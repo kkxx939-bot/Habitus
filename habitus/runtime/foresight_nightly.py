@@ -22,6 +22,7 @@ from habitus.foundation.observability import (
     Observer,
     record_observation,
 )
+from habitus.foundation.tracing import annotate, set_attributes, span
 from habitus.runtime.foresight_compaction import LedgerCompaction
 from habitus.runtime.foresight_history import HistoryStage
 from habitus.runtime.foresight_opportunities import OpportunityStore
@@ -109,6 +110,45 @@ class ForesightNightlyRun:
         signals: list[str] = []
         failed: list[str] = []
         for lane, line in sorted(timelines.items()):
+            summary = self._lane(
+                lane, line, night, concepts, recurrences, coverage, signals=signals, failed=failed, started=started
+            )
+            if summary is not None:
+                lanes[lane] = summary
+        # 口径：每条 lane 都写出来了才是成功；有一条没写是失败（那一条自己已经留了失败事件，这里再记一笔总账）
+        self._observe(
+            ObservationStatus.SUCCESS if not failed else ObservationStatus.FAILURE,
+            {
+                "lanes": len(lanes),
+                "lanes_failed": len(timelines) - len(lanes),
+                "relations": sum(item.relations for item in lanes.values()),
+                "chances": sum(item.chances for item in lanes.values()),
+                "moments": sum(item.moments for item in lanes.values()),
+                # 机会表、单元历史读回时跳过的坏文件（坏的一份不让这一晚停，计入观测）
+                "unreadable": len(self.store.take_unreadable())
+                + (len(self.history.store.take_unreadable()) if self.history is not None else 0),
+            },
+            started,
+        )
+        return OpportunityReport(night=night, lanes=lanes, signals=tuple(signals), failed=tuple(failed))
+
+    def _lane(
+        self,
+        lane: str,
+        line: LaneTimeline,
+        night: date,
+        concepts: ConceptSet,
+        recurrences: Mapping[str, Recurrence] | None,
+        coverage: Mapping[str, Coverage] | None,
+        *,
+        signals: list[str],
+        failed: list[str],
+        started: float,
+    ) -> LaneOpportunitySummary | None:
+        """一条 lane：机会表（``foresight.opportunities`` span）→ 单元历史重标（``foresight.unit_history`` span）→ 账本压实。
+        机会表没算出来是 None（这条 lane 这一晚没有表）。"""
+
+        with span("foresight.opportunities", {"lane": lane}) as attributes:
             try:
                 relation_night, found = self._relations(lane, night, signals)
                 table = build_table(
@@ -130,35 +170,22 @@ class ForesightNightlyRun:
                 signals.append(f"opportunities: {lane} 这一晚的机会表没算出来（{exc}）")
                 failed.append(f"{lane}: 机会表: {type(exc).__name__}")
                 self._observe(ObservationStatus.FAILURE, {"lane": lane, "error_type": type(exc).__name__}, started)
-                continue
-            # 单元历史与机会表分开接：表写成了、历史没写成时，表照常给白天用，但失败要报出来，不再被一并吞掉
+                attributes["failed"] = type(exc).__name__
+                return None
+            set_attributes(attributes, _table_attributes(table, len(found)))
+        # 单元历史与机会表分开接：表写成了、历史没写成时，表照常给白天用，但失败要报出来，不再被一并吞掉
+        with span("foresight.unit_history", {"lane": lane}) as attributes:
             try:
                 relabelled = self._relabel(lane, night, table, line, started)
             except ForesightError as exc:
                 signals.append(f"opportunities: {lane} 这一晚的单元历史没写成（{exc}），账本压实这一晚跳过")
                 failed.append(f"{lane}: 单元历史: {type(exc).__name__}")
                 self._observe(ObservationStatus.FAILURE, {"lane": lane, "error_type": type(exc).__name__}, started)
+                attributes["failed"] = type(exc).__name__
                 # 单元历史没把结完的日子记下来：这一晚压实会删掉它还没记的原始结果，下一晚它就拿不到了（L10.11）
-                lanes[lane] = _summarise(table, 0)
-                continue
-            compacted = self._compact(lane, night, table, signals, failed)
-            lanes[lane] = replace(_summarise(table, relabelled), compacted=compacted)
-        # 口径：每条 lane 都写出来了才是成功；有一条没写是失败（那一条自己已经留了失败事件，这里再记一笔总账）
-        self._observe(
-            ObservationStatus.SUCCESS if not failed else ObservationStatus.FAILURE,
-            {
-                "lanes": len(lanes),
-                "lanes_failed": len(timelines) - len(lanes),
-                "relations": sum(item.relations for item in lanes.values()),
-                "chances": sum(item.chances for item in lanes.values()),
-                "moments": sum(item.moments for item in lanes.values()),
-                # 机会表、单元历史读回时跳过的坏文件（坏的一份不让这一晚停，计入观测）
-                "unreadable": len(self.store.take_unreadable())
-                + (len(self.history.store.take_unreadable()) if self.history is not None else 0),
-            },
-            started,
-        )
-        return OpportunityReport(night=night, lanes=lanes, signals=tuple(signals), failed=tuple(failed))
+                return _summarise(table, 0)
+        compacted = self._compact(lane, night, table, signals, failed)
+        return replace(_summarise(table, relabelled), compacted=compacted)
 
     def _compact(self, lane: str, night: date, table: OpportunityTable, signals: list[str], failed: list[str]) -> int:
         """这条 lane 的账本压实；压不成的那几本账各自跳过，失败照 2.5.1 的口径记进 ``failed``，别的账与这一晚照常。"""
@@ -196,6 +223,13 @@ class ForesightNightlyRun:
         if self.history is None:
             return 0
         outcome = self.history.run(night=night, table=table, line=line)
+        annotate(
+            {
+                "relabelled": outcome.relabelled,
+                "signature_changed": outcome.delta.signature_changed_moments,
+                "units_affected": outcome.delta.units_affected,
+            }
+        )
         record_observation(
             self.observer,
             "foresight",
@@ -215,6 +249,19 @@ class ForesightNightlyRun:
         self, status: ObservationStatus, attributes: dict[str, str | int | float | bool], started: float
     ) -> None:
         record_observation(self.observer, "foresight", "opportunities", status, started=started, attributes=attributes)
+
+
+def _table_attributes(table: OpportunityTable, relations_read: int) -> dict[str, object]:
+    """``foresight.opportunities`` 的读数：读进来的关系、表里的关系与时窗（机会）、来了几次、类几个、用的哪一晚的关系表。"""
+
+    return {
+        "relations_read": relations_read,
+        "relations": len(table.relations),
+        "chances": sum(item.opportunities for item in table.relations),
+        "hits": sum(item.hits for item in table.relations),
+        "kinds": len(table.kinds),
+        "relation_night": "" if table.relation_night is None else table.relation_night.isoformat(),
+    }
 
 
 def _summarise(table: OpportunityTable, moments: int = 0) -> LaneOpportunitySummary:

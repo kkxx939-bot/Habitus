@@ -290,7 +290,7 @@ def _family(
     readings: dict[RelationKey, tuple[Measure, float, float, bool]], *, outside: frozenset[RelationKey] = frozenset()
 ) -> tuple[set[str], set[str], dict[str, int]]:
     inside = [item for item in readings if item not in outside]
-    return _families(readings, inside, {}, q=Q, outside=outside)
+    return _families(readings, inside, {}, q=Q, outside=outside)[:3]
 
 
 # ── 4. 父关系没放行，同组有一条极强的 → 经 Simes 组放行进族 ───────────────────────

@@ -743,9 +743,19 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     branches = runtime.components.behavior
     worker = runtime.components.nightly
     assert branches is not None and worker is not None
-    # 整晚那一趟与预测层（与结算）现在只接会话那一支；预测树删了（裁定 59），整晚自己一个常驻节拍。
+    # 夜线与预测层（与结算）现在只接会话那一支；预测树删了（裁定 59），夜线自己一个 Job 执行器（每晚 5 段 Job）。
     behavior = branches.session
-    assert worker.last_run.path == runtime.config.scene_root / "nightly" / "last_run.json"
+    assert worker.jobs.root == runtime.config.scene_root / "nightly" / "jobs"
+    assert worker.reports is not None and worker.reports.root == runtime.config.scene_root / "nightly" / "reports"
+    assert worker.traces is not None and worker.traces.root == runtime.config.scene_root / "nightly" / "traces"
+    # 全局租约与认领：组合根共用的那一份 SQLite 锁库；运维数都来自 ``config.scene.nightly_*``
+    assert worker.lock_store is runtime.components.infrastructure.path_lock.lock_store
+    assert worker.lease_key.startswith("scene:nightly:")
+    assert worker.settings.poll_seconds == runtime.config.scene.nightly_poll_seconds
+    assert worker.settings.kept_nights == runtime.config.scene.nightly_kept_nights
+    # 白天那一拍的 ``foresight.tick`` span 落夜线同一份本地 trace
+    assert runtime.components.foresight is not None and runtime.components.foresight.worker is not None
+    assert runtime.components.foresight.worker.tick.trace == worker.traces.sink
     # 每晚开头的重试接着两支各自的重试堆（裁定 67）；会话一支连同它的会话 lane
     retry = worker.nightly.retry
     assert retry is not None
@@ -799,7 +809,7 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
         runtime.components.conversation.source_delivery.consumers[ConversationSourceConsumer.BEHAVIOR_SESSION]
         is consumer
     )
-    # 整晚那一趟：结算第一步，语义树读同一棵行为树、机会表写进同一本账本旁边（语义树第 11 步）；"今天"按主体所在地算
+    # 夜线：结算在结构之前，语义树读同一棵行为树、机会表写进同一本账本旁边（语义树第 11 步）；"今天"按主体所在地算
     from habitus.runtime.nightly import Nightly
 
     nightly = worker.nightly
@@ -819,9 +829,9 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     in_line = foresight.days.forming.unsealed
     assert isinstance(in_line, UnsealedFromJudgements) and in_line.in_line
     assert in_line.judgements is behavior.judgements and not tick.forming.unsealed.in_line  # type: ignore[attr-defined]
-    # 线自己的记录只有一份：常驻节拍写，结算与白天那一拍读同一个"这一晚跑完了没有"（裁定 94 第 1、9 条）
-    assert foresight.settlement.finished == worker.last_run.finished
-    assert tick.line_finished == worker.last_run.finished
+    # 夜线的 Job 账只有一份：执行器写，结算与白天那一拍读同一个"这一晚跑完了没有"（裁定 94 第 1、9 条）
+    assert foresight.settlement.finished == worker.jobs.finished
+    assert tick.line_finished == worker.jobs.finished
     # 单元历史：夜里那一拍重标、白天的单元读同一份（裁定 55 新版第 2 条）
     assert nightly.foresight.history is foresight.history and foresight.history.store.root == foresight.ledger.root
     assert tick.delivery.units.history is foresight.history.store

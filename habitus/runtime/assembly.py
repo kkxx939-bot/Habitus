@@ -171,7 +171,7 @@ from habitus.runtime.lifecycle_retry import retry_ledger
 from habitus.runtime.lifecycle_scene import SceneParticipant, scene_vocabulary_versions
 from habitus.runtime.lifecycle_sources import ConversationSourceParticipant, ConversationSourceRecoveryParticipant
 from habitus.runtime.runtime import Runtime
-from habitus.runtime.scene import build_nightly, build_nightly_worker, build_scene_nightly, nightly_last_run
+from habitus.runtime.scene import build_nightly, build_nightly_worker, build_scene_nightly, model_tracer, nightly_line
 from habitus.runtime.scene_config import relation_thresholds
 from habitus.runtime.session_lane import BehaviorSessionConsumer, answered_question_tools, session_salvager
 from habitus.runtime.unsealed import UnsealedFromJudgements
@@ -221,7 +221,7 @@ def build_runtime(
         workflow_root=config.workflow_root,
         tracing_headers=config.credentials.resolve(config.observability.tracing.credential_ref),
     )
-    observers: list[Observer] = [observability, managed_observability]
+    observers: list[Observer] = [observability, managed_observability, model_tracer(observability)]
     if observer is not None:
         observers.append(observer)
     operation_observer: Observer = CompositeObserver(*observers)
@@ -568,7 +568,6 @@ def build_runtime(
     )
     # behavior 关着而 scene / foresight 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
     # 所以这里 behavior_components 为 None 时整晚那一趟与预测层必然都没开，直接跳过即可。
-    # 夜里一条线：归约把前一天定稿 → 接着整晚那一趟（重试 → 结算 → 语义树 → 机会表 → 单元 → 当天的日子预期；裁定 94 第 1 条）。
     # 预测层站在语义树之上，所以排在后面组装；未启用时 build 自己返回 None。
     # TODO(BHV-SESSION-LANE-001)：预测层按不按 lane 分还没定（用户 2026-10-11：「这个我还没有考虑好，因为预测层的
     # 逻辑还没有写好」）。现状：整晚那一趟与预测层只接会话那一支（行为树、词表、定稿日、未封口的判断都取自会话一支），
@@ -578,8 +577,8 @@ def build_runtime(
     calendar = None if session_behavior is None else local_calendar(config)
     # 读账的两个值（裁定 49）：α 借关系检验前向验证的显著性；遗忘半衰期是几次机会（裁定 57，config.foresight 的临时值）
     evidence = None if session_behavior is None or not config.foresight.enabled else evidence_of(config)
-    # 夜里那条线自己的记录只建一份：常驻节拍写，结算读它认停掉的那天（裁定 94 第 9 条）；没有语义树就没有这条线
-    last_run = nightly_last_run(config) if session_behavior is not None and config.scene.enabled else None
+    # 夜线的 Job 账与本地 trace 各一份：执行器写账，结算认停掉的那天、白天那一拍建不建预期都读它（裁定 94 第 1、9 条）；没有语义树就没有夜线
+    night_line = nightly_line(config, managed_observability) if config.scene.enabled and session_behavior else None
     foresight_components = (
         None
         if session_behavior is None or evidence is None
@@ -598,7 +597,7 @@ def build_runtime(
             # 出口认提问时拿类名配题目（词表给人看的名字；编号仍是身份）
             kind_label=_kind_label(VocabularyReader(session_behavior.kind_store)),
             question_tools=adapters.question_tools(),
-            line_finished=None if last_run is None else last_run.finished,
+            line_finished=None if night_line is None else night_line.jobs.finished,
         )
     )
     if foresight_components is not None and session_behavior is not None and evidence is not None:
@@ -623,6 +622,7 @@ def build_runtime(
             vocabulary_migrating=lambda: kind_store.read_migration() is not None,
             observer=operation_observer,
             reread=rereader_of(session_behavior),
+            trace=None if night_line is None else night_line.traces.sink,
         )
         foresight_components = dataclasses.replace(
             foresight_components,
@@ -738,9 +738,8 @@ def build_runtime(
 
     nightly_worker = None
     scene = None
-    if session_behavior is not None and last_run is not None:
-        # 整晚那一趟（语义树第 11 步）：重试 → 结算 → 词表（每晚新增、定期拆改）→ 行为树读一次 → 语义树 → 机会表 → 单元 → 当天的日子预期，前一天定稿后起跑。
-        # 语义树没启用时没有整晚（预测层在配置层就要求语义树开着，结算也就不会落空）。
+    if session_behavior is not None and night_line is not None:
+        # 夜线（裁定 94 第 1 条）：归约把前一天定稿 → 这一晚入队 5 段 Job（前置处理 → 结算 → 词表 → 结构 → 日子预期），按先后跑。
         scene = build_scene_nightly(
             config,
             behavior_tree=session_behavior.tree,
@@ -765,7 +764,8 @@ def build_runtime(
                     if behavior_components is None
                     else tuple(branch.reduction_runner.nightly_vocabulary for branch in behavior_components),
                 ),
-                last_run=last_run,
+                line=night_line,
+                lock_store=resolved_lock.lock_store,
                 observer=operation_observer,
             )
     # 行为侧、语义树、预测层的释放各一个参与者（26 号清单 6.14），挂进同一个生命周期 Worker

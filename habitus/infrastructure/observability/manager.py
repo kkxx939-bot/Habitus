@@ -77,9 +77,11 @@ class ManagedObservability:
         *,
         attributes: Mapping[str, str | int | float | bool] | None = None,
         traceparent: str | None = None,
-    ) -> Iterator[None]:
+    ) -> Iterator[dict[str, str | int | float | bool]]:
+        """yield 出的字典供代码块补写只有做完才知道的属性（OTel 没开时写了也不去哪儿）。"""
+
         if self.otel is None or not self.otel.initialized:
-            yield
+            yield {}
             return
         try:
             manager = self.otel.start_span(
@@ -88,13 +90,13 @@ class ManagedObservability:
                 attributes=attributes,
                 traceparent=traceparent,
             )
-            manager.__enter__()
+            late = manager.__enter__()
         except Exception as exc:
             self._degraded_reason = f"otel_span_enter:{type(exc).__name__}"
-            yield
+            yield {}
             return
         try:
-            yield
+            yield late
         except BaseException as exc:
             try:
                 manager.__exit__(type(exc), exc, exc.__traceback__)
@@ -106,6 +108,28 @@ class ManagedObservability:
                 manager.__exit__(None, None, None)
             except Exception as exc:
                 self._degraded_reason = f"otel_span_exit:{type(exc).__name__}"
+
+    def record_span(
+        self,
+        name: str,
+        *,
+        start_ns: int,
+        end_ns: int,
+        attributes: Mapping[str, str | int | float | bool],
+        error_type: str | None = None,
+    ) -> None:
+        """事后补一个已经结束的子 span；OTel 没开时不记，失败只记降级。"""
+
+        if self.otel is None or not self.otel.initialized:
+            return
+        try:
+            self.otel.record_span(name, start_ns=start_ns, end_ns=end_ns, attributes=attributes, error_type=error_type)
+        except Exception as exc:
+            self._degraded_reason = f"otel_span_record:{type(exc).__name__}"
+
+    @property
+    def tracing_enabled(self) -> bool:
+        return self.otel is not None and self.otel.initialized
 
     def health(self) -> tuple[str, str]:
         if not self._initialized:

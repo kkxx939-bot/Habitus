@@ -131,7 +131,7 @@ flowchart TD
   RED --> TREE[("行为树")]
   SL -->|"写不成的轮"| RETRY[("重试堆")]
   RED -->|"物化失败的链"| RETRY
-  RETRY --> NIGHT["整晚那一趟（前一天定稿后）<br/>重试两支；结算起只接会话一支"]
+  RETRY --> NIGHT["夜线 5 段 Job（前一天定稿后）<br/>重试两支；结算起只接会话一支"]
   TREE --> NIGHT
   NIGHT --> SCENE[("语义树<br/>概念、命中、关系")]
   SCENE --> OPP[("机会表 + 单元历史")]
@@ -167,7 +167,7 @@ flowchart TD
 
 1. **会话 lane**：一轮一次模型调用，写一条判断；这一轮开着提醒、你自己填了回答时，模型判出的正 / 中 / 负 / 已做由它写回账本；写不成的轮落「没读懂」并进重试堆。物理 lane 从上游交付直接写判断，不调模型。
 2. **归约**（每支一个常驻 worker，每 300 秒一轮）：封口（预测层开着时查账本，给「说了」之后才开始的记录盖 `reminded`）→ 白天归类（词表）→ 落行为树 → 刷新 L0/L1 → 记定稿日；物化失败的链进重试堆。
-3. **整晚那一趟**（前一天定稿完成就接着跑，不挂固定时刻；常驻节拍每 5 分钟看一眼），顺序固定、前一步完成即接下一步：刷新日历 → 每晚重试（两支的重试堆都在这一步处理；锁被另一进程拿着就停在这里、下一眼接着跑，不结算）→ 结算（从这一步起只接会话一支）→ 两支的词表：每晚新增，这一晚所在的拆改周期（从每周三那一晚起）里还没拆改过就接着拆改 → 截止日 N = min(今天, 最后定稿日 + 1) → 词表迁移没做完就停 → 读序列 → 语义树 → 机会表与单元历史 → 当天的日子预期。词表的两件活都在这一趟里、结构之前，不挂任何钟点。服务夜里没跑的，起来时昨天已定稿就接着跑（每一步重跑都幂等）。
+3. **整晚那一趟**（前一天定稿完成就给这一晚入队 5 段耐久 Job——前置处理、结算、词表、结构、日子预期——在全局租约下按先后跑，不挂固定时刻；执行器每 `scene.nightly_poll_seconds`（默认 300 秒）看一眼），顺序固定、前一步完成即接下一步：刷新日历 → 每晚重试（两支的重试堆都在这一步处理；锁被另一进程拿着就停在这里、下一眼接着跑，不结算）→ 结算（从这一步起只接会话一支）→ 两支的词表：每晚新增，这一晚所在的拆改周期（从每周三那一晚起）里还没拆改过就接着拆改 → 截止日 N = min(今天, 最后定稿日 + 1) → 词表迁移没做完就停 → 读序列 → 语义树 → 机会表与单元历史 → 当天的日子预期。词表的两件活都在这一趟里、结构之前，不挂任何钟点。服务夜里没跑的，起来时昨天已定稿就接着跑（每一步重跑都幂等）。停下的段（模型调不通、出错）按有界退避重试，`scene.nightly_max_attempts` 次用完记失败；过了那天还没跑完的段记失败，下一晚照常。最新一晚的 Job 账坏了时后面的晚不入队、健康面报读不了：删掉那份坏账文件（`scene/nightly/jobs/<日期>.json`），下一眼会重新入队。
 4. **白天一拍**（默认 900 秒）：读行为树今天与前 7 天、未封口的判断与盘上最新的机会表 → 建预期 → 单元读数 → 递送决定（时窗末、最近有宿主来取过提醒时才问判断模型；宿主来取提醒就是它"活着"的凭据）→ 「待取」写进出口可取清单。
 5. **出口**：宿主插件在 UserPromptSubmit 取走 → agent 用提问工具问你 → 转写送回 → 出口认「说了」与回话 → 进账本，第二天整晚那一趟结算。
 
@@ -1305,6 +1305,13 @@ credentials:
 | `scene.enabled` | false | true / false；开它要求行为侧已启用 | 启用语义树（整晚那一趟） |
 | `scene.baseline_slack_slots` | 3 | 0–96 | 常态按峰分份时峰两边各放宽几槽（待定档；原借 temporal.pool_half_width） |
 | `scene.nightly_shutdown_timeout_seconds` | 30 | 1–3600 | 停机时等整晚那一趟多久 |
+| `scene.nightly_poll_seconds` | 300 | 1–86400 | 夜线 Job 执行器隔多久看一眼（定稿了没有、有没有到点重试的段） |
+| `scene.nightly_kept_nights` | 366 | 1–3660 | Job 账、每晚报告、trace 文件留几晚（`scene/nightly/{jobs,reports,traces}`） |
+| `scene.nightly_lease_ttl_seconds` | 120 | 5–3600 | 执行器全局租约多久过期（两个进程挂同一个 storage root 时同一晚同一段只跑一次） |
+| `scene.nightly_heartbeat_seconds` | 30 | ≥ 1 且小于租约时长 | 多久续一次租约；一次续不上下一拍再续，租约就要到期还续不上才取消这一段 |
+| `scene.nightly_max_attempts` | 3 | 1–20 | 一段停下后最多试几次（含第一次），用完记失败 |
+| `scene.nightly_retry_base_seconds` | 900 | 1 – `nightly_retry_max_seconds` | 停下后的退避：base × 2^(第几次 − 1)，封顶 |
+| `scene.nightly_retry_max_seconds` | 3600 | base – 86400 | 退避封顶 |
 | `scene.relations.fdr` | 0.10 | > 0，< 1 | 第 1 道：当晚检验族的假发现率 |
 | `scene.relations.forward_alpha` | 0.05 | > 0，< 1 | 前向验证的单侧显著性 |
 | `scene.relations.forward_power` | 0.80 | > 0，< 1 | 前向验证与维持检验要攒几次按功效定（没有固定下限；前向按发现时效应区间离 0 近的一端算） |
@@ -1446,7 +1453,9 @@ credentials:
 | `relations/<lane>/<YYYY-MM-DD>.json` | 一晚的关系表 | 当前一晚 + 2 晚备用（`lifecycle.fallback_generations`） |
 | `relations/<lane>/transitions.jsonl` | 关系状态迁移日志 | 超 32 MiB 轮转，留 4 份 |
 | `advice/` | 先验缓存、候选条件提议簿 | 孤儿先验每晚删 |
-| `nightly/last_run.json` | 整晚那一趟最近跑过的那一晚（重启后据它判断这一晚跑过没有） | 运行状态 |
+| `nightly/jobs/<YYYY-MM-DD>.json` | 这一晚 5 段耐久 Job：状态、尝试次数、下一次尝试时刻、认领、原因、各段报告 | `scene.nightly_kept_nights` |
+| `nightly/reports/<YYYY-MM-DD>.json` | 每晚报告：每段结局、耗时、调模型次数与原有报告，关系表比上一晚多出 / 少了 / 状态变了的逐条 | `scene.nightly_kept_nights` |
+| `nightly/traces/<YYYY-MM-DD>.jsonl` | 夜线与白天那一拍的本地 span（只有计数与受控原因码） | `scene.nightly_kept_nights` |
 
 **预测层：`foresight/session/`**（物理一支没有）
 
@@ -1477,7 +1486,7 @@ credentials:
 | 目录 | 放什么 |
 |---|---|
 | `habitus/config/` | 唯一的外部配置边界：读一份严格 YAML，聚合各领域的配置类型，做跨领域校验 |
-| `habitus/runtime/` | 唯一的组合根：构造并共享模型客户端、向量库、会话、记忆、行为侧两支、语义树夜批、预测层，管理各常驻 Worker 的启停；另住三类东西：跨包的桥、预测层的落盘与编排（`runtime/foresight_*`）、语义树夜批的编排（`runtime/scene_*`） |
+| `habitus/runtime/` | 唯一的组合根：构造并共享模型客户端、向量库、会话、记忆、行为侧两支、语义树夜批、预测层，管理各常驻 Worker 的启停；另住三类东西：跨包的桥、预测层的落盘与编排（`runtime/foresight_*`）、语义树夜批的编排（`runtime/scene_*`）与夜线的 Job 账、执行器和观测（`runtime/nightly*`） |
 | `habitus/model_client/` | chat / embedding / rerank 三种能力；按 `(capability, adapter)` 找注册的 builder，`provider` 只表示服务来源 |
 | `habitus/pre/` | 会话的 Schema 与各宿主会话协议的适配器（`pre/conversation/adapters.py`） |
 | `habitus/conversation/` | 会话源：插件送来的批的落盘、恢复、分发给各消费者 |

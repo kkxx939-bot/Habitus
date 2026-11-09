@@ -8,11 +8,13 @@ B4 读的是盘上**全部**已映射的命中（不只今天）：关系每晚�
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime
 
 from habitus.conditions import DayTypeCalendar
+from habitus.foundation.tracing import annotate, span
 from habitus.runtime.scene_advice import RelationAdvice
 from habitus.scene.advice.store import AdviceStoreError
 from habitus.scene.concepts.calendar_situations import value_sets_to_add
@@ -29,6 +31,8 @@ from habitus.scene.relations import (
     Segment,
     build_timelines,
 )
+from habitus.scene.relations.diff import diff_states
+from habitus.scene.relations.engine import LaneNight
 from habitus.scene.relations.state import LaneState, Status, Transition, fold, revert_touched
 from habitus.scene.relations.store import RelationStore, RelationStoreError
 from habitus.series import EventSeries
@@ -76,7 +80,9 @@ class RelationStage:
         counts: dict[str, dict[str, int]] = {}
         moved = 0
         for lane, line in sorted(lines.items()):
-            folded = await self._fold_lane(lane, line, series, concepts, signals, vocabulary=vocabulary)
+            with span("scene.b4.lane", {"lane": lane}) as attributes:
+                folded = await self._fold_lane(lane, line, series, concepts, signals, vocabulary=vocabulary)
+                attributes["written"] = folded is not None
             if folded is None:
                 continue
             state, transitions = folded
@@ -104,6 +110,7 @@ class RelationStage:
         """一条 lane 这一晚：退回词表变更牵到的、检验、折叠、落盘；这一晚不写（沿用上一晚的）时返回 None。"""
 
         previous = self._previous(lane, series.cutoff, signals)
+        stored = previous
         reverted: tuple[Transition, ...] = ()
         if previous is not None:
             touched = _touched(concepts, _changed_classes(self.catalog.changes_since(previous.vocabulary)))
@@ -135,6 +142,7 @@ class RelationStage:
             # 不让整晚停、别的 lane 照常（26 号清单 2.5.2）
             signals.append(f"relations: {lane} 这一晚的关系表写不出（{exc}），沿用上一晚的")
             return None
+        annotate(lane_attributes(tests.last_night, stored, state, transitions, weights))
         return state, transitions
 
     def _all_hits(self) -> dict[str, ConceptHits]:
@@ -174,6 +182,39 @@ class RelationStage:
                 return state
             signals.append(f"relations: {lane} 之前的关系表都读不了（{exc}），这一晚从头折叠")
             return None
+
+
+def lane_attributes(
+    night: LaneNight | None,
+    previous: LaneState | None,
+    state: LaneState,
+    transitions: tuple[Transition, ...],
+    weights: Mapping[RelationKey, float],
+) -> dict[str, object]:
+    """一条 lane 这一晚的读数（``scene.b4.lane`` span）：要量的键数、逐条量的 / 跳过的（按段）、四族的族大小与过第 1 道数、
+    进族路径计数、各状态的新增与消失（对上一晚的表）、先验权重数与"靠先验"数。逐条的变化不进 span，在每晚报告里。"""
+
+    found: dict[str, object] = {
+        "transitions": len(transitions),
+        "prior_weights": len(weights),
+        "prior_only": sum(1 for item in state.relations if item.prior_only and item.discovered_on == state.night),
+        "sparse": state.count(Status.SPARSE),
+    }
+    if night is not None:
+        skipped = sum(night.skipped.values())
+        found.update({"keys": night.breakdown.get("measured", 0) + skipped, "skipped": skipped, "family": night.family})
+        found.update({f"skipped.{segment.value}": night.skipped.get(segment.value, 0) for segment in Segment})
+        found.update(dict(night.breakdown))
+    for status in Status:
+        found[f"count.{status.value}"] = state.count(status)
+    moved: Counter[str] = Counter({f"{kind}.{status.value}": 0 for kind in ("added", "removed") for status in Status})
+    for change in diff_states(previous, state):
+        if change.after is not None:
+            moved[f"added.{change.after.value}"] += 1
+        if change.before is not None:
+            moved[f"removed.{change.before.value}"] += 1
+    found.update(moved)
+    return found
 
 
 def _changed_classes(changes: CatalogChanges) -> frozenset[str]:

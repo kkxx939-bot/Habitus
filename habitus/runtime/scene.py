@@ -5,13 +5,15 @@
 时间尺子只认 ``config.temporal``（``relation_config``）、常态分份的容差是 ``config.scene.baseline_slack_slots``。未启用时返回 None。
 
 整晚的串法（前置处理：探模型、重试 → 结算 → 词表（每晚新增、定期拆改）→ 行为树读一次 → 语义树 → 机会表 → 单元 → 当天的日子预期）在 ``runtime.nightly.Nightly``，由
-``build_nightly`` 装好、``build_nightly_worker`` 交给它自己的常驻节拍（``runtime.nightly_worker.NightlyWorker``：前一天定稿后起跑，
-裁定 94 第 1 条；预测树删了，裁定 59）；结算排在语义树之前（找原因要在同一晚读到它结出的落空）。
+``build_nightly`` 装好、``build_nightly_worker`` 交给夜线的 Job 执行器（``runtime.nightly_worker.NightlyWorker``：前一天定稿后给这一晚
+入队 5 段，裁定 94 第 1 条；预测树删了，裁定 59）；结算排在语义树之前（找原因要在同一晚读到它结出的落空）。
 """
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
 
 from habitus.behavior.kinds.reader import VocabularyReader
@@ -22,13 +24,18 @@ from habitus.behavior.tree.dirty_days import DirtyDayLog
 from habitus.conditions import DayTypeCalendar
 from habitus.config import HabitusConfig
 from habitus.foundation.observability import Observer
+from habitus.infrastructure.store.contracts import LockStore
 from habitus.model_client import ModelUnreachable, StructuredChatClient
 from habitus.runtime.conditions import SharedCalendar, local_calendar
 from habitus.runtime.evidence import evidence_of
 from habitus.runtime.foresight import ForesightRuntimeComponents, build_foresight_nightly
 from habitus.runtime.lifecycle_retry import retry_ledger
 from habitus.runtime.nightly import Nightly
-from habitus.runtime.nightly_worker import LastRun, NightlyWorker
+from habitus.runtime.nightly_jobs import NightJobs
+from habitus.runtime.nightly_report import NightReports
+from habitus.runtime.nightly_settings import NightlySettings
+from habitus.runtime.nightly_trace import ModelCallTracer, SpanBackend, TraceFiles
+from habitus.runtime.nightly_worker import NightlyWorker
 from habitus.runtime.scene_advice import RelationAdvice
 from habitus.runtime.scene_authoring import ConceptAuthoring
 from habitus.runtime.scene_config import relation_config
@@ -177,24 +184,98 @@ def model_probe(structured_chat: StructuredChatClient) -> Callable[[], Awaitable
     return probe
 
 
-def nightly_last_run(config: HabitusConfig) -> LastRun:
-    """夜里那条线自己的记录（跑过哪一晚、跑到哪一步、哪几晚跑完了），落在语义树根下。组合根只建一份：常驻节拍写它，结算读它认
-    停掉的那天（裁定 94 第 9 条）。"""
+def nightly_jobs(config: HabitusConfig) -> NightJobs:
+    """夜线的 Job 账（每晚 5 段各一个 Job），落在语义树根下 ``nightly/jobs``。组合根只建一份：执行器写它，结算读它认停掉的那天、
+    白天那一拍读它决定今天建不建预期（裁定 94 第 1、9 条）。"""
 
-    return LastRun(config.scene_root / "nightly" / "last_run.json", root=config.scene_root)
+    return NightJobs(
+        config.scene_root / "nightly" / "jobs",
+        artifact_root=config.scene_root,
+        kept_nights=config.scene.nightly_kept_nights,
+    )
+
+
+def nightly_lease_key(config: HabitusConfig) -> str:
+    """夜线全局租约的键：由语义树根派生，同一个根只有一个执行者。"""
+
+    digest = hashlib.sha256(str(config.scene_root.expanduser().absolute()).encode("utf-8")).hexdigest()[:24]
+    return f"scene:nightly:{digest}"
+
+
+def nightly_settings(config: HabitusConfig) -> NightlySettings:
+    scene = config.scene
+    return NightlySettings(
+        poll_seconds=scene.nightly_poll_seconds,
+        kept_nights=scene.nightly_kept_nights,
+        lease_ttl_seconds=scene.nightly_lease_ttl_seconds,
+        heartbeat_seconds=scene.nightly_heartbeat_seconds,
+        max_attempts=scene.nightly_max_attempts,
+        retry_base_seconds=scene.nightly_retry_base_seconds,
+        retry_max_seconds=scene.nightly_retry_max_seconds,
+    )
+
+
+def nightly_traces(config: HabitusConfig, backend: SpanBackend | None = None) -> TraceFiles:
+    """夜线与白天那一拍的本地 trace（``nightly/traces/<日期>.jsonl``）；``backend`` 是 OTel 那一侧（开了 OTLP 时同时进去）。"""
+
+    return TraceFiles(config.scene_root / "nightly" / "traces", artifact_root=config.scene_root, backend=backend)
+
+
+@dataclass(frozen=True)
+class NightLine:
+    """夜线在组合根只建一份的两样：Job 账（执行器写，结算与白天那一拍读）与本地 trace（夜线与白天那一拍都写）。"""
+
+    jobs: NightJobs
+    traces: TraceFiles
+
+
+def nightly_line(config: HabitusConfig, backend: SpanBackend | None = None) -> NightLine:
+    return NightLine(nightly_jobs(config), nightly_traces(config, backend))
+
+
+def model_tracer(metrics: Observer) -> Observer:
+    """观测后端：调用链上有 span 时（夜线、白天那一拍），每一次模型调用补一个 ``model.call`` 子 span，按（段, 触点）计数进指标。"""
+
+    return ModelCallTracer(metrics=metrics)
 
 
 def build_nightly_worker(
-    config: HabitusConfig, nightly: Nightly, *, last_run: LastRun, observer: Observer | None = None
+    config: HabitusConfig,
+    nightly: Nightly,
+    *,
+    line: NightLine,
+    lock_store: LockStore,
+    observer: Observer | None = None,
 ) -> NightlyWorker:
-    """整晚那一趟的常驻节拍：前一天定稿完成就接着跑（裁定 94 第 1 条）。"""
+    """夜线的 Job 执行器：前一天定稿完成就给这一晚入队 5 段、按先后跑（裁定 94 第 1 条）。"""
 
     return NightlyWorker(
         nightly,
+        jobs=line.jobs,
+        lock_store=lock_store,
+        lease_key=nightly_lease_key(config),
         shutdown_timeout_seconds=config.scene.nightly_shutdown_timeout_seconds,
-        last_run=last_run,
+        settings=nightly_settings(config),
+        reports=NightReports(
+            config.scene_root / "nightly" / "reports",
+            artifact_root=config.scene_root,
+            relations=RelationStore(config.scene_root),
+        ),
+        traces=line.traces,
         observer=observer,
     )
 
 
-__all__ = ["build_nightly", "build_nightly_worker", "build_scene_nightly", "model_probe", "nightly_last_run"]
+__all__ = [
+    "build_nightly",
+    "build_nightly_worker",
+    "build_scene_nightly",
+    "model_probe",
+    "model_tracer",
+    "NightLine",
+    "nightly_jobs",
+    "nightly_line",
+    "nightly_lease_key",
+    "nightly_settings",
+    "nightly_traces",
+]

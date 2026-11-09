@@ -40,10 +40,11 @@ from datetime import date, datetime, timedelta, tzinfo
 from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.uri import BehaviorURI
 from habitus.conditions import DayTypeCalendar
+from habitus.foundation.tracing import set_attributes, span
 from habitus.infrastructure.lifecycle import RetryLedger
 from habitus.runtime.scene_advice import RelationAdvice
 from habitus.runtime.scene_authoring import ConceptAuthoring
-from habitus.runtime.scene_night_mapping import MappingStage, select_mapping_days
+from habitus.runtime.scene_night_mapping import DayMappingReport, MappingStage, select_mapping_days
 from habitus.runtime.scene_night_relations import RelationStage
 from habitus.scene.concepts.calendar_situations import calendar_key, most_specific
 from habitus.scene.concepts.catalog import ClassCatalog
@@ -136,6 +137,29 @@ class NightReport:
         )
 
 
+def _sync_attributes(plan: SyncPlan, concepts: ConceptSet, remapped: int) -> dict[str, object]:
+    return {
+        "version": plan.version,
+        "written": len(plan.write),
+        "rejected": len(plan.rejected),
+        "moved": len(plan.moved),
+        "remapped_days": remapped,
+        "concepts": len(concepts),
+    }
+
+
+def _mapping_attributes(mapping: list[DayMappingReport], days: tuple[date, ...]) -> dict[str, object]:
+    return {
+        "mapped_days": len(days),
+        "mapped": sum(item.mapped for item in mapping),
+        "resumed": sum(item.resumed for item in mapping),
+        "refreshed": sum(item.refreshed for item in mapping),
+        "unresolved": sum(item.unresolved for item in mapping),
+        "model_failed": sum(item.model_failed for item in mapping),
+        "inconsistent": sum(item.inconsistent for item in mapping),
+    }
+
+
 def line_days(lines: Mapping[str, LaneTimeline]) -> tuple[date, ...]:
     """各条 lane 人在场的日子（日历备注要给的那些天）。"""
 
@@ -206,40 +230,34 @@ class SceneNightlyRun:
         )
 
     async def run(self, *, series: EventSeries, now: datetime) -> NightReport:
-        """第 ``series.cutoff`` 晚，``now`` 是夜批时刻。节律从同一份 ``series`` 经 temporal 算（裁定 59）。"""
+        """第 ``series.cutoff`` 晚，``now`` 是夜批时刻。节律从同一份 ``series`` 经 temporal 算（裁定 59）。B1–B4 各一个 span
+        （``scene.b1``…``scene.b4``），属性是各步的输入、输出条数与关键读数。"""
 
         if now.utcoffset() is None:
             raise TypeError("now must be a timezone-aware datetime")
         signals: list[str] = []
-        changes = self.catalog.changes_since(self.concepts.synced_version())
-        # 日历情境的取值从数据里攒出来：序列里出现过的日子，日历给了哪些（键, 取值）就长哪些（裁定 59 第 7 条）
-        observed = {
-            item for day in sorted({record.day for record in series.records}) for item in self.calendar.of_day(day)
-        }
-        existing = await asyncio.to_thread(self.concepts.read_all)
-        plan = await asyncio.to_thread(plan_sync, existing, self.catalog.classes(), changes, now=now, observed=observed)
-        concepts = await asyncio.to_thread(self._write_concepts, plan, signals)
         slack_minutes = self.config.slack_slots * self.relation_config.slot_minutes
-        mapper = self.mapper_for(concepts)
-        # 各 lane 的观测覆盖只取决于序列：一晚算一次，节律（两次）与机会表的材料共用
-        coverage = await asyncio.to_thread(coverage_by_lane, series, self.rulers)
-        rhythms = await asyncio.to_thread(self._rhythms, series, concepts, coverage)
-        remapped = await self._redo_moved(
-            plan, concepts, mapper, rhythms, slack_minutes, series=series, now=now, signals=signals
-        )
-        self.concepts.write_synced_version(plan.version)
-
+        with span("scene.b1") as attributes:
+            plan, concepts, mapper, coverage, rhythms, remapped = await self._sync(series, now, slack_minutes, signals)
+            set_attributes(attributes, _sync_attributes(plan, concepts, remapped))
         if self.authoring is not None:
-            concepts = await self.authoring.run(self.concepts, self.catalog.classes(), series, rhythms, signals)
-            mapper = self.mapper_for(concepts)
-            rhythms = await asyncio.to_thread(self._rhythms, series, concepts, coverage)
-
-        mapping, days, backlog = await self.mapping.map_backlog(
-            series, concepts, mapper, rhythms, slack_minutes, now, signals
-        )
-        relations, transitions, lines = await self.relation_stage.run(
-            series, concepts, signals, vocabulary=plan.version, now=now
-        )
+            with span("scene.b2", {"concepts_before": len(concepts)}) as attributes:
+                before = set(concepts)
+                concepts = await self.authoring.run(self.concepts, self.catalog.classes(), series, rhythms, signals)
+                mapper = self.mapper_for(concepts)
+                rhythms = await asyncio.to_thread(self._rhythms, series, concepts, coverage)
+                # 只记条数：概念名是用户派生文字，不进 span（codex R3）
+                set_attributes(attributes, {"concepts": len(concepts), "added": len(set(concepts) - before)})
+        with span("scene.b3") as attributes:
+            mapping, days, backlog = await self.mapping.map_backlog(
+                series, concepts, mapper, rhythms, slack_minutes, now, signals
+            )
+            set_attributes(attributes, _mapping_attributes(mapping, days))
+        with span("scene.b4") as attributes:
+            relations, transitions, lines = await self.relation_stage.run(
+                series, concepts, signals, vocabulary=plan.version, now=now
+            )
+            set_attributes(attributes, {"lanes": len(relations), "transitions": transitions})
         return NightReport(
             night=series.cutoff,
             concepts=len(concepts),
@@ -257,6 +275,29 @@ class SceneNightlyRun:
             signals=tuple(signals),
             materials=await asyncio.to_thread(self._materials, series, concepts, lines, coverage),
         )
+
+    async def _sync(
+        self, series: EventSeries, now: datetime, slack_minutes: int, signals: list[str]
+    ) -> tuple[SyncPlan, ConceptSet, ConceptMapper, Mapping[str, Coverage], Mapping[str, Rhythm], int]:
+        """B1 同步词表：概念落盘、迁移牵到的已映射日子重映射、记下同步到的版本；顺带算一晚只算一次的覆盖与节律。"""
+
+        changes = self.catalog.changes_since(self.concepts.synced_version())
+        # 日历情境的取值从数据里攒出来：序列里出现过的日子，日历给了哪些（键, 取值）就长哪些（裁定 59 第 7 条）
+        observed = {
+            item for day in sorted({record.day for record in series.records}) for item in self.calendar.of_day(day)
+        }
+        existing = await asyncio.to_thread(self.concepts.read_all)
+        plan = await asyncio.to_thread(plan_sync, existing, self.catalog.classes(), changes, now=now, observed=observed)
+        concepts = await asyncio.to_thread(self._write_concepts, plan, signals)
+        mapper = self.mapper_for(concepts)
+        # 各 lane 的观测覆盖只取决于序列：一晚算一次，节律（两次）与机会表的材料共用
+        coverage = await asyncio.to_thread(coverage_by_lane, series, self.rulers)
+        rhythms = await asyncio.to_thread(self._rhythms, series, concepts, coverage)
+        remapped = await self._redo_moved(
+            plan, concepts, mapper, rhythms, slack_minutes, series=series, now=now, signals=signals
+        )
+        self.concepts.write_synced_version(plan.version)
+        return plan, concepts, mapper, coverage, rhythms, remapped
 
     def _materials(
         self,

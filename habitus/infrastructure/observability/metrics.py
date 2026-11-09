@@ -96,8 +96,7 @@ def project_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
                 (("operation", _label_value(event.operation)), ("status", event.status.value)),
             )
         )
-    if event.category == "behavior":
-        updates.extend(_behavior_metric_updates(event))
+    updates.extend(_domain_metric_updates(event))
     if event.category == "observability" and event.operation == "snapshot":
         for attribute, metric_name in (
             ("queue_staged", "memory_jobs_staged"),
@@ -144,6 +143,56 @@ _BEHAVIOR_GAUGES: tuple[tuple[str, str, str], ...] = (
     ("reduction_publish", "end_to_publish_seconds_max", "behavior_end_to_publish_seconds"),
     ("reduction_publish", "onset_to_publish_seconds_max", "behavior_onset_to_publish_seconds"),
 )
+
+
+#: 夜线一段一跑可以是几个小时：它的耗时直方图另用一组到数小时的桶（通用直方图最高 30 秒，一整晚都落进 +Inf）。
+LONG_DURATION_BUCKETS = (1.0, 10.0, 30.0, 60.0, 300.0, 600.0, 1800.0, 3600.0, 7200.0, 14400.0, 28800.0)
+_LONG_DURATION_METRICS = frozenset({"nightly_job_duration_seconds"})
+#: 关系变化计数的标签（取值都是封闭枚举：lane、变化种类、状态、跨度段、带不带条件）。
+_RELATION_CHANGE_LABELS = ("lane", "kind", "status_from", "status_to", "segment", "conditioned")
+
+
+def _domain_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
+    if event.category == "behavior":
+        return _behavior_metric_updates(event)
+    if event.category in ("nightly", "scene"):
+        return _nightly_metric_updates(event)
+    return ()
+
+
+def _nightly_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
+    """夜线：每段耗时与结局、各段各状态的 Job 数、按（段, 触点）的调模型次数、关系表的双向变化。标签只放低基数的。"""
+
+    attributes = event.attributes
+    operation = (event.category, event.operation)
+    if operation == ("nightly", "step"):
+        labels: tuple[tuple[str, str], ...] = (("step", _label_value(attributes.get("step"))),)
+        duration = _non_negative_number(attributes.get("duration_seconds")) or 0.0
+        outcome = labels + (("outcome", _label_value(attributes.get("outcome"))),)
+        return (
+            MetricUpdate("nightly_job_duration_seconds", "histogram", duration, labels),
+            MetricUpdate("nightly_step_outcomes_total", "counter", 1.0, outcome),
+        )
+    if operation == ("nightly", "jobs"):
+        updates: list[MetricUpdate] = []
+        for key, value in attributes.items():
+            step, _, state = key.partition(":")
+            number = _non_negative_number(value)
+            if state and number is not None:
+                updates.append(
+                    MetricUpdate(
+                        "nightly_jobs", "gauge", number, (("step", _label_value(step)), ("state", _label_value(state)))
+                    )
+                )
+        return tuple(updates)
+    if operation == ("nightly", "model_call"):
+        touch = (("step", _label_value(attributes.get("step"))), ("touch", _label_value(attributes.get("touch"))))
+        return (MetricUpdate("nightly_model_calls_total", "counter", 1.0, touch),)
+    if operation == ("scene", "relation_change"):
+        count = _non_negative_number(attributes.get("count")) or 0.0
+        change = tuple((name, _label_value(attributes.get(name))) for name in _RELATION_CHANGE_LABELS)
+        return (MetricUpdate("scene_relations_changed_total", "counter", count, change),) if count else ()
+    return ()
 
 
 def _behavior_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
@@ -211,16 +260,20 @@ class MetricRegistry:
                 elif update.kind == "gauge":
                     self._gauges[key] = update.value
                 elif update.kind == "histogram":
+                    buckets = self._buckets(update.name)
                     counts, total, count = self._histograms.get(
                         key,
-                        ([0] * len(self.duration_buckets), 0.0, 0),
+                        ([0] * len(buckets), 0.0, 0),
                     )
-                    for index, bucket in enumerate(self.duration_buckets):
+                    for index, bucket in enumerate(buckets):
                         if update.value <= bucket:
                             counts[index] += 1
                     self._histograms[key] = (counts, total + update.value, count + 1)
                 else:  # pragma: no cover - 投影函数只创建三种固定类型
                     raise ValueError("unsupported metric update kind")
+
+    def _buckets(self, name: str) -> tuple[float, ...]:
+        return LONG_DURATION_BUCKETS if name in _LONG_DURATION_METRICS else self.duration_buckets
 
     def set_gauge(
         self,
@@ -286,7 +339,7 @@ class MetricRegistry:
                 for (metric_name, labels), (counts, total, count) in sorted(self._histograms.items()):
                     if metric_name != name:
                         continue
-                    for bucket, bucket_count in zip(self.duration_buckets, counts, strict=True):
+                    for bucket, bucket_count in zip(self._buckets(metric_name), counts, strict=True):
                         bucket_labels = labels + (("le", _format_number(bucket)),)
                         lines.append(f"{full_name}_bucket{_render_labels(bucket_labels)} {bucket_count}")
                     lines.append(f"{full_name}_bucket{_render_labels(labels + (('le', '+Inf'),))} {count}")

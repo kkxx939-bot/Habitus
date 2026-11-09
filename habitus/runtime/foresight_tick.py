@@ -7,7 +7,7 @@
 
 **今晚的线跑完之前不建任何预期**（情境、事件也一样，裁定 94 第 1 条：只有整条线跑完，这一晚才算跑过）：今天这一晚的线还没
 跑完（零点到夜里那条线跑完之间、线被拖住或停下的那一天——含表写出后才停的），这一拍只递已经建好的、不建新的；停掉的那天白天也
-不建，与结算"停掉那天按看不到"读同一个判断（``LastRun.finished``）。**线跑完后的下一拍补建**：这一拍从今天零点起看
+不建，与结算"停掉那天按看不到"读同一个判断（夜线 Job 账的 ``NightJobs.finished``）。**线跑完后的下一拍补建**：这一拍从今天零点起看
 （``looked_since`` = 零点），零点到这一拍之间关掉的时窗也算赶上了，照建、照结（裁定 49 第 1 条）；之后照常按一拍的宽度看。
 "这一晚的表已经补建过"只记在这一拍的对象上（进程重启后的第一拍再从零点看一遍：同一身份只建一次，多看不多建）。
 补建抓不回来的：「同一条链」那一段的事件预期只认此刻离前因做完不超过转移窗口的链（``triggers.events``），零点后做完、到补建
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable, Iterable, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as clock_time
@@ -37,6 +38,7 @@ from habitus.foresight.opportunities import OpportunityTable
 from habitus.foresight.triggers.assemble import LOOKBACK_DAYS
 from habitus.foundation.intervals import standing_pieces
 from habitus.foundation.observability import NullObserver, ObservationStatus, Observer
+from habitus.foundation.tracing import TraceSink, open_trace, set_attributes, span
 from habitus.runtime.foresight_delivery import DeliveryReport, DeliveryStage, JudgeMaterials
 from habitus.runtime.foresight_forming import (
     ExpectationForming,
@@ -106,6 +108,7 @@ class ForesightTick:
         tolerance: Tolerance,
         reread: Callable[[datetime, datetime], Awaitable[bool]] | None = None,
         line_finished: Callable[[date], bool | None] | None = None,
+        trace: Callable[[date], TraceSink] | None = None,
     ) -> None:
         self.forming = ExpectationForming(
             ledger,
@@ -134,21 +137,28 @@ class ForesightTick:
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
         #: 时窗末当场重读那段「没读懂」「错误」的口（会话一支的重试堆，裁定 68 第 1 条）；没接就是 None。
         self.reread = reread
-        #: 夜里那条线自己记的"这一晚跑完了没有"（与结算认停掉的那天同一个判断，``LastRun.finished``）：今天这一晚的线跑完了
+        #: 夜里那条线自己记的"这一晚跑完了没有"（与结算认停掉的那天同一个判断，夜线 Job 账的 ``NightJobs.finished``）：今天这一晚的线跑完了
         #: 才建预期（裁定 94 第 1 条）；没接就只看表是不是今天这一晚的。
         self.line_finished = line_finished
         #: 用今天这一晚的表补建过的那一天（表出来后第一拍从零点起看，之后按一拍看）。
         self._caught_up: date | None = None
+        #: 这一拍的 span 落哪儿（``runtime.nightly_trace.TraceFiles.sink``，按当地日子一天一份）；没接就不记 span。
+        self.trace = trace
 
     async def run_once(self) -> TickReport:
         started = time.monotonic()
-        try:
-            report = await self._run()
-        except Exception as exc:
-            observe_foresight(
-                self.observer, "tick", ObservationStatus.FAILURE, {"error_type": type(exc).__name__}, started
-            )
-            raise
+        now = self._clock().astimezone(self.read_side.zone)
+        traced = open_trace(self.trace(now.date())) if self.trace is not None else nullcontext()
+        with traced, span("foresight.tick", {"at": now.isoformat(), "lane": self.lane}) as attributes:
+            try:
+                report = await self._run()
+            except Exception as exc:
+                observe_foresight(
+                    self.observer, "tick", ObservationStatus.FAILURE, {"error_type": type(exc).__name__}, started
+                )
+                raise
+            # "今晚的表"闸放没放行、为什么（裁定 94 第 1 条），以及建了几条、按种类、递了几条
+            set_attributes(attributes, {"gate_open": report.skipped is None, **_attributes(report)})
         observe_foresight(self.observer, "tick", ObservationStatus.SUCCESS, _attributes(report), started)
         return report
 

@@ -25,7 +25,8 @@ from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement import SettlementStage
 from habitus.runtime.foresight_tick import ForesightTick
-from habitus.runtime.nightly_worker import LastRun
+from habitus.runtime.nightly import STEPS
+from habitus.runtime.nightly_jobs import FAILED, SUCCEEDED, NightJob, NightJobs, NightLedger
 from habitus.scene.concepts import ConceptSet
 from tests.unit.kind_ids import kind_id
 from tests.unit.runtime.test_foresight_daily_miss_and_silent_day import (
@@ -56,8 +57,19 @@ class World:
         self.concepts = ConceptSet([base(habit)])
         self.habit = habit
         self.start = start
-        #: 夜里那条线自己的记录：结算据它认停掉的那天（裁定 94 第 9 条）
-        self.last_run = LastRun()
+        #: 夜里那条线的 Job 账：结算据它认停掉的那天（裁定 94 第 9 条）
+        self.jobs = NightJobs(tmp / "scene" / "nightly" / "jobs", artifact_root=tmp, kept_nights=366)
+
+    def mark(self, night: date, *, finished: bool) -> None:
+        """线把这一晚记进 Job 账：跑完是 5 段都成了；没跑完是日子预期那一段失败了（停下、或表写出后才停）。"""
+
+        states = [SUCCEEDED] * 5 if finished else [SUCCEEDED] * 4 + [FAILED]
+        moment = datetime.combine(night, LINE_AT, tzinfo=ZONE)
+        self.jobs.write(
+            NightLedger(
+                night, moment, tuple(NightJob(step, state=state) for step, state in zip(STEPS, states, strict=True))
+            )
+        )
 
     @property
     def kind(self) -> str:
@@ -80,7 +92,7 @@ def settle(w: World, through: date) -> None:
         lane="session",
         clock=lambda: now.astimezone(UTC),
         tolerance=LOSS,
-        finished=w.last_run.finished,
+        finished=w.jobs.finished,
     ).run_once()
 
 
@@ -107,7 +119,7 @@ def line(w: World, day: date, *, finish: bool = True) -> None:
     nightly(w, day)  # type: ignore[arg-type]
     if finish:
         day_expectations(w, day, at=LINE_AT)  # type: ignore[arg-type]
-    w.last_run.write(day, finished=finish)
+    w.mark(day, finished=finish)
 
 
 def run(
@@ -132,7 +144,7 @@ def run(
         publish(w.site.behavior_tree, day, OTHER, 23, 50)
         day += timedelta(days=1)
     nightly(w, live[0] - timedelta(days=1))  # type: ignore[arg-type]
-    w.last_run.write(live[0] - timedelta(days=1), finished=True)
+    w.mark(live[0] - timedelta(days=1), finished=True)
     for day in live:
         pending = sorted(done.get(day, []))
         now = datetime.combine(day, time(0), tzinfo=ZONE)
@@ -141,7 +153,7 @@ def run(
                 hour, minute = pending.pop(0)
                 publish(w.site.behavior_tree, day, habit, hour, minute)
             if now.time() == LINE_AT and day in stopped:
-                w.last_run.write(day, finished=False)
+                w.mark(day, finished=False)
             elif now.time() == LINE_AT:
                 line(w, day, finish=day not in stopped_after_table)
             tick(w, now)

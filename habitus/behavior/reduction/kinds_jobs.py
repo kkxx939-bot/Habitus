@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, tzinfo
 
-from habitus.behavior.kinds.changes import VersionRecord
+from habitus.behavior.kinds.changes import AddClass, Branch, RetireClass, VersionRecord
 from habitus.behavior.kinds.classify import OccurrenceContent
 from habitus.behavior.kinds.ids import is_marker, lane_of_token
 from habitus.behavior.kinds.nightly import NightlyGrower
@@ -34,11 +34,41 @@ class JobsOutcome:
     days: frozenset[date] = frozenset()
     model_calls: int = 0
     signals: tuple[str, ...] = ()
+    #: 只给观测（夜线的 ``nightly.vocabulary`` span）：每晚新增开始时待定池里几条、建了哪些类、这一晚拆改到没到期、
+    #: 拆出 / 并掉几类、迁移计划挪了几条。
+    pool: int = 0
+    created: tuple[str, ...] = ()
+    revision_due: bool = False
+    split: int = 0
+    merged: int = 0
+    moves: int = 0
 
     def __add__(self, other: JobsOutcome) -> JobsOutcome:
         return JobsOutcome(
-            self.days | other.days, self.model_calls + other.model_calls, (*self.signals, *other.signals)
+            self.days | other.days,
+            self.model_calls + other.model_calls,
+            (*self.signals, *other.signals),
+            pool=self.pool + other.pool,
+            created=(*self.created, *other.created),
+            revision_due=self.revision_due or other.revision_due,
+            split=self.split + other.split,
+            merged=self.merged + other.merged,
+            moves=self.moves + other.moves,
         )
+
+
+def _record_counts(record: VersionRecord) -> JobsOutcome:
+    """一版里建了哪些类、拆出 / 并掉几类、挪了几条（只给观测，不改这一版）。"""
+
+    added = [operation.item.id for operation in record.operations if isinstance(operation, AddClass)]
+    retired = {operation.class_id for operation in record.operations if isinstance(operation, RetireClass)}
+    branches = [operation for operation in record.operations if isinstance(operation, Branch)]
+    return JobsOutcome(
+        created=tuple(str(item) for item in added),
+        split=sum(1 for item in branches if item.target in added),
+        merged=sum(1 for item in branches if item.source in retired),
+        moves=len(record.moves),
+    )
 
 
 @dataclass(frozen=True)
@@ -77,7 +107,7 @@ class VocabularyJobs:
         outcome = await self.grow(now, checkpoint=checkpoint)
         last = self.store.read_jobs().revision_at
         if revision_due(night, None if last is None else last.astimezone(self.zone).date(), weekday=self.weekday):
-            outcome += await self.revise(now, checkpoint=checkpoint, night=night)
+            outcome += JobsOutcome(revision_due=True) + await self.revise(now, checkpoint=checkpoint, night=night)
         return outcome
 
     @property
@@ -86,10 +116,11 @@ class VocabularyJobs:
 
     async def grow(self, now: datetime, *, checkpoint: Callable[[], object]) -> JobsOutcome:
         vocabulary = self.store.read()
+        pending = self.store.read_pending().pool
         result = await self.grower.grow(
-            self.store.read_pending().pool, vocabulary, now=now, content_of=self._content_of, checkpoint=checkpoint
+            pending, vocabulary, now=now, content_of=self._content_of, checkpoint=checkpoint
         )
-        outcome = JobsOutcome(model_calls=result.model_calls, signals=result.signals)
+        outcome = JobsOutcome(model_calls=result.model_calls, signals=result.signals, pool=len(pending.entries))
         # 要迁进新类的成员不打"聚组过"：它们靠这一版迁移出池；崩在打标记与写迁移计划之间时，它们得留着"新"，下一晚
         # 再交模型一次把类建出来，否则这个类永远建不成（L10.4）
         moving = frozenset() if result.record is None else frozenset(move.occurrence for move in result.record.moves)
@@ -160,7 +191,7 @@ class VocabularyJobs:
         notes = (
             f"kind_version v{migrated.version}: {record.note} (moved {migrated.applied}, skipped {migrated.skipped})",
         )
-        return JobsOutcome(migrated.days, 0, (*migrated.signals, *notes))
+        return JobsOutcome(migrated.days, 0, (*migrated.signals, *notes)) + _record_counts(record)
 
     def _occurrences(self, checkpoint: Callable[[], object]) -> Iterator[_Occurrence]:
         """树上全部可计的 occurrence（撞车消歧的重复记录跳过，与事件序列同一口径）。"""

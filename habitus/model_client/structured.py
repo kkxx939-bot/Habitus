@@ -80,7 +80,7 @@ class StructuredChatClient:
         prepared = self._prepare(request, schema=schema, name=name)
         last_error: _StructuredValidationFailure | None = None
         for attempt in range(self.validation_retries + 1):
-            response = self.client.complete(prepared, context=context)
+            response = self.client.complete(prepared, context=_attempt_context(context, attempt + 1))
             try:
                 return self._validate_response(
                     response,
@@ -109,7 +109,7 @@ class StructuredChatClient:
         prepared = self._prepare(request, schema=schema, name=name)
         last_error: _StructuredValidationFailure | None = None
         for attempt in range(self.validation_retries + 1):
-            response = await self.client.complete_async(prepared, context=context)
+            response = await self.client.complete_async(prepared, context=_attempt_context(context, attempt + 1))
             try:
                 return self._validate_response(
                     response,
@@ -278,6 +278,13 @@ class StructuredChatClient:
             parse_mode=parsed.mode,
             validation_attempts=validation_attempts,
         )
+
+
+def _attempt_context(context: ChatCallContext | None, attempt: int) -> ChatCallContext:
+    """在调用侧元数据里记这是结构化校验的第几遍（不进模型请求，只给观测：第 2 遍起说明上一遍没过校验）。"""
+
+    base = context if context is not None else ChatCallContext()
+    return replace(base, metadata={**base.metadata, "structured_attempt": attempt})
 
 
 def _model_contract(model_class: type[T]) -> tuple[Mapping[str, object], Callable[[object], T]]:

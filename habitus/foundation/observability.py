@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, MutableMapping
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -141,7 +141,7 @@ class SpanController(Protocol):
         *,
         attributes: Mapping[str, str | int | float | bool] | None = None,
         traceparent: str | None = None,
-    ) -> AbstractContextManager[None]: ...
+    ) -> AbstractContextManager[MutableMapping[str, str | int | float | bool] | None]: ...
 
 
 class NullObserver:

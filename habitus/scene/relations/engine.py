@@ -137,6 +137,10 @@ class LaneNight:
     skipped: Mapping[str, int] = field(default_factory=dict)
     #: 不加权时过第 1 道的关系（给了先验权重时状态折叠据它打"靠先验"；没给权重时就是过了第 1 道的那些）。
     plain_significant: frozenset[RelationKey] = frozenset()
+    #: 只给观测：四族（不带条件短跨度 ``plain`` / 长跨度 ``long`` / 带条件 ``conditioned`` / 按组 ``groups``）各自的族大小
+    #: （``*_family``）与过第 1 道数（``*_passed``）、带条件那一族各条进族路（``entry_parent`` / ``entry_carried`` /
+    #: ``entry_group``）的条数、逐条量了几条（``measured``）。不进比较。
+    breakdown: Mapping[str, int] = field(default_factory=dict, compare=False)
 
     def significant(self) -> tuple[RelationTest, ...]:
         return tuple(test for test in self.tests if test.verdict is Verdict.SIGNIFICANT)

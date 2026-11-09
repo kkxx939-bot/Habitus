@@ -71,7 +71,7 @@ class ChatClient:
     ) -> ModelResponse:
         call_context = self._context(context)
         prepared = self._prepare(request, stream=False, context=call_context)
-        started = time.monotonic()
+        call, started = (prepared.request, call_context), time.monotonic()
         with self._sync_slots:
             for attempt in range(self.config.route.max_retries + 1):
                 try:
@@ -80,11 +80,7 @@ class ChatClient:
                         call_context,
                     )
                     self._observe(
-                        "complete",
-                        ObservationStatus.SUCCESS,
-                        started,
-                        response=response,
-                        retry_count=attempt,
+                        "complete", ObservationStatus.SUCCESS, started, call, response=response, retry_count=attempt
                     )
                     return response
                 except Exception as exc:
@@ -93,11 +89,7 @@ class ChatClient:
                         self._sleep(self._retry_delay(attempt, failure))
                         continue
                     self._observe(
-                        "complete",
-                        ObservationStatus.FAILURE,
-                        started,
-                        error=failure,
-                        retry_count=attempt,
+                        "complete", ObservationStatus.FAILURE, started, call, error=failure, retry_count=attempt
                     )
                     raise failure from exc
         raise AssertionError("chat retry loop exhausted without a result")  # pragma: no cover
@@ -110,7 +102,7 @@ class ChatClient:
     ) -> ModelResponse:
         call_context = self._context(context)
         prepared = self._prepare(request, stream=False, context=call_context)
-        started = time.monotonic()
+        call, started = (prepared.request, call_context), time.monotonic()
         async with self._async_slot():
             for attempt in range(self.config.route.max_retries + 1):
                 try:
@@ -122,6 +114,7 @@ class ChatClient:
                         "complete_async",
                         ObservationStatus.SUCCESS,
                         started,
+                        call,
                         response=response,
                         retry_count=attempt,
                     )
@@ -132,11 +125,7 @@ class ChatClient:
                         await self._async_sleep(self._retry_delay(attempt, failure))
                         continue
                     self._observe(
-                        "complete_async",
-                        ObservationStatus.FAILURE,
-                        started,
-                        error=failure,
-                        retry_count=attempt,
+                        "complete_async", ObservationStatus.FAILURE, started, call, error=failure, retry_count=attempt
                     )
                     raise failure from exc
         raise AssertionError("chat retry loop exhausted without a result")  # pragma: no cover
@@ -377,6 +366,7 @@ class ChatClient:
         operation: str,
         status: ObservationStatus,
         started: float,
+        call: tuple[ChatRequest, ChatCallContext] | None = None,
         *,
         response: ModelResponse | None = None,
         usage: TokenUsage | None = None,
@@ -388,6 +378,8 @@ class ChatClient:
             "model": self.model,
             "retry_count": retry_count,
         }
+        if call is not None:
+            attributes.update(_call_attributes(*call, response))
         resolved_usage = response.usage if response is not None else usage
         if resolved_usage is not None:
             attributes.update(
@@ -406,6 +398,28 @@ class ChatClient:
                 attributes=attributes,
             )
         )
+
+
+def _call_attributes(
+    request: ChatRequest, context: ChatCallContext, response: ModelResponse | None
+) -> dict[str, str | int | float | bool]:
+    """一次调用的读数，给 trace 的 ``model.call`` 用：触点（结构化输出的名字，没有就看提示词版本）、提示词与答复的字符数，以及
+    结构化校验的第几遍（``StructuredChatClient`` 记在调用侧元数据里）。只有长度与名字，不含内容。"""
+
+    format_name = request.response_format.name if request.response_format is not None else None
+    attributes: dict[str, str | int | float | bool] = {
+        "touch": (format_name or context.prompt_version or "chat")[:128],
+        "prompt_chars": sum(len(message.content) for message in request.messages if isinstance(message.content, str)),
+    }
+    if response is not None:
+        attributes["response_chars"] = len(response.content or "")
+        # 实际作答的后端与模型（适配器可能回退到别的后端）；``provider`` / ``model`` 仍是路由配置的那一对
+        attributes["response_provider"] = response.provider[:128]
+        attributes["response_model"] = response.model[:128]
+    attempt = context.metadata.get("structured_attempt")
+    if isinstance(attempt, int) and not isinstance(attempt, bool):
+        attributes["validation_attempt"] = attempt
+    return attributes
 
 
 __all__ = ["ChatClient"]

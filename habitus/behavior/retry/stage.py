@@ -137,6 +137,20 @@ class _Tally:
 
 
 @dataclass(frozen=True)
+class RetryCheckpoint:
+    """还没准备好时留下的、能落盘的那一份（夜里那条线把它存进前置处理那个 Job，重启或换进程接着跑时交回 ``restore``）：
+    哪一晚、各支写回了等归约的项与锁被占的项（只记编号，项本身还在重试堆里）、这一晚已经攒下的计数。"""
+
+    through: date
+    #: 支名 → (写回了等归约的项编号, 锁被占的项编号)。
+    waiting: Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]] = field(default_factory=dict)
+    counts: Mapping[str, int] = field(default_factory=dict)
+
+
+_COUNTED = ("recovered", "unavailable", "invalid", "deterministic", "leftover", "taken", "refused")
+
+
+@dataclass(frozen=True)
 class _Waiting:
     """一支还没准备好时留下的：哪一晚的、写回了等归约的那几项（不再试，直接归约）、锁被占的那几项（再试一次）。"""
 
@@ -166,6 +180,42 @@ class RetryStage:
         if waiting and not tally.halted:
             self._carried = (through, replace(tally))
         return tally.report(waiting)
+
+    def checkpoint(self) -> RetryCheckpoint | None:
+        """这一晚还没做完时留下的（没有就是 None）：等锁的支与攒下的计数，交给夜里那条线落盘。"""
+
+        if self._carried is None:
+            return None
+        through, tally = self._carried
+        return RetryCheckpoint(
+            through=through,
+            waiting={
+                name: (tuple(item.item_id for item in left.written), tuple(sorted(left.busy)))
+                for name, left in sorted(self._waiting.items())
+                if left.through == through
+            },
+            counts={name: getattr(tally, name) for name in _COUNTED},
+        )
+
+    def restore(self, checkpoint: RetryCheckpoint | None) -> None:
+        """换成落盘的那一份（``None`` 是这一晚没有等锁的）：写回等归约的项按编号从重试堆里取回，堆里已经没有的不再等。"""
+
+        self._waiting.clear()
+        self._carried = None
+        if checkpoint is None:
+            return
+        branches = {branch.name: branch for branch in self.branches}
+        for name, (written, busy) in checkpoint.waiting.items():
+            branch = branches.get(name)
+            if branch is None:
+                continue
+            kept = {item.item_id: item for item in branch.backlog.snapshot(through=checkpoint.through).items}
+            items = tuple(kept[identity] for identity in written if identity in kept)
+            self._waiting[name] = _Waiting(checkpoint.through, items, frozenset(busy))
+        tally = _Tally()
+        for name in _COUNTED:
+            setattr(tally, name, int(checkpoint.counts.get(name, 0)))
+        self._carried = (checkpoint.through, tally)
 
     def clean_leftovers(self) -> int:
         """进程重启时（常驻节拍一起来就调）：上一晚中途被杀剩下的项——属于已经跑过的日子——撤回、删掉，不等到下一晚；
@@ -263,4 +313,13 @@ async def attempt(handler: RetryHandler, item: RetryItem) -> Attempt:
         return Attempt.DETERMINISTIC
 
 
-__all__ = ["Attempt", "Reduction", "RetryBranch", "RetryHandler", "RetryReport", "RetryStage", "attempt"]
+__all__ = [
+    "Attempt",
+    "Reduction",
+    "RetryBranch",
+    "RetryCheckpoint",
+    "RetryHandler",
+    "RetryReport",
+    "RetryStage",
+    "attempt",
+]

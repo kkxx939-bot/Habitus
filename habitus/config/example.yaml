@@ -525,6 +525,13 @@ workflow:
 #   enabled: true
 #   baseline_slack_slots: 3          # 常态按峰分份时峰两边各放宽几槽（待定档；原借预测树 pool_half_width，裁定 59）
 #   nightly_shutdown_timeout_seconds: 30  # 停机时等整晚那一趟多久（那一趟前一天定稿完成就接着跑，不挂固定时刻，裁定 94）
+#   nightly_poll_seconds: 300            # 夜线 Job 执行器隔多久看一眼（定稿了没有、有没有到点重试的段）
+#   nightly_kept_nights: 366             # Job 账、每晚报告、trace 文件留几晚（scene/nightly/{jobs,reports,traces}）
+#   nightly_lease_ttl_seconds: 120       # 执行器全局租约多久过期（两个进程挂同一个 storage root 时同一晚同一段只跑一次）
+#   nightly_heartbeat_seconds: 30        # 多久续一次租约（必须小于 nightly_lease_ttl_seconds）
+#   nightly_max_attempts: 3              # 一段停下（模型调不通、出错）后最多试几次（含第一次），用完记失败
+#   nightly_retry_base_seconds: 900      # 停下后的退避：base × 2^(第几次 − 1)，封顶 nightly_retry_max_seconds
+#   nightly_retry_max_seconds: 3600
 #   relations:
 #     fdr: 0.10                        # 第 1 道：当晚检验族的假发现率
 #     forward_alpha: 0.05              # 前向验证的单侧显著性

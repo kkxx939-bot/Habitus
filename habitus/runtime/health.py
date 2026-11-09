@@ -13,8 +13,9 @@ from habitus.memory.workflow import MemoryJobStatus
 from habitus.runtime.components import RuntimeComponents
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.lifecycle import LifecycleWorkerState
-from habitus.runtime.nightly import NightOutcome
-from habitus.runtime.nightly_worker import kept_errors
+from habitus.runtime.nightly import PREPARE
+from habitus.runtime.nightly_jobs import FAILED, STOPPED, NightJobs, NightJobsError
+from habitus.runtime.nightly_summary import kept_errors
 from habitus.runtime.resident import ResidentWorker
 from habitus.runtime.worker import MemoryWorkerState
 
@@ -154,7 +155,7 @@ class RuntimeHealthService:
         if nightly is None:
             return [RuntimeHealthCheck("nightly", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
         checks = self._worker_checks(runtime_state, (("nightly_worker", nightly),))
-        checks.extend(_night_line_checks(nightly.last_outcome))
+        checks.extend(_night_line_checks(nightly.jobs))
         calendar = getattr(getattr(nightly.nightly, "scene", None), "calendar", None)
         problems = tuple(getattr(calendar, "problems", ()))
         if problems:
@@ -437,20 +438,32 @@ class RuntimeHealthService:
         return "none" if error is None else type(error).__name__
 
 
-def _night_line_checks(outcome: NightOutcome | None) -> list[RuntimeHealthCheck]:
-    """夜里那条线最近一趟要人看的：停下了（"模型调不通"、某一段出错），以及前置处理里保持「错误·看不到」的（我们自己处理不了的、
-    内容安全拦下的、格式不合夜里再试仍不合的，裁定 94 第 4、8 条）——两条各报各的，停下了也不盖住后一条。锁被占不在这里：那是还没
-    准备好，线停在那一段、下一眼接着跑（"nightly line not finished"）。
-    都是 non-critical：白天照常建预期与提醒。"""
+def _night_line_checks(jobs: NightJobs) -> list[RuntimeHealthCheck]:
+    """夜里那条线最近一晚要人看的，读 Job 账（重启之后照样看得到上一晚停在哪、为什么）：有段停下了（"模型调不通"、某一段出错，
+    等着退避重试）或失败了（次数用完、或那一晚过去了没跑完），以及前置处理里保持「错误·看不到」的（我们自己处理不了的、内容安全
+    拦下的、格式不合夜里再试仍不合的，裁定 94 第 4、8 条）——两条各报各的。锁被占不在这里：那是还没准备好，Job 保持排队、下一眼
+    接着跑。都是 non-critical：白天照常建预期与提醒。"""
 
-    if outcome is None:
+    try:
+        ledger = jobs.latest()
+    except (OSError, NightJobsError) as exc:
+        return [
+            RuntimeHealthCheck(
+                "nightly_line", RuntimeHealthStatus.DEGRADED, f"unreadable:{type(exc).__name__}", critical=False
+            )
+        ]
+    if ledger is None:
         return []
     checks: list[RuntimeHealthCheck] = []
-    if outcome.stopped is not None:
-        checks.append(
-            RuntimeHealthCheck("nightly_line", RuntimeHealthStatus.DEGRADED, outcome.stopped[:500], critical=False)
+    blocked = [job for job in ledger.jobs if job.state in (STOPPED, FAILED)]
+    if blocked:
+        detail = "; ".join(
+            f"{ledger.night} {job.step} {job.state}: {job.reason or '-'}"
+            + (f" (next attempt {job.next_attempt_at.isoformat()})" if job.next_attempt_at is not None else "")
+            for job in blocked
         )
-    kept = kept_errors(outcome.retried)
+        checks.append(RuntimeHealthCheck("nightly_line", RuntimeHealthStatus.DEGRADED, detail[:500], critical=False))
+    kept = kept_errors(ledger.job(PREPARE).report.get("retry"))
     if kept is not None:
         checks.append(
             RuntimeHealthCheck("nightly_errors", RuntimeHealthStatus.DEGRADED, f"错误·看不到：{kept}", critical=False)

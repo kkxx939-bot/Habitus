@@ -560,7 +560,7 @@ def deliver_physical(
     return outcomes
 
 
-def _span(controller: SpanController | None, operation: str) -> AbstractContextManager[None]:
+def _span(controller: SpanController | None, operation: str) -> AbstractContextManager[object]:
     """行为 Worker 的根 span；未配置追踪时是空上下文。作业身份等属性由 runner 的事件带上同一个 span。"""
 
     if controller is None:

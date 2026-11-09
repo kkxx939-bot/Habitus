@@ -27,6 +27,7 @@ from habitus.foresight import Evidence, Tolerance, UnsealedReader
 from habitus.foresight.judge import Judge
 from habitus.foresight.triggers.assemble import relation_statuses
 from habitus.foundation.observability import Observer
+from habitus.foundation.tracing import TraceSink
 from habitus.model_client import StructuredChatClient
 from habitus.pre.conversation import QuestionTool
 from habitus.runtime.behavior import BehaviorRuntimeComponents
@@ -131,7 +132,7 @@ def build_foresight_components(
 ) -> ForesightRuntimeComponents | None:
     """组装预测层；未启用时返回 None。``branch`` 是它接的那一支：账本取这一支的目录。``calendar`` 是组合根建好、与语义树共用的
     那一份（不给就自己建）。``kind_label`` 是类编号 → 给人看的类名（词表），出口认提问时拿它配题目；不给就只按话配。``line_finished``
-    是夜里那条线自己记的"这一晚跑完了没有"（``runtime.scene.nightly_last_run``），结算据它认停掉的那天（裁定 94 第 9 条）。"""
+    是夜里那条线自己记的"这一晚跑完了没有"（``runtime.scene.nightly_jobs``），结算据它认停掉的那天（裁定 94 第 9 条）。"""
 
     if not config.foresight.enabled:
         return None
@@ -232,13 +233,12 @@ def build_foresight_tick(
     clock: Callable[[], datetime] | None = None,
     lane: str = "session",
     reread: Callable[[datetime, datetime], Awaitable[bool]] | None = None,
+    trace: Callable[[date], TraceSink] | None = None,
 ) -> ForesightTick:
-    """白天那一拍：读这一支的机会表、今天的日历条件、行为树今天与前 7 天、还没封口的判断（``unsealed``），把此刻对得上
-    历史的预期写进这一支的账本；再把到了时窗的按账的级决定说不说（``structured_chat`` 给了就带模型四问，不给就按算法与模板）。
-    ``shadow_uses_unestablished`` 开着时候选关系也进影子账；词表迁移中（``vocabulary_migrating``）整拍不做。
-
-    送达走提醒出口（方案 32）：递送那一拍按出口的活性决定问不问模型——最近一段有宿主来取过才写话、记「待取」，否则记「不可达」；
-    每拍末尾把可取的请求清单交给出口。装了插件的用户自动"接通"，没装的一分钱不多花，组合根不再有写死的一行。"""
+    """白天那一拍：读这一支的机会表、今天的日历条件、行为树今天与前 7 天、还没封口的判断（``unsealed``），把此刻对得上历史的预期写进
+    这一支的账本；再把到了时窗的按账的级决定说不说（``structured_chat`` 给了就带模型四问，不给就按算法与模板）。``shadow_uses_unestablished``
+    开着时候选关系也进影子账；词表迁移中整拍不做；``trace`` 给了每拍一个 ``foresight.tick`` span。送达走提醒出口（方案 32）：最近一段有宿主
+    来取过才写话、记「待取」，否则记「不可达」；每拍末尾把可取的请求清单交给出口（装了插件的自动"接通"，没装的一分钱不多花）。"""
 
     foresight = config.foresight
     delivery = DeliveryStage(
@@ -281,6 +281,7 @@ def build_foresight_tick(
         reread=reread,
         # 今天这一晚的线跑完了才建（裁定 94 第 1 条）：与结算认停掉的那天同一个判断
         line_finished=components.settlement.finished,
+        trace=trace,
     )
 
 

@@ -136,6 +136,8 @@ class SettlementReport:
     omissions: int
     #: 有未结算的预期、但还没定稿的日子。
     pending_days: tuple[date, ...]
+    #: 这一拍新写的提醒反馈条数（只给观测）。
+    feedback: int = 0
 
 
 class SettlementStage:
@@ -172,7 +174,7 @@ class SettlementStage:
         self.tolerance = tolerance
         #: 单元历史（夜里重标过的快照）：诊断重建"落空那一刻这条边的位置"从它读（裁定 61：权重归单元）；没给就按没有历史算。
         self.history = history
-        #: 夜里那条线自己记的"这一晚跑完了没有"（``runtime.nightly_worker.LastRun.finished``）：停掉的那天后补只看到它开始为止
+        #: 夜里那条线自己记的"这一晚跑完了没有"（``runtime.nightly_jobs.NightJobs.finished``）：停掉的那天后补只看到它开始为止
         #: （裁定 94 第 8、9 条）；没给就不认停掉的那天。
         self.finished = finished
         self._facts_cache: dict[str, list[AccountFact]] | None = None
@@ -225,7 +227,7 @@ class SettlementStage:
         )
         now = self._clock()
         outcomes: dict[str, int] = {}
-        rulings = 0
+        rulings = feedback_written = 0
         pending: list[date] = []
         opened = self._opened_by_account(days)
         table = self.opportunities.latest(self.lane) if self.opportunities is not None else None
@@ -261,7 +263,7 @@ class SettlementStage:
                         item, result, spoken_at=asked.spoken_at, responses=self._responses(day, item.expectation_id)
                     )
                     if feedback is not None:
-                        self.ledger.record_feedback(feedback)
+                        feedback_written += self.ledger.record_feedback(feedback)
                 self.ledger.record_settlement(result)
                 outcomes[result.outcome] = outcomes.get(result.outcome, 0) + 1
             count, undecided = self._rule(day, cache, last_closed, now, opened, table)
@@ -273,11 +275,7 @@ class SettlementStage:
             if day not in pending and day not in waiting_rulings and not self.ledger.unsettled_expectations(day):
                 self.ledger.mark_final(day, at=now)
         return SettlementReport(
-            settled=sum(outcomes.values()),
-            outcomes=outcomes,
-            rulings=rulings,
-            omissions=found,
-            pending_days=tuple(pending),
+            sum(outcomes.values()), outcomes, rulings, found, tuple(pending), feedback=feedback_written
         )
 
     def _rule(

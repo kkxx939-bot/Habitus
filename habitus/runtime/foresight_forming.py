@@ -29,6 +29,7 @@ from habitus.runtime.foresight_implementation import IMPLEMENTATION
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement import BehaviorReadSide
+from habitus.runtime.nightly_errors import NightJobsError
 from habitus.scene.views import DayIndexCache
 from habitus.series.reader import admitted
 from habitus.temporal.slots import slot_index
@@ -148,6 +149,7 @@ MIGRATING = "词表迁移还没做完"
 NO_TABLE = "还没有机会表"
 STALE_TABLE = "今天这一晚的机会表还没有"
 LINE_UNFINISHED = "今天这一晚的线还没跑完"
+LEDGER_UNREADABLE = "夜线的 Job 账读不了"
 
 
 def held_by_migration(migrating: Callable[[], bool] | None) -> str | None:
@@ -164,7 +166,7 @@ def tonight_table(
     line_finished: Callable[[date], bool | None] | None = None,
 ) -> tuple[OpportunityTable | None, str | None]:
     """盘上最晚那张表与"能不能用它建预期"：没有表 → (None, 原因)；表不是今天这一晚的，或给了 ``line_finished``（白天那一拍）
-    而今天这一晚的线还没整条跑完（没跑到、表写出后才停）→ (那张表, 原因)——递送照用它，建预期等今晚的线跑完（裁定 94 第 1 条）；
+    而今天这一晚的线还没整条跑完（没跑到、表写出后才停）或夜线的 Job 账读不了 → (那张表, 原因)——递送照用它，建预期等今晚的线跑完（裁定 94 第 1 条）；
     否则 → (表, None)。线上的日子预期那一段自己就在线里，不给 ``line_finished``。"""
 
     table = store.latest(lane)
@@ -172,9 +174,14 @@ def tonight_table(
         return None, NO_TABLE
     if table.night != today:
         return table, STALE_TABLE
-    if line_finished is not None and line_finished(today) is not True:
-        return table, LINE_UNFINISHED
-    return table, None
+    if line_finished is None:
+        return table, None
+    try:
+        finished = line_finished(today)
+    except NightJobsError:
+        # 账坏了：不当跑完、也不当没跑完，不建预期并报出原因（递送照用表；健康面另报读不了）
+        return table, LEDGER_UNREADABLE
+    return (table, None) if finished is True else (table, LINE_UNFINISHED)
 
 
 def observe_foresight(

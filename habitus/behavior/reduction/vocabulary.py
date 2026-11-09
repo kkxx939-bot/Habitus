@@ -24,6 +24,13 @@ class VocabularyJobReport:
     days: tuple[date, ...]
     model_calls: int
     signals: tuple[str, ...]
+    #: 只给观测：见 ``JobsOutcome`` 的同名字段。
+    pool: int = 0
+    created: tuple[str, ...] = ()
+    revision_due: bool = False
+    split: int = 0
+    merged: int = 0
+    moves: int = 0
 
 
 class VocabularyRunner:
@@ -68,7 +75,15 @@ class VocabularyRunner:
             self.refresh_pending.touch(outcome.days, guard)
             notes = await self._refresh_semantics(set(outcome.days), guard)
             return VocabularyJobReport(
-                days=tuple(sorted(outcome.days)), model_calls=outcome.model_calls, signals=(*outcome.signals, *notes)
+                days=tuple(sorted(outcome.days)),
+                model_calls=outcome.model_calls,
+                signals=(*outcome.signals, *notes),
+                pool=outcome.pool,
+                created=outcome.created,
+                revision_due=outcome.revision_due,
+                split=outcome.split,
+                merged=outcome.merged,
+                moves=outcome.moves,
             )
 
     def resume_migration(self, guard: LeaseGuard) -> JobsOutcome:

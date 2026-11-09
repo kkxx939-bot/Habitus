@@ -131,7 +131,7 @@ flowchart TD
   RED --> TREE[("Behavior tree")]
   SL -->|"turns not written"| RETRY[("Retry backlog")]
   RED -->|"chains that failed to materialize"| RETRY
-  RETRY --> NIGHT["Nightly run (after yesterday closes)<br/>retries both branches; session only from settlement on"]
+  RETRY --> NIGHT["Nightly run: five durable jobs (after yesterday closes)<br/>retries both branches; session only from settlement on"]
   TREE --> NIGHT
   NIGHT --> SCENE[("Semantic tree<br/>concepts, hits, relations")]
   SCENE --> OPP[("Opportunity table + unit history")]
@@ -167,7 +167,7 @@ The session lane reads the same conversation source envelope as memory. When pre
 
 1. **Session lane**: one model call per turn, writing one judgement; when the turn has open reminders and you typed your own answer, it also writes the model's positive / neutral / negative / already-done verdict back to the ledger; a turn it cannot write becomes "not understood" and goes to the retry backlog. The physical lane writes judgements straight from upstream deliveries without a model.
 2. **Reduction** (one resident worker per branch, every 300 s): seal (when prediction is on, it looks up the ledger and stamps `reminded` on records that started after a "spoken") → daytime classification (vocabulary) → publish to the behavior tree → refresh L0/L1 → record closed days; chains that fail to materialize go to the retry backlog.
-3. **Nightly run** (starts once yesterday is closed, not at a fixed time; the resident worker looks every 5 minutes), in a fixed order, each step following the previous one: refresh calendar → nightly retry (both branches' backlogs are handled in this step; if a lock is held by another process the run stops here and resumes on the next look, without settling) → settlement (from this step on, session branch only) → both branches' vocabulary: nightly growth, then the weekly revision if none has run yet in the revision cycle this night belongs to (cycles start on the Wednesday night) → cutoff N = min(today, last closed day + 1) → stop if a vocabulary migration is unfinished → read series → semantic tree → opportunity table and unit history → today's day expectations. Both vocabulary jobs are part of this run, before the structure, with no clock time. If the service did not run overnight, it runs on start-up once yesterday is closed (every step is idempotent on a rerun).
+3. **Nightly run** (starts once yesterday is closed, not at a fixed time: the night's five steps — prepare, settle, vocabulary, structure, days — are queued as durable jobs and run in order under one global lease; the executor looks every `scene.nightly_poll_seconds`, 300 s by default), in a fixed order, each step following the previous one: refresh calendar → nightly retry (both branches' backlogs are handled in this step; if a lock is held by another process the run stops here and resumes on the next look, without settling) → settlement (from this step on, session branch only) → both branches' vocabulary: nightly growth, then the weekly revision if none has run yet in the revision cycle this night belongs to (cycles start on the Wednesday night) → cutoff N = min(today, last closed day + 1) → stop if a vocabulary migration is unfinished → read series → semantic tree → opportunity table and unit history → today's day expectations. Both vocabulary jobs are part of this run, before the structure, with no clock time. If the service did not run overnight, it runs on start-up once yesterday is closed (every step is idempotent on a rerun). A step that stops (model unreachable, a bug) is retried with bounded backoff and fails after `scene.nightly_max_attempts` attempts; steps still unfinished when the day turns are marked failed and the next night runs as usual. If the latest night's job ledger is corrupt, no later night is queued and the health check reports it as unreadable: delete that file (`scene/nightly/jobs/<date>.json`) and the next look queues the night again.
 4. **Daytime tick** (900 s by default): read today and the previous 7 days of the behavior tree, the unsealed judgements and the latest opportunity table on disk → form expectations → unit reading → delivery decision (the judge model is asked only at window end and only when a host has claimed reminders recently; a host claiming reminders is the proof that it is alive) → "awaiting host" entries go to the outlet's open list.
 5. **Outlet**: the host plugin claims on UserPromptSubmit → the agent asks you with the question tool → the transcript comes back → the outlet records "spoken" and the response → ledger, settled by the next nightly run.
 
@@ -1307,6 +1307,13 @@ The local store reads all vectors of a collection into memory when it opens and 
 | `scene.enabled` | false | true / false; requires the behaviour side | Enable the semantic tree (the nightly run) |
 | `scene.baseline_slack_slots` | 3 | 0–96 | Slots of slack on each side of a peak when splitting the baseline by peaks (provisional) |
 | `scene.nightly_shutdown_timeout_seconds` | 30 | 1–3600 | How long shutdown waits for the nightly run |
+| `scene.nightly_poll_seconds` | 300 | 1–86400 | How often the nightly job executor looks (yesterday closed? a stopped step due for retry?) |
+| `scene.nightly_kept_nights` | 366 | 1–3660 | Nights of job ledgers, reports and traces kept (`scene/nightly/{jobs,reports,traces}`) |
+| `scene.nightly_lease_ttl_seconds` | 120 | 5–3600 | Lifetime of the executor's global lease (two processes on one storage root run each step of a night once) |
+| `scene.nightly_heartbeat_seconds` | 30 | ≥ 1 and below the lease ttl | How often the lease is renewed; a failed renewal is retried until the lease would expire |
+| `scene.nightly_max_attempts` | 3 | 1–20 | Attempts (including the first) for a step that stops before it is marked failed |
+| `scene.nightly_retry_base_seconds` | 900 | 1 – `nightly_retry_max_seconds` | Backoff after a stop: base × 2^(attempt − 1), capped |
+| `scene.nightly_retry_max_seconds` | 3600 | base – 86400 | Backoff cap |
 | `scene.relations.fdr` | 0.10 | > 0, < 1 | Gate 1: false discovery rate of the night's test family |
 | `scene.relations.forward_alpha` | 0.05 | > 0, < 1 | One-sided significance of forward validation |
 | `scene.relations.forward_power` | 0.80 | > 0, < 1 | Power that sets how many occurrences forward validation and maintenance tests collect |
@@ -1448,7 +1455,9 @@ All data stays on your machine; only what is listed under "Sent to external serv
 | `relations/<lane>/<YYYY-MM-DD>.json` | one night's relation table | current night + 2 spare (`lifecycle.fallback_generations`) |
 | `relations/<lane>/transitions.jsonl` | relation state transition log | rotated above 32 MiB, 4 files kept |
 | `advice/` | prior cache, condition proposal book | orphaned priors deleted nightly |
-| `nightly/last_run.json` | the night the nightly run last ran for (read after a restart to tell whether tonight's has run) | runtime state |
+| `nightly/jobs/<YYYY-MM-DD>.json` | the night's five durable jobs: state, attempts, next attempt, claim, reason, step report | `scene.nightly_kept_nights` |
+| `nightly/reports/<YYYY-MM-DD>.json` | per-night report: each step's outcome, duration, model calls and report, and the relation table's changes against the previous night (added, removed, changed) | `scene.nightly_kept_nights` |
+| `nightly/traces/<YYYY-MM-DD>.jsonl` | local spans of the night and the daytime ticks (counts and fixed codes only) | `scene.nightly_kept_nights` |
 
 **Prediction layer: `foresight/session/`** (there is no physical branch)
 
@@ -1479,7 +1488,7 @@ All Python code lives in the single top-level package `habitus/`:
 | Directory | Contents |
 |---|---|
 | `habitus/config/` | The only external configuration boundary: reads one strict YAML file, aggregates the per-domain configuration types and runs the cross-domain checks |
-| `habitus/runtime/` | The only composition root: builds and shares the model clients, vector stores, conversation, memory, the two behavior branches, the semantic-tree nightly run and the prediction layer, and starts and stops every resident worker. It also hosts cross-package bridges, the persistence and orchestration of the prediction layer (`runtime/foresight_*`) and the orchestration of the semantic-tree nightly run (`runtime/scene_*`) |
+| `habitus/runtime/` | The only composition root: builds and shares the model clients, vector stores, conversation, memory, the two behavior branches, the semantic-tree nightly run and the prediction layer, and starts and stops every resident worker. It also hosts cross-package bridges, the persistence and orchestration of the prediction layer (`runtime/foresight_*`) and the orchestration of the semantic-tree nightly run (`runtime/scene_*`) and the nightly job ledger, executor and observability (`runtime/nightly*`) |
 | `habitus/model_client/` | Chat, embedding and rerank; builders are looked up by `(capability, adapter)`, `provider` only names the service |
 | `habitus/pre/` | Conversation schema and one protocol adapter per host transcript format (`pre/conversation/adapters.py`) |
 | `habitus/conversation/` | Conversation source: persisting the batches sent by plugins, recovery, fan-out to consumers |

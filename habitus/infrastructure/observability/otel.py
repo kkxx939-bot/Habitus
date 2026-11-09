@@ -104,15 +104,14 @@ class OpenTelemetryBackend:
         *,
         attributes: Mapping[str, str | int | float | bool] | None = None,
         traceparent: str | None = None,
-    ) -> Iterator[None]:
+    ) -> Iterator[dict[str, str | int | float | bool]]:
+        """开一个当前 span；yield 出的字典供代码块补写只有做完才知道的属性，退出时一并挂上。"""
+
+        late: dict[str, str | int | float | bool] = {}
         if not self._initialized:
-            yield
+            yield late
             return
-        safe = {
-            f"habitus.{key}": value
-            for key, value in (attributes or {}).items()
-            if isinstance(value, str | int | float | bool) and len(key) <= 64
-        }
+        safe = _span_attributes(attributes or {})
         parent_context = None
         if traceparent is not None:
             from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
@@ -125,13 +124,37 @@ class OpenTelemetryBackend:
             record_exception=False,
         ) as span:
             try:
-                yield
+                yield late
             except BaseException as exc:
                 from opentelemetry.trace import Status, StatusCode
 
                 span.set_attribute("habitus.error_type", type(exc).__name__)
                 span.set_status(Status(StatusCode.ERROR))
                 raise
+            finally:
+                for key, value in _span_attributes(late).items():
+                    span.set_attribute(key, value)
+
+    def record_span(
+        self,
+        name: str,
+        *,
+        start_ns: int,
+        end_ns: int,
+        attributes: Mapping[str, str | int | float | bool],
+        error_type: str | None = None,
+    ) -> None:
+        """事后补一个已经结束的子 span（挂在当前 span 下面），例如一次模型调用。"""
+
+        if not self._initialized:
+            return
+        span = self._tracer.start_span(name, start_time=start_ns, attributes=_span_attributes(attributes))
+        if error_type is not None:
+            from opentelemetry.trace import Status, StatusCode
+
+            span.set_attribute("habitus.error_type", error_type)
+            span.set_status(Status(StatusCode.ERROR))
+        span.end(end_time=max(start_ns, end_ns))
 
     def shutdown(self) -> None:
         first_error: BaseException | None = None
@@ -162,6 +185,28 @@ class OpenTelemetryBackend:
         return instrument
 
 
+#: 事件属性全部放进 span 事件的类别（见 ``_trace_attributes``）。
+_OPEN_CATEGORIES = frozenset({"nightly", "scene", "foresight"})
+
+
+#: span 属性里不导出的键（最后一段）：信号是带用户派生文字的句子（概念名、关系两端名、迁移原因），只留在本地每晚报告。
+_LOCAL_ONLY_KEYS = frozenset({"signals"})
+#: 开放类别的事件属性里，文字只放行这些受控键（段名、结局、枚举、原因码、日子）；计数与布尔全放行。
+_CONTROLLED_TEXT_KEYS = frozenset(
+    {"lane", "step", "outcome", "kind", "status_from", "status_to", "segment", "skipped", "reason", "night", "touch"}
+)
+
+
+def _span_attributes(attributes: Mapping[str, str | int | float | bool]) -> dict[str, str | int | float | bool]:
+    return {
+        f"habitus.{key}": value
+        for key, value in attributes.items()
+        if isinstance(value, str | int | float | bool)
+        and len(key) <= 128
+        and key.rsplit(".", 1)[-1] not in _LOCAL_ONLY_KEYS
+    }
+
+
 def _trace_attributes(event: ObservationEvent) -> dict[str, str | int | float | bool]:
     result: dict[str, str | int | float | bool] = {
         "habitus.category": event.category,
@@ -187,6 +232,10 @@ def _trace_attributes(event: ObservationEvent) -> dict[str, str | int | float | 
             "stage",
             "job_status",
         }:
+            result[f"habitus.{key}"] = value
+        elif event.category in _OPEN_CATEGORIES and (not isinstance(value, str) or key in _CONTROLLED_TEXT_KEYS):
+            # 夜线、语义树、预测层：计数、读数与布尔全放行，trace 上才看得到每一步的逻辑数据（用户 11-09：「otel 可以细一些，
+            # 对应逻辑数据要有」）；文字只放行受控键（段名、结局、枚举、原因码），用户派生文字不导出（codex R3）
             result[f"habitus.{key}"] = value
         elif event.category == "behavior" and (not isinstance(value, str) or key == "job"):
             # 行为管线的属性全是各步骤自己算出的计数、时长与布尔，不含观测语义；放行数值面，

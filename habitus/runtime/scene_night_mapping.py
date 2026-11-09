@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from habitus.behavior.tree import BehaviorTree
 from habitus.conditions import DayTypeCalendar
+from habitus.foundation.tracing import annotate
 from habitus.infrastructure.lifecycle import RetryLedger
 from habitus.runtime.scene_situations import SceneDayContext
 from habitus.scene.concepts.model import ConceptSet
@@ -89,6 +90,16 @@ class MappingStage:
             [report.day for report in reports], concepts, mapper, rhythms, slack_minutes, series, now, signals
         )
         backlog = len(pending) - len(chosen) - len(waiting)
+        annotate(
+            {
+                "pending_days": len(pending),
+                "pending_records": sum(len(series.on(day)) for day in pending),
+                "chosen_days": len(chosen),
+                "waiting_days": len(waiting),
+                "backlog_days": backlog,
+                "budget_exhausted": backlog > 0,
+            }
+        )
         if backlog:
             signals.append(f"mapping: 还有 {backlog} 天没轮到（没映射过或概念集变了要回填），之后几晚接着补")
         if waiting:

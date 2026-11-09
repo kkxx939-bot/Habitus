@@ -1,9 +1,8 @@
-"""预测层的夜批那一拍（N1）接在 ``Nightly.run_once`` 的语义树之后：用这一晚的时间线与概念集，读这一晚的关系表，写机会表。"""
+"""预测层的夜批那一拍（N1）接在夜线结构那一段（``Nightly.run_step``）的语义树之后：用这一晚的时间线与概念集，读这一晚的关系表，写机会表。"""
 
 from __future__ import annotations
 
-import asyncio
-from datetime import timedelta
+from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 
 from habitus.conditions import LocalCalendar
@@ -17,12 +16,12 @@ from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_nightly import ForesightNightlyRun
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement import SettlementStage
-from habitus.runtime.nightly import Nightly
+from habitus.runtime.nightly import DONE, HELD, PREPARE, SETTLE, STOPPED, STRUCTURE, Nightly
 from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.scene.recurrence import recurrences_of
 from habitus.scene.relations import build_timelines
 from habitus.scene.relations.store import RelationStore
-from tests.unit.runtime.test_nightly import sealed_through, steady
+from tests.unit.runtime.test_nightly import line, sealed_through, steady
 from tests.unit.runtime.test_scene_night import NOW, SLEEP, TONIGHT, nightly, publish_tonight, site_with_three_bedtimes
 from tests.unit.scene.fixtures import SUBJECT
 from tests.unit.scene.relation_fixtures import CONCEPTS, CONFIG, planted
@@ -82,22 +81,24 @@ def test_the_opportunity_table_is_written_after_the_scene_run_from_the_same_nigh
     )
     # 重标单元的历史排在同一拍、读的是这一支的账本（裁定 55 新版第 2 条）
     assert foresight.history is built.history and foresight.history.ledger is built.ledger
-    outcome = asyncio.run(run.run_once())
-    assert outcome.scene is not None and outcome.opportunities is not None
-    assert outcome.opportunities.lanes["session"].moments == 0  # 账本里还没有结过的预期
-    assert built.history.store.latest_night("session") == outcome.series.cutoff  # 这一晚的单元历史落了盘
-    assert outcome.opportunities.night == outcome.scene.night == outcome.series.cutoff
-    summary = outcome.opportunities.lanes["session"]
+    structure = line(run)[STRUCTURE]
+    scene_report, opportunities = structure.report["scene"], structure.report["opportunities"]
+    assert isinstance(scene_report, dict) and isinstance(opportunities, dict)
+    cutoff = date.fromisoformat(str(structure.report["night"]))
+    summary = opportunities["lanes"]["session"]
+    assert summary["moments"] == 0  # 账本里还没有结过的预期
+    assert built.history.store.latest_night("session") == cutoff  # 这一晚的单元历史落了盘
+    assert opportunities["night"] == scene_report["night"] == cutoff.isoformat()
     # 几天的数据：关系全是样本不够，表上没有关系；日历上有就寝等几个类
-    assert summary.relations == 0 and summary.kinds >= 1 and summary.relation_night == outcome.series.cutoff
-    stored = built.opportunities.read("session", outcome.series.cutoff)
-    assert stored.relation_night == outcome.series.cutoff and stored.slot_minutes == scene.relation_config.slot_minutes
+    assert summary["relations"] == 0 and summary["kinds"] >= 1 and summary["relation_night"] == cutoff.isoformat()
+    stored = built.opportunities.read("session", cutoff)
+    assert stored.relation_night == cutoff and stored.slot_minutes == scene.relation_config.slot_minutes
     assert stored.window_slots == scene.relation_config.transition_window_slots
     assert stored.calendar_version == built.read_side.calendar.version  # 记下这一晚用的放假数据版本（裁定 59 第 4 条）
     sleep = stored.kind(SLEEP)
     # 前三天的就寝只写在命中盘上、不在行为树上（夹具），日历只认行为树：只有今晚那条
     assert sleep is not None and len(sleep.days) == 1 and sleep.days[-1].day == TONIGHT and sleep.days[-1].count == 1
-    assert outcome.opportunities.signals == () and "机会表" in outcome.opportunities.summary()
+    assert opportunities["signals"] == [] and opportunities["failed"] == []
     # 单元历史重标先发一条观测（W13），再是机会表那条总账；两条都成功
     assert [event.operation for event in recorder.events] == ["unit_history", "opportunities"] and all(
         event.status.value == "success" for event in recorder.events
@@ -180,9 +181,9 @@ def test_the_settlement_runs_first_so_the_relabelled_history_sees_tonights_resul
         foresight=foresight,
         settlement=built.settlement,
     )
-    outcome = asyncio.run(run.run_once())
+    results = line(run)
     assert order == ["结算", "语义树", "重标历史"]
-    assert outcome.settled is not None and outcome.opportunities is not None
+    assert "settled" in results[SETTLE].report and "opportunities" in results[STRUCTURE].report
 
 
 def test_the_settlement_still_runs_when_the_rest_of_the_night_is_skipped(tmp_path, monkeypatch) -> None:
@@ -192,9 +193,9 @@ def test_the_settlement_still_runs_when_the_rest_of_the_night_is_skipped(tmp_pat
     calls: list[str] = []
     settle = built.settlement.run_once
     monkeypatch.setattr(built.settlement, "run_once", lambda: (calls.append("结算"), settle())[1])
-    for closed, vocabulary, why in (
-        (sealed_through(TONIGHT), lambda: (2, True), "词表迁移还没做完"),
-        (tuple, steady, "一天都还没封口"),
+    for closed, vocabulary, why, outcome in (
+        (sealed_through(TONIGHT), lambda: (2, True), "词表迁移还没做完", HELD),
+        (tuple, steady, "一天都还没封口", DONE),
     ):
         run = Nightly(
             behavior_tree=site.behavior_tree,
@@ -206,8 +207,10 @@ def test_the_settlement_still_runs_when_the_rest_of_the_night_is_skipped(tmp_pat
             foresight=foresight,
             settlement=built.settlement,
         )
-        outcome = asyncio.run(run.run_once())
-        assert outcome.skipped == why and outcome.scene is None and outcome.settled is not None
+        results = line(run)
+        structure = results[STRUCTURE]
+        assert structure.outcome == outcome and structure.report["skipped"] == why and "scene" not in structure.report
+        assert results[SETTLE].done and "settled" in results[SETTLE].report
     assert calls == ["结算", "结算"]
 
 
@@ -230,9 +233,10 @@ def test_a_failing_settlement_stops_the_night(tmp_path, monkeypatch) -> None:
         foresight=foresight,
         settlement=built.settlement,
     )
-    outcome = asyncio.run(run.run_once())
-    assert outcome.settled is None and outcome.scene is None and outcome.opportunities is None
-    assert outcome.stopped == "结算出错: RuntimeError" and not outcome.complete
+    results = line(run)
+    assert list(results) == [PREPARE, SETTLE]  # 不跑语义树与机会表
+    assert results[SETTLE].outcome == STOPPED and results[SETTLE].reason == "结算出错: RuntimeError"
+    assert "settled" not in results[SETTLE].report
 
 
 def test_a_failing_unit_history_is_reported_while_the_table_is_still_written(tmp_path) -> None:

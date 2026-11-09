@@ -1,178 +1,66 @@
-"""整晚那一趟的常驻节拍（裁定 59，清单 5.1；裁定 94 第 1、8、9 条）：前一天定稿完成就接着跑一次 ``Nightly``，一天一次，不挂固定时刻。
+"""夜线的 Job 执行器（裁定 59，清单 5.1；裁定 94 第 1、8、9 条）：前一天定稿完成，就给这一晚入队 5 个耐久 Job（前置处理、结算、
+词表、结构、日子预期，``runtime.nightly_jobs``），按先后执行；一天一晚，不挂固定时刻。
 
-夜里是一条线（前一天定稿 → 前置处理 → 结算 → 词表（每晚新增、定期拆改）→ 语义树 → 机会表 → 单元 → 当天的日子预期），前一步完成即接
-下一步。定稿由归约在它的轮次里定（链都落树、封口视界已过那天的本地结束），这里每隔一会儿看一眼 ``Nightly.ready``：昨天定稿了、
-今天这一晚还没跑过，就跑。
+每隔一会儿（``scene.nightly_poll_seconds``）看一眼：先拿全局租约（``SQLiteLockStore``，两个进程挂同一个 storage root 时同一晚
+同一段只跑一次），拿不到就是别人在跑、下一眼再看；拿到了就在独立线程里续租（续不上就取消这一段，账上留着"在跑"，租约过期后由
+下一次认领递增 generation 接管），然后：
 
-**只有整条线跑完、或这一晚停下了，才记这一晚跑过**（``NightOutcome.complete`` / ``stopped``），跑完了没有分开记（``LastRun``：
-结算据它认停掉的那天）。线上每成一段就落盘（``LastRun.step``）：某一段还没准备好（词表迁移中、锁被占——含前置处理里重试那一支的
-锁），下一眼带着记下的进度从那一段接着跑（``Nightly.run_once(resume=…)``；前置处理里的重试从它停下的地方接着跑，见
-``behavior.retry.stage``）。一段出错（bug）或模型整个调不通，这一晚停下、记成跑过——不每隔几分钟整段重跑，下一晚照常（裁定 94
-第 8 条）。服务夜里没跑的（关机、合盖、进程没起），起来时昨天已定稿就接着跑。进程被杀之后重试堆里剩下的项属于已推过的日子，
-起来时直接撤回丢掉（裁定 68 第 3 条，``clean_leftovers``）。从断点接着跑的那一趟不再做前置处理，那一晚前置处理的计数（"错误·看不到"
-几项）沿用之前那一趟的，健康面不丢（同一进程里；重启之后那一晚的计数只在观测里）。
+1. 上一晚过了那天还没跑完：没成的段记失败（"这一晚过去了，没跑完"），下一晚照常——旧的一晚不在新的日子上按新日子的时钟补算；
+2. 昨天定稿了：这一晚没有账就建账（5 段都排队），清掉留存之外的账、报告与 trace；
+3. 按先后跑没成的段：成了接着跑下一段；还没准备好 → 保持排队，下一眼从这一段接着跑；停下（模型调不通、出错）→ 按
+   ``next_attempt_at`` 有界退避，到点再试，次数用完记失败、后面的段不再跑。
 
-正确性全在 ``runtime.nightly.Nightly``：哪一晚、闸、先后顺序、哪一段算成都在那里。这里只管节奏、"循环别死"、记进度、留下可查的
-痕迹——停下、没跑完、前置处理里保持「错误·看不到」的都设 ``last_error``、记一笔观测，健康面据此报降级。
+每段一个 span（``nightly.<段>``，挂在 ``nightly.night`` 下，落本地 trace 文件）、一条指标事件（耗时、结局）、开始 / 结束 / 停下各一行
+INFO 日志；每次结算后重写这一晚的报告文件（``runtime.nightly_report``），结构那一段成了时算一次关系表的双向变化。
+
+进程起来后第一次拿到租约时，上一晚中途被杀剩下的重试项撤回（裁定 68 第 3 条，``clean_leftovers``）——除非前置处理那个 Job 正
+等着锁、账上留着重试那一支的状态（那时由它接着跑）。正确性全在 ``runtime.nightly.Nightly``（哪一晚、闸、哪一段算成）与 Job 账；
+这里只管节奏、租约、记账、留下可查的痕迹。
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
+import logging
+import os
 import threading
 import time
-from collections.abc import Callable, Iterable
-from dataclasses import replace
-from datetime import date, timedelta
-from pathlib import Path
-from typing import Protocol
+import uuid
+from collections import Counter
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
+from datetime import UTC, date, datetime
+from typing import cast
 
-from habitus.behavior.retry import RetryReport
 from habitus.foundation.observability import ObservationStatus, Observer
-from habitus.infrastructure.store.filesystem import atomic_replace_bytes, read_regular_bytes
-from habitus.runtime.nightly import PREPARE, NightOutcome
+from habitus.foundation.tracing import current_span, open_trace, set_attributes, span
+from habitus.infrastructure.store.contracts import LockStore, LockToken
+from habitus.runtime.nightly import PREPARE, STRUCTURE, Nightly, StepResult
+from habitus.runtime.nightly_book import NightBook, require
+from habitus.runtime.nightly_jobs import (
+    FAILED,
+    NightClaim,
+    NightClaimLostError,
+    NightJob,
+    NightJobs,
+    NightLedger,
+    claim,
+    claimed,
+    decode_checkpoint,
+    expired,
+    renewed,
+)
+from habitus.runtime.nightly_report import NightReports
+from habitus.runtime.nightly_settings import NightlySettings
+from habitus.runtime.nightly_summary import LOCAL_ONLY_KEYS, kept_errors, reason_code
+from habitus.runtime.nightly_trace import NIGHT_SPAN, STEP_SPAN_PREFIX, TraceFiles
 from habitus.runtime.resident import ResidentWorker
 
-_LAST_RUN_BYTES = 16_384
-#: "哪几晚跑完了"留多久（一年）：结算认停掉的那天只往回看到过期待决的预期还没裁的那一段，账本整天释放之后更早的不再有人问。
-KEPT_NIGHTS = 366
-#: 隔多久看一眼昨天定稿了没有（归约本身也是几分钟一轮）。按墙钟醒来重看：Mac 合盖时单调时钟不走（``mach_absolute_time``），
-#: 一口气睡长了会被推迟到开盖之后好几个小时（裁定 68 第 4 条）。
-POLL_SECONDS = 300.0
+logger = logging.getLogger("habitus.nightly")
 
 
-class NightRunner(Protocol):
-    """ "第 N 晚"整趟；``runtime.nightly.Nightly`` 就是这个形状。"""
-
-    def ready(self) -> date | None: ...
-
-    async def run_once(
-        self, *, resume: Iterable[str] = (), on_step: Callable[[str], None] | None = None
-    ) -> NightOutcome: ...
-
-
-class LastRun:
-    """这条线自己的记录，落在一个小文件里（``path`` 为 None 时只记在内存里，测试用）：
-
-    - 最近跑过（跑完或停下）的那一晚：重启之后据它判这一晚跑过没有（``read``）；
-    - 正在跑的那一晚已成的段：下一眼从哪里接着跑（``steps``）；
-    - 哪几晚整条线跑完了：从第一次跑完的那一晚（``since``）起，最近跑完的那一晚（``finished``）之前没跑完的几晚（``missed``，
-      停下了、没跑到、没开机都在里面）。"这一晚的线跑完了没有"只有这一个判断（``finished``，裁定 94 第 1、9 条：只有整条线跑完
-      这一晚才算跑过，日子预期那一段没跑完即算停）：结算据它认停掉的那天，白天那一拍据它决定今天建不建预期。
-
-    旧格式只有 ``night``（与 ``partial``）：照样读成"那一晚跑过"，跑完了没有不知道（``finished`` 答 None）。"""
-
-    def __init__(self, path: str | Path | None = None, *, root: str | Path | None = None) -> None:
-        self.path = None if path is None else Path(path)
-        self.root = None if root is None else Path(root)
-        self._value: date | None = None
-        self._progress: tuple[date, tuple[str, ...]] | None = None
-        self._since: date | None = None
-        self._finished: date | None = None
-        self._missed: frozenset[date] = frozenset()
-        self._loaded = path is None
-        self._lock = threading.Lock()
-
-    def read(self) -> date | None:
-        """最近跑完（或停下）的那一晚。"""
-
-        with self._lock:
-            self._load()
-            return self._value
-
-    def steps(self, night: date) -> frozenset[str]:
-        """这一晚已经成了的段（不是这一晚的进度就是空）。"""
-
-        with self._lock:
-            self._load()
-            return self._steps(night)
-
-    def finished(self, night: date) -> bool | None:
-        """这一晚的线整条跑完了没有：跑完为真；停下了、没跑到、没开机为假；记录够不着的那一晚（第一次跑完之前、或留存之外）
-        是 None——认不出，调用方各按各的保守口径（结算不认它停了，白天那一拍不当它跑完了）。"""
-
-        with self._lock:
-            self._load()
-            if self._since is None or self._finished is None or night < self._since:
-                return None
-            return not (night > self._finished or night in self._missed)
-
-    def step(self, night: date, step: str) -> None:
-        """这一晚又成了一段。"""
-
-        with self._lock:
-            self._load()
-            done = tuple(self._steps(night))
-            self._progress = (night, (*done, step) if step not in done else done)
-            self._save()
-
-    def write(self, night: date, *, finished: bool) -> None:
-        """这一晚跑完了（``finished``）或停下了：进度清掉；跑完的那一晚记进"哪几晚跑完了"。"""
-
-        with self._lock:
-            self._load()
-            self._value, self._progress = night, None
-            if finished:
-                self._finish(night)
-            self._save()
-
-    def _steps(self, night: date) -> frozenset[str]:
-        if self._progress is None or self._progress[0] != night:
-            return frozenset()
-        return frozenset(self._progress[1])
-
-    def _finish(self, night: date) -> None:
-        if self._finished is None or self._since is None:
-            self._since = self._finished = night
-        elif night > self._finished:
-            gap = (night - self._finished).days
-            self._missed |= {self._finished + timedelta(days=offset) for offset in range(1, gap)}
-            self._finished = night
-        else:
-            self._missed -= {night}  # 时钟回拨过、那一晚补跑完了
-        floor = self._finished - timedelta(days=KEPT_NIGHTS)
-        self._since = max(self._since, floor)
-        self._missed = frozenset(day for day in self._missed if day >= self._since)
-
-    def _load(self) -> None:
-        if self._loaded:
-            return
-        assert self.path is not None
-        try:
-            encoded = read_regular_bytes(
-                self.path, artifact_root=self.root or self.path.parent, max_bytes=_LAST_RUN_BYTES
-            )
-            raw = json.loads(encoded.decode("utf-8"))
-            self._value = _day(raw.get("night"))
-            partial = raw.get("partial")
-            if partial is not None:
-                self._progress = (date.fromisoformat(str(partial["night"])), tuple(str(s) for s in partial["steps"]))
-            self._since, self._finished = _day(raw.get("since")), _day(raw.get("finished"))
-            self._missed = frozenset(date.fromisoformat(str(day)) for day in raw.get("missed", ()))
-        except FileNotFoundError:
-            # 还没有记录就是一晚都没跑过：保持初始状态
-            pass
-        except (ValueError, KeyError, TypeError, AttributeError, UnicodeDecodeError, json.JSONDecodeError):
-            # 读不出就当没跑过：再跑一趟，每一段都幂等，代价只是多跑一次；哪几晚跑完了也不知道，结算不认停掉的那天
-            self._value = self._progress = self._since = self._finished = None
-            self._missed = frozenset()
-        self._loaded = True
-
-    def _save(self) -> None:
-        if self.path is None:
-            return
-        raw: dict[str, object] = {"night": None if self._value is None else self._value.isoformat()}
-        if self._progress is not None:
-            raw["partial"] = {"night": self._progress[0].isoformat(), "steps": list(self._progress[1])}
-        if self._since is not None and self._finished is not None:
-            raw["since"], raw["finished"] = self._since.isoformat(), self._finished.isoformat()
-            raw["missed"] = sorted(day.isoformat() for day in self._missed)
-        atomic_replace_bytes(self.path, json.dumps(raw).encode("utf-8"), artifact_root=self.root or self.path.parent)
-
-
-def _day(value: object) -> date | None:
-    return None if value is None else date.fromisoformat(str(value))
+class NightlyLeaseLostError(RuntimeError):
+    """续不上全局租约：这一段已取消，账上留着"在跑"，租约过期后由下一次认领接管。"""
 
 
 class NightlyWorker(ResidentWorker):
@@ -181,149 +69,291 @@ class NightlyWorker(ResidentWorker):
 
     def __init__(
         self,
-        nightly: NightRunner,
+        nightly: Nightly,
         *,
+        jobs: NightJobs,
+        lock_store: LockStore,
+        lease_key: str,
         shutdown_timeout_seconds: float,
-        last_run: LastRun | None = None,
+        settings: NightlySettings | None = None,
+        reports: NightReports | None = None,
+        traces: TraceFiles | None = None,
         observer: Observer | None = None,
+        clock: Callable[[], datetime] | None = None,
+        worker_id: str | None = None,
     ) -> None:
         super().__init__(shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer)
+        if not lease_key:
+            raise ValueError("lease_key must be non-empty text")
         self.nightly = nightly
-        self.last_run = last_run if last_run is not None else LastRun()
-        #: 最近一趟的结果（还没跑过、或最近一趟抛了是上一次成功的那份 / None）与它是哪一晚的（``_night`` 收到的那一晚）。
-        self.last_outcome: NightOutcome | None = None
-        self._last_night: date | None = None
+        self.jobs = jobs
+        self.lock_store = lock_store
+        self.lease_key = lease_key
+        self.settings = settings or NightlySettings()
+        self.reports = reports
+        self.traces = traces
+        self.worker_id = worker_id or f"nightly-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self.book = NightBook(
+            jobs, settings=self.settings, reports=reports, traces=traces, observer=self.observer, clock=self._clock
+        )
+        #: 进程起来后清过上一晚剩下的重试项没有（第一次拿到租约时清一次）。
+        self._cleaned = False
+        self._active: NightClaim | None = None
 
-    async def run_once(self) -> NightOutcome:
-        """手动从头跑一趟（运维与测试用），不读写进度；不许和常驻循环抢。"""
+    def finished(self, night: date) -> bool | None:
+        """这一晚的线整条跑完了没有（结算认停掉的那天、白天那一拍建不建预期都读它，``NightJobs.finished``）。"""
 
-        if self.running:
-            raise RuntimeError("manual run_once cannot race the resident worker loop")
-        outcome = await self.nightly.run_once()
-        self.last_outcome = outcome
-        return outcome
-
-    def due(self) -> date | None:
-        """现在该跑的那一晚：昨天定稿了、这一晚还没跑完（记下的那一晚不是它——时钟回拨过也再跑一趟）；否则 None。"""
-
-        night = self.nightly.ready()
-        return night if night is not None and self.last_run.read() != night else None
+        return self.jobs.finished(night)
 
     async def _run_loop(self) -> None:
-        clean = getattr(self.nightly, "clean_leftovers", None)
-        if callable(clean):
-            try:
-                await asyncio.to_thread(clean)  # 上一晚中途被杀剩下的重试项：现在就撤回，不等下一晚
-            except Exception as exc:  # noqa: BLE001 - 常驻循环必须活过基础设施抖动
-                self.last_error = exc
         while not self._stop_requested.is_set():
             try:
-                night = await asyncio.to_thread(self.due)
-            except Exception as exc:  # noqa: BLE001 - 读不了定稿日照样活着，下一眼再看
+                await self.look()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 常驻循环必须活过基础设施抖动；账上的状态下一眼接着用
                 self.last_error = exc
-                night = None
-            if night is not None:
-                await self._night(night)
-            await self._wait(POLL_SECONDS)
+                self._observe("look", ObservationStatus.FAILURE, {"error_type": type(exc).__name__})
+            await self._wait(self.settings.poll_seconds)
 
-    async def _night(self, night: date) -> None:
-        started = time.monotonic()
-        problems: list[str] = []
+    async def look(self) -> NightLedger | None:
+        """看一眼：拿得到租约就把这一晚能跑的段跑完（或跑到停下、没准备好），返回这一晚的账；拿不到租约是 None。"""
+
         try:
-            resume = self.last_run.steps(night)
-        except Exception:  # noqa: BLE001 - 读不出进度就从头跑：每一段都幂等
-            resume = frozenset()
+            token = await asyncio.to_thread(
+                self.lock_store.acquire, self.lease_key, int(self.settings.lease_ttl_seconds)
+            )
+        except TimeoutError:
+            return None
+        execution = asyncio.create_task(self._drain(token), name=f"habitus-nightly-drain:{self.worker_id}")
+        stop = threading.Event()
+        loop = asyncio.get_running_loop()
+        heartbeat = asyncio.create_task(asyncio.to_thread(self._heartbeat, token, execution, stop, loop))
         try:
-            outcome = await self.nightly.run_once(resume=resume, on_step=lambda step: self._step(night, step, problems))
-        except Exception as exc:  # noqa: BLE001 - 常驻循环必须活过基础设施抖动；不记跑过，下一眼从断点接着跑
-            self.last_error = exc
-            self._observe("night", ObservationStatus.FAILURE, {"error_type": type(exc).__name__}, started=started)
-            return
-        outcome = self._carry_prepared(night, resume, outcome)
-        if outcome.complete or outcome.stopped is not None:
-            problems.extend(self._mark(night, finished=outcome.complete))
-        self.last_outcome = outcome
-        self._last_night = night
-        self._succeeded()
-        # 停下、没跑完、或前置处理里有保持「错误·看不到」的：都列出来，健康面据此报降级
-        problems.extend(_problems(outcome))
-        if problems:
-            self.last_error = RuntimeError("; ".join(problems))
-        self._observe("night", ObservationStatus.SUCCESS, _attributes(outcome), started=started)
+            done, _pending = await asyncio.wait({execution, heartbeat}, return_when=asyncio.FIRST_COMPLETED)
+            if heartbeat in done:
+                execution.cancel()
+                await asyncio.gather(execution, return_exceptions=True)
+                raise NightlyLeaseLostError("nightly lease could not be renewed") from heartbeat.exception()
+            result = await execution
+            self._refresh_health(result)
+            return result
+        finally:
+            stop.set()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            if not execution.done():
+                execution.cancel()
+                await asyncio.gather(execution, return_exceptions=True)
+            try:
+                await asyncio.to_thread(self.lock_store.release, token)
+            except Exception:  # noqa: BLE001 - 租约放不掉照样活着：过期之后别人能拿
+                logger.warning("nightly lease release failed")
 
-    def _carry_prepared(self, night: date, resume: frozenset[str], outcome: NightOutcome) -> NightOutcome:
-        """从断点接着跑的这一趟没做前置处理：那一晚的前置处理结果沿用之前那一趟的（续跑不丢健康面上的"错误·看不到"）。"""
+    def _heartbeat(
+        self,
+        token: LockToken,
+        execution: asyncio.Task[NightLedger | None],
+        stop: threading.Event,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """在独立线程续租（同步文件、SQLite 操作卡住事件循环时也不丢租约），顺带续在跑那一段的认领。
 
-        previous = self.last_outcome
-        if PREPARE not in resume or self._last_night != night or previous is None:
-            return outcome
-        return replace(outcome, retried=previous.retried, calendar_failed=previous.calendar_failed)
+        一次续不上（SQLite busy 之类的一时失败）不取消：租约到期之前别人拿不走它，下一拍再续；只有下一拍之前租约就要到期、
+        还没续上，才取消这一段（原来一次 busy 就把几小时的结构段打回排队，验证轮"要人定"第 3 条）。"""
 
-    def _step(self, night: date, step: str, problems: list[str]) -> None:
-        try:
-            self.last_run.step(night, step)
-        except Exception as exc:  # noqa: BLE001 - 记不下来照样活着：最坏是下一眼从更前面接着跑
-            problems.append(f"nightly progress not written: {type(exc).__name__}")
+        ttl = int(self.settings.lease_ttl_seconds)
+        beat = self.settings.heartbeat_seconds
+        expires = time.monotonic() + ttl  # 刚拿到租约
+        while not stop.wait(timeout=beat):
+            attempted = time.monotonic()
+            try:
+                self.lock_store.renew(token, ttl)
+                expires = attempted + ttl
+                active = self._active
+                if active is not None:
+                    self._renew_claim(token, active)
+            except NightClaimLostError:
+                continue  # 这一段刚结算完：认领已经不在账上，下一拍没有要续的
+            except Exception:
+                if time.monotonic() + beat < expires:
+                    logger.warning("nightly lease renewal failed; retrying before it expires")
+                    continue
+                loop.call_soon_threadsafe(execution.cancel)
+                raise
 
-    def _mark(self, night: date, *, finished: bool) -> list[str]:
-        try:
-            self.last_run.write(night, finished=finished)
-        except Exception as exc:  # noqa: BLE001 - 记不下来照样活着：最坏是重启后多跑一趟
-            return [f"nightly last-run marker not written: {type(exc).__name__}"]
-        return []
-
-
-def _problems(outcome: NightOutcome) -> list[str]:
-    found: list[str] = []
-    if outcome.stopped is not None:
-        # 模型整个调不通、或某一段出错：这一晚停下、不拿旧数据顶（裁定 94 第 4、8 条）
-        found.append(f"nightly stopped: {outcome.stopped}")
-    elif not outcome.complete:
-        found.append(
-            f"nightly line not finished (done: {', '.join(outcome.done) or '-'}; skipped: {outcome.skipped or '-'})"
+    def _renew_claim(self, token: LockToken, active: NightClaim) -> None:
+        ttl = self.settings.lease_ttl_seconds
+        self.jobs.update(
+            active.night,
+            lambda ledger: renewed(require(ledger), active, now=self._clock(), ttl_seconds=ttl),
+            fence=self._fence(token),
         )
-    if outcome.calendar_failed is not None:
-        found.append(f"nightly calendar refresh failed: {outcome.calendar_failed}")
-    kept = kept_errors(outcome.retried)
-    if kept is not None:
-        found.append(f"nightly errors kept unseen: {kept}")
-    return found
+
+    def _fence(self, token: LockToken) -> Callable[[], AbstractContextManager[object]]:
+        return lambda: self.lock_store.fenced([token], int(self.settings.lease_ttl_seconds))
+
+    async def _drain(self, token: LockToken) -> NightLedger | None:
+        fence = self._fence(token)
+        now = self._clock()
+        latest = await asyncio.to_thread(self.jobs.latest)
+        if latest is not None and latest.night < self.nightly.tonight() and not latest.closed:
+            latest = await asyncio.to_thread(
+                self.jobs.update, latest.night, lambda ledger: expired(require(ledger), now=now), fence=fence
+            )
+            await asyncio.to_thread(self.book.write_report, latest, None)
+            logger.info("nightly night expired night=%s", latest.night.isoformat())
+        night = await asyncio.to_thread(self.nightly.ready)
+        if night is None:
+            await self._clean_once(latest if latest is not None and latest.night == self.nightly.tonight() else None)
+            return latest
+        ledger = await asyncio.to_thread(self.book.ledger_of, night, fence)
+        await self._clean_once(ledger)
+        job = ledger.next_job()
+        if job is None or job.state == FAILED or not job.runnable(self._clock()) or self._stop_requested.is_set():
+            return ledger  # 跑完了、失败了、停下的还没到点重试、或正在停机：这一眼没有要跑的
+        trace = open_trace(self.traces.sink(night)) if self.traces is not None else nullcontext()
+        with trace, span(NIGHT_SPAN, {"night": night.isoformat(), "worker_id": self.worker_id}) as attributes:
+            started = time.monotonic()
+            ledger = await self._run_steps(ledger, fence)
+            set_attributes(attributes, _night_attributes(ledger, time.monotonic() - started))
+        return ledger
+
+    async def _clean_once(self, ledger: NightLedger | None) -> None:
+        """进程起来后第一次拿到租约：上一晚中途被杀剩下的重试项撤回——前置处理正等着锁（账上留着重试那一支的状态）时不撤。"""
+
+        if self._cleaned:
+            return
+        self._cleaned = True
+        waiting = ledger is not None and ledger.job(PREPARE).retry_checkpoint is not None
+        if not waiting:
+            await asyncio.to_thread(self.nightly.clean_leftovers)
+
+    async def _run_steps(self, ledger: NightLedger, fence: Callable[[], AbstractContextManager[object]]) -> NightLedger:
+        while not self._stop_requested.is_set():
+            job = ledger.next_job()
+            if job is None or job.state == FAILED or not job.runnable(self._clock()):
+                break
+            ledger, result = await self._run_job(ledger, job, fence)
+            if result is None or not result.done:
+                break
+        return ledger
+
+    async def _run_job(
+        self, ledger: NightLedger, job: NightJob, fence: Callable[[], AbstractContextManager[object]]
+    ) -> tuple[NightLedger, StepResult | None]:
+        ttl = self.settings.lease_ttl_seconds
+        token = claim(ledger, job.step, worker_id=self.worker_id, now=self._clock())
+        ledger = await asyncio.to_thread(
+            self.jobs.update,
+            ledger.night,
+            lambda current: claimed(require(current), token, now=self._clock(), ttl_seconds=ttl),
+            fence=fence,
+        )
+        self._active = token
+        logger.info(
+            "nightly step started night=%s step=%s attempt=%d", ledger.night.isoformat(), job.step, token.attempt
+        )
+        started = time.monotonic()
+        try:
+            with span(f"{STEP_SPAN_PREFIX}{job.step}", _step_attributes(token)) as attributes:
+                result = await self._step(ledger, job.step)
+                record = current_span()
+                calls = Counter[str]()
+                if record is not None:
+                    for (touch, _provider, _model), count in record.model_calls.items():
+                        calls[touch] += count
+                result = StepResult(
+                    result.step,
+                    result.outcome,
+                    result.reason,
+                    {**result.report, "model_calls": dict(calls)},
+                    result.retry_checkpoint,
+                )
+                set_attributes(attributes, _result_attributes(result))
+        except BaseException:
+            # 被取消（停机超时、租约丢了）或执行器自己出错（不是段里的 bug，那由 ``run_step`` 记成停下）：放回排队，下一次接着跑
+            self._active = None
+            await asyncio.shield(asyncio.to_thread(self.book.release, ledger.night, token, fence))
+            raise
+        self._active = None
+        duration = time.monotonic() - started
+        ledger = await asyncio.to_thread(self.book.settle, ledger.night, token, result, duration, fence)
+        self.book.after_step(ledger, result, duration)
+        return ledger, result
+
+    async def _step(self, ledger: NightLedger, step: str) -> StepResult:
+        checkpoint_raw = ledger.job(PREPARE).retry_checkpoint
+        structure = ledger.job(STRUCTURE).report.get("skipped")
+        return await self.nightly.run_step(
+            step,
+            ledger.night,
+            structure_skipped=structure if isinstance(structure, str) else None,
+            retry_checkpoint=None if checkpoint_raw is None else decode_checkpoint(checkpoint_raw),
+        )
+
+    def _refresh_health(self, ledger: NightLedger | None) -> None:
+        """常驻循环的 ``last_error``：这一晚有段停下或失败就挂上（健康面另读 Job 账给出原因）。"""
+
+        if ledger is None:
+            return
+        problems = [
+            f"nightly {job.step} {job.state}: {job.reason}" for job in ledger.jobs if job.state in ("stopped", FAILED)
+        ]
+        prepared = ledger.job(PREPARE).report
+        if prepared.get("calendar_failed"):
+            problems.append(f"nightly calendar refresh failed: {prepared['calendar_failed']}")
+        kept = kept_errors(prepared.get("retry"))
+        if kept is not None:
+            problems.append(f"nightly errors kept unseen: {kept}")
+        self.last_error = RuntimeError("; ".join(problems)) if problems else None
 
 
-def kept_errors(retried: RetryReport | None) -> str | None:
-    """前置处理之后仍保持「错误·看不到」、要人看的（裁定 94 第 4 条）：我们自己处理不了的是 bug，内容安全拦下的单独列，格式不合
-    夜里再试仍不合的也列出来；都没有是 None。锁被占不在这里：那是还没准备好，线停在前置处理、下一眼接着跑。"""
-
-    if retried is None or not (retried.deterministic or retried.refused or retried.invalid):
-        return None
-    return f"处理不了 {retried.deterministic}，内容安全 {retried.refused}，格式不合 {retried.invalid}"
-
-
-def _attributes(outcome: NightOutcome) -> dict[str, str | int | float | bool]:
-    """这一趟的读数：哪一晚、停在哪、为什么停、序列几条、语义树 / 机会表 / 结算跑没跑；开头的重试各类几项（裁定 67 第 12 条）。"""
-
-    retried = outcome.retried
+def _step_attributes(token: NightClaim) -> dict[str, str | int | float | bool]:
     return {
-        "night": outcome.night.isoformat(),
-        "skipped": outcome.skipped or "",
-        "complete": outcome.complete,
-        "stopped": outcome.stopped or "",
-        "records": len(outcome.series.records),
-        "scene": outcome.scene is not None,
-        "opportunities": outcome.opportunities is not None,
-        "settled": outcome.settled is not None,
-        "calendar_failed": outcome.calendar_failed or "",
-        "days_recorded": outcome.days.formed.recorded if outcome.days is not None else 0,
-        "days_skipped": (outcome.days.skipped or "") if outcome.days is not None else "",
-        "retry_taken": retried.taken if retried is not None else 0,
-        "retry_recovered": retried.recovered if retried is not None else 0,
-        "retry_unavailable": retried.unavailable if retried is not None else 0,
-        "retry_invalid": retried.invalid if retried is not None else 0,
-        "retry_deterministic": retried.deterministic if retried is not None else 0,
-        "retry_leftover": retried.leftover if retried is not None else 0,
-        "retry_refused": retried.refused if retried is not None else 0,
-        "retry_waiting": ",".join(retried.waiting) if retried is not None else "",
+        "night": token.night.isoformat(),
+        "step": token.step,
+        "attempt": token.attempt,
+        "claim_generation": token.claim_generation,
+        "worker_id": token.worker_id,
     }
 
 
-__all__ = ["KEPT_NIGHTS", "POLL_SECONDS", "LastRun", "NightRunner", "NightlyWorker", "kept_errors"]
+def _result_attributes(result: StepResult) -> dict[str, object]:
+    return {"outcome": result.outcome, "reason": reason_code(result.reason), **flatten(result.report)}
+
+
+def _night_attributes(ledger: NightLedger, duration: float) -> dict[str, object]:
+    return {
+        "duration_seconds": duration,
+        "complete": ledger.complete,
+        **{f"outcome.{job.step}": job.state for job in ledger.jobs},
+        "stopped_reason": reason_code(
+            next((job.reason for job in ledger.jobs if job.state in ("stopped", FAILED)), None)
+        ),
+    }
+
+
+def flatten(value: object, prefix: str = "") -> dict[str, object]:
+    """报告摊成 span 属性：嵌套键用点连，列表记条数（短的字符串列表另记一份逗号连起来的），None 不记；``LOCAL_ONLY_KEYS``
+    里的键（信号文字）整段跳过。"""
+
+    found: dict[str, object] = {}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in LOCAL_ONLY_KEYS:
+                continue  # 带用户派生文字（概念名、关系两端、迁移原因）：只进本地每晚报告，不进 span（codex R3）
+            found.update(flatten(item, f"{prefix}.{key}" if prefix else str(key)))
+    elif isinstance(value, list | tuple):
+        found[f"{prefix}.count"] = len(value)
+        if value and all(isinstance(item, str) for item in value):
+            found[prefix] = ",".join(cast(list[str], list(value)))[:1_000]
+        elif value and all(isinstance(item, dict) for item in value):
+            for index, item in enumerate(value):
+                found.update(flatten(item, f"{prefix}.{index}"))
+    elif value is not None:
+        found[prefix] = value
+    return found
+
+
+__all__ = ["NightlyLeaseLostError", "NightlySettings", "NightlyWorker", "flatten"]

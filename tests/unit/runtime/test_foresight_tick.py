@@ -170,24 +170,54 @@ def test_the_day_expectations_wait_for_tonights_table(tmp_path) -> None:
 
 def test_a_day_whose_line_stopped_after_writing_the_table_builds_nothing_in_the_daytime(tmp_path) -> None:
     """裁定 94 第 1 条（只有整条线跑完，这一晚才算跑过）：今天这一晚的表已经写出、线却在那之后停了（单元历史写失败、日子预期
-    那一段出错）——白天那一拍也不建事件、情境预期，只报原因；与结算"停掉那天按看不到"读同一个判断（``LastRun.finished``）。
-    线跑完了照常建；线的记录够不着（None）也不当它跑完了。撤回 ``tonight_table`` 的 ``line_finished`` 这里就红。"""
+    那一段出错）——白天那一拍也不建事件、情境预期，只报原因；与结算"停掉那天按看不到"读同一个判断（夜线 Job 账的
+    ``NightJobs.finished``）。线跑完了照常建；线的记录够不着（None）也不当它跑完了。撤回 ``tonight_table`` 的 ``line_finished``
+    这里就红。"""
 
-    from habitus.runtime.nightly_worker import LastRun
+    from habitus.runtime.nightly import STEPS
+    from habitus.runtime.nightly_jobs import FAILED, SUCCEEDED, NightJob, NightJobs, NightLedger
+
+    def mark(night, *, finished: bool) -> None:  # type: ignore[no-untyped-def]
+        states = [SUCCEEDED] * 5 if finished else [SUCCEEDED] * 4 + [FAILED]
+        jobs.write(
+            NightLedger(
+                night, at(night, 1, 15), tuple(NightJob(s, state=x) for s, x in zip(STEPS, states, strict=True))
+            )
+        )
 
     site, _codes = site_with_three_mornings(tmp_path)
     ledger, opportunities = stores(tmp_path, site)  # 表是 TODAY 那一晚的
     publish(site.behavior_tree, TODAY, "讨论方案", 10, 0)
-    last = LastRun()
+    jobs = NightJobs(tmp_path / "nightly" / "jobs", artifact_root=tmp_path, kept_nights=366)
     run = tick(tmp_path, site, ledger, opportunities, at(TODAY, 10, 15))
-    run.line_finished = last.finished
+    run.line_finished = jobs.finished
     assert asyncio.run(run.run_once()).skipped == "今天这一晚的线还没跑完"  # 记录够不着
-    last.write(TODAY - timedelta(days=1), finished=True)
-    last.write(TODAY, finished=False)  # 表写出后停下
+    mark(TODAY - timedelta(days=1), finished=True)
+    mark(TODAY, finished=False)  # 表写出后停下
     report = asyncio.run(run.run_once())
     assert report.skipped == "今天这一晚的线还没跑完" and report.recorded == 0 and ledger.expectations_on(TODAY) == ()
-    last.write(TODAY, finished=True)
+    mark(TODAY, finished=True)
     assert asyncio.run(run.run_once()).recorded == 1
+
+
+def test_each_tick_is_a_span_with_the_gate_and_what_it_formed(tmp_path) -> None:
+    """trace 细度（共享说明末节）：白天那一拍一个 ``foresight.tick`` span，带时刻、lane、"今晚的表"闸放没放行及原因、建了几条、
+    递了几条；落夜线同一份本地 trace（按当地日子一天一份）。"""
+
+    from habitus.runtime.nightly_trace import TraceFiles
+
+    site, _codes = site_with_three_mornings(tmp_path)
+    ledger, opportunities = stores(tmp_path, site)
+    traces = TraceFiles(tmp_path / "traces", artifact_root=tmp_path)
+    run = tick(tmp_path, site, ledger, opportunities, at(TODAY, 10, 15))
+    run.trace = traces.sink
+    run.line_finished = lambda _night: None
+    asyncio.run(run.run_once())
+    (span,) = traces.read(TODAY)
+    attributes = span["attributes"]
+    assert span["name"] == "foresight.tick" and span["parent_id"] is None
+    assert attributes["lane"] == "session" and attributes["gate_open"] is False
+    assert attributes["skipped"] == "今天这一晚的线还没跑完" and attributes["recorded"] == 0 and "spoken" in attributes
 
 
 def test_without_a_table_the_tick_only_reports_why(tmp_path) -> None:

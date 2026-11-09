@@ -58,6 +58,17 @@ class SceneConfig:
     baseline_slack_slots: int = 3
     # 整晚那一趟停机时等它多久（运维数）。那一趟什么时候跑不是配置：前一天定稿完成就接着跑（裁定 94 第 1 条）。
     nightly_shutdown_timeout_seconds: float = 30.0
+    # 夜线 Job 执行器隔多久看一眼（昨天定稿了没有、有没有到点重试的段）。按墙钟醒来重看：Mac 合盖时单调时钟不走（裁定 68 第 4 条）。
+    nightly_poll_seconds: float = 300.0
+    # Job 账、每晚报告、trace 文件留几晚（一年）：结算认停掉的那天只往回看到过期待决的预期还没裁的那一段。
+    nightly_kept_nights: int = 366
+    # 执行器的全局租约多久过期、多久续一次（两个进程挂同一个 storage root 时同一晚同一段只跑一次）。
+    nightly_lease_ttl_seconds: float = 120.0
+    nightly_heartbeat_seconds: float = 30.0
+    # 一段停下（模型调不通、出错）之后最多试几次（含第一次），之间按指数退避，用完记失败。
+    nightly_max_attempts: int = 3
+    nightly_retry_base_seconds: float = 900.0
+    nightly_retry_max_seconds: float = 3_600.0
 
     def __post_init__(self) -> None:
         if not 0 <= self.baseline_slack_slots <= 96:
@@ -65,6 +76,21 @@ class SceneConfig:
         timeout = self.nightly_shutdown_timeout_seconds
         if not 1.0 <= float(timeout) <= 3_600.0:
             raise ValueError("scene.nightly_shutdown_timeout_seconds must be between 1 and 3600")
+        if not 1.0 <= float(self.nightly_poll_seconds) <= 86_400.0:
+            raise ValueError("scene.nightly_poll_seconds must be between 1 and 86400")
+        if not 1 <= self.nightly_kept_nights <= 3_660:
+            raise ValueError("scene.nightly_kept_nights must be an integer between 1 and 3660")
+        if not 5.0 <= float(self.nightly_lease_ttl_seconds) <= 3_600.0:
+            raise ValueError("scene.nightly_lease_ttl_seconds must be between 5 and 3600")
+        if not 1.0 <= float(self.nightly_heartbeat_seconds) < float(self.nightly_lease_ttl_seconds):
+            raise ValueError("scene.nightly_heartbeat_seconds must be at least 1 and below the lease ttl")
+        if not 1 <= self.nightly_max_attempts <= 20:
+            raise ValueError("scene.nightly_max_attempts must be an integer between 1 and 20")
+        base, cap = float(self.nightly_retry_base_seconds), float(self.nightly_retry_max_seconds)
+        if not 1.0 <= base <= cap <= 86_400.0:
+            raise ValueError(
+                "scene.nightly_retry_base_seconds must be at least 1 and at most nightly_retry_max_seconds (≤ 86400)"
+            )
 
     @classmethod
     def from_mapping(cls, value: Any) -> SceneConfig:

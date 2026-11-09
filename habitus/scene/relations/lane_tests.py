@@ -63,6 +63,8 @@ class LaneTests:
         #: 量哪些（枚举与冻住的行的寿命）与怎么量（读数、检验族、子集上的读数）。
         self.candidates = RelationCandidates(self)
         self.evaluator = RelationEvaluator(self, self.candidates)
+        #: 最近一次 ``night`` 的结果（还没算过是 None）：夜线的观测从这里读各族的分解，不再算第二遍。
+        self.last_night: LaneNight | None = None
 
     # ── 量哪些（``candidates``） ──────────────────────────────────────────────
 
@@ -86,9 +88,11 @@ class LaneTests:
         outside: frozenset[RelationKey] = frozenset(),
         keep: frozenset[RelationKey] = frozenset(),
     ) -> LaneNight:
-        """当晚的检验族（``RelationEvaluator.night``）。"""
+        """当晚的检验族（``RelationEvaluator.night``）。最近一次的结果留在 ``last_night``（只给观测读各族的分解）。"""
 
-        return self.evaluator.night(weights, since=since, outside=outside, keep=keep)
+        result = self.evaluator.night(weights, since=since, outside=outside, keep=keep)
+        self.last_night = result
+        return result
 
     def evaluate(
         self, key: RelationKey, *, upward: bool, since: date | None = None, last_blocks: int | None = None, purpose: str

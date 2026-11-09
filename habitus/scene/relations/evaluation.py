@@ -75,7 +75,7 @@ class RelationEvaluator:
         # 带条件的权重恒为 1 时（先验只给不带条件的），带条件那一族的归一系数就是 1，跳过的键既不改归一、也进不了族
         weighted = any(key.condition for key in weights)
         try:
-            family, passed, limits = _families(
+            family, passed, limits, parts = _families(
                 readings, inside, weights, q=q, outside=outside, skipped=skipped if weighted else ()
             )
         except _SkippedMayEnter:
@@ -84,7 +84,7 @@ class RelationEvaluator:
             blinded |= more_blinded
             skipped = ()
             inside = [key for key in readings if key not in outside and key not in blinded]
-            family, passed, limits = _families(readings, inside, weights, q=q, outside=outside)
+            family, passed, limits, parts = _families(readings, inside, weights, q=q, outside=outside)
         texts = {key.text: key for key in readings}
         plain = passed if not weights else _families(readings, inside, {}, q=q, outside=outside)[1]
         ordered = [texts[text] for text in sorted(texts)]
@@ -94,14 +94,14 @@ class RelationEvaluator:
             )
             for key in ordered
         ]
-        segments = Counter(key.segment.value for key in skipped)
         return LaneNight(
             lane=self.tests.line.lane,
             cutoff=self.tests.cutoff,
             tests=tuple(tests),
             family=len(family),
-            skipped=dict(segments),
+            skipped=dict(Counter(key.segment.value for key in skipped)),
             plain_significant=frozenset(texts[text] for text in plain),
+            breakdown={**parts, "measured": len(readings), "outside": len(outside), "blinded": len(blinded)},
         )
 
     def _test(
@@ -310,6 +310,13 @@ class _SkippedMayEnter(Exception):
     """没逐条量的带条件键在带条件那一族归一之后可能进族：要逐条量回来再判。"""
 
 
+#: 只给观测的分解里固定有的键：没有就写 0，看 trace 的人分得清"是 0"还是"没记"。
+_BREAKDOWN_KEYS = (
+    *(f"{family}_{part}" for family in ("plain", "long", "conditioned", "groups") for part in ("family", "passed")),
+    *(f"entry_{path}" for path in ("parent", "carried", "group")),
+)
+
+
 def _families(
     readings: Mapping[RelationKey, _Reading],
     inside: list[RelationKey],
@@ -318,7 +325,7 @@ def _families(
     q: float,
     outside: frozenset[RelationKey],
     skipped: Sequence[RelationKey] = (),
-) -> tuple[set[str], set[str], dict[str, int]]:
+) -> tuple[set[str], set[str], dict[str, int], dict[str, int]]:
     """第 1 道分三族，同一个 q 各控各的（裁定 95 第 1 条）：不带条件的短跨度、长跨度（裁定 27 第 4 条：两类问题，混在一族里
     几十条长跨度要和几百条短跨度分摊误发现率）、带条件的短跨度。带条件的不和不带条件的同族：几十万条带条件的会把族撑大、门槛压低，
     不带条件的一条都进不了族（v0.12 跑数 13 晚 0 条）。
@@ -327,13 +334,13 @@ def _families(
     那一族过了第 1 道、或跨夜带着为候选 / 成立（``outside``）；或它所在的（前因, 后果, 段）这一组过了组间检验（``_pairs_passed``，
     只在条件下成立、整体看不出的关系走这条）。其余这一晚不进任何族。``skipped``：没逐条量的带条件键（开测门第 1 道
     整组到不了，读数必是"到不了"），放得进来的那些按各自权重计入带条件那一族的归一；归一之后可能进族时抛 ``_SkippedMayEnter``。
-    返回（族, 过了第 1 道的, 各自族的大小）。"""
+    返回（族, 过了第 1 道的, 各自族的大小, 只给观测的分解：各族大小与过第 1 道数、各条进族路的条数）。"""
 
     family: set[str] = set()
     passed: set[str] = set()
-    limits: dict[str, int] = {}
+    limits, breakdown = dict[str, int](), dict.fromkeys(_BREAKDOWN_KEYS, 0)
 
-    def test(members: list[RelationKey], untestable: Sequence[float] = ()) -> frozenset[str]:
+    def test(name: str, members: list[RelationKey], untestable: Sequence[float] = ()) -> frozenset[str]:
         group, group_passed = stats.tarone_bh(
             {key.text: readings[key][1] for key in members},
             {key.text: readings[key][2] for key in members},
@@ -344,16 +351,20 @@ def _families(
         family.update(group)
         passed.update(group_passed)
         limits.update({key.text: max(1, len(group)) for key in members})
+        breakdown[f"{name}_family"], breakdown[f"{name}_passed"] = len(group), len(group_passed)
         return group_passed
 
-    parents_passed = test([key for key in inside if not key.segment.long and not key.condition])
-    test([key for key in inside if key.segment.long])
+    parents_passed = test("plain", [key for key in inside if not key.segment.long and not key.condition])
+    test("long", [key for key in inside if key.segment.long])
 
     def by_parent(key: RelationKey) -> bool:
         return any(parent.text in parents_passed or parent in outside for parent in key.parents())
 
     pairs_passed = _pairs_passed(
-        [key for key in inside if not key.segment.long and key.condition and not by_parent(key)], readings, q=q
+        [key for key in inside if not key.segment.long and key.condition and not by_parent(key)],
+        readings,
+        breakdown,
+        q=q,
     )
 
     def admitted(key: RelationKey) -> bool:
@@ -363,15 +374,32 @@ def _families(
     untestable = [weights.get(key, 1.0) for key in skipped if admitted(key)]
     if untestable and stats.untestable_may_enter([weights.get(key, 1.0) for key in moderated], untestable, q=q):
         raise _SkippedMayEnter
-    test(moderated, untestable)
-    return family, passed, limits
+    test("conditioned", moderated, untestable)
+    breakdown.update(Counter(f"entry_{_entry_path(key, parents_passed, outside)}" for key in moderated))
+    return family, passed, limits, breakdown
+
+
+def _entry_path(key: RelationKey, parents_passed: frozenset[str], outside: frozenset[RelationKey]) -> str:
+    """带条件的键从哪条路进的族（只给观测）：父关系当晚过了第 1 道、父关系跨夜带着（候选 / 成立），否则是按组。"""
+
+    if any(parent.text in parents_passed for parent in key.parents()):
+        return "parent"
+    if any(parent in outside for parent in key.parents()):
+        return "carried"
+    return "group"
 
 
 def _pair_of(key: RelationKey) -> str:
     return f"{key.antecedent}|{key.consequent}|{key.segment.value}"
 
 
-def _pairs_passed(keys: Sequence[RelationKey], readings: Mapping[RelationKey, _Reading], *, q: float) -> frozenset[str]:
+def _pairs_passed(
+    keys: Sequence[RelationKey],
+    readings: Mapping[RelationKey, _Reading],
+    breakdown: dict[str, int],
+    *,
+    q: float,
+) -> frozenset[str]:
     """父关系没放行的带条件键的第二条进族路（裁定 95 第 2 条）：按（前因, 后果, 段）分组，组的 p 是组内键的 Simes 合并、
     组的最小可达 p 是同一公式代入各键的最小可达 p（组 p 的下界，供 Tarone 修剪）；组与组之间做一次 Tarone + BH（同一个 q）。
     开测门到不了的键（最小可达 p = 1）不进组：它们不可能显著，算进来只会抬高门槛。只在条件下成立、整体看不出的关系从这里进族；
@@ -385,7 +413,9 @@ def _pairs_passed(keys: Sequence[RelationKey], readings: Mapping[RelationKey, _R
         return frozenset()
     p_values = {name: stats.simes([readings[key][1] for key in members]) for name, members in groups.items()}
     minimum = {name: stats.simes([readings[key][2] for key in members]) for name, members in groups.items()}
-    return stats.tarone_bh(p_values, minimum, {}, q=q)[1]
+    family, passed = stats.tarone_bh(p_values, minimum, {}, q=q)
+    breakdown["groups_family"], breakdown["groups_passed"] = len(family), len(passed)
+    return passed
 
 
 def _more_needed(measure: Measure, threshold: float) -> int | None:
