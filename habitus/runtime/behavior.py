@@ -6,7 +6,7 @@
     会话那一支：会话源的交付 → ``runtime/session_lane.py`` 的桥 → 一轮一条判断（LLM 描述）
     物理那一支：上游的一份交付（Runtime 正门）→ 一段一条判断（不调模型）
     每一支各自：判断 / 回执存储 → 归约 sweep（封口 → 词表归类 → 行为树 + L0/L1 → 定稿日记账）
-    → 整晚那一趟（会话那一支；见 runtime/nightly.py）
+    → 换代（会话那一支；见 runtime/generation.py）
 
 两支不共用任何存储、词表、归约或 Worker：一支上的记录、空白、词表的类，另一支看不到（裁定 35）。
 
@@ -107,7 +107,7 @@ class BehaviorRuntimeComponents:
     reduction_runner: BehaviorReductionRunner
     fusion: SessionLane | PhysicalLane
     reduction_worker: BehaviorReductionWorker
-    #: 这一支每晚重试的堆（裁定 67）：会话 lane 放写成「没读懂」的轮，归约放失败的链。没开语义树就没有夜批、没人来试，
+    #: 这一支重试的堆（裁定 67）：会话 lane 放写成「没读懂」的轮，归约放失败的链。没开语义树就没有换代、没人来试，
     #: 不建堆（读不懂的只落「没读懂」）。
     retry_backlog: RetryBacklogStore | None = None
 
@@ -395,7 +395,7 @@ def _build_branch(
         tree, lock_store, kind_store, structured_chat, config.locale.zone(), lane, write_config=domain.write
     )
     reduction_ledger = BehaviorReductionLedger(root / "reduction")
-    # 每晚重试的堆只在有夜批时建（夜批随语义树开）：没人来试的堆只会一直满着
+    # 重试的堆只在有换代时建（换代随语义树开）：没人来试的堆只会一直满着
     backlog = RetryBacklogStore(root, max_items=behavior_config.retry_backlog_max) if config.scene.enabled else None
     reduction_runner = BehaviorReductionRunner(
         judgements=judgements,
@@ -419,7 +419,7 @@ def _build_branch(
                 deterministic=MODEL_DETERMINISTIC,
             )
         ),
-        # 脏日日志只有语义树夜批读（只接会话一支）：别的支不记
+        # 脏日日志只有换代读序列时读（只接会话一支）：别的支不记
         dirty_days=DirtyDayLog(root / "reduction") if lane is Lane.SESSION and config.scene.enabled else None,
         failed_chains=FailedChains(judgements, ledger=reduction_ledger, clock=clock or _utc_now, backlog=backlog),
         clock=clock,
@@ -489,7 +489,7 @@ def _build_branch(
 
 
 def retry_stage_of(branches: Iterable[BehaviorRuntimeComponents]) -> RetryStage | None:
-    """每晚跑批第一步的重试（裁定 67、68）：各支有重试堆的接进来——会话一支的会话轮交给会话 lane，两支的链交给各自的
+    """换代里重试收尾那一步（裁定 67、68）：各支有重试堆的接进来——会话一支的会话轮交给会话 lane，两支的链交给各自的
     归约；一支都没有就是 None。"""
 
     found: list[RetryBranch] = []
@@ -511,13 +511,13 @@ def rereader_of(branch: BehaviorRuntimeComponents) -> Callable[[datetime, dateti
     return Rereader(branch.retry_backlog, TurnHandler(branch.fusion)).reread
 
 
-#: 重试段的归约碰到它就是模型整个用不了（与夜里那条线同一口径，``runtime.nightly``）。
+#: 重试段的归约碰到它就是模型整个用不了（与换代同一口径，``runtime.generation``）。
 _UNREACHABLE: tuple[type[BaseException], ...] = (ModelUnreachable, *MODEL_UNUSABLE)
 
 
 def _reduce(branch: BehaviorRuntimeComponents) -> Callable[[], Awaitable[Reduction]]:
-    """重试段里这一支的那一次归约（裁定 94 第 9 条）：锁被另一进程拿着 = 还没准备好（``BUSY``，线下一眼从这里接着跑）；
-    归类时模型整个用不了 = ``UNREACHABLE``（线停下这一晚）；别的异常是 bug，原样抛给线停下、报出。"""
+    """重试段里这一支的那一次归约（裁定 94 第 9 条）：锁被另一进程拿着 = 还没准备好（``BUSY``，这一代跳过结算）；
+    归类时模型整个用不了 = ``UNREACHABLE``（同样跳过结算）；别的异常是 bug，原样抛给换代报出、跳过结算。"""
 
     async def reduce() -> Reduction:
         try:

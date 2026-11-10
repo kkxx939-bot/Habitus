@@ -18,6 +18,8 @@ _INT_BOUNDS = (
     ("open_reminders_judged", 1, 50),
     ("outlet_max_attempts", 1, 20),
     ("outlet_claim_limit", 1, 20),
+    ("unwatched_tolerance_slots", 1, 96),
+    ("generation_margin_slots", 0, 96),
 )
 _FLOAT_BOUNDS = (
     ("false_alarm_rate", 0.01, 0.99),
@@ -101,9 +103,16 @@ class ForesightConfig:
     # 模型对传输层瞬态错的有界重试。
     judge_transient_retries: int = 1
     judge_transient_retry_delay_seconds: float = 5.0
-    # 常驻 worker：白天多久一拍（一拍 = 建预期、到时窗的决定说不说；默认一个槽），与停机时限。
+    # 常驻 worker：多久一拍（一拍 = 建预期、到时窗的决定说不说），与停机时限。一拍就是一个槽：拍点对齐槽边界，
+    # 必须等于 ``temporal.slot_minutes`` × 60（配置根交叉校验，实时化方案第 5 节）。
     tick_interval_seconds: float = 900.0
     worker_shutdown_timeout_seconds: float = 30.0
+    # ── 没在看的时段（实时化方案第 6 节）──
+    # 两拍之间隔了超过这么多槽，那一段就记成会话一支的「未观测」空白（关机、合盖、进程没跑）。
+    unwatched_tolerance_slots: int = 2
+    # 换代要等预测拍水位过了 max(昨天日终, 最后一段「未观测」的结尾) 再这么多槽：给归约留时间把空白落树，
+    # 结算与读序列才看得到它（用户 11-10「按槽留余量」）。
+    generation_margin_slots: int = 3
     # ── 账本遗忘的半衰期（几次机会，裁定 57）──
     # 一笔证据的分量只看它之后这本账又来了几次机会（边数这本账的全部机会，单元的提醒反馈数这个行为单元历史里的每一次机会，裁定 91 第 3 条①），不看隔了几天：
     # 一个月一次的事不再被压到只剩两三次有效样本。行为单元按每一层自己的刻数、temporal 的时段读数按最近 M 次用同一个 H，

@@ -212,15 +212,26 @@ def test_a_new_vocabulary_version_reclassifies_the_open_chains(tmp_path) -> None
     assert provider.calls == 2
 
 
-def test_on_the_nightly_line_an_unusable_model_stops_the_night_instead_of_being_swallowed(tmp_path) -> None:
-    """review-94b 低 4：日子预期那一段（夜里那条线上）归未封口判断时碰到模型整个用不了，原样抛出——线据它停下这一晚、报"模型调不通"
-    （裁定 94 第 8 条），不拿没归上的建预期；白天那一拍照旧留着下一拍再试。撤回 ``in_line`` 那一处这里就红。"""
-
-    import pytest
+def test_an_unusable_model_never_raises_for_the_day_expectations_either(tmp_path) -> None:
+    """实时化方案第 2 节"模型调不通不停一天"：换代里的日子预期与预测拍读同一座桥、同一口径——模型整个用不了时这一次不归类、
+    不抛（原来日子预期那一份 ``in_line`` 原样抛出、整晚停下）。"""
 
     for error in (ModelQuotaError("quota exhausted"), ModelTransportError("down")):
-        unsealed, judgements, ledger, _provider = reader(tmp_path / type(error).__name__, provider=ScriptedProvider([error]))
+        unsealed, judgements, _ledger, _provider = reader(tmp_path / type(error).__name__, provider=ScriptedProvider([error]))
         judgements.put_payload(record("play", behavior="打球", start=0, end=600))
-        in_line = UnsealedFromJudgements(judgements, ledger, unsealed.stamping, in_line=True)
-        with pytest.raises(type(error)):
-            prepared(in_line, at(700))
+        prepared(unsealed, at(700))
+        (row,) = unsealed.rows(since=at(0), until=at(700))
+        assert row.name == "打球" and row.kind_token is None
+
+
+def test_an_unobserved_gap_is_not_an_unreadable_row(tmp_path) -> None:
+    """「未观测」不是看不到（裁定 68 第 2 条、94 第 3 条）：会话一支写下、还没归约的没在看的时段不进未封口的空白行——不然
+    时窗末那一拍会把它当「没读懂」、记「说不准」不开口。"""
+
+    unsealed, judgements, _ledger, _provider = reader(tmp_path)
+    unwatched = record("lid", behavior=None, start=0, end=300)
+    unwatched["status_basis"] = "unobserved"
+    judgements.put_payload(unwatched)
+    judgements.put_payload(record("blur", behavior=None, start=400, end=500))
+    rows = unsealed.rows(since=at(-100), until=at(600))
+    assert [(row.name, row.started_at) for row in rows] == [(None, at(400))]

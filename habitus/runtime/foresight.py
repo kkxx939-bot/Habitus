@@ -1,12 +1,12 @@
 """预测层在组合根的组装（``19-预测层方案.md`` 第九节，按步接）。
 
-现在接上的：账本（``ForesightLedgerStore``）与结算这一拍（``SettlementStage``，整晚那一趟的第一步）；机会表的存储
+现在接上的：账本（``ForesightLedgerStore``）与结算这一拍（``SettlementStage``，换代里的一步）；机会表的存储
 （``OpportunityStore``）与算它的那一拍（``ForesightNightlyRun``，由 ``build_foresight_nightly`` 装、挂在
-``runtime.nightly.Nightly`` 的语义树之后，同一拍重标单元的历史 ``HistoryStage``，整晚那一趟由 ``NightlyWorker`` 在前一天定稿后
-起跑）；当天的日子预期（``DayExpectationStage``，由 ``build_foresight_days`` 装，夜里那条线的最后一步，裁定 94 第 1 条）；
-白天那一拍（``ForesightTick``，由 ``build_foresight_tick`` 装：事件与情境的触发、候选、前因清单，落账；到了时窗按账的级决定
-说不说）；常驻 worker（``ForesightWorker``，由
-``build_foresight_worker`` 装，assembly 接进 ``worker``，Runtime 起停它）。读账的两个借用值（α、遗忘半衰期）由组合根从
+``runtime.generation.Generation`` 的语义树之后，同一拍重标单元的历史 ``HistoryStage``，换代由 ``GenerationWorker`` 在连续定稿到
+昨天之后做）；当天的日子预期（``DayExpectationStage``，由 ``build_foresight_days`` 装，换代必须成的一步）；
+预测拍（``ForesightTick``，由 ``build_foresight_tick`` 装：事件与情境的触发、候选、前因清单，落账；到了时窗按账的级决定
+说不说；落盘的水位、没在看的时段、预测根租约）；常驻 worker（``ForesightWorker``，由
+``build_foresight_worker`` 装，拍点对齐槽边界，assembly 接进 ``worker``，Runtime 起停它）。读账的两个借用值（α、遗忘半衰期）由组合根从
 关系检验与 ``config.foresight`` 的配置装成 ``Evidence`` 传进来（裁定 49：全系统一个"多大把握"、一种"过去多快淡掉"）。
 
 三件只有组合根知道的事定在这里：此刻是主体本地时刻（时区来自 ``config.locale``）；预测层只接会话一支（按不按 lane 分
@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -28,6 +29,7 @@ from habitus.foresight.judge import Judge
 from habitus.foresight.triggers.assemble import relation_statuses
 from habitus.foundation.observability import Observer
 from habitus.foundation.tracing import TraceSink
+from habitus.infrastructure.store.contracts import LockStore
 from habitus.model_client import StructuredChatClient
 from habitus.pre.conversation import QuestionTool
 from habitus.runtime.behavior import BehaviorRuntimeComponents
@@ -48,6 +50,8 @@ from habitus.runtime.foresight_responses import ReminderResponses
 from habitus.runtime.foresight_settlement import SettlementStage
 from habitus.runtime.foresight_tick import ForesightTick
 from habitus.runtime.foresight_worker import ForesightWorker
+from habitus.runtime.generation_lease import Lease
+from habitus.runtime.generation_watermark import TickTrack, TickWatermarkStore
 from habitus.runtime.resident import ResidentWorker
 from habitus.runtime.session_lane import BehaviorSessionConsumer
 from habitus.scene.relations import RelationConfig
@@ -70,7 +74,8 @@ class ForesightReadSide:
 
 @dataclass(frozen=True)
 class ForesightRuntimeComponents:
-    """预测层的全部已组装部件。``history`` 是夜里重标单元历史的那一步（与它的落盘）；``worker`` 在触发与递法接上之前为 None。"""
+    """预测层的全部已组装部件。``history`` 是换代里重标单元历史的那一步（与它的落盘）；``worker`` 在触发与递法接上之前为 None。
+    ``watermark`` 是预测拍的水位（换代据它判"没在看的空白落树了没有"）。"""
 
     read_side: ForesightReadSide
     ledger: ForesightLedgerStore
@@ -78,12 +83,14 @@ class ForesightRuntimeComponents:
     opportunities: OpportunityStore
     history: HistoryStage
     worker: ResidentWorker | None = None
-    #: 夜里的账本压实（26 号清单 4.8）；不给就不压。
+    #: 换代里的账本压实（26 号清单 4.8）；不给就不压。
     compaction: LedgerCompaction | None = None
     #: 提醒出口（方案 32）：宿主来取、从转写认提问写「说了」；递送那一拍按它的活性决定问不问模型。
     outlet: ReminderOutlet | None = None
-    #: 夜里那条线末尾建当天日子预期的那一步（裁定 94 第 1 条）；与 ``worker`` 一起在未封口的桥装好之后接上。
+    #: 换代里建当天日子预期的那一步（必须成）；与 ``worker`` 一起在未封口的桥装好之后接上。
     days: DayExpectationStage | None = None
+    #: 预测拍的水位（``ticked_at``、``unwatched_until``、``formed_through``、``formed_generation``）。
+    watermark: TickWatermarkStore | None = None
 
     def __post_init__(self) -> None:
         if self.compaction is not None and self.compaction.ledger is not self.ledger:
@@ -99,7 +106,7 @@ class ForesightRuntimeComponents:
         if self.history.ledger is not self.ledger or self.history.store.root != self.ledger.root:
             raise ValueError("the unit history is read from and lives beside the ledger of the same branch")
         if self.settlement.history is not None and self.settlement.history is not self.history.store:
-            raise ValueError("the settlement stage reads the same unit history the nightly stage writes")
+            raise ValueError("the settlement stage reads the same unit history the generation writes")
         if self.days is not None and (
             self.days.ledger is not self.ledger or self.days.opportunities is not self.opportunities
         ):
@@ -128,11 +135,11 @@ def build_foresight_components(
     calendar: DayTypeCalendar | None = None,
     kind_label: Callable[[str], str | None] | None = None,
     question_tools: Sequence[QuestionTool] | None = None,
-    line_finished: Callable[[date], bool | None] | None = None,
+    finished: Callable[[date], bool | None] | None = None,
 ) -> ForesightRuntimeComponents | None:
     """组装预测层；未启用时返回 None。``branch`` 是它接的那一支：账本取这一支的目录。``calendar`` 是组合根建好、与语义树共用的
-    那一份（不给就自己建）。``kind_label`` 是类编号 → 给人看的类名（词表），出口认提问时拿它配题目；不给就只按话配。``line_finished``
-    是夜里那条线自己记的"这一晚跑完了没有"（``runtime.scene.nightly_jobs``），结算据它认停掉的那天（裁定 94 第 9 条）。"""
+    那一份（不给就自己建）。``kind_label`` 是类编号 → 给人看的类名（词表），出口认提问时拿它配题目；``finished`` 是换代的完成标记
+    （``GenerationMarks.finished``），结算据它认没有这一代的那天（裁定 94 第 9 条）。"""
 
     if not config.foresight.enabled:
         return None
@@ -144,8 +151,7 @@ def build_foresight_components(
     )
     limits = config.foresight.store
     ledger = ForesightLedgerStore(config.foresight_root / branch, limits=limits)
-    # 派生物留当前一代与 ``fallback_generations`` 代备用（26 号清单 6.12）
-    generations = 1 + config.lifecycle.fallback_generations
+    generations = 1 + config.lifecycle.fallback_generations  # 派生物留当前一代与几代备用（26 号清单 6.12）
     opportunities = OpportunityStore(config.foresight_root / branch, retained_nights=generations, limits=limits)
     history_store = HistoryStore(config.foresight_root / branch, retained_nights=generations, limits=limits)
     settlement = SettlementStage(
@@ -162,7 +168,7 @@ def build_foresight_components(
         clock=clock,
         tolerance=_tolerance(config),
         history=history_store,
-        finished=line_finished,
+        finished=finished,
     )
     history = HistoryStage(
         ledger,
@@ -191,6 +197,7 @@ def build_foresight_components(
         history=history,
         compaction=LedgerCompaction(ledger, evidence=evidence, lane=branch, clock=clock),
         outlet=outlet,
+        watermark=TickWatermarkStore(config.foresight_root / branch),
     )
 
 
@@ -205,7 +212,7 @@ def build_foresight_nightly(
 ) -> ForesightNightlyRun:
     """机会表那一拍：读语义树的关系表（``relations``）、按关系检验同一份时间参数（``relation_config``，由
     ``runtime.scene_config.relation_config`` 换算）、写进这一支的机会表存储；同一拍重标这一支的单元历史（裁定 55 新版第 2 条）。
-    交给 ``runtime.nightly.Nightly`` 的 ``foresight``。"""
+    交给 ``runtime.generation.Generation`` 的 ``foresight``。"""
 
     return ForesightNightlyRun(
         components.opportunities,
@@ -234,11 +241,14 @@ def build_foresight_tick(
     lane: str = "session",
     reread: Callable[[datetime, datetime], Awaitable[bool]] | None = None,
     trace: Callable[[date], TraceSink] | None = None,
+    unwatched: Callable[[datetime, datetime], object] | None = None,
+    lease: Lease | None = None,
 ) -> ForesightTick:
-    """白天那一拍：读这一支的机会表、今天的日历条件、行为树今天与前 7 天、还没封口的判断（``unsealed``），把此刻对得上历史的预期写进
+    """预测拍：读这一支的机会表、今天的日历条件、行为树今天与前 7 天、还没封口的判断（``unsealed``），把此刻对得上历史的预期写进
     这一支的账本；再把到了时窗的按账的级决定说不说（``structured_chat`` 给了就带模型四问，不给就按算法与模板）。``shadow_uses_unestablished``
     开着时候选关系也进影子账；词表迁移中整拍不做；``trace`` 给了每拍一个 ``foresight.tick`` span。送达走提醒出口（方案 32）：最近一段有宿主
-    来取过才写话、记「待取」，否则记「不可达」；每拍末尾把可取的请求清单交给出口（装了插件的自动"接通"，没装的一分钱不多花）。"""
+    来取过才写话、记「待取」，否则记「不可达」；每拍末尾把可取的请求清单交给出口（装了插件的自动"接通"，没装的一分钱不多花）。
+    往回看读落盘的水位，没在看的那一段交 ``unwatched`` 写成「未观测」，整拍持预测根租约（``lease``）。"""
 
     foresight = config.foresight
     delivery = DeliveryStage(
@@ -248,17 +258,10 @@ def build_foresight_tick(
         daily_cap=foresight.daily_reminder_cap,
         unit_prior_share=foresight.unit_prior_share,
         history=components.history.store,
-        judge=(
-            None
-            if structured_chat is None
-            else Judge(
-                structured_chat,
-                retries=foresight.judge_transient_retries,
-                delay_seconds=foresight.judge_transient_retry_delay_seconds,
-            )
-        ),
+        judge=None if structured_chat is None else _judge(structured_chat, config),
         tick_seconds=foresight.tick_interval_seconds,
         outlet=components.outlet,
+        claimed=components.outlet.store.claimed if components.outlet is not None else lambda request_id: False,
         # 与结算同一个"编号现在对应哪些编号"：开口前核前因、判做没做两边认的是同一件事
         current=components.settlement.current,
         lane=lane,
@@ -279,9 +282,10 @@ def build_foresight_tick(
         recent=evidence.window,
         tolerance=_tolerance(config),
         reread=reread,
-        # 今天这一晚的线跑完了才建（裁定 94 第 1 条）：与结算认停掉的那天同一个判断
-        line_finished=components.settlement.finished,
         trace=trace,
+        track=_track(components, config, unwatched),
+        lease=lease,
+        finished=components.settlement.finished,  # 白天那道闸：今天这一代完成了才建（完成标记，与结算同一个判断）
     )
 
 
@@ -297,8 +301,8 @@ def build_foresight_days(
     clock: Callable[[], datetime] | None = None,
     lane: str = "session",
 ) -> DayExpectationStage:
-    """当天的日子预期：夜里那条线写完这一晚的机会表与单元之后，用这张含昨天的表建（裁定 94 第 1 条）；读材料与白天那一拍同一套
-    （行为树今天与前 7 天、还没封口的判断 ``unsealed``）。交给 ``runtime.nightly.Nightly`` 的 ``days``。"""
+    """当天的日子预期：换代写完这一代的机会表与单元历史之后，用这张含昨天的表建（裁定 94 第 1 条）；读材料与预测拍同一套
+    （行为树今天与前 7 天、还没封口的判断 ``unsealed``）。交给 ``runtime.generation.Generation`` 的 ``days``。"""
 
     return DayExpectationStage(
         components.ledger,
@@ -319,13 +323,33 @@ def build_foresight_days(
 def build_foresight_worker(
     tick: ForesightTick, *, config: HabitusConfig, observer: Observer | None = None
 ) -> ForesightWorker:
-    """常驻 worker：每 ``tick_interval_seconds`` 跑一拍。"""
+    """常驻 worker：每个槽边界跑一拍（``tick_interval_seconds`` 已由配置根校验等于槽宽）。"""
 
     return ForesightWorker(
         tick,
         interval_seconds=config.foresight.tick_interval_seconds,
         shutdown_timeout_seconds=config.foresight.worker_shutdown_timeout_seconds,
+        zone=config.locale.zone(),
         observer=observer,
+    )
+
+
+def foresight_lease_key(config: HabitusConfig, branch: str = "session") -> str:
+    """预测根租约的键：由这一支的预测根派生（与换代租约不同键）。"""
+
+    digest = hashlib.sha256(str((config.foresight_root / branch).expanduser().absolute()).encode("utf-8")).hexdigest()
+    return f"foresight:root:{digest[:24]}"
+
+
+def foresight_ledger_lease(config: HabitusConfig, lock_store: LockStore, branch: str = "session") -> Lease:
+    """预测根租约（写账本的那几步与每个预测拍持有，用户 11-10「两把锁」）：换代与预测拍共用这一个实例（含进程内那把锁）；
+    租期与续租间隔同换代租约（``scene.generation_lease_*``）。"""
+
+    return Lease(
+        lock_store,
+        foresight_lease_key(config, branch),
+        ttl_seconds=config.scene.generation_lease_ttl_seconds,
+        heartbeat_seconds=config.scene.generation_heartbeat_seconds,
     )
 
 
@@ -357,6 +381,28 @@ def build_reminder_responses(
     return ReminderResponses(components.ledger, limit=config.foresight.open_reminders_judged, observer=observer)
 
 
+def _judge(structured_chat: StructuredChatClient, config: HabitusConfig) -> Judge:
+    foresight = config.foresight
+    return Judge(
+        structured_chat,
+        retries=foresight.judge_transient_retries,
+        delay_seconds=foresight.judge_transient_retry_delay_seconds,
+    )
+
+
+def _track(
+    components: ForesightRuntimeComponents,
+    config: HabitusConfig,
+    unwatched: Callable[[datetime, datetime], object] | None,
+) -> TickTrack | None:
+    if components.watermark is None:
+        return None
+    slot = timedelta(seconds=config.foresight.tick_interval_seconds)
+    return TickTrack(
+        components.watermark, slot=slot, tolerance_slots=config.foresight.unwatched_tolerance_slots, unwatched=unwatched
+    )
+
+
 def _tolerance(config: HabitusConfig) -> Tolerance:
     foresight = config.foresight
     return Tolerance(line=1.0 - foresight.false_alarm_rate)
@@ -371,6 +417,8 @@ __all__ = [
     "build_foresight_tick",
     "build_foresight_worker",
     "build_outlet_consumer",
+    "foresight_lease_key",
+    "foresight_ledger_lease",
     "build_reminded_lookup",
     "build_reminder_responses",
 ]

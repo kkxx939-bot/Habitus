@@ -1,5 +1,6 @@
-"""裁定 94 第 1 条的回归（D1、D4，``37-材料/readme/repro-d1/report.md``）：当天的日子预期是夜里那条线的最后一步，一天只建一次，
-用这条线刚写的、含昨天的那张表；白天那一拍不按"日期变了"自己建。
+"""裁定 94 第 1 条的回归（D1、D4，``37-材料/readme/repro-d1/report.md``）：当天的日子预期是换代必须成的一步，一天只建一次，
+用这一代刚写的、含昨天的那张表；预测拍不按"日期变了"自己建。换代记"这一天做完了没有"用完成标记（实时化方案第 3 节，取代
+夜线的 Job 账，三值判法不变）。下面的"线"就是换代。
 
 走真实链路（接法同 ``test_foresight_daily_miss_and_silent_day``）：真实行为树、夜里那条线同一套调用建机会表（read_series →
 build_timelines → build_table）、全天每 15 分钟一拍 ``ForesightTick``、前一天定稿后（这里 01:15）先结算到昨天、再建今天这一晚的
@@ -25,8 +26,7 @@ from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement import SettlementStage
 from habitus.runtime.foresight_tick import ForesightTick
-from habitus.runtime.nightly import STEPS
-from habitus.runtime.nightly_jobs import FAILED, SUCCEEDED, NightJob, NightJobs, NightLedger
+from habitus.runtime.generation_marks import GenerationMark, GenerationMarks
 from habitus.scene.concepts import ConceptSet
 from tests.unit.kind_ids import kind_id
 from tests.unit.runtime.test_foresight_daily_miss_and_silent_day import (
@@ -57,19 +57,14 @@ class World:
         self.concepts = ConceptSet([base(habit)])
         self.habit = habit
         self.start = start
-        #: 夜里那条线的 Job 账：结算据它认停掉的那天（裁定 94 第 9 条）
-        self.jobs = NightJobs(tmp / "scene" / "nightly" / "jobs", artifact_root=tmp, kept_nights=366)
+        #: 换代的完成标记：结算据它认没有这一代的那天（裁定 94 第 9 条）
+        self.marks = GenerationMarks(tmp / "scene" / "generation", artifact_root=tmp)
 
     def mark(self, night: date, *, finished: bool) -> None:
-        """线把这一晚记进 Job 账：跑完是 5 段都成了；没跑完是日子预期那一段失败了（停下、或表写出后才停）。"""
+        """换代写成了就写这一天的完成标记；没写成（必须成的那一步没成：表都没写出、或表写出后日子预期没建成）就没有标记。"""
 
-        states = [SUCCEEDED] * 5 if finished else [SUCCEEDED] * 4 + [FAILED]
-        moment = datetime.combine(night, LINE_AT, tzinfo=ZONE)
-        self.jobs.write(
-            NightLedger(
-                night, moment, tuple(NightJob(step, state=state) for step, state in zip(STEPS, states, strict=True))
-            )
-        )
+        if finished:
+            self.marks.write(GenerationMark(day=night, finished_at=datetime.combine(night, LINE_AT, tzinfo=ZONE)))
 
     @property
     def kind(self) -> str:
@@ -92,7 +87,7 @@ def settle(w: World, through: date) -> None:
         lane="session",
         clock=lambda: now.astimezone(UTC),
         tolerance=LOSS,
-        finished=w.jobs.finished,
+        finished=w.marks.finished,
     ).run_once()
 
 

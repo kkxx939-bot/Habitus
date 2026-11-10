@@ -145,3 +145,32 @@ def test_a_speakable_basis_the_unit_kept_quiet_keeps_the_day_subsumed(tmp_path) 
     for minutes in (81, 200):
         asyncio.run(run.run_once(at(minutes), materials))
     assert reasons(ledger, "day") == ["单元已选"]
+
+
+def test_a_basis_already_taken_by_the_host_is_as_good_as_spoken(tmp_path) -> None:
+    """F8（用户 11-10「取走等同说出口」）：依据那条「待取」已被宿主取走（还没说出口）、换代后关系变回候选——依据不撤，同一刻的
+    成员也不接手，出口上同一刻最多一条请求。对照：没被取走的，依据撤下（「依据失效」）、成员照现有规则接手。"""
+
+    for taken in (True, False):
+        claimed: set[str] = set()
+        run, ledger = stage(tmp_path / str(taken), claimed=claimed.__contains__)
+        earn(ledger, trigger="rel", source="事件", hits=8)
+        earn(ledger, trigger="interval", hits=8)
+        ledger.record_unit_level(UnitLevel(KIND, DAY0 - timedelta(days=1), 1))
+        ledger.record_expectation(expectation("ev", DAY0, trigger="rel", source="事件"))
+        ledger.record_expectation(expectation("day", DAY0, trigger="interval", window=(50, 80), deadline_hours=4))
+        cause = JudgeMaterials(CAUSE, lambda uris: {})
+        asyncio.run(run.run_once(at(15), cause))
+        asyncio.run(run.run_once(at(41), cause))
+        assert reasons(ledger, "ev")[-1] == "待取"
+        if taken:
+            claimed.add("ev")
+        candidate = JudgeMaterials(CANDIDATE, lambda uris: {})
+        for minute in (56, 81):
+            asyncio.run(run.run_once(at(minute), candidate))
+        if taken:
+            assert reasons(ledger, "ev")[-1] == "待取" and "待取" not in reasons(ledger, "day")
+        else:
+            assert reasons(ledger, "ev")[-1] == "依据失效" and reasons(ledger, "day")[-1] == "待取"
+        open_now = [row.request_id for row in run.outlet.published[-1]]  # type: ignore[union-attr]
+        assert open_now == (["ev"] if taken else ["day"])  # 同一刻只挂一条

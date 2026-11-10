@@ -975,6 +975,8 @@ def test_foresight_only_reads_the_derived_trees() -> None:
         "habitus.behavior.kinds.classify",
         "habitus.behavior.reduction.kinds_step",
         "habitus.behavior.reduction.ledger",
+        # 空判断落成哪种空白用归约自己的口径（``gap_kind_of``）：「未观测」不是看不到，不进未封口的空白行（实时化方案第 6 节）
+        "habitus.behavior.reduction.payloads",
         "habitus.behavior.reduction.pending",
     }
 
@@ -1140,6 +1142,7 @@ def test_the_session_lane_meets_the_conversation_source_only_in_the_composition_
         "redaction.py",
         "reminders.py",
         "service.py",
+        "unwatched.py",  # 没在看的时段写成「未观测」空判断（实时化方案第 6 节），不调模型
     }
     for path in lane_root.glob("*.py"):
         assert imported_roots(path).isdisjoint({"conversation", "pre", "memory", "runtime", "config"})

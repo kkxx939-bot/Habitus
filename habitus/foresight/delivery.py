@@ -3,11 +3,12 @@
 组合根（``runtime/foresight_delivery.py``）分拨（时窗开 / 时窗末 / 等宿主）、取材料、问模型、落账；记哪一种原因、先后怎么排都在这里。
 最后三种（影子、名额已满、待取 / 说了）由 ``ladder.decide`` 定，这里在它之前把别的原因按顺序过一遍：
 
-- **时窗开**：已发生 → 影子（档 0）→ 久别回来 → 等时窗末（提醒档一律等到时窗末还没做再说，裁定 58 第 1 条）；
+- **时窗开**：已发生 → 影子（档 0）→ 久别回来 → 过了时限 → 等时窗末（提醒档一律等到时窗末还没做再说，裁定 58 第 1 条）；
 - **时窗末**：已发生 → 说不准（窗里有「没读懂」，裁定 67 第 14 条）→ 影子（窗里被压回影子或关了账）→ 久别回来 → 前因不成立 →
-  模型判不像 → 同类已说 → 不可达（没有宿主活着，方案 32 第 3.3 条）→ ``decide``；
+  模型判不像 → 同类已说 → 不可达（没有宿主活着，方案 32 第 3.3 条）→ 过了时限 → ``decide``；
+- **过了时限**（用户 11-10）：提醒档轮到决定时此刻已过最晚时限——不说（不记「待取」、不占名额、出口不收），终局，结算照常结它；
 - **等宿主**（最近一条是「待取」）：做了追加已发生；过了最晚时限还没人问出口追加宿主没取（终局，结算按没说过处理）。
-- **依据没说成**（``unsaid``，裁定 92 第 2 条②）：依据记了「不可达」「宿主没取」，或停在「等时窗末」「待取」过了最晚时限，
+- **依据没说成**（``unsaid``，裁定 92 第 2 条②）：依据记了「不可达」「宿主没取」「过了时限」，或停在「等时窗末」「待取」过了最晚时限，
   或依据本来就不能开口（候选关系、巧合，裁定 56 第 12 条；这回已经做了的除外）——话没对人说出口，被它「单元已选」吸收的
   成员时限还在的照常走时窗末（组合根接手）。依据能开口而自己决定不说的（已发生、单元读数定的影子、同类已说、名额已满、
   模型判不像……）不算：那是单元替这一刻做的决定。
@@ -17,14 +18,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from habitus.foresight.ladder import Standing, decide
 from habitus.foresight.ledger.model import (
     AWAITING_HOST,
+    BASIS_WITHDRAWN,
     HOST_NEVER_CLAIMED,
+    PAST_DEADLINE,
     RETURNED,
     UNOBSERVED,
     Delivery,
@@ -32,6 +35,7 @@ from habitus.foresight.ledger.model import (
 )
 from habitus.foresight.ledger.settle import counts_as_done
 from habitus.foresight.model import Seen
+from habitus.foresight.units import UNIT
 
 #: 不是终局的递送原因：之后还会再决定一次。
 PENDING = "等时窗末"
@@ -81,6 +85,8 @@ def on_opening(item: Expectation, standing: Standing, *, now: datetime, facts: C
         return Delivery(item.expectation_id, now, 0, False, "影子", 0.0)
     if quiet_after_absence(standing, facts.absent):
         return Delivery(item.expectation_id, now, level, False, RETURNED, 0.0)
+    if now > item.deadline:  # 补看到的拍（被挤掉的那一拍）开时窗时就已过了时限：不说
+        return Delivery(item.expectation_id, now, level, False, PAST_DEADLINE, 0.0)
     return Delivery(item.expectation_id, now, level, False, PENDING, 0.0)
 
 
@@ -124,6 +130,8 @@ def on_closing(
         return Delivery(item.expectation_id, now, level, False, "同类已说", 0.0, evidence=cited)
     if not alive:
         return Delivery(item.expectation_id, now, level, False, UNREACHABLE, 0.0, evidence=cited)
+    if now > item.deadline:  # 时窗末那一拍才轮到、已过了时限：不说，不记「待取」占名额
+        return Delivery(item.expectation_id, now, level, False, PAST_DEADLINE, 0.0, evidence=cited)
     return decide(
         item,
         level,
@@ -148,20 +156,79 @@ def on_awaiting(item: Expectation, pending: Delivery, *, now: datetime, happened
     return None
 
 
-def unsaid(item: Expectation, made: Sequence[Delivery], *, now: datetime, voiceless: bool = False) -> bool:
-    """依据这条预期的话没对人说成、也说不成了（``made`` 是它的全部递送）：没有「说了」，而且最近一条是「不可达」「宿主没取」，
+def on_withdrawn(item: Expectation, pending: Delivery, *, now: datetime, voiced: bool, taken: bool) -> Delivery | None:
+    """「待取」之后依据失效（实时化方案第 7 节）：话已写好、宿主还没取走（``taken`` 为假），而它此刻已不能当开口的依据
+    （``voiced`` 为假：换代之后关系变回候选、从机会表上消失）——撤下请求，记「依据失效」（终局，结算按没说过处理）；被它吸收的
+    成员照现有规则接手（``unsaid`` 认它没说成）。已被取走的不撤（宿主可能已在问），依据还能开口的不动：都是 None。"""
+
+    if voiced or taken:
+        return None
+    return Delivery(item.expectation_id, now, pending.level, False, BASIS_WITHDRAWN, 0.0)
+
+
+def unsaid(
+    item: Expectation, made: Sequence[Delivery], *, now: datetime, voiceless: bool = False, taken: bool = False
+) -> bool:
+    """依据这条预期的话没对人说成、也说不成了（``made`` 是它的全部递送）：没有「说了」，而且最近一条是「不可达」「宿主没取」「过了时限」，
     或还停在「等时窗末」「待取」却已过了最晚时限（中间停过机、时窗末那一拍没跑到）。``voiceless`` 是它本来就不能当开口的依据
     （候选关系、巧合，``units.voiced``）：单元只能从它里面取、记了影子——也是没说成（裁定 56 第 12 条、裁定 92 第 2 条②），
-    这回已经做了（「已发生」）的除外：那是单元替这一刻做的决定。"""
+    这回已经做了（「已发生」）的除外：那是单元替这一刻做的决定。``taken`` 是它的请求已被宿主取走（还没说出口）：取走等同说出口
+    （用户 11-10），成员不接手，同一刻最多一条请求。"""
 
-    if not made or any(item_.spoken for item_ in made):
+    if not made or taken or any(item_.spoken for item_ in made):
         return False
     if voiceless and all(item_.reason != HAPPENED for item_ in made):
         return True
     latest = max(made, key=lambda delivery: delivery.decided_at)
-    if latest.reason in (UNREACHABLE, HOST_NEVER_CLAIMED):
+    if latest.reason in (UNREACHABLE, HOST_NEVER_CLAIMED, PAST_DEADLINE):
         return True
     return latest.reason in (PENDING, AWAITING_HOST) and item.deadline.astimezone(UTC) < now.astimezone(UTC)
+
+
+def hand_over(
+    known: Mapping[str, Expectation],
+    decided: Mapping[str, Sequence[Delivery]],
+    members: Mapping[str, Sequence[Expectation]],
+    instant: datetime,
+    *,
+    voiced: Callable[[Expectation], bool] = lambda item: True,
+    taken: Callable[[str], bool] = lambda request_id: False,
+) -> tuple[tuple[tuple[tuple[Expectation, ...], tuple[str, ...]], ...], dict[str, Delivery]]:
+    """依据没说成（``delivery.unsaid``）的那几刻里，能接手的成员：只决定过「单元已选」、自己最晚时限还没到的。已经有成员接手过、
+    它还没说成或自己决定了不说（不是 ``unsaid``）的，这一刻不再交给别的成员——同一刻只说一次。依据或成员已经结掉（不在账上的
+    还没结那几天里）的不动。
+
+    依据本来就不能开口（``voiced`` 为假：候选关系、巧合——只进读数、不当依据，裁定 56 第 12 条）也算没说成（裁定 92 第 2 条②）：
+    同一刻只有它先到了时窗，单元只能从它里面取、记了影子，被吸收的成员（还没到时窗时拉进来的、后来并进来的）到了自己的时窗末
+    按同一组输入重算单元、依据换成能开口的那条。依据的请求已被宿主取走（``taken``）等同说出口：成员不接手。
+
+    （原在 ``runtime.foresight_delivery._handovers``，纯规则，挪到这里与 ``unsaid`` 放在一起，判法不变。）"""
+
+    found: list[tuple[tuple[Expectation, ...], tuple[str, ...]]] = []
+    subsumed: dict[str, Delivery] = {}
+    for basis_id in sorted(members):
+        basis = known.get(basis_id)
+        if basis is None:
+            continue
+        # 依据的请求已被宿主取走（还没说出口）：取走等同说出口，成员不接手（用户 11-10，F8）
+        spoken = decided.get(basis_id, ())
+        if not unsaid(basis, spoken, now=instant, voiceless=not voiced(basis), taken=taken(basis_id)):
+            continue
+        group = [item for item in members[basis_id] if item.expectation_id in known]
+        took = [item for item in group if any(made.reason != UNIT for made in decided[item.expectation_id])]
+        if any(not unsaid(item, decided[item.expectation_id], now=instant) for item in took):
+            continue
+        free = [
+            item
+            for item in group
+            if item not in took and item.deadline.astimezone(UTC) > instant and decided[item.expectation_id]
+        ]
+        if not free:
+            continue
+        for item in free:
+            subsumed[item.expectation_id] = max(decided[item.expectation_id], key=lambda made: made.decided_at)
+        found.append(((basis, *group), tuple(item.expectation_id for item in free)))
+    return tuple(found), subsumed
 
 
 def done_since(
@@ -198,9 +265,11 @@ __all__ = [
     "UNREACHABLE",
     "Circumstances",
     "done_since",
+    "hand_over",
     "on_awaiting",
     "on_closing",
     "on_opening",
+    "on_withdrawn",
     "quiet_after_absence",
     "reminded_before",
     "unsaid",

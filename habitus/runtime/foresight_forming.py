@@ -1,4 +1,4 @@
-"""建预期、落账的那一段，两处共用（裁定 94 第 1 条）：白天那一拍（``runtime.foresight_tick``，事件与情境）与夜里那条线末尾的
+"""建预期、落账的那一段，两处共用（裁定 94 第 1 条）：预测拍（``runtime.foresight_tick``，事件与情境）与换代末尾的
 当天日子预期（``runtime.foresight_days``）。
 
 取材料：此刻是主体本地时刻（``read_side.zone``），今天的日历条件从 ``read_side.calendar`` 取；行为树经 ``scene.views`` 只读今天
@@ -6,8 +6,8 @@
 同一个身份已经在账上的不再写（身份不含槽号、时刻与日子，账本按身份索引，跨天重算得到同一条）；人说过「以后别提了」的行为不再建
 （裁定 50、61）。进程不留内存状态：重启后重扫得到的都是已有的身份。
 
-两处共用的闸也在这里一份：词表迁移做到一半时不建（``held_by_migration``）、表是不是今天这一晚的（``tonight_table``，裁定 94
-第 1 条），以及观测怎么记（``observe_foresight``）。
+两处共用的闸也在这里一份：词表迁移做到一半时不建（``held_by_migration``）、表是不是今天这一代的（``tonight_table``，实时化方案
+第 3 节"白天那道闸"），以及观测怎么记（``observe_foresight``）。
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from habitus.runtime.foresight_implementation import IMPLEMENTATION
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement import BehaviorReadSide
-from habitus.runtime.nightly_errors import NightJobsError
+from habitus.runtime.generation_marks import GenerationMarkError
 from habitus.scene.views import DayIndexCache
 from habitus.series.reader import admitted
 from habitus.temporal.slots import slot_index
@@ -55,10 +55,11 @@ class Recent:
 
 @dataclass(frozen=True)
 class Formed:
-    #: 此刻对得上历史的预期有几条、其中新写进账本的几条、按触发种类分。
+    #: 此刻对得上历史的预期有几条、其中新写进账本的几条、按触发种类分（对得上的、新写进的各一份）。
     formed: int = 0
     recorded: int = 0
     by_source: dict[str, int] = field(default_factory=dict)
+    recorded_by_source: dict[str, int] = field(default_factory=dict)
 
 
 class ExpectationForming:
@@ -133,6 +134,7 @@ class ExpectationForming:
         )
         recorded = 0
         by_source: dict[str, int] = {}
+        recorded_by_source: dict[str, int] = {}
         silent: dict[str, bool] = {}
         for item in expectations:
             by_source[item.source] = by_source.get(item.source, 0) + 1
@@ -142,14 +144,15 @@ class ExpectationForming:
                 silent[item.kind_token] = silenced(self.ledger.setting_of(item.kind_token))
             if not silent[item.kind_token] and self.ledger.record_expectation(item):
                 recorded += 1
-        return Formed(len(expectations), recorded, by_source)
+                recorded_by_source[item.source] = recorded_by_source.get(item.source, 0) + 1
+        return Formed(len(expectations), recorded, by_source, recorded_by_source)
 
 
 MIGRATING = "词表迁移还没做完"
 NO_TABLE = "还没有机会表"
-STALE_TABLE = "今天这一晚的机会表还没有"
-LINE_UNFINISHED = "今天这一晚的线还没跑完"
-LEDGER_UNREADABLE = "夜线的 Job 账读不了"
+STALE_TABLE = "今天这一代的机会表还没有"
+UNFINISHED = "今天这一代还没完成"
+MARK_UNREADABLE = "今天的完成标记读不了"
 
 
 def held_by_migration(migrating: Callable[[], bool] | None) -> str | None:
@@ -163,25 +166,25 @@ def tonight_table(
     lane: str,
     today: date,
     *,
-    line_finished: Callable[[date], bool | None] | None = None,
+    finished: Callable[[date], bool | None] | None = None,
 ) -> tuple[OpportunityTable | None, str | None]:
-    """盘上最晚那张表与"能不能用它建预期"：没有表 → (None, 原因)；表不是今天这一晚的，或给了 ``line_finished``（白天那一拍）
-    而今天这一晚的线还没整条跑完（没跑到、表写出后才停）或夜线的 Job 账读不了 → (那张表, 原因)——递送照用它，建预期等今晚的线跑完（裁定 94 第 1 条）；
-    否则 → (表, None)。线上的日子预期那一段自己就在线里，不给 ``line_finished``。"""
+    """盘上最晚那张表与"能不能用它建预期"（白天那道闸，实时化方案第 3 节）：没有表 → (None, 原因)；表不是今天这一代的，或给了
+    ``finished``（预测拍）而今天这一代还没完成（机会表写出了、日子预期或完成标记没成——下一眼重做整代会重写这张表，已建的预期
+    可能对不上新表）、完成标记读不了 → (那张表, 原因)——递送照用它，建预期等今天这一代完成；否则 → (表, None)。换代里的日子
+    预期那一步在写完成标记之前直接用这张表，不给 ``finished``。"""
 
     table = store.latest(lane)
     if table is None:
         return None, NO_TABLE
     if table.night != today:
         return table, STALE_TABLE
-    if line_finished is None:
+    if finished is None:
         return table, None
     try:
-        finished = line_finished(today)
-    except NightJobsError:
-        # 账坏了：不当跑完、也不当没跑完，不建预期并报出原因（递送照用表；健康面另报读不了）
-        return table, LEDGER_UNREADABLE
-    return (table, None) if finished is True else (table, LINE_UNFINISHED)
+        done = finished(today)
+    except GenerationMarkError:
+        return table, MARK_UNREADABLE  # 标记坏了：不当完成、也不当没做，不建、报出原因
+    return (table, None) if done is True else (table, UNFINISHED)
 
 
 def observe_foresight(
@@ -191,7 +194,7 @@ def observe_foresight(
     attributes: dict[str, str | int | float | bool],
     started: float,
 ) -> None:
-    """记一笔预测层的观测；观测本身出错不许影响白天那一拍与夜里那条线。"""
+    """记一笔预测层的观测；观测本身出错不许影响预测拍与换代。"""
 
     try:
         observer.record(
@@ -208,10 +211,11 @@ def observe_foresight(
 
 
 __all__ = [
-    "LINE_UNFINISHED",
     "MIGRATING",
     "NO_TABLE",
+    "MARK_UNREADABLE",
     "STALE_TABLE",
+    "UNFINISHED",
     "ExpectationForming",
     "Formed",
     "FormingReadSide",

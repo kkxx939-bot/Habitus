@@ -5,7 +5,8 @@
 **拢组**：这一拍到了时窗、还没决定过的预期按类分组；同一类里说中的范围（起算 → 最晚时限）和它们连成一片、还没到时窗的那几条
 一起拉进来——它们是同一刻的另外几个输入，单元替它们一并决定（记「单元已选」），不再等各自时窗开了再各说各的。依据只从到了时窗的
 那几条里选（``units.basis`` 的 ``due``）。
-**历史**：读这条 lane 盘上最晚一晚的单元历史（每晚重算一次），按晚缓存；白天不扫账本。
+**历史**：读这条 lane 盘上最晚一晚的单元历史（每代重算一次），按（那一晚, 文件此刻的样子）缓存——同一晚重写了照样读到新的
+（实时化缺陷 7）；白天不扫账本。
 **档**：单元的档按行为记（``UnitLevel``），滞回读这个行为单元上一次的档，不读哪一本账的级；单元的提醒反馈与设置也按行为
 （裁定 61：开口只看单元）。
 """
@@ -78,8 +79,8 @@ class UnitPlanner:
         self.prior_share = float(prior_share)
         #: 没有机会表时按哪条 lane 读单元历史（账本是一条 lane 一本）。
         self.lane = lane
-        #: （lane, 那一晚）→ 读回的单元历史：每晚只重算一次，白天每拍不再读盘。
-        self._cached: dict[str, tuple[date, UnitHistory | None]] = {}
+        #: lane → （那一晚, 那一晚的文件此刻的样子, 读回的单元历史）：没变就不再读盘，同一晚被重写了就重读。
+        self._cached: dict[str, tuple[date, tuple[int, int, int] | None, UnitHistory | None]] = {}
 
     def plan(
         self,
@@ -162,7 +163,7 @@ class UnitPlanner:
         )
 
     def history_of(self, table: OpportunityTable | None) -> UnitHistory | None:
-        """这条 lane 盘上最晚一晚读得出来的单元历史（每晚只读一次；最晚那一份坏了往前退一晚）；边的读数从它来。"""
+        """这条 lane 盘上最晚一晚读得出来的单元历史（文件没变就不再读；最晚那一份坏了往前退一晚）；边的读数从它来。"""
 
         if self.history is None:
             return None
@@ -170,11 +171,12 @@ class UnitPlanner:
         night = self.history.latest_night(lane)
         if night is None:
             return None
+        stamp = self.history.stamp(lane, night)
         cached = self._cached.get(lane)
-        if cached is None or cached[0] != night:
-            cached = (night, self.history.latest(lane))
+        if cached is None or cached[0] != night or cached[1] != stamp:
+            cached = (night, stamp, self.history.latest(lane))
             self._cached[lane] = cached
-        return cached[1]
+        return cached[2]
 
 
 def _groups(

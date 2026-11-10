@@ -73,10 +73,7 @@ class RelationStage:
         成员的类，涉及它们的关系先退回候选（裁定 59）；按状态上记的版本算，同一晚重跑也退回得一样。折叠之后，同一件事有两个以上
         单个取值（周几、几号、日型）的日历关系处在候选或成立的，补一个取值集合的日历情境，下一晚起一起检验。"""
 
-        hits = await asyncio.to_thread(self._all_hits)
-        lines = await asyncio.to_thread(
-            build_timelines, series, concepts, hits, self.relation_config, calendar=self.calendar
-        )
+        lines = await self.timelines(series, concepts)
         counts: dict[str, dict[str, int]] = {}
         moved = 0
         for lane, line in sorted(lines.items()):
@@ -96,6 +93,14 @@ class RelationStage:
                 for item in transitions
             )
         return counts, moved, lines
+
+    async def timelines(self, series: EventSeries, concepts: ConceptSet) -> dict[str, LaneTimeline]:
+        """各 lane 的时间线（盘上全部已映射的命中 + 这一份序列；纯计算、零模型）。关系判定没做成时，换代用它照样算机会表。"""
+
+        hits = await asyncio.to_thread(self._all_hits)
+        return await asyncio.to_thread(
+            build_timelines, series, concepts, hits, self.relation_config, calendar=self.calendar
+        )
 
     async def _fold_lane(
         self,

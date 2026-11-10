@@ -39,7 +39,7 @@ class KindModelOutputError(RuntimeError):
 class CallFailure(str, Enum):
     """一次词表调模型失败属于哪一类（裁定 94 错误分类）。"""
 
-    UNAVAILABLE = "unavailable"  # 模型整个用不了（此刻用不了、没配好）：夜里停线，白天放一边等当晚
+    UNAVAILABLE = "unavailable"  # 模型整个用不了（此刻用不了、没配好）：换代里走退路照常往下做，白天放一边等重试收尾
     REFUSED = "refused"  # 这一份触发内容安全：不重试
     TOO_LARGE = "too_large"  # 输入超长：材料上限与模型窗口没对上，是 bug，不重试
     BUG = "bug"  # 别的：我们自己的代码出错，当场报

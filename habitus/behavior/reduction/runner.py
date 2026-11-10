@@ -81,7 +81,7 @@ class BehaviorReductionReport:
     # 词表侧的事件与信号（新建/命中/过期/降级），与归约本身的丢边、隔离分开列——面板数"异常"时
     # 不把"新建了一个 kind"这种正常事件数进去。
     kind_signals: tuple[str, ...] = ()
-    #: 这一轮因为模型整个用不了、换成「错误」放一边的链（夜里那一支的归约据它停线，裁定 94 第 8 条）。
+    #: 这一轮因为模型整个用不了、换成「错误」放一边的链（换代的重试收尾据它记"归约时模型整个用不了"、这一代跳过结算，裁定 94 第 8 条）。
     unavailable: int = 0
     #: 这一轮拦住的我们自己的 bug（归类抛了模型之外的异常）：常驻节拍把它挂到健康面，当场报出。
     bugs: tuple[str, ...] = ()
@@ -256,7 +256,7 @@ class BehaviorReductionRunner:
         # 600s 租约耗死，续约点再多也救不了已过期的租约）。因此每段边界都续，长循环内部按条数续。
         guard.checkpoint()
         # 没做完的词表迁移排在检查点重放之后、本轮归类之前续做：本轮新封口的链就按改过的清单归类；改过的日子并进本轮刷新。
-        # 词表的每晚新增与定期拆改不在这里，在夜里那条线上、结构那一段之前（裁定 94 第 9 条，``nightly_vocabulary``）。
+        # 词表的每晚新增与定期拆改不在这里，在换代里、读序列之前（裁定 94 第 9 条，``nightly_vocabulary``）。
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_vocabulary") as attributes:
             jobs = self.vocabulary.resume_migration(guard)
             self.refresh_pending.touch(jobs.days, guard)
@@ -391,18 +391,18 @@ class BehaviorReductionRunner:
         return _Sealed(horizon, ready_indexes, ready_gaps, unsealed_days)
 
     async def nightly_vocabulary(self, night: date) -> VocabularyJobReport:
-        """夜里那条线在结构那一段之前调它（裁定 94 第 8、9 条）：这一晚的每晚新增，与这一晚所在拆改周期里还没做的定期拆改。
-        锁被占抛 ``BehaviorReductionBusyError``（线据此下一眼再来）；模型整个用不了、代码出错原样抛给线（停下这一晚）。"""
+        """换代在读序列之前调它（裁定 94 第 8、9 条）：这一天的每晚新增，与这一天所在拆改周期里还没做的定期拆改。锁被占抛
+        ``BehaviorReductionBusyError``（换代这一眼到此为止）；模型用不了、代码出错原样抛给换代（记这一支词表没做成、照常往下做）。"""
 
         return await self.vocabulary.nightly(night)
 
     async def grow_vocabulary(self) -> VocabularyJobReport:
-        """立刻跑一次每晚新增（运维与实验用；常规路径是夜里那条线的 ``nightly_vocabulary``）。"""
+        """立刻跑一次每晚新增（运维与实验用；常规路径是换代的 ``nightly_vocabulary``）。"""
 
         return await self.vocabulary.grow()
 
     async def revise_vocabulary(self) -> VocabularyJobReport:
-        """立刻跑一次定期拆改（运维与实验用；常规路径是夜里那条线的 ``nightly_vocabulary``）。"""
+        """立刻跑一次定期拆改（运维与实验用；常规路径是换代的 ``nightly_vocabulary``）。"""
 
         return await self.vocabulary.revise()
 
@@ -463,7 +463,7 @@ class BehaviorReductionRunner:
                 stamps = await self.kinds.classify(records, checkpoint=guard.checkpoint)
             except Exception as exc:  # noqa: BLE001 - 归类失败不拖住那天：这批链换成「错误」放一边（裁定 94 第 3 条）
                 guard.checkpoint()  # 租约丢了（另一进程接手）照常整轮失败，不当成归类失败
-                # 按错误分类分开（裁定 94 第 8 条）：模型整个用不了的放一边等当晚（夜里那一支的归约据报告停线），
+                # 按错误分类分开（裁定 94 第 8 条）：模型整个用不了的放一边等换代里的重试收尾（它据报告这一代跳过结算），
                 # 别的是我们自己的 bug，当场报出（``bugs``，常驻节拍据它挂到健康面）、不白试
                 failure = call_failure(exc)
                 if failure is CallFailure.BUG:

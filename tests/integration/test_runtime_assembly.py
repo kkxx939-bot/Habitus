@@ -741,23 +741,28 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
 
     runtime = _fully_enabled_runtime(tmp_path)
     branches = runtime.components.behavior
-    worker = runtime.components.nightly
+    worker = runtime.components.generation
     assert branches is not None and worker is not None
-    # 夜线与预测层（与结算）现在只接会话那一支；预测树删了（裁定 59），夜线自己一个 Job 执行器（每晚 5 段 Job）。
+    # 换代与预测层（与结算）现在只接会话那一支；预测树删了（裁定 59），换代一个常驻 worker（实时化方案第 3 节，取代夜线 Job 账）。
     behavior = branches.session
-    assert worker.jobs.root == runtime.config.scene_root / "nightly" / "jobs"
-    assert worker.reports is not None and worker.reports.root == runtime.config.scene_root / "nightly" / "reports"
-    assert worker.traces is not None and worker.traces.root == runtime.config.scene_root / "nightly" / "traces"
-    # 全局租约与认领：组合根共用的那一份 SQLite 锁库；运维数都来自 ``config.scene.nightly_*``
-    assert worker.lock_store is runtime.components.infrastructure.path_lock.lock_store
-    assert worker.lease_key.startswith("scene:nightly:")
-    assert worker.settings.poll_seconds == runtime.config.scene.nightly_poll_seconds
-    assert worker.settings.kept_nights == runtime.config.scene.nightly_kept_nights
-    # 白天那一拍的 ``foresight.tick`` span 落夜线同一份本地 trace
+    generation = worker.generation
+    assert generation.marks.root == runtime.config.scene_root / "generation"
+    assert worker.reports is not None and worker.reports.root == runtime.config.scene_root / "generation" / "reports"
+    assert worker.traces is not None and worker.traces.root == runtime.config.scene_root / "generation" / "traces"
+    # 换代租约：组合根共用的那一份 SQLite 锁库；运维数都来自 ``config.scene.generation_*``
+    assert worker.lease.lock_store is runtime.components.infrastructure.path_lock.lock_store
+    assert worker.lease.key.startswith("scene:generation:")
+    assert worker.settings.poll_seconds == runtime.config.scene.generation_poll_seconds
+    assert worker.settings.kept_days == runtime.config.scene.generation_kept_days
+    # 预测根租约（另一个键）：换代写账本的那几步与每个预测拍共用同一个实例
     assert runtime.components.foresight is not None and runtime.components.foresight.worker is not None
+    ledger_lease = runtime.components.foresight.worker.tick.lease
+    assert ledger_lease is not None and generation.ledger_lease is ledger_lease
+    assert ledger_lease.key.startswith("foresight:root:") and ledger_lease.key != worker.lease.key
+    # 预测拍的 ``foresight.tick`` span 落换代同一份本地 trace
     assert runtime.components.foresight.worker.tick.trace == worker.traces.sink
-    # 每晚开头的重试接着两支各自的重试堆（裁定 67）；会话一支连同它的会话 lane
-    retry = worker.nightly.retry
+    # 换代开头的重试收尾接着两支各自的重试堆（裁定 67）；会话一支连同它的会话 lane
+    retry = generation.retry
     assert retry is not None
     from habitus.behavior.fusion.lanes.session import TurnHandler
     from habitus.behavior.reduction.failed import ChainHandler
@@ -777,7 +782,7 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert runtime.components.foresight is not None and runtime.components.foresight.worker is not None
     assert runtime.components.foresight.worker.tick.reread is not None
     assert runtime.reminders_enabled()
-    assert worker.shutdown_timeout_seconds == runtime.config.scene.nightly_shutdown_timeout_seconds
+    assert worker.shutdown_timeout_seconds == runtime.config.scene.generation_shutdown_timeout_seconds
     foresight = runtime.components.foresight
     assert foresight is not None
     assert foresight.read_side.behavior_tree is behavior.tree
@@ -809,11 +814,11 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
         runtime.components.conversation.source_delivery.consumers[ConversationSourceConsumer.BEHAVIOR_SESSION]
         is consumer
     )
-    # 夜线：结算在结构之前，语义树读同一棵行为树、机会表写进同一本账本旁边（语义树第 11 步）；"今天"按主体所在地算
-    from habitus.runtime.nightly import Nightly
+    # 换代：结算在读序列之前，语义树读同一棵行为树、机会表写进同一本账本旁边（语义树第 11 步）；"今天"按主体所在地算
+    from habitus.runtime.generation import Generation
 
-    nightly = worker.nightly
-    assert isinstance(nightly, Nightly)
+    nightly = generation
+    assert isinstance(nightly, Generation)
     assert nightly.behavior_tree is behavior.tree and nightly.zone == runtime.config.locale.zone()
     # 当地日历只建一份：语义树、预测层的读侧共用，整晚开头重读的就是它（2026-10-18 四方评审）
     assert nightly.scene.calendar is foresight.read_side.calendar and nightly.refresh_calendar is not None
@@ -822,16 +827,26 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert nightly.foresight is not None and nightly.foresight.store is foresight.opportunities
     assert nightly.closed_days == behavior.reduction_runner.closed_days
     assert nightly.settlement is foresight.settlement
-    # 当天的日子预期是夜里那条线的最后一步（裁定 94 第 1 条），与白天那一拍读同一种未封口的桥、写同一本账；线上那一份碰到模型
-    # 整个用不了就抛给线（裁定 94 第 8 条），白天那一份留到下一拍
+    # 当天的日子预期是换代必须成的一步，与预测拍读同一座未封口的桥（同一口径：模型调不通不抛）、写同一本账
     assert nightly.days is foresight.days and foresight.days is not None
     assert foresight.days.ledger is foresight.ledger and foresight.days.opportunities is foresight.opportunities
-    in_line = foresight.days.forming.unsealed
-    assert isinstance(in_line, UnsealedFromJudgements) and in_line.in_line
-    assert in_line.judgements is behavior.judgements and not tick.forming.unsealed.in_line  # type: ignore[attr-defined]
-    # 夜线的 Job 账只有一份：执行器写，结算与白天那一拍读同一个"这一晚跑完了没有"（裁定 94 第 1、9 条）
-    assert foresight.settlement.finished == worker.jobs.finished
-    assert tick.line_finished == worker.jobs.finished
+    assert foresight.days.forming.unsealed is tick.forming.unsealed
+    # 完成标记只有一份：换代写，结算读同一个"这一天的换代做完了没有"（裁定 94 第 9 条）
+    assert foresight.settlement.finished == generation.marks.finished
+    # 白天那道闸读同一份完成标记（F5）；续做迁移接着两支、排在最前（F1）
+    assert tick.finished == generation.marks.finished
+    assert [job.__self__ for job in generation.migration_jobs] == [  # type: ignore[attr-defined]
+        branches.session.reduction_runner.vocabulary,
+        branches.physical.reduction_runner.vocabulary,
+    ]
+    assert worker.settings.retry_base_seconds == runtime.config.scene.generation_retry_base_seconds
+    # 预测拍的水位落在这一支的预测根下；触发换代也读它；没在看的时段写进会话一支
+    assert tick.track is not None and tick.track.store is foresight.watermark
+    assert tick.track.store.root == foresight.ledger.root and tick.track.unwatched is not None
+    assert tick.track.slot.total_seconds() == runtime.config.foresight.tick_interval_seconds
+    assert generation.watermark is not None and generation.margin.total_seconds() == 45 * 60
+    # 序列读者按名字记脏日水位（实时化缺陷 5）
+    assert generation.series.name == "generation" and generation.series.logs == (behavior.reduction_runner.dirty_days,)
     # 单元历史：夜里那一拍重标、白天的单元读同一份（裁定 55 新版第 2 条）
     assert nightly.foresight.history is foresight.history and foresight.history.store.root == foresight.ledger.root
     assert tick.delivery.units.history is foresight.history.store
@@ -875,28 +890,28 @@ def test_the_runtime_starts_and_stops_the_foresight_worker(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
-def test_an_enabled_foresight_layer_that_is_not_attached_to_the_nightly_batch_is_refused(tmp_path: Path) -> None:
-    """接线漏了的话，进程照常启动、health 全绿、结算与新语义树的各拍一夜都不会跑，而配置里还开着——无处可查。"""
+def test_an_enabled_foresight_layer_that_is_not_attached_to_the_generation_is_refused(tmp_path: Path) -> None:
+    """接线漏了的话，进程照常启动、health 全绿、结算与新语义树的各步一代都不会跑，而配置里还开着——无处可查。"""
 
     runtime = _fully_enabled_runtime(tmp_path)
     components = runtime.components
-    assert components.nightly is not None
-    components.nightly.nightly.settlement = None  # type: ignore[attr-defined]
+    assert components.generation is not None
+    components.generation.generation.settlement = None  # type: ignore[assignment]
 
-    with pytest.raises(ValueError, match="first step of the nightly run"):
+    with pytest.raises(ValueError, match="settlement stage must be a step of the generation"):
         replace(components)
-    with pytest.raises(ValueError, match="nightly run must be enabled"):
-        replace(components, nightly=None)
-    components.nightly.nightly.settlement = runtime.components.foresight.settlement  # type: ignore[attr-defined, union-attr]
-    components.nightly.nightly.foresight = None  # type: ignore[attr-defined]
+    with pytest.raises(ValueError, match="the generation must be enabled"):
+        replace(components, generation=None)
+    components.generation.generation.settlement = runtime.components.foresight.settlement  # type: ignore[union-attr]
+    components.generation.generation.foresight = None
     with pytest.raises(ValueError, match="opportunity table the foresight layer reads"):
         replace(components)
 
 
-def test_the_runtime_starts_and_stops_the_nightly_worker_and_reports_how_old_the_opportunity_table_is(
+def test_the_runtime_starts_and_stops_the_generation_worker_and_reports_how_old_the_opportunity_table_is(
     tmp_path: Path,
 ) -> None:
-    """整晚那一趟自己一个常驻节拍，Runtime 起停它；健康面看它活着，接了预测层时再看机会表最晚一晚有多旧（清单 5.1、5.3）。"""
+    """换代自己一个常驻 worker，Runtime 起停它；健康面看它活着，接了预测层时再看机会表最晚一晚有多旧（清单 5.1、5.3）。"""
 
     import asyncio
     from datetime import UTC, datetime, timedelta
@@ -904,7 +919,7 @@ def test_the_runtime_starts_and_stops_the_nightly_worker_and_reports_how_old_the
     from habitus.foresight.opportunities import OpportunityTable
 
     runtime = _fully_enabled_runtime(tmp_path)
-    worker = runtime.components.nightly
+    worker = runtime.components.generation
     foresight = runtime.components.foresight
     assert worker is not None and foresight is not None
 
@@ -918,24 +933,24 @@ def test_the_runtime_starts_and_stops_the_nightly_worker_and_reports_how_old_the
         await asyncio.sleep(0.05)
         assert worker.running
         report = await runtime.health()
-        assert check(report, "nightly_worker").status.value == "healthy"
+        assert check(report, "generation_worker").status.value == "healthy"
         await runtime.stop()
         assert not worker.running
 
     asyncio.run(scenario())
     zone = runtime.config.locale.zone()
     # 放假数据有年份读不了：健康面报出来（非关键），进程照常
-    worker.nightly.scene.calendar.problems = ("2027.json: 写坏了",)  # type: ignore[attr-defined]
+    worker.generation.scene.calendar.problems = ("2027.json: 写坏了",)  # type: ignore[attr-defined]
     calendar_check = check(asyncio.run(runtime.health()), "calendar")
     assert (
         calendar_check.status.value == "degraded"
         and "2027.json" in calendar_check.detail
         and not calendar_check.critical
     )
-    worker.nightly.scene.calendar.problems = ()  # type: ignore[attr-defined]
+    worker.generation.scene.calendar.problems = ()  # type: ignore[attr-defined]
     today = datetime.now(UTC).astimezone(zone).date()
-    stale = today - timedelta(days=1)  # 昨天已定稿、今天这一晚的表还没出来：落后于"最后定稿日 + 1"（裁定 68 第 4 条）
-    worker.nightly.closed_days = lambda: (today - timedelta(days=1),)  # type: ignore[attr-defined]
+    stale = today - timedelta(days=1)  # 昨天已定稿、今天这一代的表还没出来：落后于"最后定稿日 + 1"（裁定 68 第 4 条）
+    worker.generation.closed_days = lambda: (today - timedelta(days=1),)
     foresight.opportunities.write(OpportunityTable("session", stale, stale, 15, 3, (), ()))
     report = asyncio.run(runtime.health())
     assert check(report, "opportunities_session").status.value == "degraded"
@@ -951,7 +966,7 @@ def test_every_derived_store_keeps_the_configured_number_of_fallback_generations
 
     runtime = _fully_enabled_runtime(tmp_path, lifecycle={"fallback_generations": 4})
     foresight = runtime.components.foresight
-    scene = runtime.components.nightly.nightly.scene  # type: ignore[union-attr]
+    scene = runtime.components.generation.generation.scene  # type: ignore[union-attr]
     assert foresight is not None
     assert scene.relations.fallback_generations == 4
     assert foresight.opportunities._files.retained_nights == 5

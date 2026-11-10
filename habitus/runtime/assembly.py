@@ -140,7 +140,7 @@ from habitus.memory.workflow import (
 )
 from habitus.model_client import ProviderFactory, StructuredChatClient
 from habitus.pre.conversation import ConversationAdapterRegistry
-from habitus.runtime.behavior import behavior_domain_configs, build_behavior_components, rereader_of, retry_stage_of
+from habitus.runtime.behavior import behavior_domain_configs, build_behavior_components, rereader_of
 from habitus.runtime.components import (
     RuntimeComponents,
     RuntimeConversation,
@@ -160,6 +160,7 @@ from habitus.runtime.foresight import (
     build_outlet_consumer,
     build_reminded_lookup,
     build_reminder_responses,
+    foresight_ledger_lease,
 )
 from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
 from habitus.runtime.lifecycle import LifecycleWorker
@@ -171,9 +172,14 @@ from habitus.runtime.lifecycle_retry import retry_ledger
 from habitus.runtime.lifecycle_scene import SceneParticipant, scene_vocabulary_versions
 from habitus.runtime.lifecycle_sources import ConversationSourceParticipant, ConversationSourceRecoveryParticipant
 from habitus.runtime.runtime import Runtime
-from habitus.runtime.scene import build_nightly, build_nightly_worker, build_scene_nightly, model_tracer, nightly_line
+from habitus.runtime.scene import assemble_generation, generation_marks, generation_traces, model_tracer
 from habitus.runtime.scene_config import relation_thresholds
-from habitus.runtime.session_lane import BehaviorSessionConsumer, answered_question_tools, session_salvager
+from habitus.runtime.session_lane import (
+    BehaviorSessionConsumer,
+    answered_question_tools,
+    session_salvager,
+    unwatched_writer,
+)
 from habitus.runtime.unsealed import UnsealedFromJudgements
 from habitus.runtime.vector_stores import build_vector_store
 from habitus.runtime.worker import MemoryWorker
@@ -567,18 +573,25 @@ def build_runtime(
         source_settled=behavior_settled,
     )
     # behavior 关着而 scene / foresight 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
-    # 所以这里 behavior_components 为 None 时整晚那一趟与预测层必然都没开，直接跳过即可。
+    # 所以这里 behavior_components 为 None 时换代与预测层必然都没开，直接跳过即可。
     # 预测层站在语义树之上，所以排在后面组装；未启用时 build 自己返回 None。
     # TODO(BHV-SESSION-LANE-001)：预测层按不按 lane 分还没定（用户 2026-10-11：「这个我还没有考虑好，因为预测层的
-    # 逻辑还没有写好」）。现状：整晚那一趟与预测层只接会话那一支（行为树、词表、定稿日、未封口的判断都取自会话一支），
-    # 物理那一支没有语义树夜批、没有预测层、也不结算。定了之后要么再起一份接物理一支，要么改成同时读两支。
+    # 逻辑还没有写好」）。现状：换代与预测层只接会话那一支（行为树、词表、定稿日、未封口的判断都取自会话一支），
+    # 物理那一支没有语义树、没有预测层、也不结算。定了之后要么再起一份接物理一支，要么改成同时读两支。
     session_behavior = None if behavior_components is None else behavior_components.session
-    # 当地日历只建一份：语义树与预测层读同一份，夜批开头重读放假数据时两边一起换（2026-10-18 四方评审）
+    # 当地日历只建一份：语义树与预测层读同一份，换代开头重读放假数据时两边一起换（2026-10-18 四方评审）
     calendar = None if session_behavior is None else local_calendar(config)
     # 读账的两个值（裁定 49）：α 借关系检验前向验证的显著性；遗忘半衰期是几次机会（裁定 57，config.foresight 的临时值）
     evidence = None if session_behavior is None or not config.foresight.enabled else evidence_of(config)
-    # 夜线的 Job 账与本地 trace 各一份：执行器写账，结算认停掉的那天、白天那一拍建不建预期都读它（裁定 94 第 1、9 条）；没有语义树就没有夜线
-    night_line = nightly_line(config, managed_observability) if config.scene.enabled and session_behavior else None
+    # 换代的完成标记与本地 trace 各一份：换代写标记，结算认没有这一代的那天读它（裁定 94 第 9 条）；trace 换代与预测拍都写。
+    # 没有语义树就没有换代
+    generating = config.scene.enabled and session_behavior is not None
+    marks = generation_marks(config) if generating else None
+    traces = generation_traces(config, managed_observability) if generating else None
+    # 预测根租约（写账本的那几步与每个预测拍持有，用户 11-10「两把锁」）：换代与预测拍共用这一个实例（含进程内那把锁）
+    ledger_lease = (
+        foresight_ledger_lease(config, resolved_lock.lock_store) if generating and config.foresight.enabled else None
+    )
     foresight_components = (
         None
         if session_behavior is None or evidence is None
@@ -597,42 +610,41 @@ def build_runtime(
             # 出口认提问时拿类名配题目（词表给人看的名字；编号仍是身份）
             kind_label=_kind_label(VocabularyReader(session_behavior.kind_store)),
             question_tools=adapters.question_tools(),
-            line_finished=None if night_line is None else night_line.jobs.finished,
+            finished=None if marks is None else marks.finished,
         )
     )
     if foresight_components is not None and session_behavior is not None and evidence is not None:
-        # 白天那一拍的常驻 worker：未封口的判断经那座桥（判断存储 + 消费账本 + 归约的白天归类）读，
-        # 词表版本记在预期上。
-        def unsealed_reader(*, in_line: bool) -> UnsealedFromJudgements:
-            return UnsealedFromJudgements(
-                session_behavior.judgements,
-                session_behavior.reduction_runner.ledger,
-                session_behavior.reduction_runner.kinds,
-                in_line=in_line,
-            )
-
+        # 预测拍的常驻 worker：未封口的判断经那座桥（判断存储 + 消费账本 + 归约的白天归类）读，词表版本记在预期上。
+        # 换代里的日子预期读同一座桥（模型此刻用不了只是这一次没归上类，不抛：与预测拍同口径）
+        unsealed = UnsealedFromJudgements(
+            session_behavior.judgements,
+            session_behavior.reduction_runner.ledger,
+            session_behavior.reduction_runner.kinds,
+        )
         kind_store = session_behavior.kind_store
         tick = build_foresight_tick(
             foresight_components,
             config=config,
-            unsealed=unsealed_reader(in_line=False),
+            unsealed=unsealed,
             evidence=evidence,
             structured_chat=structured_chat,
             vocabulary_version=lambda: kind_store.read().version,
             vocabulary_migrating=lambda: kind_store.read_migration() is not None,
             observer=operation_observer,
             reread=rereader_of(session_behavior),
-            trace=None if night_line is None else night_line.traces.sink,
+            trace=None if traces is None else traces.sink,
+            # 没在看的时段写成会话一支的「未观测」空判断（实时化方案第 6 节），由会话一支的归约落树
+            unwatched=unwatched_writer(None if behavior_components is None else behavior_components.session_lane),
+            lease=ledger_lease,
         )
         foresight_components = dataclasses.replace(
             foresight_components,
             worker=build_foresight_worker(tick, config=config, observer=operation_observer),
-            # 当天的日子预期：夜里那条线的最后一步（裁定 94 第 1 条），与白天那一拍读同一种未封口的桥；线上那一份碰到模型
-            # 整个用不了就抛给线停下（裁定 94 第 8 条），白天那一份留到下一拍
+            # 当天的日子预期：换代必须成的一步，与预测拍读同一座未封口的桥
             days=build_foresight_days(
                 foresight_components,
                 config=config,
-                unsealed=unsealed_reader(in_line=True),
+                unsealed=unsealed,
                 evidence=evidence,
                 vocabulary_version=lambda: kind_store.read().version,
                 vocabulary_migrating=lambda: kind_store.read_migration() is not None,
@@ -736,38 +748,20 @@ def build_runtime(
         ConversationSourceRecoveryParticipant(source_recovery, source_coordinator, wake_memory=worker.wake),
     ]
 
-    nightly_worker = None
-    scene = None
-    if session_behavior is not None and night_line is not None:
-        # 夜线（裁定 94 第 1 条）：归约把前一天定稿 → 这一晚入队 5 段 Job（前置处理 → 结算 → 词表 → 结构 → 日子预期），按先后跑。
-        scene = build_scene_nightly(
+    scene, generation_worker = (None, None)
+    if session_behavior is not None and behavior_components is not None and marks is not None and traces is not None:
+        scene, generation_worker = assemble_generation(
             config,
-            behavior_tree=session_behavior.tree,
+            behavior=behavior_components,
             calendar=calendar,
-            kind_store=session_behavior.kind_store,
             structured_chat=structured_chat,
+            foresight=foresight_components,
+            marks=marks,
+            traces=traces,
+            ledger_lease=ledger_lease,
+            lock_store=resolved_lock.lock_store,
+            observer=operation_observer,
         )
-        if scene is not None:
-            nightly_worker = build_nightly_worker(
-                config,
-                build_nightly(
-                    config,
-                    behavior_tree=session_behavior.tree,
-                    scene=scene,
-                    kind_store=session_behavior.kind_store,
-                    closed_days=session_behavior.reduction_runner.closed_days,
-                    foresight=foresight_components,
-                    dirty_days=session_behavior.reduction_runner.dirty_days,
-                    retry=retry_stage_of(() if behavior_components is None else behavior_components),
-                    structured_chat=structured_chat,
-                    vocabulary_jobs=()
-                    if behavior_components is None
-                    else tuple(branch.reduction_runner.nightly_vocabulary for branch in behavior_components),
-                ),
-                line=night_line,
-                lock_store=resolved_lock.lock_store,
-                observer=operation_observer,
-            )
     # 行为侧、语义树、预测层的释放各一个参与者（26 号清单 6.14），挂进同一个生命周期 Worker
     scene_versions = None
     if scene is not None:
@@ -869,7 +863,7 @@ def build_runtime(
             lifecycle_worker=lifecycle_worker,
         ),
         behavior=behavior_components,
-        nightly=nightly_worker,
+        generation=generation_worker,
         foresight=foresight_components,
     )
     return Runtime(config, components, conversation_adapters=adapters)

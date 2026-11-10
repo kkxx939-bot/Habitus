@@ -175,8 +175,9 @@ runtime/foresight_ledger.py
 runtime/foresight_nightly_files.py
 runtime/foresight_outlet.py
 runtime/foresight_outlet_store.py
+runtime/generation_marks.py
+runtime/generation_watermark.py
 runtime/lifecycle_memory.py
-runtime/nightly_jobs.py
 runtime/scene_vocabulary.py
 
 # G6 读回落盘：基础设施

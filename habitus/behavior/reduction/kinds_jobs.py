@@ -1,5 +1,5 @@
-"""词表的两件整理活，在归约 sweep 锁下执行（改树与发布互斥）。都在夜里那条线上、结构那一段之前，不挂任何钟点（裁定 94 第 8、9 条）：
-线经 ``BehaviorReductionRunner.nightly_vocabulary`` 调 ``nightly``——
+"""词表的两件整理活，在归约 sweep 锁下执行（改树与发布互斥）。都在换代里、读序列之前，不挂任何钟点（裁定 94 第 8、9 条）：
+换代经 ``BehaviorReductionRunner.nightly_vocabulary`` 调 ``nightly``——
 
 - 每晚新增（``grow``）：每晚一次；
 - 定期拆改（``revise``）：这一晚所在的拆改周期里还没拆改过才跑（``revision_due``；所有用户每周都跑，放行靠证据规则与锚点自检，
@@ -34,7 +34,7 @@ class JobsOutcome:
     days: frozenset[date] = frozenset()
     model_calls: int = 0
     signals: tuple[str, ...] = ()
-    #: 只给观测（夜线的 ``nightly.vocabulary`` span）：每晚新增开始时待定池里几条、建了哪些类、这一晚拆改到没到期、
+    #: 只给观测（换代词表那一步的 ``generation.vocabulary`` span 与每代报告）：每晚新增开始时待定池里几条、建了哪些类、这一晚拆改到没到期、
     #: 拆出 / 并掉几类、迁移计划挪了几条。
     pool: int = 0
     created: tuple[str, ...] = ()

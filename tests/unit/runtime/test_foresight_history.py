@@ -86,13 +86,14 @@ def test_the_night_records_every_finished_day_once_and_writes_one_history(tmp_pa
     assert len(store.records("session")) == 4 and open_item.day not in store.recorded_days("session")
 
 
-def test_the_history_of_a_night_only_reads_what_was_known_before_it(tmp_path) -> None:
-    """第 N 晚记下的不看 N 那天及以后才写下的改判。"""
+def test_the_history_records_a_day_with_every_fact_written_by_the_moment_it_records(tmp_path) -> None:
+    """实时化缺陷 3：单元历史记某天时按"记录这一刻"取账上已写下的事实——结算在第 N 天零点之后才写下的后补（并同一拍把那天标结完），
+    同一代重标时就带上，不按过期待决记下（原来只看那一晚零点之前写下的，那天之后再也不重记）。"""
 
     run, ledger, store = stage(tmp_path)
     item = gym(NIGHT - timedelta(days=7))
     record(ledger, item, came=False)
-    ledger.append_fact(  # 之后才补做、补做写在这一晚之后：这一晚还不知道
+    ledger.append_fact(  # 补做写在这一晚零点之后（换代里结算刚写下）
         AccountFact(
             item.account,
             item.formed_at,
@@ -105,8 +106,8 @@ def test_the_history_of_a_night_only_reads_what_was_known_before_it(tmp_path) ->
     )
     table, line = nothing()
     run.run(night=NIGHT, table=table, line=line)  # type: ignore[arg-type]
-    (moment,) = store.latest("session").of("s-k0002")  # type: ignore[union-attr]
-    assert not moment.came and moment.weight == pytest.approx(1.0)
+    (moment,) = store.records("session")
+    assert moment.expectation_id == item.expectation_id and moment.strength == pytest.approx(0.0)
 
 
 def test_a_day_reopened_by_a_resettle_is_recorded_again_when_it_finishes(tmp_path) -> None:
@@ -246,3 +247,20 @@ def test_an_occurrence_two_overlapping_day_expectations_settled_on_is_one_moment
     (moment,) = store.latest("session").labelled("s-k0002")  # type: ignore[union-attr]
     assert moment.expectation_ids == ("gym-2026-09-06",) and moment.past.came
     assert {item.occurrence_uri for item in store.records("session")} == {found}
+
+
+def test_the_unit_reader_sees_a_rewritten_snapshot_of_the_same_night(tmp_path) -> None:
+    """实时化缺陷 7（E14）：同一晚的单元历史快照被重写（重跑那一代），读侧的缓存按文件此刻的样子失效，读到新内容。"""
+
+    from habitus.runtime.foresight_units import UnitPlanner
+
+    NIGHT_AT = datetime.combine(NIGHT - timedelta(days=1), datetime.min.time(), tzinfo=CST)
+
+    _run, _ledger, store = stage(tmp_path)
+    planner = UnitPlanner(store, evidence=EVIDENCE, prior_share=1 / 3)
+    first = UnitHistory("session", NIGHT, {})
+    store.write(first)
+    assert planner.history_of(None) == first
+    rewritten = UnitHistory("session", NIGHT, {"s-k0009": (Moment(PastMoment(NIGHT_AT, frozenset({"a"}), True), ("x",)),)})
+    store.write(rewritten)
+    assert planner.history_of(None) == rewritten

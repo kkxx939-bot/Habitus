@@ -159,7 +159,7 @@ def test_the_day_expectations_wait_for_tonights_table(tmp_path) -> None:
     ledger, opportunities = stores(tmp_path, site)  # 表是 TODAY 那一晚的
     tomorrow = TODAY + timedelta(days=1)
     stale = asyncio.run(days(site, ledger, opportunities, at(tomorrow, 0, 15)).run_once())
-    assert stale.skipped == "今天这一晚的机会表还没有" and ledger.expectations_on(tomorrow) == ()
+    assert stale.skipped == "今天这一代的机会表还没有" and ledger.expectations_on(tomorrow) == ()
     root = tmp_path / "empty"
     none = days(site, ForesightLedgerStore(root), OpportunityStore(root), at(TODAY, 1, 15))
     assert asyncio.run(none.run_once()).skipped == "还没有机会表"
@@ -168,56 +168,36 @@ def test_the_day_expectations_wait_for_tonights_table(tmp_path) -> None:
     assert asyncio.run(migrating.run_once()).skipped == "词表迁移还没做完" and ledger.expectations_on(TODAY) == ()
 
 
-def test_a_day_whose_line_stopped_after_writing_the_table_builds_nothing_in_the_daytime(tmp_path) -> None:
-    """裁定 94 第 1 条（只有整条线跑完，这一晚才算跑过）：今天这一晚的表已经写出、线却在那之后停了（单元历史写失败、日子预期
-    那一段出错）——白天那一拍也不建事件、情境预期，只报原因；与结算"停掉那天按看不到"读同一个判断（夜线 Job 账的
-    ``NightJobs.finished``）。线跑完了照常建；线的记录够不着（None）也不当它跑完了。撤回 ``tonight_table`` 的 ``line_finished``
-    这里就红。"""
-
-    from habitus.runtime.nightly import STEPS
-    from habitus.runtime.nightly_jobs import FAILED, SUCCEEDED, NightJob, NightJobs, NightLedger
-
-    def mark(night, *, finished: bool) -> None:  # type: ignore[no-untyped-def]
-        states = [SUCCEEDED] * 5 if finished else [SUCCEEDED] * 4 + [FAILED]
-        jobs.write(
-            NightLedger(
-                night, at(night, 1, 15), tuple(NightJob(s, state=x) for s, x in zip(STEPS, states, strict=True))
-            )
-        )
+def test_the_daytime_gate_only_asks_whether_the_table_is_todays_generation(tmp_path) -> None:
+    """白天那道闸（实时化方案第 3 节）：只看盘上最晚那张表是不是今天这一代的——是就建，不再等"今晚的线整条跑完"（夜线的
+    Job 账删了）。表不是今天的只递不建（见 ``test_the_day_expectations_wait_for_tonights_table``）。"""
 
     site, _codes = site_with_three_mornings(tmp_path)
-    ledger, opportunities = stores(tmp_path, site)  # 表是 TODAY 那一晚的
+    ledger, opportunities = stores(tmp_path, site)  # 表是 TODAY 这一代的
     publish(site.behavior_tree, TODAY, "讨论方案", 10, 0)
-    jobs = NightJobs(tmp_path / "nightly" / "jobs", artifact_root=tmp_path, kept_nights=366)
     run = tick(tmp_path, site, ledger, opportunities, at(TODAY, 10, 15))
-    run.line_finished = jobs.finished
-    assert asyncio.run(run.run_once()).skipped == "今天这一晚的线还没跑完"  # 记录够不着
-    mark(TODAY - timedelta(days=1), finished=True)
-    mark(TODAY, finished=False)  # 表写出后停下
     report = asyncio.run(run.run_once())
-    assert report.skipped == "今天这一晚的线还没跑完" and report.recorded == 0 and ledger.expectations_on(TODAY) == ()
-    mark(TODAY, finished=True)
-    assert asyncio.run(run.run_once()).recorded == 1
+    assert report.skipped is None and report.recorded == 1
 
 
-def test_each_tick_is_a_span_with_the_gate_and_what_it_formed(tmp_path) -> None:
-    """trace 细度（共享说明末节）：白天那一拍一个 ``foresight.tick`` span，带时刻、lane、"今晚的表"闸放没放行及原因、建了几条、
-    递了几条；落夜线同一份本地 trace（按当地日子一天一份）。"""
+def test_each_tick_is_a_span_with_the_gate_what_it_formed_and_how_late_it_started(tmp_path) -> None:
+    """trace 细度：每拍一个 ``foresight.tick`` span，带时刻、lane、白天那道闸放没放行及原因、建了几条、递了几条、离它该开始的
+    槽边界晚了多少、一拍用时（实时化方案第 10 节 E12）；落换代同一份本地 trace（按当地日子一天一份）。"""
 
-    from habitus.runtime.nightly_trace import TraceFiles
+    from habitus.runtime.generation_trace import TraceFiles
 
     site, _codes = site_with_three_mornings(tmp_path)
     ledger, opportunities = stores(tmp_path, site)
     traces = TraceFiles(tmp_path / "traces", artifact_root=tmp_path)
-    run = tick(tmp_path, site, ledger, opportunities, at(TODAY, 10, 15))
+    run = tick(tmp_path, site, ledger, opportunities, at(TODAY, 10, 15) + timedelta(seconds=7))
     run.trace = traces.sink
-    run.line_finished = lambda _night: None
-    asyncio.run(run.run_once())
+    asyncio.run(run.run_once(scheduled=at(TODAY, 10, 15)))
     (span,) = traces.read(TODAY)
     attributes = span["attributes"]
     assert span["name"] == "foresight.tick" and span["parent_id"] is None
-    assert attributes["lane"] == "session" and attributes["gate_open"] is False
-    assert attributes["skipped"] == "今天这一晚的线还没跑完" and attributes["recorded"] == 0 and "spoken" in attributes
+    assert attributes["lane"] == "session" and attributes["gate_open"] is True
+    assert attributes["skipped"] == "" and attributes["recorded"] == 0 and "spoken" in attributes
+    assert attributes["lateness_seconds"] == 7.0 and "tick_seconds" in attributes
 
 
 def test_without_a_table_the_tick_only_reports_why(tmp_path) -> None:
@@ -472,6 +452,8 @@ def test_the_tick_looks_back_over_its_own_interval_when_forming(tmp_path) -> Non
 
 
 def _minute_tick(site: Site, ledger, opportunities, clock: list[datetime]) -> ForesightTick:  # type: ignore[no-untyped-def]
+    from habitus.runtime.generation_watermark import TickTrack, TickWatermarkStore
+
     read_side = ForesightReadSide(site.behavior_tree, SUBJECT, LocalCalendar(), ZoneInfo("Asia/Shanghai"))
     return ForesightTick(
         ledger,
@@ -482,6 +464,7 @@ def _minute_tick(site: Site, ledger, opportunities, clock: list[datetime]) -> Fo
         recent=35,
         tolerance=TOLERANCE,
         tick_seconds=60.0,
+        track=TickTrack(TickWatermarkStore(ledger.root), slot=timedelta(minutes=1), tolerance_slots=2),
     )
 
 
@@ -492,13 +475,14 @@ def test_before_tonights_table_the_tick_builds_no_expectation(tmp_path) -> None:
     ledger, opportunities = stores(tmp_path, site, night=TODAY - timedelta(days=1))
     publish(site.behavior_tree, TODAY, "讨论方案", 10, 0)
     report = asyncio.run(tick(tmp_path, site, ledger, opportunities, at(TODAY, 10, 15)).run_once())
-    assert report.skipped == "今天这一晚的机会表还没有" and report.recorded == 0
+    assert report.skipped == "今天这一代的机会表还没有" and report.recorded == 0
     assert ledger.expectations_on(TODAY) == ()
 
 
 def test_the_first_tick_after_tonights_table_catches_up_from_midnight(tmp_path) -> None:
-    """表出来后的第一拍从零点起看：讨论方案 10:00，改代码的时窗在 10:49 之前就关了——表出来后第一拍（10:50）照样建（补建），
-    同一拍对象之后的拍只按一拍的宽度看，已经补建过的那天不再从零点看（对照：先跑过一拍的同样时刻不建）。
+    """表出来后的第一拍从零点起看：讨论方案 10:00，改代码的时窗在 10:49 之前就关了——表出来后第一拍（10:50）照样建（补建）。
+    之后的拍从落盘的水位（上一次建预期看到的那一刻）起看：09:00 看过一拍、10:50 才有下一拍（中间合盖），10:00–10:49 那段照样
+    看到、照样建（实时化缺陷 1：原来按 ``now - 一拍`` 只看 10:49 之后，这一条就丢了——没做的那一侧不建，账往上偏）。
     补建抓不回来的（已写进说明）：前因做完到第一拍已过转移窗口，「同一条链」那一段的预期补不回来。"""
 
     site, _codes = site_with_three_mornings(tmp_path)
@@ -511,12 +495,174 @@ def test_the_first_tick_after_tonights_table_catches_up_from_midnight(tmp_path) 
     root = tmp_path / "caught-up"
     other_ledger, other_tables = stores(root, site)
     caught_up = _minute_tick(site, other_ledger, other_tables, [at(TODAY, 9, 0)])
-    asyncio.run(caught_up.run_once())  # 09:00 已用今天这一晚的表看过一拍
+    asyncio.run(caught_up.run_once())  # 09:00 已用今天这一代的表看过一拍
     caught_up._clock = lambda: at(TODAY, 10, 50)  # type: ignore[method-assign]
     asyncio.run(caught_up.run_once())
-    assert [item for item in other_ledger.expectations_on(TODAY) if item.source == "事件"] == []
+    assert [item.kind_token for item in other_ledger.expectations_on(TODAY) if item.source == "事件"] == [CODE]
 
     late_root = tmp_path / "late"
     late_ledger, late_tables = stores(late_root, site)
     asyncio.run(_minute_tick(site, late_ledger, late_tables, [at(TODAY, 11, 30)]).run_once())
     assert [item for item in late_ledger.expectations_on(TODAY) if item.source == "事件"] == []
+
+
+def test_a_gap_between_ticks_is_written_as_unwatched_and_the_watermark_drives_the_look_back(tmp_path) -> None:
+    """实时化方案第 5、6 节（缺陷 1，E7、E15）：每拍跑完把水位落盘；下一拍离上一拍超过容差（2 槽），中间那段交会话一支写成
+    「未观测」，落盘它的结尾；第一次启动（没有水位）不写。往回看的起点：今天这一代第一次建预期从零点起，之后从上一次建预期看到的
+    那一刻（落盘的 ``formed_through``）——合盖 10:00–13:45 醒来那一拍从 10:00 起看，不是 ``now - 一拍``。"""
+
+    from habitus.runtime.generation_watermark import TickTrack, TickWatermarkStore
+
+    site, _codes = site_with_three_mornings(tmp_path)
+    ledger, opportunities = stores(tmp_path, site)
+    written: list[tuple[datetime, datetime]] = []
+    store = TickWatermarkStore(tmp_path / "foresight" / "session")
+    track = TickTrack(
+        store, slot=timedelta(minutes=15), tolerance_slots=2, unwatched=lambda start, end: written.append((start, end))
+    )
+    clock = [at(TODAY, 10, 0)]
+    run = tick(tmp_path, site, ledger, opportunities, clock[0])
+    run.tick = timedelta(minutes=15)
+    run._clock = lambda: clock[0]  # type: ignore[method-assign]
+    run.track = track
+    looked: list[datetime | None] = []
+    form = run.forming.form
+
+    def spy(recent, table, **kwargs):  # type: ignore[no-untyped-def]
+        looked.append(kwargs["looked_since"])
+        return form(recent, table, **kwargs)
+
+    run.forming.form = spy  # type: ignore[method-assign]
+    first = asyncio.run(run.run_once())
+    assert first.unwatched is None and written == []  # 第一次启动：不知道之前在不在跑
+    assert looked == [at(TODAY, 0, 0)]  # 今天这一代第一次建预期：从零点起看
+    assert store.read().ticked_at == at(TODAY, 10, 0) and store.read().formed_through == at(TODAY, 10, 0)
+    clock[0] = at(TODAY, 10, 15)
+    assert asyncio.run(run.run_once()).unwatched is None and looked[-1] == at(TODAY, 10, 0)
+    clock[0] = at(TODAY, 13, 45)  # 合盖三个半小时
+    late = asyncio.run(run.run_once())
+    assert written == [(at(TODAY, 10, 15), at(TODAY, 13, 45))] and late.unwatched == written[0]
+    assert looked[-1] == at(TODAY, 10, 15)  # 从上一次建预期看到的那一刻起看
+    assert store.read().unwatched_until == at(TODAY, 13, 45)
+
+    def broken(_start, _end) -> None:  # type: ignore[no-untyped-def]
+        raise OSError("judgement store")
+
+    track.unwatched = broken
+    clock[0] = at(TODAY, 18, 0)
+    with pytest.raises(OSError):
+        asyncio.run(run.run_once())
+    assert store.read().ticked_at == at(TODAY, 13, 45)  # 写不成：水位不推，下一拍再写
+
+
+def test_the_daytime_gate_waits_for_todays_generation_to_be_complete(tmp_path) -> None:
+    """F5：表是今天的、可今天这一代还没完成（机会表写出了、日子预期或完成标记没成；下一眼重做整代会重写这张表）——预测拍不建
+    预期，只报原因；完成标记读不了也不建。今天的完成标记在了才建。"""
+
+    from habitus.runtime.foresight_forming import MARK_UNREADABLE, UNFINISHED
+    from habitus.runtime.generation_marks import GenerationMarkError
+
+    site, _codes = site_with_three_mornings(tmp_path)
+    ledger, opportunities = stores(tmp_path, site)  # 表是 TODAY 这一代的
+    publish(site.behavior_tree, TODAY, "讨论方案", 10, 0)
+    run = tick(tmp_path, site, ledger, opportunities, at(TODAY, 10, 15))
+    done: list[bool | None] = [None]
+    run.finished = lambda _day: done[0]
+    assert asyncio.run(run.run_once()).skipped == UNFINISHED and ledger.expectations_on(TODAY) == ()
+    done[0] = False
+    assert asyncio.run(run.run_once()).skipped == UNFINISHED
+
+    def broken(_day):  # type: ignore[no-untyped-def]
+        raise GenerationMarkError("generation mark is corrupt")
+
+    run.finished = broken
+    assert asyncio.run(run.run_once()).skipped == MARK_UNREADABLE
+    done[0] = True
+    run.finished = lambda _day: done[0]
+    assert asyncio.run(run.run_once()).recorded == 1
+
+
+def test_a_tick_watermark_with_a_repeated_key_is_refused(tmp_path) -> None:
+    """F7：水位文件里同一个键写了两次——报错，不让后一个悄悄盖掉前一个。"""
+
+    from habitus.runtime.generation_watermark import TickWatermark, TickWatermarkError, TickWatermarkStore
+
+    store = TickWatermarkStore(tmp_path)
+    store.write(TickWatermark(ticked_at=at(TODAY, 10, 0)))
+    text = store.path.read_text(encoding="utf-8")
+    store.path.write_text(text.replace("{", '{\n  "ticked_at": null,', 1), encoding="utf-8")
+    with pytest.raises(TickWatermarkError, match="repeats"):
+        store.read()
+
+
+# ── 第二轮修复 G2：递送补被挤掉的那一拍，读数"隔了几拍" ─────────────────────────────
+
+
+def test_the_tick_hands_delivery_the_last_watched_moment_unless_it_just_wrote_unwatched(tmp_path) -> None:
+    """递送的起点 = max(上一拍落盘的系统确知在看到的那一刻, 此刻 − 2 拍)（``JudgeMaterials.since``）。第一次启动（盘上没有
+    水位）、这一拍开头刚写了「未观测」时是 None（递送从此刻 − 1 拍起，没在看的时段不补说——``begin`` 写完空白已把水位推到此刻，
+    不能拿它当起点）。span 读数 ``ticks_since_previous`` 记这一拍离上一拍隔了几拍（被挤掉一拍是 2）。"""
+
+    from habitus.runtime.foresight_delivery import DeliveryReport
+    from habitus.runtime.generation_watermark import TickTrack, TickWatermarkStore
+
+    site, _codes = site_with_three_mornings(tmp_path)
+    ledger, opportunities = stores(tmp_path, site)
+    clock = [at(TODAY, 10, 0)]
+    run = tick(tmp_path, site, ledger, opportunities, clock[0])
+    run.tick = timedelta(minutes=15)
+    run._clock = lambda: clock[0]  # type: ignore[method-assign]
+    run.track = TickTrack(
+        TickWatermarkStore(tmp_path / "foresight" / "session"), slot=timedelta(minutes=15), tolerance_slots=2
+    )
+    handed: list[datetime | None] = []
+
+    class Delivery:
+        current = staticmethod(lambda token: (token,))
+
+        tick = timedelta(minutes=15)
+
+        async def run_once(self, now, materials):  # type: ignore[no-untyped-def]
+            handed.append(materials.since)
+            return DeliveryReport(now, 0, 0)
+
+    run.delivery = Delivery()  # type: ignore[assignment]
+    ticks = []
+    for hour, minute in ((10, 0), (10, 15), (10, 45), (14, 0)):
+        clock[0] = at(TODAY, hour, minute)
+        ticks.append(asyncio.run(run.run_once()).ticks_since_previous)
+    assert handed == [None, at(TODAY, 10, 0), at(TODAY, 10, 15), None]  # 10:45：max(10:15, 10:45 − 30 分)
+    assert ticks == [None, 1, 2, 13]
+
+
+def test_the_look_back_follows_the_unwatched_tolerance(tmp_path) -> None:
+    """用户 11-10「跟着容差走」：容差 3 槽时，挤掉两拍（空当 3 槽，不写「未观测」）的这一拍交给递送的起点就是上一拍；
+    空当 4 槽写了「未观测」，交 None。"""
+
+    from habitus.runtime.foresight_delivery import DeliveryReport
+    from habitus.runtime.generation_watermark import TickTrack, TickWatermarkStore
+
+    site, _codes = site_with_three_mornings(tmp_path)
+    ledger, opportunities = stores(tmp_path, site)
+    clock = [at(TODAY, 10, 0)]
+    run = tick(tmp_path, site, ledger, opportunities, clock[0])
+    run.tick = timedelta(minutes=15)
+    run._clock = lambda: clock[0]  # type: ignore[method-assign]
+    run.track = TickTrack(
+        TickWatermarkStore(tmp_path / "foresight" / "session"), slot=timedelta(minutes=15), tolerance_slots=3
+    )
+    handed: list[datetime | None] = []
+
+    class Delivery:
+        current = staticmethod(lambda token: (token,))
+        tick = timedelta(minutes=15)
+
+        async def run_once(self, now, materials):  # type: ignore[no-untyped-def]
+            handed.append(materials.since)
+            return DeliveryReport(now, 0, 0)
+
+    run.delivery = Delivery()  # type: ignore[assignment]
+    for hour, minute in ((10, 0), (10, 45), (11, 45)):
+        clock[0] = at(TODAY, hour, minute)
+        asyncio.run(run.run_once())
+    assert handed == [None, at(TODAY, 10, 0), None]

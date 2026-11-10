@@ -1,4 +1,4 @@
-"""夜批：第 N 晚把语义树的几步按固定顺序跑一遍（语义树新方案 ``13`` 第五节）。
+"""换代里语义树那一段：第 N 代把语义树的几步按固定顺序跑一遍（语义树新方案 ``13`` 第五节；原来的夜批）。
 
 顺序是**线性的、不级联的**（派生树按固定先后处理已封口的历史，不做"输入又变了就重建"）：
 
@@ -22,9 +22,10 @@ B4 读的是盘上**全部**已映射的命中（不只今天）：关系每晚�
 **桥不读命中**：概念记着自己的类，节律按类编号从序列算（``temporal``；基础 / 细分 = 自己那个类，汇总 = 成员类合起来），
 所以桥在映射之前就定了。常态是映射的**材料**，按裁定**不含当天**。
 
-**跑法是可注入的对象**：组合根的 ``runtime/nightly.py`` 把结算、它与机会表串起来，``NightlyWorker`` 定拍。
+**跑法是可注入的对象**：组合根的 ``runtime/generation.py`` 把结算、它与机会表串成换代，``GenerationWorker`` 定拍。
 
-**失败在哪停**：映射里模型失败不塌整天（映射器自己记未决）。
+**失败在哪停**：映射里模型失败不塌整天（映射器自己记未决）。换代里各步是尽力而为（``run`` 的 ``failures``）：一步没做成走退路，
+时间线与材料照样算给机会表。
 
 **不卡事件循环**：夜批跑在本地服务的事件循环上，读整支概念、同步词表、节律、时间线、两两检验与折叠、机会表的材料这些
 纯计算都下沉到线程（``asyncio.to_thread``）；循环上只留调模型与落盘。
@@ -42,6 +43,7 @@ from habitus.behavior.uri import BehaviorURI
 from habitus.conditions import DayTypeCalendar
 from habitus.foundation.tracing import set_attributes, span
 from habitus.infrastructure.lifecycle import RetryLedger
+from habitus.model_client import MODEL_UNUSABLE, ModelUnreachable
 from habitus.runtime.scene_advice import RelationAdvice
 from habitus.runtime.scene_authoring import ConceptAuthoring
 from habitus.runtime.scene_night_mapping import DayMappingReport, MappingStage, select_mapping_days
@@ -121,6 +123,8 @@ class NightReport:
     relations: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
     transitions: int = 0
     signals: tuple[str, ...] = ()
+    #: B4 这一代没判（模型整个调不通，关系沿用上一代）：为什么；判了是 None。
+    relations_held: str | None = None
     #: 这一晚的材料（见 ``NightMaterials``）；不进比较与打印。
     materials: NightMaterials | None = field(default=None, compare=False, repr=False)
 
@@ -229,52 +233,28 @@ class SceneNightlyRun:
             advice=lambda: self.advice,
         )
 
-    async def run(self, *, series: EventSeries, now: datetime) -> NightReport:
+    async def run(
+        self,
+        *,
+        series: EventSeries,
+        now: datetime,
+        failures: list[tuple[str, BaseException]] | None = None,
+        relations_held: str | None = None,
+    ) -> NightReport:
         """第 ``series.cutoff`` 晚，``now`` 是夜批时刻。节律从同一份 ``series`` 经 temporal 算（裁定 59）。B1–B4 各一个 span
-        （``scene.b1``…``scene.b4``），属性是各步的输入、输出条数与关键读数。"""
+        （``scene.b1``…``scene.b4``），属性是各步的输入、输出条数与关键读数。
+
+        ``failures`` 给了就是换代的尽力而为（实时化方案第 3 节）：某一步抛了，记进 ``failures``（哪一步, 异常）、走退路接着做——
+        B1 / B2 没做成按盘上现有的概念集、B3 没做成这一次不映射、B4 没做成这一次不写关系表（机会表退到上一代的关系表）——
+        时间线与材料照样算出来交给机会表。不给就照原样往上抛。各步的算法不变。
+
+        ``relations_held`` 给了（换代前面的步因模型整个调不通没做成），或 B1–B3 里有一步因模型整个调不通没做成，B4 这一代
+        不判：不写关系表、时间线照算，机会表退到上一代关系表（实时化方案第 2 节"模型调不通 → 关系沿用上一次判定的"），
+        原因记在 ``NightReport.relations_held``。"""
 
         if now.utcoffset() is None:
             raise TypeError("now must be a timezone-aware datetime")
-        signals: list[str] = []
-        slack_minutes = self.config.slack_slots * self.relation_config.slot_minutes
-        with span("scene.b1") as attributes:
-            plan, concepts, mapper, coverage, rhythms, remapped = await self._sync(series, now, slack_minutes, signals)
-            set_attributes(attributes, _sync_attributes(plan, concepts, remapped))
-        if self.authoring is not None:
-            with span("scene.b2", {"concepts_before": len(concepts)}) as attributes:
-                before = set(concepts)
-                concepts = await self.authoring.run(self.concepts, self.catalog.classes(), series, rhythms, signals)
-                mapper = self.mapper_for(concepts)
-                rhythms = await asyncio.to_thread(self._rhythms, series, concepts, coverage)
-                # 只记条数：概念名是用户派生文字，不进 span（codex R3）
-                set_attributes(attributes, {"concepts": len(concepts), "added": len(set(concepts) - before)})
-        with span("scene.b3") as attributes:
-            mapping, days, backlog = await self.mapping.map_backlog(
-                series, concepts, mapper, rhythms, slack_minutes, now, signals
-            )
-            set_attributes(attributes, _mapping_attributes(mapping, days))
-        with span("scene.b4") as attributes:
-            relations, transitions, lines = await self.relation_stage.run(
-                series, concepts, signals, vocabulary=plan.version, now=now
-            )
-            set_attributes(attributes, {"lanes": len(relations), "transitions": transitions})
-        return NightReport(
-            night=series.cutoff,
-            concepts=len(concepts),
-            mapped_days=days,
-            mapped=sum(item.mapped for item in mapping),
-            resumed=sum(item.resumed for item in mapping),
-            refreshed=sum(item.refreshed for item in mapping),
-            unresolved=sum(item.unresolved for item in mapping),
-            model_failed=sum(item.model_failed for item in mapping),
-            inconsistent=sum(item.inconsistent for item in mapping),
-            backlog=backlog,
-            remapped_days=remapped,
-            relations=relations,
-            transitions=transitions,
-            signals=tuple(signals),
-            materials=await asyncio.to_thread(self._materials, series, concepts, lines, coverage),
-        )
+        return await _NightRun(self, series, now, failures, relations_held).run()
 
     async def _sync(
         self, series: EventSeries, now: datetime, slack_minutes: int, signals: list[str]
@@ -407,6 +387,153 @@ class SceneNightlyRun:
             consequent: tuple(concepts[item].name for item in most_specific(concepts, antecedents))
             for consequent, antecedents in held.items()
         }
+
+
+@dataclass
+class _Concepts:
+    """一夜里各步之间传的那一份：概念集与据它建的映射器、覆盖、节律。"""
+
+    concepts: ConceptSet
+    mapper: ConceptMapper
+    coverage: Mapping[str, Coverage]
+    rhythms: Mapping[str, Rhythm]
+
+
+class _NightRun:
+    """``SceneNightlyRun.run`` 的那一段串法：B1 → B2 → B3 → B4 → 材料。``failures`` 给了的时候一步抛了就记下、走退路接着做。"""
+
+    def __init__(
+        self,
+        scene: SceneNightlyRun,
+        series: EventSeries,
+        now: datetime,
+        failures: list[tuple[str, BaseException]] | None,
+        relations_held: str | None = None,
+    ) -> None:
+        self.scene = scene
+        self.series = series
+        self.now = now
+        self.failures = failures
+        self.relations_held = relations_held
+        self.signals: list[str] = []
+        self.slack_minutes = scene.config.slack_slots * scene.relation_config.slot_minutes
+
+    async def run(self) -> NightReport:
+        scene, series = self.scene, self.series
+        version, current, remapped = await self._b1()
+        current = await self._b2(current)
+        mapping, days, backlog = await self._b3(current)
+        relations, transitions, lines = await self._b4(current, version)
+        return NightReport(
+            night=series.cutoff,
+            concepts=len(current.concepts),
+            mapped_days=days,
+            mapped=sum(item.mapped for item in mapping),
+            resumed=sum(item.resumed for item in mapping),
+            refreshed=sum(item.refreshed for item in mapping),
+            unresolved=sum(item.unresolved for item in mapping),
+            model_failed=sum(item.model_failed for item in mapping),
+            inconsistent=sum(item.inconsistent for item in mapping),
+            backlog=backlog,
+            remapped_days=remapped,
+            relations=relations,
+            transitions=transitions,
+            signals=tuple(self.signals),
+            relations_held=self.relations_held,
+            materials=await asyncio.to_thread(scene._materials, series, current.concepts, lines, current.coverage),
+        )
+
+    def _tolerate(self, step: str, exc: Exception) -> None:
+        """一步抛了：严格跑法（没给 ``failures``）原样抛，换代记下这一步、走退路。"""
+
+        if self.failures is None:
+            raise exc
+        self.failures.append((step, exc))
+
+    async def _b1(self) -> tuple[int, _Concepts, int]:
+        scene = self.scene
+        try:
+            with span("scene.b1") as attributes:
+                plan, concepts, mapper, coverage, rhythms, remapped = await scene._sync(
+                    self.series, self.now, self.slack_minutes, self.signals
+                )
+                set_attributes(attributes, _sync_attributes(plan, concepts, remapped))
+            return plan.version, _Concepts(concepts, mapper, coverage, rhythms), remapped
+        except Exception as exc:
+            self._tolerate("b1", exc)
+        # 同步没做成：按盘上已同步到的那一版与现有的概念集接着做，下一代再同步
+        return scene.concepts.synced_version(), await self._from_disk(), 0
+
+    async def _b2(self, current: _Concepts) -> _Concepts:
+        scene = self.scene
+        if scene.authoring is None:
+            return current
+        try:
+            with span("scene.b2", {"concepts_before": len(current.concepts)}) as attributes:
+                before = set(current.concepts)
+                concepts = await scene.authoring.run(
+                    scene.concepts, scene.catalog.classes(), self.series, current.rhythms, self.signals
+                )
+                rhythms = await asyncio.to_thread(scene._rhythms, self.series, concepts, current.coverage)
+                # 只记条数：概念名是用户派生文字，不进 span（codex R3）
+                set_attributes(attributes, {"concepts": len(concepts), "added": len(set(concepts) - before)})
+            return _Concepts(concepts, scene.mapper_for(concepts), current.coverage, rhythms)
+        except Exception as exc:
+            self._tolerate("b2", exc)
+        # 写概念没做成：沿用盘上现有的（可能已写了一部分，按盘上的读），下一代用上
+        return await self._from_disk()
+
+    async def _b3(self, current: _Concepts) -> tuple[list[DayMappingReport], tuple[date, ...], int]:
+        try:
+            with span("scene.b3") as attributes:
+                mapping, days, backlog = await self.scene.mapping.map_backlog(
+                    self.series,
+                    current.concepts,
+                    current.mapper,
+                    current.rhythms,
+                    self.slack_minutes,
+                    self.now,
+                    self.signals,
+                )
+                set_attributes(attributes, _mapping_attributes(mapping, days))
+            return mapping, days, backlog
+        except Exception as exc:
+            self._tolerate("b3", exc)
+        # 映射没做完：那些记录对细分概念算看不到（``scene/relations/timeline.py``），下一代接着映射
+        return [], (), 0
+
+    async def _b4(
+        self, current: _Concepts, version: int
+    ) -> tuple[Mapping[str, Mapping[str, int]], int, Mapping[str, LaneTimeline]]:
+        stage = self.scene.relation_stage
+        if self.relations_held is None:
+            # 与 ``generation_result.UNREACHABLE_ERRORS`` 同一组（那边经 ``generation_summary`` 引用本模块，这里不能反引）
+            down = [step for step, exc in self.failures or () if isinstance(exc, (ModelUnreachable, *MODEL_UNUSABLE))]
+            self.relations_held = f"模型调不通（{'、'.join(down)}）" if down else None
+        if self.relations_held is not None:
+            # 模型整个调不通：不拿这一代没长成的词表、概念与映射判出一张新表（同一代不重写，判出来就一直留着）
+            self.signals.append(f"relations: 这一代不判关系（{self.relations_held}），机会表沿用上一代的关系表")
+            return {}, 0, await stage.timelines(self.series, current.concepts)
+        try:
+            with span("scene.b4") as attributes:
+                relations, transitions, lines = await stage.run(
+                    self.series, current.concepts, self.signals, vocabulary=version, now=self.now
+                )
+                set_attributes(attributes, {"lanes": len(relations), "transitions": transitions})
+            return relations, transitions, lines
+        except Exception as exc:
+            self._tolerate("b4", exc)
+        # 关系判定没做成：这一代不写关系表（已写出的 lane 留着），时间线照算，机会表退到上一代关系表
+        return {}, 0, await stage.timelines(self.series, current.concepts)
+
+    async def _from_disk(self) -> _Concepts:
+        """前一步没做成时的退路：盘上现有的概念集，与据它算的映射器、覆盖、节律（都是纯计算）。"""
+
+        scene = self.scene
+        concepts = await asyncio.to_thread(scene.concepts.read_all)
+        coverage = await asyncio.to_thread(coverage_by_lane, self.series, scene.rulers)
+        rhythms = await asyncio.to_thread(scene._rhythms, self.series, concepts, coverage)
+        return _Concepts(concepts, scene.mapper_for(concepts), coverage, rhythms)
 
 
 __all__ = [

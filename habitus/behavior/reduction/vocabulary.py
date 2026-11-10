@@ -59,6 +59,15 @@ class VocabularyRunner:
 
         return await self.run(job)
 
+    async def resume(self) -> VocabularyJobReport:
+        """只续做没做完的迁移（换代最前那一步，实时化方案第 3 节）：同一条持锁路径，不做整理活本身。没有没做完的迁移时是空操作
+        （只拿一下 sweep 锁）；锁被占抛 ``BehaviorReductionBusyError``。"""
+
+        async def nothing(_now: datetime, *, checkpoint: Callable[[], object]) -> JobsOutcome:
+            return JobsOutcome()
+
+        return await self.run(nothing)
+
     async def grow(self) -> VocabularyJobReport:
         return await self.run(self.jobs.grow)
 

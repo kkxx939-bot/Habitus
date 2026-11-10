@@ -70,6 +70,15 @@ class HistoryStore:
     def read(self, lane: str, night: date) -> UnitHistory:
         return decode_history(self._files.read(lane, night), lane=lane, night=night)
 
+    def stamp(self, lane: str, night: date) -> tuple[int, int, int] | None:
+        """这一晚快照文件此刻的样子（inode、修改时刻、大小）：同一晚被重写后不一样，读侧的缓存据它失效；没有文件是 None。"""
+
+        try:
+            info = (self._files.lane_directory(lane) / f"{night.isoformat()}.json").stat()
+        except FileNotFoundError:
+            return None
+        return info.st_ino, info.st_mtime_ns, info.st_size
+
     def latest(self, lane: str) -> UnitHistory | None:
         """盘上最晚一晚读得出来的快照（最晚那一份坏了往前退一晚，坏的计入观测）；没有是 None。"""
 

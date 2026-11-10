@@ -12,6 +12,7 @@ E5 稀疏的只计数、E6 加权 BH 的归一）。
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 from collections import Counter
 from datetime import date, timedelta
@@ -91,6 +92,31 @@ def _tests(seed: int, previous: LaneState | None = None) -> LaneTests:
 def _digest(state: LaneState, transitions: tuple[Transition, ...]) -> str:
     text = encode_night(state) + "\n" + "".join(encode_transition(item) + "\n" for item in transitions)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _rounded(value: object) -> object:
+    if isinstance(value, float):
+        return float(f"{value:.9g}")
+    if isinstance(value, dict):
+        return {name: _rounded(item) for name, item in value.items()}
+    if isinstance(value, list):
+        return [_rounded(item) for item in value]
+    return value
+
+
+def _stable_text(state: LaneState, transitions: tuple[Transition, ...]) -> str:
+    """折叠结果的全文，浮点取 9 位有效数字：带先验权重的那几份情形在 Linux、Windows 上与 macOS 只差浮点末位（族、稀疏、
+    候选都相同），按全文逐位比的摘要在那两个平台上对不上（远端 CI，2026-11-09）。断言失败时把这份全文打出来，能直接看差在哪。"""
+
+    lines = [encode_night(state), *(encode_transition(item) for item in transitions)]
+    return "\n".join(
+        json.dumps(_rounded(json.loads(line)), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        for line in lines
+    )
+
+
+def _stable_digest(state: LaneState, transitions: tuple[Transition, ...]) -> str:
+    return hashlib.sha256(_stable_text(state, transitions).encode("utf-8")).hexdigest()
 
 
 def _uniform(tests: LaneTests, weight: float) -> dict[RelationKey, float]:
@@ -295,7 +321,9 @@ def test_prior_only_reaches_a_moderated_relation_through_its_parent(name: str) -
     lost = sorted(_short(item.key) for item in plain.relations if item.key.text in unweighted - _candidates(state))
     assert prior_only or lost  # 前提：这份数据上先验确实改了结果
     assert (prior_only, lost, plain.family, state.family) == GOLDEN_PRIOR_THROUGH_PARENT[name]
-    assert _digest(state, transitions) == GOLDEN_PRIOR_THROUGH_PARENT_DIGEST[name]
+    assert _stable_digest(state, transitions) == GOLDEN_PRIOR_THROUGH_PARENT_DIGEST[name], _stable_text(
+        state, transitions
+    )
 
 
 # ── 权重归一：必然稀疏的带条件键也按"个数 × 权重 1"留在归一里 ────────────────────────
@@ -356,8 +384,9 @@ GOLDEN_PRIOR_THROUGH_PARENT: dict[str, tuple[list[str], list[str], int, int]] = 
     "boosted-second-night": (["讨论→代码 chain", "讨论→代码 chain｜调研"], [], 15, 16),
     "damped": ([], ["讨论→代码 chain", "讨论→代码 chain｜调研"], 17, 16),
 }
+#: 摘要是 ``_stable_digest``（浮点取 9 位有效数字）：这几份带权重的情形跨平台只差浮点末位。
 GOLDEN_PRIOR_THROUGH_PARENT_DIGEST = {
-    "boosted": "18382afc8379b4d7871ed028abd7704fbd2c46f307948fa19fa3b57cddfc5768",
-    "boosted-second-night": "ddf7352789e7a0da1853201d0c8c9ea76821c1bef5bab00e1f926dbed61602d2",
-    "damped": "7d2c007f496a62ed28b7afe523ab8aae382f2ab29adc3d223da3a0ba7ac4bf08",
+    "boosted": "3fa4ec5e8ec966894adc5d92d3b17ac7ee40bcd985fcafa7060b68632bd14eb0",
+    "boosted-second-night": "2ac4b4b07fb5a363e3c3051f68cfb190ef39afc88079ffb62a0ae2643af8b835",
+    "damped": "8eed3918c05bd23dd89c6010066a4670a7658c73d3ae6f4f16673dfb01304766",
 }

@@ -473,29 +473,3 @@ def test_a_write_bug_on_retry_is_counted_as_ours_not_as_a_bad_model_answer(tmp_p
         report = asyncio.run(_stage(stores, session).run_once(through=DAY))
 
         assert report == RetryReport(taken=1, deterministic=1), type(error).__name__
-
-
-def test_a_busy_reduction_resumes_in_a_fresh_stage_from_its_checkpoint(tmp_path: Path) -> None:
-    """观测 + Job（共享说明 #6）：重试那一支等锁时的状态能落盘（``checkpoint``），换一个进程（新的 ``RetryStage``）交回
-    ``restore`` 之后照样直接归约写回的那一项、不再问一次模型，计数接着这一晚之前那一趟的。撤回 ``restore`` 这里就红
-    （新的重试段会把那一项当上一晚剩下的撤回）。"""
-
-    from habitus.runtime.nightly_jobs import decode_checkpoint, encode_checkpoint
-
-    stores = Stores(tmp_path)
-    session, provider = lane(stores, [description()])
-    turn = _turn("统计一下行数", 0)
-    stores.backlog.put(_turn_item(turn))
-    first = _stage(stores, session, reduce=_Reduce(Reduction.BUSY))
-    assert asyncio.run(first.run_once(through=DAY)) == RetryReport(taken=1, waiting=("session",))
-    saved = first.checkpoint()
-    assert saved is not None and saved.waiting == {"session": ((_turn_item(turn).item_id,), ())}
-
-    reduce = _Reduce()
-    fresh = _stage(stores, session, reduce=reduce)
-    fresh.restore(decode_checkpoint(encode_checkpoint(saved)))
-    second = asyncio.run(fresh.run_once(through=DAY))
-
-    assert second == RetryReport(taken=1, recovered=1) and second.ready
-    assert provider.calls == 1 and reduce.runs == 1 and stores.backlog.count() == 0
-    assert fresh.checkpoint() is None

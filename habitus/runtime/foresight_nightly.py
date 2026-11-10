@@ -1,9 +1,11 @@
-"""预测层的夜批那一拍（N1，``19-预测层方案.md`` 第九节第 2 步）：排在语义树之后，用语义树这一晚建好的时间线与概念集，
-读这一晚的关系表，算每条 lane 的机会表、落盘；接着用同一份关系表与时间线重标单元的历史（裁定 55 新版第 2 条）。零模型。
+"""换代里预测层的那一段（N1，``19-预测层方案.md`` 第九节第 2 步）：排在语义树之后，用语义树这一代建好的时间线与概念集，
+读这一代的关系表，算每条 lane 的机会表、落盘；接着用同一份关系表与时间线重标单元的历史（裁定 55 新版第 2 条），再压实账本。零模型。
 
-读的关系表是语义树**刚写的这一晚**；那一晚没有（语义树这一步没跑到）就退到盘上更早的最晚一晚，并在 ``signals`` 里说明，
-表上也记着用的是哪一晚（``relation_night``）。一条 lane 失败不拖别的 lane；失败自己留观测与信号，不往上抛（夜批
-不能因为机会表没算出来而不算下一晚）。
+读的关系表是语义树**刚写的这一代**；那一晚没有（关系判定没做成）就退到盘上更早的最晚一晚，并在 ``signals`` 里说明，
+表上也记着用的是哪一晚（``relation_night``）。一条 lane 失败不拖别的 lane；失败自己留观测与信号，不往上抛。
+
+两种失败分开报（实时化方案第 3 节）：机会表写不出是**必须成**的那一步没成（``failed``，换代据它判今天没有这一代）；单元历史、
+压实没做成是**尽力而为**（``degraded``，表照用、压实这一次跳过）。
 """
 
 from __future__ import annotations
@@ -51,8 +53,22 @@ class OpportunityReport:
     night: date
     lanes: Mapping[str, LaneOpportunitySummary] = field(default_factory=dict)
     signals: tuple[str, ...] = ()
-    #: 这一晚没做成的步骤（"lane: 机会表 / 单元历史: 异常类型"）。机会表写成了而单元历史没写成，也要在这里看得见（26 号清单 2.5.1）。
+    #: 机会表没写成的 lane（"lane: 机会表: 异常类型"）：必须成的那一步没成。
     failed: tuple[str, ...] = ()
+    #: 机会表写成了、之后尽力的那几步没做成的（"lane: 单元历史 / 账本压实: 异常类型"）：表照用，要看得见（26 号清单 2.5.1）。
+    degraded: tuple[str, ...] = ()
+
+    @property
+    def history_skipped(self) -> int:
+        """单元历史没做成（压实因此跳过）的 lane 数。"""
+
+        return sum(1 for item in self.degraded if ": 单元历史: " in item)
+
+    @property
+    def compaction_failed(self) -> int:
+        """账本压实没做成的条数（整条 lane 或某一本账）。"""
+
+        return sum(1 for item in self.degraded if ": 账本压实: " in item)
 
     def summary(self) -> str:
         counts = "；".join(
@@ -109,13 +125,23 @@ class ForesightNightlyRun:
         lanes: dict[str, LaneOpportunitySummary] = {}
         signals: list[str] = []
         failed: list[str] = []
+        degraded: list[str] = []
         for lane, line in sorted(timelines.items()):
             summary = self._lane(
-                lane, line, night, concepts, recurrences, coverage, signals=signals, failed=failed, started=started
+                lane,
+                line,
+                night,
+                concepts,
+                recurrences,
+                coverage,
+                signals=signals,
+                failed=failed,
+                degraded=degraded,
+                started=started,
             )
             if summary is not None:
                 lanes[lane] = summary
-        # 口径：每条 lane 都写出来了才是成功；有一条没写是失败（那一条自己已经留了失败事件，这里再记一笔总账）
+        # 口径：每条 lane 的机会表都写出来了才是成功；有一条没写是失败（那一条自己已经留了失败事件，这里再记一笔总账）
         self._observe(
             ObservationStatus.SUCCESS if not failed else ObservationStatus.FAILURE,
             {
@@ -130,7 +156,9 @@ class ForesightNightlyRun:
             },
             started,
         )
-        return OpportunityReport(night=night, lanes=lanes, signals=tuple(signals), failed=tuple(failed))
+        return OpportunityReport(
+            night=night, lanes=lanes, signals=tuple(signals), failed=tuple(failed), degraded=tuple(degraded)
+        )
 
     def _lane(
         self,
@@ -143,10 +171,11 @@ class ForesightNightlyRun:
         *,
         signals: list[str],
         failed: list[str],
+        degraded: list[str],
         started: float,
     ) -> LaneOpportunitySummary | None:
-        """一条 lane：机会表（``foresight.opportunities`` span）→ 单元历史重标（``foresight.unit_history`` span）→ 账本压实。
-        机会表没算出来是 None（这条 lane 这一晚没有表）。"""
+        """一条 lane：机会表（``foresight.opportunities`` span）→ 单元历史重标（``foresight.unit_history`` span）→ 账本压实
+        （``foresight.compaction`` span）。机会表没算出来是 None（这条 lane 这一晚没有表）。"""
 
         with span("foresight.opportunities", {"lane": lane}) as attributes:
             try:
@@ -179,29 +208,32 @@ class ForesightNightlyRun:
                 relabelled = self._relabel(lane, night, table, line, started)
             except ForesightError as exc:
                 signals.append(f"opportunities: {lane} 这一晚的单元历史没写成（{exc}），账本压实这一晚跳过")
-                failed.append(f"{lane}: 单元历史: {type(exc).__name__}")
+                degraded.append(f"{lane}: 单元历史: {type(exc).__name__}")
                 self._observe(ObservationStatus.FAILURE, {"lane": lane, "error_type": type(exc).__name__}, started)
                 attributes["failed"] = type(exc).__name__
                 # 单元历史没把结完的日子记下来：这一晚压实会删掉它还没记的原始结果，下一晚它就拿不到了（L10.11）
                 return _summarise(table, 0)
-        compacted = self._compact(lane, night, table, signals, failed)
+        compacted = self._compact(lane, night, table, signals, degraded)
         return replace(_summarise(table, relabelled), compacted=compacted)
 
-    def _compact(self, lane: str, night: date, table: OpportunityTable, signals: list[str], failed: list[str]) -> int:
-        """这条 lane 的账本压实；压不成的那几本账各自跳过，失败照 2.5.1 的口径记进 ``failed``，别的账与这一晚照常。"""
+    def _compact(self, lane: str, night: date, table: OpportunityTable, signals: list[str], degraded: list[str]) -> int:
+        """这条 lane 的账本压实；压不成的那几本账各自跳过，失败照 2.5.1 的口径记进 ``degraded``，别的账与这一晚照常。"""
 
         if self.compaction is None or self.compaction.lane != lane:
             return 0
-        try:
-            report = self.compaction.run(night=night, table=table)
-        except ForesightError as exc:
-            signals.append(f"opportunities: {lane} 这一晚的账本压实没做成（{exc}）")
-            failed.append(f"{lane}: 账本压实: {type(exc).__name__}")
-            return 0
-        for account, error in sorted(report.failed.items()):
-            signals.append(f"opportunities: {lane} 账 {account!r} 这一晚没压实（{error}）")
-            failed.append(f"{lane}: 账本压实: {error}")
-        return report.compacted
+        with span("foresight.compaction", {"lane": lane}) as attributes:
+            try:
+                report = self.compaction.run(night=night, table=table)
+            except ForesightError as exc:
+                signals.append(f"opportunities: {lane} 这一晚的账本压实没做成（{exc}）")
+                degraded.append(f"{lane}: 账本压实: {type(exc).__name__}")
+                attributes["failed"] = type(exc).__name__
+                return 0
+            for account, error in sorted(report.failed.items()):
+                signals.append(f"opportunities: {lane} 账 {account!r} 这一晚没压实（{error}）")
+                degraded.append(f"{lane}: 账本压实: {error}")
+            set_attributes(attributes, {"compacted": report.compacted, "accounts_failed": len(report.failed)})
+            return report.compacted
 
     def _relations(self, lane: str, night: date, signals: list[str]) -> tuple[date | None, tuple[Relation, ...]]:
         """这一晚的关系表；没有就退到更早的最晚一晚。一晚都没有（语义树还没写过表）是空表。"""

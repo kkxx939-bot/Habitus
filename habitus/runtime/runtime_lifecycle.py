@@ -80,10 +80,10 @@ class RuntimeLifecycle:
                 await self._start_optional(
                     "behavior_start", branch.reduction_worker.start, started, {"lane": branch.lane.value}
                 )
-        # 整晚那一趟同一哲学：它只读行为树、只写派生的存储，起不来不影响任何在线路径。
-        nightly = self.components.nightly
-        if nightly is not None:
-            await self._start_optional("nightly_start", nightly.start, started)
+        # 换代同一哲学：它只读行为树、只写派生的存储，起不来不影响任何在线路径。
+        generation = self.components.generation
+        if generation is not None:
+            await self._start_optional("generation_start", generation.start, started)
         # 预测层每槽一拍，只读两棵派生树与判断存储、只调模型，同一哲学。
         foresight = self.components.foresight
         if foresight is not None and foresight.worker is not None:
@@ -96,11 +96,11 @@ class RuntimeLifecycle:
         started: float,
         attributes: dict[str, str | int | float | bool] | None = None,
     ) -> None:
-        """起一个可选的后台循环（行为侧、夜批、预测层）：失败只记一条观测，不阻断记忆主链。"""
+        """起一个可选的后台循环（行为侧、换代、预测层）：失败只记一条观测，不阻断记忆主链。"""
 
         try:
             await start()
-        except Exception as exc:  # noqa: BLE001 - 行为侧、夜批、预测层失败不阻断记忆主链
+        except Exception as exc:  # noqa: BLE001 - 行为侧、换代、预测层失败不阻断记忆主链
             self._observe(
                 "runtime",
                 operation,
@@ -135,13 +135,13 @@ class RuntimeLifecycle:
             await self.components.workflow.worker.stop()
 
     async def stop_background_workers(self) -> None:
-        """停行为侧两个循环与预测夜批；失败不阻断记忆主链的停机（与启动侧同一哲学）。
+        """停行为侧两个循环、换代与预测拍；失败不阻断记忆主链的停机（与启动侧同一哲学）。
 
         名字不叫 behavior：启动侧是分开的两块，停机侧合成一个函数是为了保证顺序（预测先停，
         它读的行为树才停），但既然管着两个域，就不该顶着一个域的名字。
         """
 
-        # 预测层先停（它读机会表与行为树），然后整晚那一趟，最后行为侧。
+        # 预测层先停（它读机会表与行为树），然后换代，最后行为侧。
         foresight = self.components.foresight
         if foresight is not None and foresight.worker is not None:
             try:
@@ -154,13 +154,13 @@ class RuntimeLifecycle:
                     time.monotonic(),
                     {"error_type": type(exc).__name__},
                 )
-        if self.components.nightly is not None:
+        if self.components.generation is not None:
             try:
-                await self.components.nightly.stop()
-            except Exception as exc:  # noqa: BLE001 - 夜批停机失败不阻断主链
+                await self.components.generation.stop()
+            except Exception as exc:  # noqa: BLE001 - 换代停机失败不阻断主链
                 self._observe(
                     "runtime",
-                    "nightly_stop",
+                    "generation_stop",
                     ObservationStatus.FAILURE,
                     time.monotonic(),
                     {"error_type": type(exc).__name__},

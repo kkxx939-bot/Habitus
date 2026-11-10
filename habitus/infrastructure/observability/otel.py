@@ -186,14 +186,28 @@ class OpenTelemetryBackend:
 
 
 #: 事件属性全部放进 span 事件的类别（见 ``_trace_attributes``）。
-_OPEN_CATEGORIES = frozenset({"nightly", "scene", "foresight"})
+_OPEN_CATEGORIES = frozenset({"generation", "scene", "foresight"})
 
 
-#: span 属性里不导出的键（最后一段）：信号是带用户派生文字的句子（概念名、关系两端名、迁移原因），只留在本地每晚报告。
+#: span 属性里不导出的键（最后一段）：信号是带用户派生文字的句子（概念名、关系两端名、迁移原因），只留在本地每代报告。
 _LOCAL_ONLY_KEYS = frozenset({"signals"})
 #: 开放类别的事件属性里，文字只放行这些受控键（段名、结局、枚举、原因码、日子）；计数与布尔全放行。
 _CONTROLLED_TEXT_KEYS = frozenset(
-    {"lane", "step", "outcome", "kind", "status_from", "status_to", "segment", "skipped", "reason", "night", "touch"}
+    {
+        "lane",
+        "step",
+        "outcome",
+        "kind",
+        "status_from",
+        "status_to",
+        "segment",
+        "skipped",
+        "reason",
+        "night",
+        "day",
+        "failed_step",
+        "touch",
+    }
 )
 
 
@@ -234,7 +248,7 @@ def _trace_attributes(event: ObservationEvent) -> dict[str, str | int | float | 
         }:
             result[f"habitus.{key}"] = value
         elif event.category in _OPEN_CATEGORIES and (not isinstance(value, str) or key in _CONTROLLED_TEXT_KEYS):
-            # 夜线、语义树、预测层：计数、读数与布尔全放行，trace 上才看得到每一步的逻辑数据（用户 11-09：「otel 可以细一些，
+            # 换代、语义树、预测层：计数、读数与布尔全放行，trace 上才看得到每一步的逻辑数据（用户 11-09：「otel 可以细一些，
             # 对应逻辑数据要有」）；文字只放行受控键（段名、结局、枚举、原因码），用户派生文字不导出（codex R3）
             result[f"habitus.{key}"] = value
         elif event.category == "behavior" and (not isinstance(value, str) or key == "job"):

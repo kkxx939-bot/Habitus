@@ -489,7 +489,7 @@ workflow:
 #   kinds_max_pending: 5000            # 待定池上限（保护闸）
 #   kinds_nightly_max_new: 200         # 每晚新增一晚最多交几条新条目（保护闸，多的留到下一晚；旧条目不进，按相似召回）
 #   kinds_recall_per_entry: 3          # 每条新条目按字符二元组相似召回几条旧条目一起聚组
-#   kinds_revision_weekday: 2          # 定期拆改的周期从每周几那一晚起（0=周一，2=周三；在夜里那条线上，不挂钟点）
+#   kinds_revision_weekday: 2          # 定期拆改的周期从每周几那一晚起（0=周一，2=周三；在换代里做，不挂钟点）
 #   kinds_merge_evidence_runs: 2       # 合并要在连续几个拆改周期里都被提出才算有证据（裁定 17）
 #   kinds_cooldown_days: 14            # 改过的类冷却几天（待定档）
 #   kinds_max_changes_per_revision: 3  # 一次拆改最多改几处（待定档）
@@ -524,14 +524,14 @@ workflow:
 # scene:
 #   enabled: true
 #   baseline_slack_slots: 3          # 常态按峰分份时峰两边各放宽几槽（待定档；原借预测树 pool_half_width，裁定 59）
-#   nightly_shutdown_timeout_seconds: 30  # 停机时等整晚那一趟多久（那一趟前一天定稿完成就接着跑，不挂固定时刻，裁定 94）
-#   nightly_poll_seconds: 300            # 夜线 Job 执行器隔多久看一眼（定稿了没有、有没有到点重试的段）
-#   nightly_kept_nights: 366             # Job 账、每晚报告、trace 文件留几晚（scene/nightly/{jobs,reports,traces}）
-#   nightly_lease_ttl_seconds: 120       # 执行器全局租约多久过期（两个进程挂同一个 storage root 时同一晚同一段只跑一次）
-#   nightly_heartbeat_seconds: 30        # 多久续一次租约（必须小于 nightly_lease_ttl_seconds）
-#   nightly_max_attempts: 3              # 一段停下（模型调不通、出错）后最多试几次（含第一次），用完记失败
-#   nightly_retry_base_seconds: 900      # 停下后的退避：base × 2^(第几次 − 1)，封顶 nightly_retry_max_seconds
-#   nightly_retry_max_seconds: 3600
+#   generation_shutdown_timeout_seconds: 30  # 停机时等换代 worker 多久（换代在连续定稿到昨天、预测拍水位过了余量后做，不挂固定时刻）
+#   generation_poll_seconds: 300         # 换代 worker 隔多久看一眼（昨天定稿了没有、今天这一代做过没有）
+#   generation_kept_days: 366            # 完成标记、每代报告、trace 文件留几天（scene/generation/{<日>.json,reports,traces}）
+#   generation_lease_ttl_seconds: 120    # 换代租约与预测根租约多久过期（两个进程挂同一个 storage root 时同一天只换代一次、账本只有一个写者）
+#   generation_heartbeat_seconds: 30     # 多久续一次租约（必须小于 generation_lease_ttl_seconds）
+#   generation_stuck_ticks: 3            # 连续几眼看到定稿日不连续（较早一天没定稿、较晚一天已定稿）就在健康面报出卡住的那一天
+#   generation_retry_base_seconds: 300   # 必须成的那一步没成（改树、读序列、机会表、日子预期、完成标记）：同一天按退避一直重试，首次等多久
+#   generation_retry_max_seconds: 3600   #   ……逐次加倍，最多等这么久（锁被占不算失败、不退避，下一眼从头做）
 #   relations:
 #     fdr: 0.10                        # 第 1 道：当晚检验族的假发现率
 #     forward_alpha: 0.05              # 前向验证的单侧显著性
@@ -573,8 +573,8 @@ workflow:
 #                                    #   哪年没有数据，那年日型是未知（不当普通工作日），周几、几号照常答。
 #   nominal_weekend: [5, 6]          # 没有放假数据时建预期的兜底周末（0=周一 … 6=周日）；统计里不用它
 
-# 预测层。缺省未启用；置 enabled: true 即启用（语义树必须已启用——机会表、复现与关系全从语义树那一晚来，
-# 结算是整晚那一趟的第一步；预测树删了，裁定 59）。
+# 预测层。缺省未启用；置 enabled: true 即启用（语义树必须已启用——机会表、复现与关系全从语义树的换代来，
+# 结算是换代里的一步；预测树删了，裁定 59）。
 #
 # 这一组没有算法参数：时窗来自历史那几次的实际时刻，转移窗就是 temporal 的 merge_window_minutes / slot_minutes。
 # 这里只有开关、递法的升降节奏（产品决定，不是统计量）、保护闸；没定的几项先给默认值（裁定 46）。
@@ -588,8 +588,10 @@ workflow:
 #   unit_prior_share: 0.333          # 行为单元分层读数里先验的分量占有效样本上限的比例（没见过的组合贴着更粗那一层；回放后定）
 #   judge_transient_retries: 1       # 模型对传输层瞬态错的有界重试
 #   judge_transient_retry_delay_seconds: 5.0
-#   tick_interval_seconds: 900       # 白天多久一拍（建预期、到时窗的决定说不说；默认一个槽）
+#   tick_interval_seconds: 900       # 多久一拍（建预期、到时窗的决定说不说）；一拍一槽、对齐槽边界，必须等于 temporal.slot_minutes × 60
 #   worker_shutdown_timeout_seconds: 30
+#   unwatched_tolerance_slots: 2     # 两拍之间隔了超过这么多槽，那一段记成会话一支的「未观测」空白（关机、合盖、进程没跑）
+#   generation_margin_slots: 3       # 换代要等预测拍水位过了 max(昨天日终, 最后一段「未观测」结尾) 再这么多槽（给归约留时间把空白落树）
 #   half_life_opportunities: 8       # 证据遗忘的半衰期：几次机会（账、行为单元、时段读数共用；裁定 57，回放后定）；账的久别也要空白 ≥ H 个典型间隔（裁定 88）
 #   outlet_liveness_hours: 48        # 提醒出口：最近几小时有宿主来取过才算活着（活着才问模型写话、记「待取」；否则记「不可达」）
 #   outlet_lease_minutes: 30         # 一条请求被一个会话取走后多久内别的会话取不到（不超过最晚时限）

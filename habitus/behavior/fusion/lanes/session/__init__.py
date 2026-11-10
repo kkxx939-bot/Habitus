@@ -34,6 +34,7 @@ from habitus.behavior.fusion.lanes.session.reminders import (
     ReminderResponse,
 )
 from habitus.behavior.fusion.lanes.session.service import DescribedTurn, SessionTurnDescriber
+from habitus.behavior.fusion.lanes.session.unwatched import SessionUnwatchedRecorder
 
 __all__ = [
     "SESSION_FUSION_VERSION",
@@ -52,6 +53,7 @@ __all__ = [
     "SessionTurn",
     "SessionTurnDescriber",
     "SessionTurnRecorder",
+    "SessionUnwatchedRecorder",
     "TurnDescription",
     "TurnDisposition",
     "TurnHandler",

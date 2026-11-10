@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import asdict
+from datetime import datetime
 
 from habitus.behavior.fusion.lanes.session import (
     SESSION_FUSION_VERSION,
@@ -27,6 +28,7 @@ from habitus.behavior.fusion.lanes.session import (
     SessionMessage,
     SessionMessageRole,
     SessionTurn,
+    SessionUnwatchedRecorder,
     TurnDisposition,
     TurnOutcome,
     split_turns,
@@ -72,6 +74,24 @@ def answered_question_tools(registry: ConversationAdapterRegistry) -> Callable[[
 
 
 _BUILTIN_QUESTION_TOOLS = answered_question_tools(ConversationAdapterRegistry.with_builtins())
+
+
+def unwatched_writer(lane: SessionLane | None) -> Callable[[datetime, datetime], object] | None:
+    """预测拍写"没在看的时段"的口（实时化方案第 6 节）：用会话一支同一套判断、回执与覆盖存储写一条「未观测」空判断，由会话一支的
+    归约落树。行为侧没开就没有。"""
+
+    if lane is None:
+        return None
+    recorder = lane.recorder
+    return SessionUnwatchedRecorder(
+        observations=recorder.observations,
+        judgements=recorder.judgements,
+        receipts=recorder.receipts,
+        coverage=recorder.coverage,
+        primary_subject=recorder.primary_subject,
+        zone=recorder.zone,
+        clock=recorder.clock,
+    ).record
 
 
 def session_turns(
@@ -240,6 +260,7 @@ def _skipped(reason: str) -> ConversationConsumerRunResult:
 
 
 __all__ = [
+    "unwatched_writer",
     "SKIP_BEHAVIOR_DISABLED",
     "SKIP_NO_TURNS",
     "SKIP_SUBAGENT",

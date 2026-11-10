@@ -3,8 +3,10 @@
 ``runtime.foresight_history_store``。
 
 - **记**：账本里结完（``is_final``）、还没记过的日子，每条预期记一份（自然命中带上结算认出的那次发生：一次发生只算给一刻，
-  裁定 81）；结完之后又被重结撤回的日子从"记过的"里拿掉，再结完时
-  整天重记（同一条预期的记录整份替换）。不再每晚回读"回看多少天"的日目录：账本压实会删掉旧事实，单元历史的原料自己存着。
+  裁定 81）；事实按**记录这一刻**账上已写下的取（实时化缺陷 3：结算在零点之后写下后补、同一拍把那天标结完，同一代重标时
+  这条后补要带上——原来只取"那一晚零点之前写下的"，那天就按过期待决记下、之后再也不重记）。结完之后又被重结撤回的日子从
+  "记过的"里拿掉，再结完时整天重记（同一条预期的记录整份替换）。不再每晚回读"回看多少天"的日目录：账本压实会删掉旧事实，
+  单元历史的原料自己存着。
 - **重标**：每晚读全部记录，按当晚的语义树重标在场的输入；一刻的分量是原始强度，"规律断了"的打折读的时候对正在读的那串刻算
   （``edges.fold_sequence``），不存打折后的。
 - **退出**：一刻在它所属的每一层里，排在它之后的都已有 M 刻（单元每层只读最近 M 刻），并且早于诊断够得着的最早一天，
@@ -58,7 +60,8 @@ class HistoryStage:
         self.statuses = tuple(statuses)
 
     def run(self, *, night: date, table: OpportunityTable, line: LaneTimeline) -> HistoryOutcome:
-        """第 ``night`` 晚这条 lane 的单元历史；返回重标了几刻、相对上一份快照变了多少。只读这一晚之前形成、这一晚之前写下的东西。"""
+        """第 ``night`` 晚这条 lane 的单元历史；返回重标了几刻、相对上一份快照变了多少。只记这一晚之前的日子，事实取记录这一刻
+        账上已写下的。"""
 
         lane = table.lane
         before = self.store.latest(lane)
@@ -83,7 +86,6 @@ class HistoryStage:
         days = self.ledger.days_with_expectations()
         # 账本放掉的日子（26 号清单 6.11）从"记过的"里一起拿掉：它们的每刻记录已经在了，这份集合不跟着历史一直长
         recorded = set(self.store.recorded_days(lane)) & set(days)
-        known_by = None
         facts: dict[str, tuple[AccountFact, ...]] = {}
         for day in days:
             if day >= night:
@@ -95,11 +97,9 @@ class HistoryStage:
                 continue
             found_on = {item.expectation_id: item.occurrence_uri for item in self.ledger.settlements_on(day)}
             for item in self.ledger.expectations_on(day):
-                if known_by is None:
-                    known_by = datetime.combine(night, time(0, 0), tzinfo=item.formed_at.tzinfo)
                 if item.account not in facts:
-                    visible = (fact for fact in self.ledger.facts_of(item.account) if fact.precedence <= known_by)
-                    facts[item.account] = current_facts(visible)
+                    # 记录这一刻账上已写下的全部事实（含零点之后结算写下的后补）
+                    facts[item.account] = current_facts(self.ledger.facts_of(item.account))
                 fact = next(
                     (found for found in facts[item.account] if found.expectation_id == item.expectation_id), None
                 )

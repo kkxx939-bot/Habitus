@@ -1,9 +1,12 @@
 """行为树哪些日子变过（26 号清单 6.7）：归约每次改树都把改到的日子记一笔增量，按天缓存的读侧（``series.reader``）据此只重读
 变过的日子。一条 lane 一份，放在那一支的归约根下：
 
-    <lane 根>/reduction/dirty_days.jsonl     一行 {"seq": 序号, "days": [...]}，只追加
+    <lane 根>/reduction/dirty_days.jsonl           一行 {"seq": 序号, "days": [...]}，只追加
+    <lane 根>/reduction/dirty_days_readers.json    {读者名: 读到第几号}，每个读者一份消费水位
 
-读侧记着自己读到第几号（消费水位），读完把它及以前的截掉（唯一的消费者）。
+读侧可以有好几个（换代读序列，以后模型队列也读）：每个读者按名字把自己读到第几号落盘（``advance``），日志只截到**全部读者里
+最小的**那个水位——一个读者读完就截，会把别的读者还没读的日子一起截掉、它就漏读那一天（实时化缺陷 5）。进程重启后各读者的
+水位还在盘上；读者自己的缓存是空的、本来就全读一遍。
 
 写与读同一个字节上限（写得进就读得回）：记这一笔会让文件超限时，先把已有的各号并成一号（最后一号、日子取并集）再记。
 并起来只会让读侧多重读几天、不会少读——水位落在被并的几号之间时，并成的那一号比水位新，它的日子照样读到；水位已过
@@ -30,6 +33,9 @@ from habitus.infrastructure.store.filesystem import (
 )
 
 DIRTY_DAYS_FILENAME = "dirty_days.jsonl"
+DIRTY_DAYS_READERS_FILENAME = "dirty_days_readers.json"
+#: 读者水位文件的字节上限（读者名有限、每个只是一个序号）。
+_MAX_READERS_BYTES = 1024 * 1024
 _MAX_BYTES = 16 * 1024 * 1024
 # 记（归约）与截（读侧）都是"读整份、改、整份写回"，分在两个线程里：同一份文件的两次改写必须串起来，否则截断会把
 # 刚记下的那一号一起抹掉（L10.3）。按路径共用一把，两个实例指向同一份文件也串得住。
@@ -50,6 +56,7 @@ class DirtyDayLog:
     def __init__(self, reduction_root: str | Path) -> None:
         self.root = Path(reduction_root).expanduser().resolve(strict=False)
         self.path = self.root / DIRTY_DAYS_FILENAME
+        self.readers_path = self.root / DIRTY_DAYS_READERS_FILENAME
         self._lock = _lock_for(self.path)
 
     def record(self, days: Iterable[date]) -> int:
@@ -78,6 +85,22 @@ class DirtyDayLog:
         last = entries[-1][0] if entries else seq
         return last, frozenset(day for _number, days in entries for day in days)
 
+    def watermark(self, reader: str) -> int | None:
+        """这个读者落盘的消费水位（读到第几号）；还没记过是 None。"""
+
+        return self._readers().get(_reader_name(reader))
+
+    def advance(self, reader: str, seq: int) -> None:
+        """这个读者读到了第 ``seq`` 号：落盘它的水位，再把日志截到全部读者里最小的水位。"""
+
+        name = _reader_name(reader)
+        with self._lock:
+            readers = self._readers()
+            readers[name] = int(seq)
+            self._write_readers(readers)
+            floor = min(readers.values())
+        self.truncate_through(floor)
+
     def truncate_through(self, seq: int) -> None:
         """``seq`` 及以前的记录截掉（读侧已经读过）；序号照旧往后接着数。"""
 
@@ -90,6 +113,34 @@ class DirtyDayLog:
                 # 留最后一号的空记录：序号不能从头再数，否则读侧的水位会跳过之后新记的
                 kept = [(entries[-1][0], ())]
             self._write(kept)
+
+    def _readers(self) -> dict[str, int]:
+        try:
+            encoded = read_regular_bytes(self.readers_path, artifact_root=self.root, max_bytes=_MAX_READERS_BYTES)
+        except FileNotFoundError:
+            return {}
+        except DurablePathIntegrityError as exc:
+            raise DirtyDayLogError(f"dirty-day readers cannot be read: {exc}") from exc
+        try:
+            raw = json.loads(encoded.decode("utf-8"), object_pairs_hook=_unique_keys)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise DirtyDayLogError(f"dirty-day readers are not decodable: {exc}") from exc
+        if not isinstance(raw, dict) or any(
+            not isinstance(key, str) or isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for key, value in raw.items()
+        ):
+            raise DirtyDayLogError("dirty-day readers must map reader names to non-negative sequence numbers")
+        return {str(key): int(value) for key, value in raw.items()}
+
+    def _write_readers(self, readers: dict[str, int]) -> None:
+        payload = json.dumps(dict(sorted(readers.items())), separators=(",", ":")).encode("utf-8")
+        if len(payload) > _MAX_READERS_BYTES:
+            raise DirtyDayLogError("dirty-day readers would exceed their byte bound")
+        try:
+            ensure_real_directory(self.root, artifact_root=self.root)
+            atomic_replace_bytes(self.readers_path, payload, artifact_root=self.root)
+        except DurablePathIntegrityError as exc:
+            raise DirtyDayLogError(f"dirty-day readers cannot be written: {exc}") from exc
 
     def _entries(self) -> list[tuple[int, tuple[date, ...]]]:
         try:
@@ -118,6 +169,23 @@ class DirtyDayLog:
             raise DirtyDayLogError(f"dirty-day log cannot be written: {exc}") from exc
 
 
+def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """同一个读者名写了两次：不收（不让后一个水位悄悄盖掉前一个，F7）。"""
+
+    found: dict[str, object] = {}
+    for key, value in pairs:
+        if key in found:
+            raise ValueError(f"dirty-day readers repeat the reader {key!r}")
+        found[key] = value
+    return found
+
+
+def _reader_name(reader: str) -> str:
+    if not isinstance(reader, str) or not reader.strip() or reader != reader.strip():
+        raise DirtyDayLogError("a dirty-day reader needs a non-blank name without surrounding spaces")
+    return reader
+
+
 def _encoded(entries: list[tuple[int, tuple[date, ...]]]) -> bytes:
     return "".join(
         json.dumps({"seq": number, "days": [day.isoformat() for day in days]}, separators=(",", ":")) + "\n"
@@ -125,4 +193,4 @@ def _encoded(entries: list[tuple[int, tuple[date, ...]]]) -> bytes:
     ).encode("utf-8")
 
 
-__all__ = ["DIRTY_DAYS_FILENAME", "DirtyDayLog", "DirtyDayLogError"]
+__all__ = ["DIRTY_DAYS_FILENAME", "DIRTY_DAYS_READERS_FILENAME", "DirtyDayLog", "DirtyDayLogError"]

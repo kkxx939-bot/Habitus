@@ -1,4 +1,4 @@
-"""夜线与白天那一拍的 trace：span 落本地 ``<scene_root>/nightly/traces/<日期>.jsonl``（一行一个 span：名字、父子、起止、属性、
+"""换代与预测拍的 trace：span 落本地 ``<scene_root>/generation/traces/<日期>.jsonl``（一行一个 span：名字、父子、起止、属性、
 结局），开了 OTLP 时同时进 OTel（``ManagedObservability``）——不开 collector 也能看全。
 
 - ``TraceFiles.sink(day)`` 给 ``foundation.tracing.open_trace`` 用：活的 span 开始时进 OTel 的当前 span（子 span、模型调用都
@@ -29,9 +29,10 @@ from habitus.infrastructure.store.filesystem import (
 #: 一天的 trace 文件最多这么大；再多的 span 丢掉（观测是旁路，不让它把盘写满）。
 _MAX_TRACE_BYTES = 64 * 1024 * 1024
 _MAX_FILES = 4_096
-#: 段的 span 名前缀：模型调用按"属于哪一段"记指标时认它。
-STEP_SPAN_PREFIX = "nightly."
-NIGHT_SPAN = "nightly.night"
+#: 换代每一步的 span 名前缀：模型调用按"属于哪一步"记指标时认它。
+STEP_SPAN_PREFIX = "generation."
+#: 换代那一个父 span（各步的子 span 挂在它下面）。
+GENERATION_SPAN = "generation.run"
 
 
 class SpanBackend(Protocol):
@@ -58,7 +59,7 @@ class SpanBackend(Protocol):
 
 
 class TraceFiles:
-    """一天一份 trace 文件；保留天数同 Job 账。"""
+    """一天一份 trace 文件；保留天数同完成标记。"""
 
     def __init__(self, root: str | Path, *, artifact_root: str | Path, backend: SpanBackend | None = None) -> None:
         self.root = Path(root)
@@ -83,7 +84,7 @@ class TraceFiles:
     def append(self, day: date, record: SpanRecord) -> None:
         line = json.dumps(_encode(record), ensure_ascii=False, sort_keys=True) + "\n"
         ensure_real_directory(self.root, artifact_root=self.artifact_root)
-        path = require_safe_artifact_path(self.artifact_root, self.path(day), label="nightly trace file")
+        path = require_safe_artifact_path(self.artifact_root, self.path(day), label="generation trace file")
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags, 0o600)
         try:
@@ -207,13 +208,13 @@ class ModelCallTracer:
             (
                 item.name.removeprefix(STEP_SPAN_PREFIX)
                 for item in reversed(chain)
-                if item.name.startswith(STEP_SPAN_PREFIX) and item.name != NIGHT_SPAN
+                if item.name.startswith(STEP_SPAN_PREFIX) and item.name != GENERATION_SPAN
             ),
             None,
         )
         if self.metrics is not None and step is not None:
             record_observation(
-                self.metrics, "nightly", "model_call", event.status, attributes={"step": step, "touch": touch}
+                self.metrics, "generation", "model_call", event.status, attributes={"step": step, "touch": touch}
             )
 
 
@@ -233,4 +234,4 @@ def prune_dated(directory: Path, artifact_root: Path, floor: date, *, suffix: st
     return removed
 
 
-__all__ = ["NIGHT_SPAN", "STEP_SPAN_PREFIX", "ModelCallTracer", "SpanBackend", "TraceFiles", "prune_dated"]
+__all__ = ["GENERATION_SPAN", "STEP_SPAN_PREFIX", "ModelCallTracer", "SpanBackend", "TraceFiles", "prune_dated"]

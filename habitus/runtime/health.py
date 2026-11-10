@@ -7,15 +7,16 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum
+from zoneinfo import ZoneInfo
 
 from habitus.foresight import ForesightError
 from habitus.memory.workflow import MemoryJobStatus
 from habitus.runtime.components import RuntimeComponents
 from habitus.runtime.foresight_opportunities import OpportunityStore
+from habitus.runtime.generation_marks import GenerationMarkError
+from habitus.runtime.generation_result import REWOUND
+from habitus.runtime.generation_worker import GenerationWorker
 from habitus.runtime.lifecycle import LifecycleWorkerState
-from habitus.runtime.nightly import PREPARE
-from habitus.runtime.nightly_jobs import FAILED, STOPPED, NightJobs, NightJobsError
-from habitus.runtime.nightly_summary import kept_errors
 from habitus.runtime.resident import ResidentWorker
 from habitus.runtime.worker import MemoryWorkerState
 
@@ -52,11 +53,14 @@ class RuntimeHealthReport:
 class RuntimeHealthService:
     """聚合现有组件状态，不触发索引重建或业务写入。"""
 
-    def __init__(self, components: RuntimeComponents, *, capacity_warning_share: float = 0.8) -> None:
+    def __init__(
+        self, components: RuntimeComponents, capacity_warning_share: float = 0.8, zone: ZoneInfo | None = None
+    ) -> None:
         if not 0.0 < capacity_warning_share < 1.0:
             raise ValueError("capacity_warning_share must lie in (0, 1)")
         self.components = components
         self.capacity_warning_share = float(capacity_warning_share)
+        self.zone = zone  # 配置的主体时区（``locale.timezone``）：与系统时区比（``timezone_checks``）；没给不比
 
     async def report(self, runtime_state: str, *, deep: bool = False) -> RuntimeHealthReport:
         if not runtime_state:
@@ -68,9 +72,10 @@ class RuntimeHealthService:
             self._lifecycle_check(),
             self._lifecycle_capacity_check(),
             self._observability_check(),
+            *([] if self.zone is None else timezone_checks(self.zone, datetime.now().astimezone())),
         ]
         checks.extend(self._behavior_checks(runtime_state))
-        checks.extend(self._nightly_checks(runtime_state))
+        checks.extend(self._generation_checks(runtime_state))
         checks.extend(self._foresight_checks(runtime_state))
         checks.append(await self._queue_check())
         checks.extend(
@@ -83,11 +88,11 @@ class RuntimeHealthService:
             checks.extend(
                 await asyncio.gather(
                     self._chat_check(),
-                    self._index_consistency_check(
+                    _index_consistency_check(
                         "memory_index_consistency",
                         self.components.memory.vector_index,
                     ),
-                    self._index_consistency_check(
+                    _index_consistency_check(
                         "summary_index_consistency",
                         self.components.conversation.summary_vector_index,
                     ),
@@ -144,19 +149,18 @@ class RuntimeHealthService:
                 )
         return checks
 
-    def _nightly_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
-        """整晚那一趟的健康面；同样 non-critical。
-
-        夜批循环死掉不会让任何请求出错——它只是让语义树和机会表停在昨天，而这**恰恰是最难自己发现的故障**：
-        白天照常建预期，只是依据越来越旧。所以循环存活必须上健康面；接了预测层时再看机会表最晚一晚有多旧（清单 5.3）。
+    def _generation_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
+        """换代的健康面；同样 non-critical。换代死掉不会让任何请求出错——它只是让语义树和机会表停在昨天，而这**恰恰是最难自己发现的故障**：白天照常递送，只是依据
+        越来越旧、新的预期一条都不建。所以循环存活必须上健康面；另报：今天没有这一代（必须成的那一步没成）、走了退路的步、
+        定稿日不连续卡住的那一天、最新的完成标记读不了；接了预测层时再看机会表最晚一晚有多旧（清单 5.3）。
         """
 
-        nightly = self.components.nightly
-        if nightly is None:
-            return [RuntimeHealthCheck("nightly", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
-        checks = self._worker_checks(runtime_state, (("nightly_worker", nightly),))
-        checks.extend(_night_line_checks(nightly.jobs))
-        calendar = getattr(getattr(nightly.nightly, "scene", None), "calendar", None)
+        worker = self.components.generation
+        if worker is None:
+            return [RuntimeHealthCheck("generation", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
+        checks = self._worker_checks(runtime_state, (("generation_worker", worker),))
+        checks.extend(_generation_state_checks(worker))
+        calendar = getattr(getattr(worker.generation, "scene", None), "calendar", None)
         problems = tuple(getattr(calendar, "problems", ()))
         if problems:
             # 放假数据有年份读不了：那几年日型未知（建预期按名义周末），进程照常——但要让人看见、去改文件
@@ -165,7 +169,7 @@ class RuntimeHealthService:
             )
         foresight = self.components.foresight
         if foresight is not None:
-            closed_days = getattr(nightly.nightly, "closed_days", None)
+            closed_days = getattr(worker.generation, "closed_days", None)
             checks.append(self._opportunity_freshness_check(foresight.opportunities, closed_days))
         return checks
 
@@ -176,7 +180,7 @@ class RuntimeHealthService:
         if foresight is None:
             return [RuntimeHealthCheck("foresight", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
         if foresight.worker is None:
-            # 触发与递法还没接上：只有账本与夜间结算，没有常驻循环可查
+            # 触发与递法还没接上：只有账本与换代里的结算，没有常驻循环可查
             return [RuntimeHealthCheck("foresight", RuntimeHealthStatus.HEALTHY, "ledger only", critical=False)]
         return self._worker_checks(runtime_state, (("foresight_worker", foresight.worker),))
 
@@ -184,10 +188,10 @@ class RuntimeHealthService:
     def _opportunity_freshness_check(
         store: OpportunityStore, closed_days: Callable[[], Iterable[date]] | None
     ) -> RuntimeHealthCheck:
-        """机会表有多旧。循环活着不等于整晚在产出——这正是上面那段 docstring 说最难自己发现的故障。
+        """机会表有多旧。循环活着不等于换代在产出——这正是上面那段 docstring 说最难自己发现的故障。
 
-        不写死周期（裁定 68 第 4 条）：线在前一天定稿之后跑（裁定 94 第 1 条），所以该有的最晚一晚是"最后定稿日 + 1"；盘上最晚
-        那张表比它早就是陈旧（线没跑到、没跑完、停下了）。还没写过任何一晚、还没有定稿日都不算故障：行为侧刚接入、第一夜还没到。
+        不写死周期（裁定 68 第 4 条）：换代在前一天定稿之后做，所以该有的最晚一代是"最后定稿日 + 1"；盘上最晚那张表比它早就是
+        陈旧（换代没做、没做成）。还没写过任何一代、还没有定稿日都不算故障：行为侧刚接入、第一代还没到。
         """
 
         lane = "session"
@@ -405,70 +409,134 @@ class RuntimeHealthService:
         )
 
     @staticmethod
-    async def _index_consistency_check(name: str, index: object) -> RuntimeHealthCheck:
-        """执行无副作用的真相源/派生索引审计，不在健康检查中重建。"""
-
-        try:
-            state = await index.store.state()  # type: ignore[attr-defined]
-            if state is None:
-                return RuntimeHealthCheck(name, RuntimeHealthStatus.DEGRADED, "not_published")
-            if not state.ready:
-                return RuntimeHealthCheck(name, RuntimeHealthStatus.DEGRADED, "not_ready")
-            report = await index.audit_consistency()  # type: ignore[attr-defined]
-        except Exception as exc:
-            return RuntimeHealthCheck(name, RuntimeHealthStatus.UNHEALTHY, type(exc).__name__)
-        if report.ok:
-            return RuntimeHealthCheck(
-                name,
-                RuntimeHealthStatus.HEALTHY,
-                f"expected={report.expected_count};indexed={report.indexed_count}",
-            )
-        return RuntimeHealthCheck(
-            name,
-            RuntimeHealthStatus.UNHEALTHY,
-            (
-                f"missing={len(report.missing_identities)};"
-                f"stale={len(report.stale_identities)};"
-                f"orphan={len(report.orphan_identities)}"
-            ),
-        )
-
-    @staticmethod
     def _error(error: BaseException | None) -> str:
         return "none" if error is None else type(error).__name__
 
 
-def _night_line_checks(jobs: NightJobs) -> list[RuntimeHealthCheck]:
-    """夜里那条线最近一晚要人看的，读 Job 账（重启之后照样看得到上一晚停在哪、为什么）：有段停下了（"模型调不通"、某一段出错，
-    等着退避重试）或失败了（次数用完、或那一晚过去了没跑完），以及前置处理里保持「错误·看不到」的（我们自己处理不了的、内容安全
-    拦下的、格式不合夜里再试仍不合的，裁定 94 第 4、8 条）——两条各报各的。锁被占不在这里：那是还没准备好，Job 保持排队、下一眼
-    接着跑。都是 non-critical：白天照常建预期与提醒。"""
+async def _index_consistency_check(name: str, index: object) -> RuntimeHealthCheck:
+    """执行无副作用的真相源/派生索引审计，不在健康检查中重建。"""
 
     try:
-        ledger = jobs.latest()
-    except (OSError, NightJobsError) as exc:
-        return [
-            RuntimeHealthCheck(
-                "nightly_line", RuntimeHealthStatus.DEGRADED, f"unreadable:{type(exc).__name__}", critical=False
-            )
-        ]
-    if ledger is None:
+        state = await index.store.state()  # type: ignore[attr-defined]
+        if state is None:
+            return RuntimeHealthCheck(name, RuntimeHealthStatus.DEGRADED, "not_published")
+        if not state.ready:
+            return RuntimeHealthCheck(name, RuntimeHealthStatus.DEGRADED, "not_ready")
+        report = await index.audit_consistency()  # type: ignore[attr-defined]
+    except Exception as exc:
+        return RuntimeHealthCheck(name, RuntimeHealthStatus.UNHEALTHY, type(exc).__name__)
+    if report.ok:
+        return RuntimeHealthCheck(
+            name,
+            RuntimeHealthStatus.HEALTHY,
+            f"expected={report.expected_count};indexed={report.indexed_count}",
+        )
+    return RuntimeHealthCheck(
+        name,
+        RuntimeHealthStatus.UNHEALTHY,
+        (
+            f"missing={len(report.missing_identities)};"
+            f"stale={len(report.stale_identities)};"
+            f"orphan={len(report.orphan_identities)}"
+        ),
+    )
+
+
+def timezone_checks(zone: ZoneInfo, system: datetime) -> list[RuntimeHealthCheck]:
+    """系统时区与配置时区（non-critical；用户 11-10 换时区，方案 19 第 6.1 节；不管换代接没接都比，用户 11-10）：运行时一切按
+    配置的 ``locale.timezone`` 算（今天、槽、闸），``system`` 是此刻按系统本地时区的读法，系统时区只影响人在系统上看到的钟点——``system``（此刻、按系统本地时区）与它
+    此刻的 UTC 偏移不一致时报出两边的名字与偏移，人可能改了一边忘了另一边。只比此刻的偏移：名字不同、偏移相同（Asia/Shanghai
+    与 Asia/Singapore）不报。"""
+
+    configured = system.astimezone(zone)
+    if system.utcoffset() == configured.utcoffset():
         return []
+    detail = f"system timezone {_system_zone_name(system)} {system:%z} differs from locale.timezone {zone.key} {configured:%z}"
+    return [RuntimeHealthCheck("timezone", RuntimeHealthStatus.DEGRADED, detail, critical=False)]
+
+
+def _system_zone_name(moment: datetime) -> str:
+    """系统时区的名字：能拿到 IANA 名（tzlocal）就用它，拿不到用系统给的缩写。"""
+
+    try:
+        from tzlocal import get_localzone_name
+
+        name = get_localzone_name()
+    except Exception:  # noqa: BLE001 - tzlocal 在各平台抛的异常不一，名字只是给人看的
+        name = None
+    return name or moment.tzname() or "local"
+
+
+def _generation_state_checks(worker: GenerationWorker) -> list[RuntimeHealthCheck]:
+    """换代要人看的（都是 non-critical：白天照常递送）：
+
+    - ``generation``：最近一次做的那一代没写成（必须成的那一步没成），今天没有这一代，带下一次重试的时刻；
+    - ``generation_fallbacks``：最近一次写成的那一代走了退路（关系判定退到上一代、结算留到下次、单元历史跳过……），逐步列出；
+    - ``generation_errors``：重试收尾之后仍保持「错误·看不到」的（我们自己处理不了的、内容安全拦下的、格式不合再试仍不合的）；
+    - ``generation_stuck``：定稿日不连续、连着几眼都卡在同一天（有判断一直封不了口）；最新的完成标记读不了也报（日期回退见 ``_rewound_checks``）。"""
+
     checks: list[RuntimeHealthCheck] = []
-    blocked = [job for job in ledger.jobs if job.state in (STOPPED, FAILED)]
-    if blocked:
-        detail = "; ".join(
-            f"{ledger.night} {job.step} {job.state}: {job.reason or '-'}"
-            + (f" (next attempt {job.next_attempt_at.isoformat()})" if job.next_attempt_at is not None else "")
-            for job in blocked
-        )
-        checks.append(RuntimeHealthCheck("nightly_line", RuntimeHealthStatus.DEGRADED, detail[:500], critical=False))
-    kept = kept_errors(ledger.job(PREPARE).report.get("retry"))
-    if kept is not None:
+    result = worker.last_result
+    if result is not None and not result.complete and result.held is None:
+        later = "" if worker.retry_at is None else f"; next retry at {worker.retry_at.isoformat()}"
         checks.append(
-            RuntimeHealthCheck("nightly_errors", RuntimeHealthStatus.DEGRADED, f"错误·看不到：{kept}", critical=False)
+            RuntimeHealthCheck(
+                "generation",
+                RuntimeHealthStatus.DEGRADED,
+                f"{result.day} not written: {result.failed} {result.reason or '-'}{later}"[:500],
+                critical=False,
+            )
         )
-    return checks
+    try:
+        mark = worker.generation.marks.latest()
+    except GenerationMarkError as exc:
+        checks.append(
+            RuntimeHealthCheck(
+                "generation_marks", RuntimeHealthStatus.DEGRADED, f"unreadable:{type(exc).__name__}", critical=False
+            )
+        )
+        mark = None
+    if mark is not None:
+        degraded = [
+            f"{step}: {value.get('reason') or '-'}"
+            for step, value in mark.steps.items()
+            if value.get("outcome") == "degraded"
+        ]
+        if degraded:
+            checks.append(
+                RuntimeHealthCheck(
+                    "generation_fallbacks",
+                    RuntimeHealthStatus.DEGRADED,
+                    f"{mark.day} " + "; ".join(degraded)[:480],
+                    critical=False,
+                )
+            )
+        kept = [item for item in mark.problems if item.startswith("错误·看不到")]
+        if kept:
+            checks.append(
+                RuntimeHealthCheck("generation_errors", RuntimeHealthStatus.DEGRADED, kept[0][:500], critical=False)
+            )
+    stuck = worker.stuck
+    if stuck is not None:
+        checks.append(
+            RuntimeHealthCheck(
+                "generation_stuck",
+                RuntimeHealthStatus.DEGRADED,
+                f"closed days are not contiguous: stuck at {stuck}",
+                critical=False,
+            )
+        )
+    return [*checks, *_rewound_checks(worker)]
+
+
+def _rewound_checks(worker: GenerationWorker) -> list[RuntimeHealthCheck]:
+    """``generation_rewound``：当地日期回到了已换代的日子之前（往西改了时区），日期追上之前不换代；追上后这一项自己消掉。"""
+
+    if worker.rewound is None:
+        return []
+    today, latest = worker.rewound
+    detail = f"{REWOUND}: today {today}, latest generation {latest}; no generation until the date catches up"
+    return [RuntimeHealthCheck("generation_rewound", RuntimeHealthStatus.DEGRADED, detail, critical=False)]
 
 
 __all__ = [

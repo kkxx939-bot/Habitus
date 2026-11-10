@@ -1600,3 +1600,27 @@ def test_a_chain_whose_delivery_is_gone_still_lands_and_says_so(tmp_path) -> Non
 
     assert report.published_occurrences == 1
     assert f"source_delivery_missing {source}" in report.dropped_edges
+
+
+def test_resuming_only_the_vocabulary_migration_is_a_no_op_without_a_plan_and_finishes_a_pending_one(tmp_path) -> None:
+    """F1：换代最前那一步只续做没做完的迁移（``VocabularyRunner.resume``，持 sweep 锁）。没有计划时是空操作（不改树、不记
+    脏日、不调模型）；有计划时把它做完，改过的日子进脏日日志。"""
+
+    from habitus.behavior.kinds.changes import ChangeReason, Move, VersionRecord
+
+    harness = Harness(tmp_path, known_kinds=("洗手", "擦干"))
+    seed_wash(harness, harness.deliver(OBS_A, OBS_B, OBS_C))
+    asyncio.run(harness.runner.run_once())
+    (address,) = harness.tree.list_addresses(BehaviorKind.OCCURRENCE)
+    before = harness.runner.dirty_days.last()
+    quiet = asyncio.run(harness.runner.vocabulary.resume())
+    assert quiet.days == () and quiet.model_calls == 0 and harness.runner.dirty_days.last() == before
+    uri = str(BehaviorURI.from_address(address))
+    record = VersionRecord(
+        harness.kind_store.read().version + 1, harness.now, ChangeReason.NIGHTLY, (), (Move(uri, "s-k0001", "s-k0002"),)
+    )
+    harness.vocabulary_jobs.migrator.plan(record)
+    resumed = asyncio.run(harness.runner.vocabulary.resume())
+    assert any(signal.startswith("kind_migration_resumed") for signal in resumed.signals)
+    assert harness.tree.read(address).fields["kind_token"] == "s-k0002"
+    assert harness.kind_store.read_migration() is None

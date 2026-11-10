@@ -245,7 +245,7 @@ class Runtime:
         self._conversation_adapters = (
             conversation_adapters if conversation_adapters is not None else ConversationAdapterRegistry.with_builtins()
         )
-        self._health = RuntimeHealthService(components, capacity_warning_share=config.lifecycle.capacity_warning_share)
+        self._health = RuntimeHealthService(components, config.lifecycle.capacity_warning_share, config.locale.zone())
         self._lifecycle = RuntimeLifecycle(config, components, observe=self._observe)
         self._failed_jobs = FailedMemoryJobOperations(
             components, running=lambda: self._state is RuntimeState.RUNNING, observe=self._observe

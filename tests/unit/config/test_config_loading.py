@@ -442,6 +442,8 @@ def test_foresight_carries_the_loss_ratios_and_protective_limits_and_needs_both_
         "judge_transient_retry_delay_seconds",
         "tick_interval_seconds",
         "worker_shutdown_timeout_seconds",
+        "unwatched_tolerance_slots",
+        "generation_margin_slots",
         "half_life_opportunities",
         "outlet_liveness_hours",
         "outlet_lease_minutes",
@@ -498,21 +500,58 @@ def test_foresight_carries_the_loss_ratios_and_protective_limits_and_needs_both_
     assert HabitusConfig.from_mapping(mapping).foresight.enabled is True
 
 
-def test_the_nightly_run_has_no_clock_time_only_a_shutdown_wait() -> None:
-    """整晚那一趟前一天定稿完成就接着跑，不挂固定时刻（裁定 94 第 1 条）：语义树那一段只留停机等多久（默认 30 秒），越界硬拒；
-    写了旧的 ``nightly_at`` 是未知字段。"""
+def test_the_generation_has_no_clock_time_only_operating_numbers() -> None:
+    """换代在连续定稿到昨天、预测拍水位过了余量后做，不挂固定时刻（实时化方案第 3 节）：语义树那一段只留换代的运维数
+    （停机等多久、隔多久看一眼、留几天、两把租约的租期与续租、卡住几眼报出），越界硬拒；夜线的 ``nightly_*`` 与更早的
+    ``nightly_at`` 都是未知字段。"""
 
     from habitus.config.scene import SceneConfig
 
-    assert SceneConfig().nightly_shutdown_timeout_seconds == 30.0
+    config = SceneConfig()
+    assert (
+        config.generation_shutdown_timeout_seconds,
+        config.generation_poll_seconds,
+        config.generation_kept_days,
+        config.generation_lease_ttl_seconds,
+        config.generation_heartbeat_seconds,
+        config.generation_stuck_ticks,
+        config.generation_retry_base_seconds,
+        config.generation_retry_max_seconds,
+    ) == (30.0, 300.0, 366, 120.0, 30.0, 3, 300.0, 3600.0)
     for field_name, bad in (
-        ("nightly_shutdown_timeout_seconds", 0.5),
-        ("nightly_shutdown_timeout_seconds", "30"),
+        ("generation_shutdown_timeout_seconds", 0.5),
+        ("generation_shutdown_timeout_seconds", "30"),
+        ("generation_poll_seconds", 0.5),
+        ("generation_kept_days", 0),
+        ("generation_lease_ttl_seconds", 1.0),
+        ("generation_stuck_ticks", 0),
+        ("generation_retry_base_seconds", 0.5),
     ):
         with pytest.raises(ConfigError, match=f"scene.{field_name}"):
             SceneConfig.from_mapping({field_name: bad})
-    with pytest.raises(ConfigError, match="nightly_at"):
-        SceneConfig.from_mapping({"nightly_at": "04:00"})
+    with pytest.raises(ConfigError, match="generation_heartbeat_seconds"):
+        SceneConfig.from_mapping({"generation_heartbeat_seconds": 120.0})
+    with pytest.raises(ConfigError, match="generation_retry_base_seconds"):
+        SceneConfig.from_mapping({"generation_retry_base_seconds": 7200.0})
+    for retired in ("nightly_at", "nightly_poll_seconds", "nightly_kept_nights"):
+        with pytest.raises(ConfigError, match=retired):
+            SceneConfig.from_mapping({retired: 1})
+
+
+def test_a_tick_is_one_slot(tmp_path) -> None:
+    """实时化方案第 5 节：预测拍一拍一槽、对齐槽边界——预测层开着时 ``tick_interval_seconds`` 必须等于槽宽 × 60。"""
+
+    mapping = valid_mapping(tmp_path)
+    mapping["behavior"] = {"primary_subject": "家庭成员A"}
+    mapping["scene"] = {"enabled": True}
+    mapping["foresight"] = {"enabled": True, "tick_interval_seconds": 600}
+    with pytest.raises(ConfigError, match="tick_interval_seconds"):
+        HabitusConfig.from_mapping(mapping)
+    mapping["temporal"] = {"slot_minutes": 10, "merge_window_minutes": 40}
+    assert HabitusConfig.from_mapping(mapping).foresight.tick_interval_seconds == 600
+    mapping["foresight"] = {"enabled": True, "unwatched_tolerance_slots": 0}
+    with pytest.raises(ConfigError, match="unwatched_tolerance_slots"):
+        HabitusConfig.from_mapping(mapping)
 
 
 def startup_yaml(tmp_path: Path, *, behavior: dict[str, object], scene: dict[str, object]) -> Path:

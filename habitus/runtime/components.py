@@ -59,9 +59,9 @@ from habitus.model_client import (
 from habitus.runtime.behavior import BehaviorBranches
 from habitus.runtime.foresight import ForesightRuntimeComponents
 from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
+from habitus.runtime.generation_worker import GenerationWorker
 from habitus.runtime.lifecycle import LifecycleWorker
 from habitus.runtime.lifecycle_memory import ConversationChainParticipant
-from habitus.runtime.nightly_worker import NightlyWorker
 from habitus.runtime.session_lane import BehaviorSessionConsumer
 from habitus.runtime.worker import MemoryWorker
 
@@ -279,30 +279,35 @@ class RuntimeComponents:
     workflow: RuntimeWorkflow
     # 行为管线的两支（会话、物理各一整套：融合→归约→行为树）；primary_subject 未配置时为 None（行为侧未启用）。
     behavior: BehaviorBranches | None = None
-    # 整晚那一趟（结算 → 语义树 → 机会表）的常驻节拍；语义树没启用时为 None。它只接会话那一支（见 assembly 的 TODO）。
-    nightly: NightlyWorker | None = None
+    # 换代（重试收尾 → 结算 → 词表 → 语义树 → 机会表 → 日子预期 → 完成标记）的常驻 worker；语义树没启用时为 None。
+    # 它只接会话那一支（见 assembly 的 TODO）。
+    generation: GenerationWorker | None = None
     # 预测层的证据装配；foresight.enabled 为假时为 None。它现在只接会话那一支（见 assembly 的 TODO）。
     foresight: ForesightRuntimeComponents | None = None
 
     def __post_init__(self) -> None:
-        if self.nightly is not None:
+        if self.generation is not None:
             if self.behavior is None:
-                raise ValueError("the nightly run reads the behaviour tree; behaviour must be enabled")
-            # 实例同一性：整晚那一趟必须读**这个** Runtime 写入的会话那一支行为树——不是另开一个同路径的实例。
-            if getattr(self.nightly.nightly, "behavior_tree", None) is not self.behavior.session.tree:
-                raise ValueError("the nightly run must read the session behaviour tree")
+                raise ValueError("the generation reads the behaviour tree; behaviour must be enabled")
+            # 实例同一性：换代必须读**这个** Runtime 写入的会话那一支行为树——不是另开一个同路径的实例。
+            if getattr(self.generation.generation, "behavior_tree", None) is not self.behavior.session.tree:
+                raise ValueError("the generation must read the session behaviour tree")
         if self.foresight is not None:
-            if self.behavior is None or self.nightly is None:
+            if self.behavior is None or self.generation is None:
                 raise ValueError(
-                    "foresight reads the semantic layer's nightly run; behaviour and the nightly run must be enabled"
+                    "foresight reads the semantic layer's generation; behaviour and the generation must be enabled"
                 )
-            # 接线漏了的话，进程照常启动、health 全绿、结算一夜都不会跑，而配置里还开着——无处可查。结算是整晚那一趟的第一步。
-            if getattr(self.nightly.nightly, "settlement", None) is not self.foresight.settlement:
-                raise ValueError("the settlement stage must be the first step of the nightly run")
-            # 机会表那一步漏接：进程照常、健康全绿（一晚都没写过不算故障），白天永远停在"还没有机会表"（2026-10-18 四方评审）
-            step = getattr(self.nightly.nightly, "foresight", None)
+            generation = self.generation.generation
+            # 接线漏了的话，进程照常启动、health 全绿、结算一代都不会跑，而配置里还开着——无处可查。结算是换代里的一步。
+            if getattr(generation, "settlement", None) is not self.foresight.settlement:
+                raise ValueError("the settlement stage must be a step of the generation")
+            # 机会表那一步漏接：进程照常、健康全绿（一代都没写过不算故障），白天永远停在"还没有机会表"（2026-10-18 四方评审）
+            step = getattr(generation, "foresight", None)
             if step is None or getattr(step, "store", None) is not self.foresight.opportunities:
-                raise ValueError("the nightly run must write the opportunity table the foresight layer reads")
+                raise ValueError("the generation must write the opportunity table the foresight layer reads")
+            # 结算认"那天有没有这一代"读的必须是换代写的那一份完成标记
+            if self.foresight.settlement.finished != generation.marks.finished:
+                raise ValueError("the settlement must read the generation's own completion marks")
             self.foresight.assert_attached_to(behavior=self.behavior.session)
             # 出口漏包：提醒记了「待取」、宿主也问了，转写回来却没人认，账上永远没有「说了」——结算全按没说过处理，一处都不报错
             consumer = self.conversation.behavior_session_consumer

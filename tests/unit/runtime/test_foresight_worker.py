@@ -1,4 +1,4 @@
-"""预测层的常驻 worker：按节拍跑那一拍、失败记下来不死、停得下来。"""
+"""预测层的常驻 worker：拍点对齐槽边界跑那一拍（实时化方案第 5 节）、失败记下来不死、停得下来。"""
 
 from __future__ import annotations
 
@@ -40,7 +40,15 @@ def worker(tmp_path, *, broken: bool = False, recorder: Recorder | None = None) 
             raise ForesightError("derived tree cannot be read")
 
         tick._read = unreadable  # type: ignore[method-assign,assignment]
-    return ForesightWorker(tick, interval_seconds=3600.0, shutdown_timeout_seconds=5.0, observer=recorder)
+    # 时钟停在 10:15，正好是一个槽边界：起来这一拍就跑，下一拍等 10:30
+    return ForesightWorker(
+        tick,
+        interval_seconds=900.0,
+        shutdown_timeout_seconds=5.0,
+        zone=ZoneInfo("Asia/Shanghai"),
+        observer=recorder,
+        clock=lambda: at(TODAY, 10, 15),
+    )
 
 
 def test_the_loop_runs_a_tick_then_waits_and_stops(tmp_path) -> None:
@@ -75,5 +83,15 @@ def test_a_failing_tick_is_recorded_and_the_loop_survives(tmp_path) -> None:
     asyncio.run(scenario())
     assert [event.status for event in recorder.events if event.operation == "tick_loop"] == [ObservationStatus.FAILURE]
     with pytest.raises(ValueError):
-        ForesightWorker(run.tick, interval_seconds=0.0, shutdown_timeout_seconds=1.0)
-    assert timedelta(seconds=run.interval_seconds) == timedelta(hours=1)
+        ForesightWorker(run.tick, interval_seconds=0.0, shutdown_timeout_seconds=1.0, zone=ZoneInfo("Asia/Shanghai"))
+    assert timedelta(seconds=run.interval_seconds) == timedelta(minutes=15)
+
+
+def test_ticks_start_on_slot_boundaries_and_skip_the_ones_already_passed(tmp_path) -> None:
+    """E12：拍点是当地零点起每一槽的边界；一拍拖过了几个边界，下一拍从此刻之后的边界接着走（不补跑）。"""
+
+    run = worker(tmp_path)
+    assert run.next_boundary(at(TODAY, 10, 16), inclusive=True) == at(TODAY, 10, 30)
+    assert run.next_boundary(at(TODAY, 10, 30), inclusive=True) == at(TODAY, 10, 30)
+    assert run.next_boundary(at(TODAY, 10, 30), inclusive=False) == at(TODAY, 10, 45)
+    assert run.next_boundary(at(TODAY, 23, 50), inclusive=True) == at(TODAY + timedelta(days=1), 0, 0)

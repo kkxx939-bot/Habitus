@@ -63,7 +63,8 @@ class LaneTests:
         #: 量哪些（枚举与冻住的行的寿命）与怎么量（读数、检验族、子集上的读数）。
         self.candidates = RelationCandidates(self)
         self.evaluator = RelationEvaluator(self, self.candidates)
-        #: 最近一次 ``night`` 的结果（还没算过是 None）：夜线的观测从这里读各族的分解，不再算第二遍。
+        #: 最近一次 ``night`` 的结果（还没算过是 None）：换代里关系那一步的观测（``scene.b4.lane`` span）从这里读各族的分解，
+        #: 不再算第二遍。
         self.last_night: LaneNight | None = None
 
     # ── 量哪些（``candidates``） ──────────────────────────────────────────────

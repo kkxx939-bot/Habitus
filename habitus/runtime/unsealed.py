@@ -15,20 +15,21 @@
   9 条，1.6%，最近一小时等于全是未归类。）
 
 归类要调模型，所以分两步：``prepare``（异步，每拍装配之前调一次）归新出现的判断；``rows``（同步，装配时调）只读缓存。
-白天那一拍里模型此刻用不了就留着下一拍再归；夜里那条线上（``in_line``，日子预期那一段）碰到模型整个用不了原样抛出，线停下
-这一晚、报"模型调不通"（裁定 94 第 8 条），不拿没归上的建预期。
-还没归上的（白天模型这一拍不可用、或归为「待定」）带原名进场景、标未归类，不猜；归为「非事件」的不进场景（与序列同一口径）。
-没读懂的判断（``behavior`` 为 None）是一段空白，按空白行给出。隔离的坏记录归约每轮都会报，这里不报第二遍。
+模型此刻用不了就留着下一拍再归——预测拍与换代里的日子预期同一口径（实时化方案第 2 节：模型调不通不停一天）。
+还没归上的（模型这一拍不可用、或归为「待定」）带原名进场景、标未归类，不猜；归为「非事件」的不进场景（与序列同一口径）。
+没读懂、出错的判断（``behavior`` 为 None）是一段看不到的空白，按空白行给出；依据写着"没在看"（``unobserved``）的空判断是
+「未观测」，不是看不到——照常说话（裁定 68 第 2 条、94 第 3 条），不给出。隔离的坏记录归约每轮都会报，这里不报第二遍。
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, tzinfo
 
 from habitus.behavior.fusion.store import BehaviorJudgementStore
 from habitus.behavior.kinds.classify import EXHAUSTED, ClassifyRequest, Outcome
 from habitus.behavior.reduction.kinds_step import KindStamping, judgement_content
 from habitus.behavior.reduction.ledger import BehaviorReductionLedger
+from habitus.behavior.reduction.payloads import UNOBSERVED_GAP_KIND, gap_kind_of
 from habitus.behavior.reduction.pending import pending_judgements
 from habitus.foresight import UnsealedRow
 from habitus.model_client import MODEL_UNAVAILABLE
@@ -42,22 +43,17 @@ class UnsealedFromJudgements:
         judgements: BehaviorJudgementStore,
         ledger: BehaviorReductionLedger,
         stamping: KindStamping,
-        *,
-        in_line: bool = False,
     ) -> None:
-        """``in_line``：这一份给夜里那条线用（日子预期那一段），模型整个用不了时抛出、不留到下一拍。"""
-
         self.judgements = judgements
         self.ledger = ledger
         self.stamping = stamping
-        self.in_line = in_line
         #: （节点身份, 词表版本）→ （结局, 编号）。只留还没封口的；词表拆改之后版本变了，自动重归（不留停用的编号）。
         self._classified: dict[tuple[str, int], tuple[Outcome, str]] = {}
         self._version = 0
 
     async def prepare(self, *, until: datetime) -> None:
-        """把还没归过的未封口判断交白天归类。白天模型这一拍不可用（``MODEL_UNAVAILABLE``）就留着不归（下一拍再试），不让此刻场景
-        因此失败；配置错误照样抛出来——吞掉它会让每一拍都悄悄归不上。线上那一份（``in_line``）一律抛出。"""
+        """把还没归过的未封口判断交白天归类。模型这一拍不可用（``MODEL_UNAVAILABLE``）就留着不归（下一拍再试），不让此刻场景
+        因此失败；配置错误照样抛出来——吞掉它会让每一拍都悄悄归不上。"""
 
         if until.utcoffset() is None:
             raise ValueError("until must be a timezone-aware datetime")
@@ -78,8 +74,6 @@ class UnsealedFromJudgements:
         try:
             result = await self.stamping.classify_requests(requests, vocabulary, checkpoint=lambda: None)
         except MODEL_UNAVAILABLE:
-            if self.in_line:
-                raise
             return
         for key, verdict in result.verdicts.items():
             if verdict.outcome is Outcome.PENDING and verdict.reason == EXHAUSTED:
@@ -117,9 +111,21 @@ class UnsealedFromJudgements:
                 summary=None,
             )
             for gap in pending.gaps
+            if gap_kind_of(gap) != UNOBSERVED_GAP_KIND
         )
         inside = [row for row in rows if _instant(row.last_observed_at) >= begin and _instant(row.started_at) <= finish]
         return tuple(sorted(inside, key=_row_order))
+
+
+def unreduced_gaps(
+    judgements: BehaviorJudgementStore, ledger: BehaviorReductionLedger, *, cutoff: date, zone: tzinfo
+) -> int:
+    """截止日之前（本地日）还没归约的空判断条数：换代按槽留余量，等这几槽里归约把没在看的空白落树——这个数正常应为 0
+    （用户 11-10 已知局限的读数）。"""
+
+    return sum(
+        1 for gap in pending_judgements(judgements, ledger).gaps if gap.started_at.astimezone(zone).date() < cutoff
+    )
 
 
 def _instant(value: datetime) -> datetime:
@@ -130,4 +136,4 @@ def _row_order(row: UnsealedRow) -> tuple[datetime, str]:
     return _instant(row.started_at), row.name or ""
 
 
-__all__ = ["UnsealedFromJudgements"]
+__all__ = ["UnsealedFromJudgements", "unreduced_gaps"]

@@ -796,7 +796,7 @@ def test_a_window_end_reached_already_in_the_opening_tick_is_decided_in_the_next
 
     run, ledger = stage(tmp_path, tick_seconds=900.0)
     earn(ledger)
-    early = replace(expectation("early", DAY0, window=(3, 5)), deadline=DAY0 + timedelta(minutes=5))
+    early = replace(expectation("early", DAY0, window=(3, 5)), deadline=DAY0 + timedelta(minutes=10))  # G8：时限晚于开时窗那一拍
     ledger.record_expectation(early)
     assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=6), NO_ROWS)).by_reason == {"等时窗末": 1}
     assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=21), NO_ROWS)).decided == 1
@@ -949,3 +949,182 @@ def test_a_later_input_joins_the_basis_not_a_member_the_unit_already_decided_for
     asyncio.run(run.run_once(at(105)))
     later = [item for item in ledger.deliveries_on(DAY0.date()) if item.expectation_id == "F"]
     assert later and all(item.evidence != ("单元:M",) for item in later)
+
+
+def test_an_awaiting_request_whose_basis_can_no_longer_speak_is_withdrawn_unless_taken(tmp_path) -> None:
+    """实时化方案第 7 节（E9）：话已写好、宿主还没取走的「待取」，它所依据的关系换代后从机会表上消失（不再能开口）——撤下请求、
+    账上记一条终局原因「依据失效」，可取清单里不再有它（同一刻最多挂一条请求，成员照现有规则接手）；已被取走的不撤；盘上一张表
+    都没有时认不出，不撤；日子触发（不靠关系）不撤。"""
+
+    from habitus.foresight.opportunities import OpportunityTable
+
+    table = OpportunityTable("session", DAY0.date(), DAY0.date(), 15, 3, (), ())  # 换代之后：这条关系不在表上了
+    with_table = JudgeMaterials(table, lambda uris: {})
+    for taken, table_given, source, withdrawn in (
+        (False, True, "事件", True),
+        (True, True, "事件", False),
+        (False, False, "事件", False),
+        (False, True, "日子", False),
+    ):
+        outlet, claimed = Outlet(), set[str]()
+        run, ledger = stage(tmp_path / f"{taken}-{table_given}-{source}", outlet=outlet, claimed=claimed.__contains__)
+        ledger.record_expectation(expectation("ev", DAY0, source=source))
+        ledger.record_delivery(DAY0.date(), Delivery("ev", DAY0 + timedelta(minutes=41), 1, False, "待取", 1.0, "该去了"))
+        if taken:
+            claimed.add("ev")
+        report = asyncio.run(run.run_once(DAY0 + timedelta(minutes=50), with_table if table_given else NO_ROWS))
+        reasons = [item.reason for item in ledger.deliveries_on(DAY0.date()) if item.expectation_id == "ev"]
+        if withdrawn:
+            assert report.by_reason == {"依据失效": 1} and reasons == ["待取", "依据失效"]
+            assert outlet.published[-1] == ()
+            # 终局：之后每拍不再动它
+            assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=51), with_table)).decided == 0
+        else:
+            assert report.decided == 0 and reasons == ["待取"]
+            assert [row.request_id for row in outlet.published[-1]] == ["ev"]
+
+
+
+# ── 第二轮修复 G2：被挤掉的那一拍由下一拍补上（用户 11-10「最多 +1 时间槽位」）─────────────────────
+
+
+def after(previous, now, tolerance=2):  # type: ignore[no-untyped-def]
+    """预测拍交给递送的材料：区间起点按 ``delivery_since``（上一拍落盘的系统确知在看到的那一刻；None 是不知道），往回最多
+    「未观测」容差槽数 × 一拍。"""
+
+    from habitus.runtime.foresight_tick import delivery_since
+
+    return JudgeMaterials(None, lambda uris: {}, since=delivery_since(now, previous, tolerance * timedelta(minutes=15)))
+
+
+def test_a_crowded_out_tick_is_made_up_by_the_next_one_with_at_most_one_extra_slot(tmp_path) -> None:
+    """22:45 那一拍被模型拖过了 23:00、23:00 那一拍没跑：时窗 [22:48, 22:58) 整段落在被挤掉的那一拍里。23:15 那一拍从
+    max(上一拍 22:45, 此刻 − 2 拍) = 22:45 起看，照样决定它（改前从 23:00 起看，它再也不决定）；不知道上一拍（第一次启动、
+    刚写了「未观测」）仍从此刻 − 1 拍起；隔得再久也只多看一拍。"""
+
+    from dataclasses import replace
+
+    late = DAY0.replace(hour=22, minute=45)
+    crowded = expectation("crowded", late, window=(3, 13))  # 22:48–22:58
+    for name, previous, decided in (("made_up", late, {"影子": 1}), ("unknown", None, {})):
+        run, ledger = stage(tmp_path / name, tick_seconds=900.0)
+        ledger.record_expectation(crowded)
+        assert asyncio.run(run.run_once(late, after(late - timedelta(minutes=15), late))).decided == 0  # 22:45：还没开
+        now = late + timedelta(minutes=30)
+        assert asyncio.run(run.run_once(now, after(previous, now))).by_reason == decided, name
+    # 隔得再久也只多看一拍：时窗落在此刻 − 2 拍之前的（22:28–22:40）不补
+    run, ledger = stage(tmp_path / "older", tick_seconds=900.0)
+    ledger.record_expectation(expectation("older", late, window=(-17, -5)))
+    now = late + timedelta(minutes=30)
+    assert asyncio.run(run.run_once(now, after(late - timedelta(hours=1), now))).decided == 0
+
+    # 提醒档、最晚时限也落在被挤掉的那一拍里（22:48–22:58，时限 23:05）：补看到时已过时限——记「过了时限」，不说、只记账（G8），
+    # 结算照常
+    run, ledger = stage(tmp_path / "reminder", tick_seconds=900.0)
+    earn(ledger)
+    item = replace(crowded, deadline=late + timedelta(minutes=20))
+    ledger.record_expectation(item)
+    outlet = run.outlet
+    assert asyncio.run(run.run_once(late, after(late - timedelta(minutes=15), late))).decided == 0
+    previous = late
+    for minutes in (30, 45, 60):
+        now = late + timedelta(minutes=minutes)
+        report = asyncio.run(run.run_once(now, after(previous, now)))
+        if minutes == 30:
+            assert report.by_reason == {"过了时限": 1}
+        previous = now
+    reasons = [found.reason for found in sorted(ledger.deliveries_on(item.day), key=lambda found: found.decided_at)]
+    assert reasons == ["过了时限"]
+    assert all(row.expectation_id != "crowded" for rows in outlet.published for row in rows)  # type: ignore[union-attr]
+
+
+def test_with_one_slot_between_ticks_the_decisions_are_the_same_as_before(tmp_path) -> None:
+    """正常一拍一槽：起点 = 上一拍 = 此刻 − 1 拍，决定集合与改前（不给起点）相同。"""
+
+    found = []
+    for name, chained in (("before", False), ("after", True)):
+        run, ledger = stage(tmp_path / name, tick_seconds=900.0)
+        earn(ledger)
+        for index, window in enumerate(((7, 12), (10, 40), (25, 26), (44, 70))):
+            ledger.record_expectation(expectation(f"e{index}", DAY0, kind=f"s-k00{index + 2:02d}", window=window))
+        for minutes in range(0, 120, 15):
+            now = DAY0 + timedelta(minutes=minutes)
+            previous = now - timedelta(minutes=15) if chained and minutes else None
+            asyncio.run(run.run_once(now, after(previous, now)))
+        found.append(sorted((d.expectation_id, d.reason, d.decided_at) for d in ledger.deliveries_on(DAY0.date())))
+    assert found[0] == found[1] and found[0]
+
+
+def test_with_a_tolerance_of_three_slots_two_crowded_out_ticks_are_both_made_up(tmp_path) -> None:
+    """用户 11-10「跟着容差走」：容差 3 槽时，22:45 那一拍拖过了 23:00、23:15，两拍被挤掉、空当 3 槽（还算在看）；23:30 那一拍
+    从 max(22:45, 此刻 − 3 拍) = 22:45 起看，被挤掉的两拍里开、又关的时窗（22:48–22:58、23:03–23:12）都决定。容差 2 时
+    只往回看到 23:00，22:48–22:58 那一条不决定。"""
+
+    late = DAY0.replace(hour=22, minute=45)
+    now = late + timedelta(minutes=45)
+    for tolerance, decided in ((3, 2), (2, 1)):
+        run, ledger = stage(tmp_path / str(tolerance), tick_seconds=900.0)
+        ledger.record_expectation(expectation("first", late, window=(3, 13)))
+        ledger.record_expectation(expectation("second", late, kind="s-k0003", window=(18, 27)))
+        assert asyncio.run(run.run_once(late, after(late - timedelta(minutes=15), late, tolerance))).decided == 0
+        assert asyncio.run(run.run_once(now, after(late, now, tolerance))).decided == decided, tolerance
+
+
+# ── 第二轮修复 G8：轮到决定时已过最晚时限——记「过了时限」，不说（用户 11-10）──────────────────────
+
+
+def _past_deadline_shape(tmp_path, crowded: bool):  # type: ignore[no-untyped-def]
+    """两种形状，都是提醒档、有宿主活着、接了模型：被挤掉的那一拍（22:48–22:58，时限 23:05；拍点 22:45、23:15、23:30、23:45，
+    23:00 那一拍被挤掉），与不经挤掉的（10:03–10:13，时限 10:20；拍点 10:00、10:15、10:30、10:45）。返回每拍的报告、账、出口、模型。"""
+
+    from dataclasses import replace
+
+    client, provider = recording_client([LIKE, LIKE, LIKE])
+    run, ledger = stage(tmp_path, tick_seconds=900.0, judge=Judge(client, retries=0, delay_seconds=0.0))
+    earn(ledger)
+    start = DAY0.replace(hour=22, minute=45) if crowded else DAY0.replace(hour=10, minute=0)
+    item = replace(expectation("short", start, window=(3, 13)), deadline=start + timedelta(minutes=20))
+    ledger.record_expectation(item)
+    ticks = (0, 30, 45, 60) if crowded else (0, 15, 30, 45)
+    reports, previous = [], start - timedelta(minutes=15)
+    for minutes in ticks:
+        now = start + timedelta(minutes=minutes)
+        reports.append((now, asyncio.run(run.run_once(now, after(previous, now)))))
+        assert "short" not in run._spoken_today(now)  # 不占名额
+        previous = now
+    return reports, ledger, run.outlet, provider, item
+
+
+@pytest.mark.parametrize("crowded", [True, False])
+def test_a_reminder_reached_after_its_deadline_is_not_spoken(tmp_path, crowded) -> None:
+    """G8：轮到决定（开时窗或时窗末那一拍）时已过最晚时限——记「过了时限」：不记「待取」、不占名额、出口不收、不调模型，下一拍
+    也不记「宿主没取」。被挤掉那一拍的形状在开时窗那一拍（23:15）就已过时限；不经挤掉的在时窗末那一拍（10:30）。"""
+
+    reports, ledger, outlet, provider, item = _past_deadline_shape(tmp_path, crowded)
+    reasons = [found.reason for found in sorted(ledger.deliveries_on(item.day), key=lambda found: found.decided_at)]
+    assert reasons == (["过了时限"] if crowded else ["等时窗末", "过了时限"])
+    decided_at = reports[1][0] if crowded else reports[2][0]
+    assert [found.decided_at for found in ledger.deliveries_on(item.day) if found.reason == "过了时限"] == [decided_at]
+    assert all(row.expectation_id != "short" for rows in outlet.published for row in rows)
+    assert provider.calls == 0
+
+
+def test_a_member_takes_over_when_its_basis_is_past_its_deadline(tmp_path) -> None:
+    """G8：依据记「过了时限」也是"没说成"（``unsaid``）：被它「单元已选」吸收、自己时限还在的成员照常接手，到自己的时窗末记「待取」。"""
+
+    from dataclasses import replace
+
+    from tests.unit.runtime.test_foresight_delivery_handover import at, reasons
+
+    run, ledger = stage(tmp_path)
+    earn(ledger, trigger="rel")
+    earn(ledger, trigger="clock")
+    ledger.record_expectation(replace(expectation("now", DAY0, trigger="rel"), deadline=at(40)))  # 09:10–09:40，时限 09:40
+    ledger.record_expectation(expectation("later", at(30), trigger="clock", deadline_hours=4))  # 09:40–10:10
+    asyncio.run(run.run_once(at(16)))
+    assert reasons(ledger, "now") == ["等时窗末"] and reasons(ledger, "later") == ["单元已选"]
+    asyncio.run(run.run_once(at(41)))
+    assert reasons(ledger, "now") == ["等时窗末", "过了时限"]
+    for minutes in (42, 71):
+        asyncio.run(run.run_once(at(minutes)))
+    assert reasons(ledger, "later") == ["单元已选", "待取"]

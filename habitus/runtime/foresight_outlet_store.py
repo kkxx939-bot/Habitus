@@ -70,6 +70,11 @@ class OutletStore:
     def claims(self) -> dict[str, dict[str, Any]]:
         return self._all(self._claims)
 
+    def claimed(self, request_id: str) -> bool:
+        """这条请求被宿主取走过没有（有取走记录）：依据失效时取走过的不撤（实时化方案第 7 节）。"""
+
+        return request_id in self.claims()
+
     def broken_claims(self) -> tuple[str, ...]:
         """读不出来的取走记录（请求身份）：不知道它的最晚时限，出口清扫时删掉（计入观测）。"""
 

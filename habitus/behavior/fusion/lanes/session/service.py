@@ -43,11 +43,12 @@ RETRY_DETERMINISTIC: tuple[type[BaseException], ...] = (DeterministicFailure, *M
 #: 白天第一次描述一轮时模型用不了（额度、鉴权、权限、连不上、没配好）：不抛给会话源等它重做，先落「错误」进夜里待处理的堆，
 #: 那天照常按时定稿、结算读到"看不到"而不是"没做"（裁定 80 第 5 条、94 第 3 条）。
 DESCRIBE_UNAVAILABLE: tuple[type[BaseException], ...] = MODEL_UNUSABLE
-#: 白天描述一轮时模型答了但格式不合（结构化校验用尽）：放一边、夜里再试一次（裁定 94 错误分类）。
+#: 白天描述一轮时模型答了但格式不合（结构化校验用尽）：放一边、换代里的重试收尾再试一次（裁定 94 错误分类）。
 DESCRIBE_INVALID: tuple[type[BaseException], ...] = (ModelStructuredOutputError,)
 #: 这一条触发了内容安全：只这一条记「错误」，不重试（裁定 94 错误分类）。确定性失败（``BehaviorFusionRefusedError``）的起因。
 CONTENT_REFUSED: tuple[type[BaseException], ...] = MODEL_REFUSED
-#: 模型整个用不了（此刻用不了、没配好）：夜里那条线停下这一晚（裁定 94 第 4、8 条）、留到当晚（时窗末重读）。
+#: 模型整个用不了（此刻用不了、没配好）：放一边，留给时窗末重读与换代里的重试收尾（裁定 94 第 4、8 条）；重试收尾碰到它就不再试
+#: 别的项、这一代跳过结算（下一代补结），换代照常往下做。
 RETRY_UNAVAILABLE: tuple[type[BaseException], ...] = MODEL_UNUSABLE
 #: 锁被另一进程拿着（文件锁、sqlite 锁库等不到）：不是错误、更不是模型调不通，还没准备好（裁定 94 第 8、9 条）。
 RETRY_BUSY: tuple[type[BaseException], ...] = (TimeoutError,)

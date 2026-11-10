@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -185,6 +186,31 @@ def _hashed(tests: LaneTests) -> dict[RelationKey, float]:
 def _digest(state: LaneState, transitions: tuple[Transition, ...]) -> str:
     text = encode_night(state) + "\n" + "".join(encode_transition(item) + "\n" for item in transitions)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _rounded(value: object) -> object:
+    if isinstance(value, float):
+        return float(f"{value:.9g}")
+    if isinstance(value, dict):
+        return {name: _rounded(item) for name, item in value.items()}
+    if isinstance(value, list):
+        return [_rounded(item) for item in value]
+    return value
+
+
+def _stable_text(state: LaneState, transitions: tuple[Transition, ...]) -> str:
+    """折叠结果的全文，浮点取 9 位有效数字：带先验权重的那几份情形在 Linux、Windows 上与 macOS 只差浮点末位（族、稀疏、
+    候选都相同），按全文逐位比的摘要在那两个平台上对不上（远端 CI，2026-11-09）。断言失败时把这份全文打出来，能直接看差在哪。"""
+
+    lines = [encode_night(state), *(encode_transition(item) for item in transitions)]
+    return "\n".join(
+        json.dumps(_rounded(json.loads(line)), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        for line in lines
+    )
+
+
+def _stable_digest(state: LaneState, transitions: tuple[Transition, ...]) -> str:
+    return hashlib.sha256(_stable_text(state, transitions).encode("utf-8")).hexdigest()
 
 
 def _outcome(
@@ -491,7 +517,9 @@ def test_skipped_keys_under_a_passing_parent_count_in_the_moderated_normalisatio
     tests = _tests(ADMITTED)
     group = _admitted_premise(tests)
     state, transitions = fold(None, _tests(ADMITTED), {item: hopeless for item in group})
-    assert (state.family, dict(state.sparse), _digest(state, transitions)) == GOLDEN_ADMITTED_WEIGHTS[hopeless]
+    family, sparse, digest = GOLDEN_ADMITTED_WEIGHTS[hopeless]
+    assert (state.family, dict(state.sparse)) == (family, sparse)
+    assert _stable_digest(state, transitions) == digest, _stable_text(state, transitions)
     assert GOLDEN_ADMITTED_WEIGHTS[0.1] != GOLDEN_ADMITTED_WEIGHTS[10.0]  # 前提：归一真的改了结果
 
 
@@ -661,16 +689,17 @@ GOLDEN_HOPELESS_WEIGHTS: dict[tuple[float, bool], tuple[int, dict[str, int], str
 }
 GOLDEN_OUTSIDE_READING: list[tuple[str, int, int, float, float]] = [("tested", 40, 40, 1.0, 1.0)]
 GOLDEN_OUTSIDE_FAMILY: int = 5
+#: 摘要是 ``_stable_digest``（浮点取 9 位有效数字）：这两份带权重的情形跨平台只差浮点末位。
 GOLDEN_ADMITTED_WEIGHTS: dict[float, tuple[int, dict[str, int], str]] = {
     0.1: (
         6,
         {"chain": 75, "days_2_7": 78, "next_day": 79, "rest_of_day": 78},
-        "a93a59b153791503f11a04066fcc41972226cb2d36bc7254a1426e40cf56edce",
+        "f7cf56b5335c2927b19dd2c363b51e18136fa6f0019fb8a0ac4e88454cbd899d",
     ),
     10.0: (
         5,
         {"chain": 76, "days_2_7": 78, "next_day": 79, "rest_of_day": 78},
-        "9a3d1f2f7953afc7c541e9be03de9a5bdaec7eb62292fa5e5426d458eb71c951",
+        "b692c8a2e9ef9aaa6bd5975efdff1f11f96952fdeeebd8eacf18b3b70ff425ea",
     ),
 }
 #: （当晚加权的族, 折叠后的族, 各段稀疏, 摘要）

@@ -145,54 +145,101 @@ _BEHAVIOR_GAUGES: tuple[tuple[str, str, str], ...] = (
 )
 
 
-#: 夜线一段一跑可以是几个小时：它的耗时直方图另用一组到数小时的桶（通用直方图最高 30 秒，一整晚都落进 +Inf）。
+#: 换代一步一跑可以是几个小时：它的耗时直方图另用一组到数小时的桶（通用直方图最高 30 秒，一整代都落进 +Inf）。
 LONG_DURATION_BUCKETS = (1.0, 10.0, 30.0, 60.0, 300.0, 600.0, 1800.0, 3600.0, 7200.0, 14400.0, 28800.0)
-_LONG_DURATION_METRICS = frozenset({"nightly_job_duration_seconds"})
+_LONG_DURATION_METRICS = frozenset({"generation_step_duration_seconds", "generation_duration_seconds"})
 #: 关系变化计数的标签（取值都是封闭枚举：lane、变化种类、状态、跨度段、带不带条件）。
 _RELATION_CHANGE_LABELS = ("lane", "kind", "status_from", "status_to", "segment", "conditioned")
+#: 预测拍按触发种类计的建了几条（种类是封闭枚举：日子、事件、情境）。
+_FORESIGHT_SOURCE_PREFIX = "recorded_"
 
 
 def _domain_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
     if event.category == "behavior":
         return _behavior_metric_updates(event)
-    if event.category in ("nightly", "scene"):
-        return _nightly_metric_updates(event)
+    if event.category in ("generation", "scene"):
+        return _generation_metric_updates(event)
+    if event.category == "foresight" and event.operation == "tick":
+        return _tick_metric_updates(event)
     return ()
 
 
-def _nightly_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
-    """夜线：每段耗时与结局、各段各状态的 Job 数、按（段, 触点）的调模型次数、关系表的双向变化。标签只放低基数的。"""
+def _generation_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
+    """换代：每步耗时与结局、每代写成没有与多久、从昨天定稿到写出隔多久、各个退路的计数、按（步, 触点）的调模型次数、
+    关系表的双向变化。标签只放低基数的。"""
 
     attributes = event.attributes
     operation = (event.category, event.operation)
-    if operation == ("nightly", "step"):
+    if operation == ("generation", "step"):
         labels: tuple[tuple[str, str], ...] = (("step", _label_value(attributes.get("step"))),)
         duration = _non_negative_number(attributes.get("duration_seconds")) or 0.0
         outcome = labels + (("outcome", _label_value(attributes.get("outcome"))),)
         return (
-            MetricUpdate("nightly_job_duration_seconds", "histogram", duration, labels),
-            MetricUpdate("nightly_step_outcomes_total", "counter", 1.0, outcome),
+            MetricUpdate("generation_step_duration_seconds", "histogram", duration, labels),
+            MetricUpdate("generation_step_outcomes_total", "counter", 1.0, outcome),
         )
-    if operation == ("nightly", "jobs"):
-        updates: list[MetricUpdate] = []
-        for key, value in attributes.items():
-            step, _, state = key.partition(":")
-            number = _non_negative_number(value)
-            if state and number is not None:
-                updates.append(
-                    MetricUpdate(
-                        "nightly_jobs", "gauge", number, (("step", _label_value(step)), ("state", _label_value(state)))
-                    )
-                )
+    if operation == ("generation", "run"):
+        outcome = (("outcome", _label_value(attributes.get("outcome"))),)
+        updates = [
+            MetricUpdate("generation_runs_total", "counter", 1.0, outcome),
+            MetricUpdate(
+                "generation_duration_seconds",
+                "histogram",
+                _non_negative_number(attributes.get("duration_seconds")) or 0.0,
+                outcome,
+            ),
+        ]
+        lag = _non_negative_number(attributes.get("lag_seconds"))
+        if lag is not None:
+            updates.append(MetricUpdate("generation_lag_seconds", "gauge", lag))
+        gaps = _non_negative_number(attributes.get("unreduced_gaps"))
+        if gaps is not None:
+            updates.append(MetricUpdate("generation_unreduced_gaps", "gauge", gaps))
         return tuple(updates)
-    if operation == ("nightly", "model_call"):
+    if operation == ("generation", "fallback"):
+        count = _non_negative_number(attributes.get("count")) or 0.0
+        kind = (("kind", _label_value(attributes.get("kind"))),)
+        return (
+            MetricUpdate("generation_fallbacks_total", "counter", count, kind),
+            MetricUpdate("generation_fallbacks_last", "gauge", count, kind),
+        )
+    if operation == ("generation", "model_call"):
         touch = (("step", _label_value(attributes.get("step"))), ("touch", _label_value(attributes.get("touch"))))
-        return (MetricUpdate("nightly_model_calls_total", "counter", 1.0, touch),)
+        return (MetricUpdate("generation_model_calls_total", "counter", 1.0, touch),)
     if operation == ("scene", "relation_change"):
         count = _non_negative_number(attributes.get("count")) or 0.0
         change = tuple((name, _label_value(attributes.get(name))) for name in _RELATION_CHANGE_LABELS)
         return (MetricUpdate("scene_relations_changed_total", "counter", count, change),) if count else ()
     return ()
+
+
+def _tick_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
+    """预测拍：离槽边界晚了多少、一拍用时（通用的操作直方图）、建了几条（按种类，补建单列）、说了几条（合盖后补说单列）、
+    没在看记了几段、共多少分钟。"""
+
+    attributes = event.attributes
+    updates: list[MetricUpdate] = []
+    lateness = _non_negative_number(attributes.get("lateness_seconds"))
+    if lateness is not None:
+        updates.append(MetricUpdate("foresight_tick_lateness_seconds", "histogram", lateness))
+    catch_up = "true" if attributes.get("catch_up") is True else "false"
+    for key, value in attributes.items():
+        if not key.startswith(_FORESIGHT_SOURCE_PREFIX):
+            continue
+        number = _non_negative_number(value)
+        if number:
+            labels = (("source", _label_value(key.removeprefix(_FORESIGHT_SOURCE_PREFIX))), ("catch_up", catch_up))
+            updates.append(MetricUpdate("foresight_expectations_recorded_total", "counter", number, labels))
+    for attribute, metric_name in (
+        ("spoken", "foresight_reminders_spoken_total"),
+        ("spoken_after_gap", "foresight_reminders_spoken_after_gap_total"),
+        ("unwatched_spans", "foresight_unwatched_spans_total"),
+        ("unwatched_minutes", "foresight_unwatched_minutes_total"),
+    ):
+        number = _non_negative_number(attributes.get(attribute))
+        if number:
+            updates.append(MetricUpdate(metric_name, "counter", number))
+    return tuple(updates)
 
 
 def _behavior_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:

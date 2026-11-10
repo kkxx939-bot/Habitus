@@ -452,15 +452,16 @@ MODEL_DETERMINISTIC: tuple[type[ModelClientError], ...] = (ModelInputTooLargeErr
 #: ``MODEL_DETERMINISTIC`` 里"这一条触发了内容安全"的那一种：只这一条记「错误」、不重试、健康面单列（裁定 94 错误分类）；
 #: 输入超长是材料上限与模型窗口没对上，按我们自己处理不了的 bug 算，不在这里。
 MODEL_REFUSED: tuple[type[ModelClientError], ...] = (ModelContentSafetyError,)
-#: 模型整个用不了：此刻用不了的那一组加上没配好（``ModelConfigurationError``，含缺依赖）。夜里那条线上任何一处调模型碰到它
-#: 就整晚停（``ModelUnreachable``，裁定 94 第 8 条）。
+#: 模型整个用不了：此刻用不了的那一组加上没配好（``ModelConfigurationError``，含缺依赖）。换代里任何一处调模型碰到它
+#: （``ModelUnreachable``）是那一步走退路、换代照常往下做；只有必须成的步骤失败才不写完成标记、进退避（裁定 94 第 8 条）。
 MODEL_UNUSABLE: tuple[type[ModelClientError], ...] = (*MODEL_UNAVAILABLE, ModelConfigurationError)
 
 
 class ModelUnreachable(RuntimeError):
-    """模型整个调不通（连不上 / 限流、额度或余额、鉴权、权限、服务端答坏、没配好）：再多重试也处理不了。夜里那条线碰到它
-    这一晚停下、健康面写"模型调不通"，下一晚照常再跑（裁定 94 第 4、8 条）。不是 ``ModelClientError``：它不是某一次调用的
-    失败分类，而是"这一处调模型的结论是整个用不了"，由各触点（``model_client.asking.ask``、夜里的探针）抛出。"""
+    """模型整个调不通（连不上 / 限流、额度或余额、鉴权、权限、服务端答坏、没配好）：再多重试也处理不了。换代碰到它：调模型的
+    那一步走退路（关系沿用上一代、结算留到下次……）、健康面写"模型调不通"，换代照常往下做；只有必须成的步骤失败才不写完成标记、
+    按退避重做（裁定 94 第 4、8 条）。不是 ``ModelClientError``：它不是某一次调用的
+    失败分类，而是"这一处调模型的结论是整个用不了"，由各触点（``model_client.asking.ask``、换代的探针）抛出。"""
 
 
 __all__ = [

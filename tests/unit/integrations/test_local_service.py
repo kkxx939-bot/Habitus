@@ -286,7 +286,7 @@ def test_deep_doctor_chat_timeout_is_a_real_wall_clock_bound(
             return {"ok": True}
 
         async def health_check_async(self) -> dict[str, bool]:
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(10.0)
             return {"ok": True}
 
     class Embedder:
@@ -307,7 +307,8 @@ def test_deep_doctor_chat_timeout_is_a_real_wall_clock_bound(
 
     checks = doctor_module._deep_checks(_config(tmp_path), timeout_seconds=0.01)
 
-    assert time.monotonic() - started < 0.15
+    # 探针要睡 10 秒、超时 0.01 秒：没按超时切断就会等满 10 秒。上限留得宽，慢的 CI 机器上装配本身就要零点几秒。
+    assert time.monotonic() - started < 5.0
     assert next(check for check in checks if check.name == "chat_probe").status is DoctorStatus.FAIL
 
 

@@ -238,8 +238,14 @@ def _require_layer_dependencies(config: HabitusConfig) -> None:
     if config.foresight.enabled and not config.scene.enabled:
         raise ConfigError(
             "config.foresight is enabled but config.scene is not; "
-            "the foresight layer reads its opportunity table from the semantic layer's nightly run "
+            "the foresight layer reads its opportunity table from the semantic layer's generation "
             "and has nothing to build expectations from without it"
+        )
+    # 预测拍一拍一槽、对齐槽边界（实时化方案第 5 节）：两个数各配一份迟早对不上，对不上就硬拒。
+    if config.foresight.enabled and config.foresight.tick_interval_seconds != config.temporal.slot_minutes * 60:
+        raise ConfigError(
+            f"config.foresight.tick_interval_seconds ({config.foresight.tick_interval_seconds:g}) must equal "
+            f"config.temporal.slot_minutes × 60 ({config.temporal.slot_minutes * 60}): a tick is one slot"
         )
 
 

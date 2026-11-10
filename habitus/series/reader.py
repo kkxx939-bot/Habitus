@@ -49,13 +49,16 @@ class SeriesReader:
     """按天缓存行为树文档，每晚在内存里重新拼整份序列（26 号清单 6.7）。
 
     序列不能按天拆开增量算：空白按截止时刻截断、证伪看全部记录的起点、并行关系跨天——所以缓存的是**解码好的文档**，拼装
-    每晚全量重做。哪些天要重读看归约记下的脏日日志（``behavior.tree.dirty_days``）：读到第几号记在这里，读完截掉；
+    每次全量重做。哪些天要重读看归约记下的脏日日志（``behavior.tree.dirty_days``）：读到第几号按读者名（``name``）落在日志
+    旁边，日志只截到全部读者里最小的水位（一个读者截掉了别的读者还没读的日子，那个读者就漏读那一天：实时化缺陷 5）；
     第一次读（缓存是空的）先记下日志读到哪、再读全部日子，期间新记的日子下一次照常重读。新出现的日子（树上有、缓存里没有）
     当场读。"""
 
-    def __init__(self, tree: BehaviorTree, logs: Sequence[DirtyDayLog] = ()) -> None:
+    def __init__(self, tree: BehaviorTree, logs: Sequence[DirtyDayLog] = (), *, name: str = "series") -> None:
         self.tree = tree
         self.logs = tuple(logs)
+        #: 读者名：消费水位按它落盘（同一份日志的几个读者各记各的）。
+        self.name = name
         self._days: dict[tuple[BehaviorKind, date], tuple[BehaviorDocument, ...]] = {}
         self._read_through: list[int] | None = None
 
@@ -74,7 +77,10 @@ class SeriesReader:
 
     def _forget_dirty_days(self) -> None:
         if self._read_through is None:
+            # 缓存是空的、这一次全读：水位记到日志此刻的最后一号（落盘，别的读者截日志时不越过它）
             self._read_through = [log.last() for log in self.logs]
+            for log, last in zip(self.logs, self._read_through, strict=True):
+                log.advance(self.name, last)
             return
         for index, log in enumerate(self.logs):
             last, days = log.after(self._read_through[index])
@@ -82,7 +88,7 @@ class SeriesReader:
                 for kind in (BehaviorKind.OCCURRENCE, BehaviorKind.GAP):
                     self._days.pop((kind, day), None)
             self._read_through[index] = last
-            log.truncate_through(last)
+            log.advance(self.name, last)
 
     def _documents(self, kind: BehaviorKind, cutoff: date) -> list[BehaviorDocument]:
         found: list[BehaviorDocument] = []

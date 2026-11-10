@@ -117,7 +117,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-ra --strict-config --strict-markers"
 markers = [
-    "multiprocess: 起真实 OS 进程的夜线多进程测试（约 20 秒；CI 的 pytest 照常跑到）",
+    "multiprocess: 起真实 OS 进程的换代多进程测试（约 20 秒；CI 的 pytest 照常跑到）",
 ]
 
 [tool.coverage.run]

@@ -104,7 +104,7 @@ class FailedChains:
         return True
 
     def withdraw(self, item: RetryItem) -> None:
-        """放回了、还没归约就断了的那几条原判断撤下（不让它们之后在白天落进已经跑过批的那一天，裁定 68 第 3 条）。"""
+        """放回了、还没归约就断了的那几条原判断撤下（不让它们之后在白天落进已经做过重试收尾的那一天，裁定 68 第 3 条）。"""
 
         records = item.payload.get("records")
         if not isinstance(records, list):

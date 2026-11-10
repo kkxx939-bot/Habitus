@@ -33,7 +33,7 @@
 每日上限不把同一刻里没说成的那几条算进去（同一刻只说一次，它们一句也没说出口）；别的单元照算。结算不变：成员说出口了按它自己的说出
 时刻结、反馈由它写一笔，依据那条照旧按没说过结。
 送达在本层之外（``runtime.foresight_outlet``）：这里产出的是"递送请求 + 档 + 话"，记「待取」、每拍把可取的请求清单交给出口；
-「说了」由出口在转写里认出提问后追加。「待取」之后每拍只做两件事：做了追加「已发生」、过了最晚时限还没人问出口追加「宿主没取」。
+「说了」由出口在转写里认出提问后追加。「待取」之后每拍只做三件事（``runtime.foresight_withdrawal``）：做了「已发生」、过时限「宿主没取」、依据失效撤下。
 """
 
 from __future__ import annotations
@@ -47,11 +47,10 @@ from habitus.foresight.absence import returned_after_absence
 from habitus.foresight.delivery import (
     PENDING,
     Circumstances,
-    on_awaiting,
+    hand_over,
     on_closing,
     on_opening,
     quiet_after_absence,
-    unsaid,
 )
 from habitus.foresight.feedback import feedback_reading
 from habitus.foresight.judge import (
@@ -67,6 +66,7 @@ from habitus.foresight.judge import (
 from habitus.foresight.ladder import effective_setting
 from habitus.foresight.ledger import (
     AWAITING_HOST,
+    BASIS_WITHDRAWN,
     AccountLevel,
     AntecedentRow,
     Delivery,
@@ -82,6 +82,7 @@ from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_outlet import OpenRequest, OutletPort
 from habitus.runtime.foresight_units import Unit, UnitPlanner, UnitView
+from habitus.runtime.foresight_withdrawal import awaiting_outcome
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,7 @@ class JudgeMaterials:
     #: 这一拍读到的行（最近几天已封口的与还没封口、现场归上类的）：开口前再核事件触发的前因从这里按实例找那一行
     #: （与结算同一个找法，``ledger.settle.event_antecedent_holds``）。
     seen: Sequence[Seen] = ()
+    since: datetime | None = None  # 区间起点（``foresight_tick.delivery_since``）；None 是此刻 − 1 拍
 
 
 class DeliveryStage:
@@ -139,6 +141,7 @@ class DeliveryStage:
         history: HistoryStore | None = None,
         lane: str = "session",
         current: Callable[[str], Sequence[str]] = lambda token: (token,),
+        claimed: Callable[[str], bool] = lambda request_id: False,
     ) -> None:
         if daily_cap < 1:
             raise ValueError("daily_cap must be a positive integer")
@@ -150,8 +153,8 @@ class DeliveryStage:
         self.daily_cap = daily_cap
         self.judge = judge
         self.tick = timedelta(seconds=float(tick_seconds))
-        #: 提醒出口（没有 = 没有宿主活着：提醒档到时窗末都「不可达」，也不问模型）。
-        self.outlet = outlet
+        #: 提醒出口（没有 = 没有宿主活着：提醒档到时窗末都「不可达」，也不问模型）；``claimed``：出口上这条请求取走过没有。
+        self.outlet, self.claimed = outlet, claimed
         self.units = UnitPlanner(history, evidence=evidence, prior_share=unit_prior_share, lane=lane)
         #: 编号 → 现在对应哪些在用编号（与结算同一个映射）：开口前核前因、判做没做都按它认词表拆改。
         self.current = current
@@ -162,7 +165,8 @@ class DeliveryStage:
         if now.utcoffset() is None:
             raise ValueError("now must be a timezone-aware datetime")
         table = materials.table if materials is not None else None
-        found = self._due(now, voiced=lambda item: voiced(table, item))
+        since = (materials.since if materials is not None else None) or now.astimezone(UTC) - self.tick
+        found = self._due(now, since, voiced=lambda item: voiced(table, item))
         calls = 0
         signals: tuple[str, ...] = ()
         cached: dict[str, Standing] = {}
@@ -216,7 +220,6 @@ class DeliveryStage:
         # 依据没说成：同一刻里接手的那条到了自己的时窗末，按同一组输入重算单元、照时窗末那一套走
         handed: list[tuple[Expectation, Delivery]] = []
         moment_of: dict[str, frozenset[str]] = {}
-        instant = now.astimezone(UTC)
         for group, due in found.handovers:
             unit = self.units.unit_for(
                 group,
@@ -229,7 +232,7 @@ class DeliveryStage:
                 now=now,
             )
             pending = found.subsumed[unit.basis.expectation_id]
-            if _closes(unit.basis, pending, instant - self.tick, instant):
+            if _closes(unit.basis, pending, since, now.astimezone(UTC)):
                 closing_units[unit.basis.expectation_id] = unit
                 handed.append((unit.basis, pending))
                 moment_of[unit.basis.expectation_id] = frozenset(item.expectation_id for item in group)
@@ -243,7 +246,7 @@ class DeliveryStage:
             same_moment=moment_of,
         )
         for item, pending in found.awaiting:
-            self._record(tally, item, self._awaiting(item, pending, materials, now))
+            self._record(tally, item, awaiting_outcome(self.claimed, item, pending, materials, now))
         for unit in units:
             for member in unit.members:
                 self._subsume(tally, member, unit.basis.expectation_id, unit.level)
@@ -252,7 +255,7 @@ class DeliveryStage:
         due_closing = (*found.closing, *handed)
         deferred = await self._reread(due_closing, materials)
         closing = tuple((item, pending) for item, pending in due_closing if item.expectation_id not in deferred)
-        speaking = tuple(item for item, _pending in closing)
+        speaking = tuple(item for item, _pending in closing if now <= item.deadline)  # 过了时限的不说、不问模型
         judgement = await self._judge(speaking, standings, materials, now, tally, inputs)
         for item, pending in self._ordered_closing(closing, judgement):
             verdict = judgement.verdicts.get(item.expectation_id) if judgement is not None else None
@@ -305,6 +308,7 @@ class DeliveryStage:
                 item.day,
             )
             for item, pending in (*found.awaiting, *tally.awaiting)
+            if item.expectation_id not in tally.withdrawn
             if now <= item.deadline and pending.text and not (materials is not None and materials.happened(item))
         ]
         return self.outlet.publish(rows, now=now)
@@ -357,12 +361,6 @@ class DeliveryStage:
             if await materials.reread(item):
                 found.add(item.expectation_id)
         return frozenset(found)
-
-    @staticmethod
-    def _awaiting(
-        item: Expectation, pending: Delivery, materials: JudgeMaterials | None, now: datetime
-    ) -> Delivery | None:
-        return on_awaiting(item, pending, now=now, happened=materials is not None and materials.happened(item))
 
     def _circumstances(self, item: Expectation, materials: JudgeMaterials | None) -> Circumstances:
         """这一条的材料，问到才读：做没做、「没读懂」从这一拍的材料读，久别从账上读，前因从机会表与这一拍的行读。"""
@@ -584,12 +582,12 @@ class DeliveryStage:
 
     # ── 读账 ────────────────────────────────────────────────────────────────
 
-    def _due(self, now: datetime, *, voiced: Callable[[Expectation], bool] = lambda item: True) -> _Due:
-        """四拨：时窗与这一拍的区间（上一拍到此刻）有交集、还没结算、账上还没有决定的（开了）；只决定过「等时窗末」、这一拍
+    def _due(self, now: datetime, since: datetime, *, voiced: Callable[[Expectation], bool]) -> _Due:
+        """四拨：时窗与这一拍的区间（``since`` 到此刻：``JudgeMaterials.since``）有交集、还没结算、账上还没有决定的（开了）；只决定过「等时窗末」、这一拍
         到了时窗末的（该来了还没来，``_closes``）；还没到时窗、没决定过的（单元从这里拉同一刻的另外几个输入）；最近一条决定是
         「待取」、还没说出口的（等宿主）。过了时窗终点还没决定过的不再递：那是结算去记的事。另记每条依据替哪几条一并决定过
         （「单元已选」引它）：时窗末开口时小包与话照样带上同一刻的全部输入。``voiced`` 按此刻的机会表判一条预期能不能当开口的
-        依据（``units.voiced``）：不能的依据记了影子，被它吸收的成员照常接手（``_handovers``）。"""
+        依据（``units.voiced``）：不能的依据记了影子，被它吸收的成员照常接手（``delivery.hand_over``）。"""
 
         fresh: list[Expectation] = []
         closing: list[tuple[Expectation, Delivery]] = []
@@ -602,7 +600,6 @@ class DeliveryStage:
         #: 已经作为依据决定过、还没结的（类 → (预期, 最近那次决定的档)）：后来才形成的同一刻的输入并进它，不另起一个单元。
         bases: dict[str, list[tuple[Expectation, int]]] = {}
         instant = now.astimezone(UTC)
-        since = instant - self.tick
         for day in self.ledger.open_days():
             if day > now.date():
                 continue
@@ -648,7 +645,7 @@ class DeliveryStage:
             else:
                 joins.append((item, base[0].expectation_id, base[1]))
                 members.setdefault(base[0].expectation_id, []).append(item)
-        handovers, subsumed = _handovers(known, decided, members, instant, voiced=voiced)
+        handovers, subsumed = hand_over(known, decided, members, instant, voiced=voiced, taken=self.claimed)
         return _Due(
             tuple(opened),
             tuple(closing),
@@ -700,45 +697,6 @@ class _Due:
     subsumed: Mapping[str, Delivery] = field(default_factory=dict)
 
 
-def _handovers(
-    known: Mapping[str, Expectation],
-    decided: Mapping[str, Sequence[Delivery]],
-    members: Mapping[str, Sequence[Expectation]],
-    instant: datetime,
-    *,
-    voiced: Callable[[Expectation], bool] = lambda item: True,
-) -> tuple[tuple[tuple[tuple[Expectation, ...], tuple[str, ...]], ...], dict[str, Delivery]]:
-    """依据没说成（``delivery.unsaid``）的那几刻里，能接手的成员：只决定过「单元已选」、自己最晚时限还没到的。已经有成员接手过、
-    它还没说成或自己决定了不说（不是 ``unsaid``）的，这一刻不再交给别的成员——同一刻只说一次。依据或成员已经结掉（不在账上的
-    还没结那几天里）的不动。
-
-    依据本来就不能开口（``voiced`` 为假：候选关系、巧合——只进读数、不当依据，裁定 56 第 12 条）也算没说成（裁定 92 第 2 条②）：
-    同一刻只有它先到了时窗，单元只能从它里面取、记了影子，被吸收的成员（还没到时窗时拉进来的、后来并进来的）到了自己的时窗末
-    按同一组输入重算单元、依据换成能开口的那条。"""
-
-    found: list[tuple[tuple[Expectation, ...], tuple[str, ...]]] = []
-    subsumed: dict[str, Delivery] = {}
-    for basis_id in sorted(members):
-        basis = known.get(basis_id)
-        if basis is None or not unsaid(basis, decided.get(basis_id, ()), now=instant, voiceless=not voiced(basis)):
-            continue
-        group = [item for item in members[basis_id] if item.expectation_id in known]
-        took = [item for item in group if any(made.reason != UNIT for made in decided[item.expectation_id])]
-        if any(not unsaid(item, decided[item.expectation_id], now=instant) for item in took):
-            continue
-        free = [
-            item
-            for item in group
-            if item not in took and item.deadline.astimezone(UTC) > instant and decided[item.expectation_id]
-        ]
-        if not free:
-            continue
-        for item in free:
-            subsumed[item.expectation_id] = max(decided[item.expectation_id], key=lambda made: made.decided_at)
-        found.append(((basis, *group), tuple(item.expectation_id for item in free)))
-    return tuple(found), subsumed
-
-
 def _closes(item: Expectation, pending: Delivery, since: datetime, instant: datetime) -> bool:
     """这一拍（``since`` → ``instant``，UTC）是不是这条「等时窗末」的时窗末那一拍：此刻已过时窗终点，而且这一拍的区间与
     (终点, 最晚时限] 有交集；终点与最晚时限重合时（区间为空）是越过终点的那一拍；开时窗那一拍（``pending`` 记下的时刻）就已
@@ -784,8 +742,11 @@ class _Tally:
         self.by_level: dict[int, int] = {}
         #: 这一拍刚记「待取」的（拍末交给出口）。
         self.awaiting: list[tuple[Expectation, Delivery]] = []
+        self.withdrawn: set[str] = set()  # 这一拍撤下的「待取」（依据失效）：不再交给出口
 
     def count(self, delivery: Delivery, kind_token: str) -> None:
+        if delivery.reason == BASIS_WITHDRAWN:
+            self.withdrawn.add(delivery.expectation_id)
         self.decided += 1
         self.by_reason[delivery.reason] = self.by_reason.get(delivery.reason, 0) + 1
         self.by_level[delivery.level] = self.by_level.get(delivery.level, 0) + 1

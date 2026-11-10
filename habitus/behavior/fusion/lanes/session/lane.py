@@ -9,7 +9,7 @@
   就丢了（结算按"没回应"处理），不为它重问模型。
 - 写成「错误」的轮（系统出了问题没读成，裁定 94 第 3 条：确定性写不成——含内容安全拦下、输入超长，见 ``service``——、
   模型此刻用不了或没配好（裁定 80 第 5 条：不抛给会话源等它重做，不然那一天照样到点定稿、结算把没看到的读成"没做"）、
-  模型答了但格式不合，或重试账放弃了）只连累它自己，后面的轮照常判；它把这一轮本身放进夜里待处理的堆（``backlog``，裁定 67），
+  模型答了但格式不合，或重试账放弃了）只连累它自己，后面的轮照常判；它把这一轮本身放进重试堆（``backlog``，裁定 67），
   进来的原因（``RetryCause``）定夜里试不试：能重试的由当晚前置处理 ``retry`` 再描述一次，成了就补一条判断（原「错误」不删，
   读的时候被它作废），没成就保持「错误」。重试编排（``behavior/retry``）对会话轮调的处理器是这里的 ``TurnHandler``：处理器
   跟着它试的东西走，重试包不反过来依赖 lane。
@@ -60,7 +60,7 @@ class TurnDisposition(str, Enum):
     RECORDED = "recorded"  # 这次写了判断
     ALREADY_RECORDED = "already_recorded"  # 之前写过（重做时），包括上一次写到一半、这次接着写完的
     UNANSWERED = "unanswered"  # 助手没答复也没调用，不出记录
-    ERROR = "error"  # 系统出了问题没读成：写成一段「错误」，放进夜里待处理的堆，不再每次重做（26 号清单 2.4.4；裁定 94 第 3 条）
+    ERROR = "error"  # 系统出了问题没读成：写成「错误」、放进重试堆，不再每次重做（26 号清单 2.4.4；裁定 94 第 3 条）
 
 
 @dataclass(frozen=True)
@@ -222,7 +222,7 @@ class SessionLane:
         return TurnOutcome(turn, TurnDisposition.RECORDED, judgement_id, described.validation_attempts)
 
     async def _error(self, turn: SessionTurn, cause: RetryCause, sources: tuple[str, ...]) -> TurnOutcome:
-        """先落「错误」（下游不等它），再把这一轮放进夜里待处理的堆；堆满了就只是「错误」。"""
+        """先落「错误」（下游不等它），再把这一轮放进重试堆；堆满了就只是「错误」。"""
 
         failed = await asyncio.to_thread(self.recorder.record_error, turn, sources=sources)
         await asyncio.to_thread(self._keep, turn, cause)
@@ -230,7 +230,7 @@ class SessionLane:
 
     def salvage(self, turns: Sequence[SessionTurn]) -> tuple[TurnOutcome, ...]:
         """会话源"处理完了没有"的账坏了（信封完好，裁定 67 第 5、16 条）：逐轮看写没写过，没写过的落「错误」（数据坏了，
-        裁定 94 错误分类）、进夜里待处理的堆（材料完好，夜里照裁定 67 第 5 条再描述一次；那一天的夜批已经跑过的，堆按天拒收，
+        裁定 94 错误分类）、进重试堆（材料完好，换代里的重试收尾照裁定 67 第 5 条再描述一次；那一天已做过重试收尾的，堆按天拒收，
         裁定 68 第 3 条）。不问模型，全是同步的读写。
 
         "写过"三处任一认得出就算：覆盖记录、判断存储里凭据相同的判断（写了没归约；回执没落的照常接着写完）、树上
@@ -268,7 +268,7 @@ class SessionLane:
         )
 
     def _keep(self, turn: SessionTurn, cause: RetryCause) -> Admission:
-        """这一轮放进夜里待处理的堆；拒收的（满了、那天已过）它已经落了「错误」，堆自己记数（裁定 68 第 3、4 条）。"""
+        """这一轮放进重试堆；拒收的（满了、那天已过）它已经落了「错误」，堆自己记数（裁定 68 第 3、4 条）。"""
 
         return self.backlog.put(
             RetryItem(
