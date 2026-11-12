@@ -25,13 +25,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, cast
 
 from habitus.behavior.document import BehaviorDocument
 from habitus.behavior.model import BehaviorKind
-from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.uri import BehaviorURI
 from habitus.conditions import WEEKDAY_NAMES
 from habitus.foundation.integrity import canonical_digest
@@ -52,9 +51,7 @@ from habitus.scene.occurrences.model import (
     ConceptHitsError,
     UnresolvedReason,
 )
-from habitus.scene.occurrences.situations import SituationOutcome
-from habitus.scene.occurrences.store import ConceptHitStore
-from habitus.series import EventSeries, SeriesGap, SeriesRecord, SkipReason
+from habitus.series import SeriesGap, SeriesRecord
 
 MAPPER_PROMPT_VERSION = "scene_concept_mapper_prompt_v4"
 
@@ -613,10 +610,6 @@ _MISSING_MATERIAL: dict[ContextScope, tuple[UnresolvedReason, str]] = {
     ContextScope.DAY: (UnresolvedReason.TIMELINE_MISSING, "需要当天时间线"),
     ContextScope.RECENT: (UnresolvedReason.RECENT_MISSING, "需要近几天同类记录"),
 }
-#: 这几种原因下，再问一遍可能有不同的答案（模型这一次没答成、或当时材料没给到）：续跑时要重问。
-_RETRY_REASONS = frozenset(
-    {UnresolvedReason.MODEL_FAILED, UnresolvedReason.TIMELINE_MISSING, UnresolvedReason.RECENT_MISSING}
-)
 
 
 class _Verdict:
@@ -654,212 +647,6 @@ def recent_digest(rows: Sequence[TimelineEntry]) -> str:
     return canonical_digest(sorted(row.uri for row in rows))[:16]
 
 
-@dataclass(frozen=True)
-class DayMappingReport:
-    day: date
-    mapped: int
-    resumed: int
-    duplicates_skipped: int
-    stale_removed: int
-    unresolved: int
-    #: 盘上原本就有、这次又重新判了一遍的记录数（口径变了、编号被迁移改了、或输入变了）。它加上 ``stale_removed``
-    #: 不为零，就说明这一天的命中**变了**——靶它开的承诺与结算已经是脏的，夜批要撤了重开（评审 A-12 / B-5）。
-    rewritten: int = 0
-    not_events_skipped: int = 0
-    #: 候选没变、只就地重算了情境的记录数（不问模型）。
-    refreshed: int = 0
-    #: 这一天里有几个（记录, 细分概念）是模型这一次没答成——有就不盖完成章，下一晚回来重问（E10）。
-    model_failed: int = 0
-    #: 有几个是两遍判得不一样——映射器一致性在生产上的读数（`10` 判决线要的就是它）。
-    inconsistent: int = 0
-
-    @property
-    def changed(self) -> bool:
-        return self.rewritten > 0 or self.stale_removed > 0
-
-
-async def map_closed_day(
-    tree: BehaviorTree,
-    store: ConceptHitStore,
-    mapper: ConceptMapper,
-    day: date,
-    *,
-    now: datetime,
-    series: EventSeries,
-    situation_for: Callable[[BehaviorDocument], SituationOutcome | Sequence[ConceptHit]],
-    baseline_for: Callable[[BehaviorDocument], Mapping[str, str]],
-    force: bool = False,
-) -> DayMappingReport:
-    """把已封口的一天从行为树映射到 ``occurrences/``，最后落完成标记。
-
-    - **映射哪几条、各是类还是「待定」、属于哪条 lane、当天的空白、近几天的同类记录，全部按事件序列 ``series`` 读**
-      （``temporal`` 与机会表读的是同一份，读法只写在 ``series.reader``：撞车重复、「非事件」不在序列里）；行为树只用来取这几条的全文；
-    - 时间线里**带上这一天的空白段**（gap，未观测 / 没读懂）：不带的话时间线看上去连续，模型按"里面没有就是没发生"
-      把被空白盖住的事件答成"没有"，而那在关系检验里是反面证据（用户 09-27"没看到就不算"）；
-    - 有细分概念要近几天同类记录时，往前读 ``recent_days`` 天的行为树（只读一次，按编号分组）；
-    - 先清掉上轮多出来的记录，再逐条映射——**续跑**：同口径、编号没变、且输入没变的记录不重问模型；
-    - 行为树这一天比盘上少（读不到、或缩水了）时拒绝清掉多出来的记录（多半是根指错或封口日算错），除非 ``force``；
-    - 时间线与近几天记录只放**同一条 lane** 的（裁定 21-2：两条 lane 相互独立、不干扰）；观测空白没有 lane，两边都放；
-    - ``situation_for`` / ``baseline_for`` 都必填：情境与常态是映射的材料，要空就显式传 ``lambda _d: ()`` / ``lambda _d: {}``。
-    """
-
-    if day >= series.cutoff:
-        raise ConceptMapperError(f"{day} is not sealed in a series cut at {series.cutoff}")
-    records = {record.uri: record for record in series.on(day)}
-    by_uri = {
-        str(BehaviorURI.from_address(document.address)): document
-        for document in tree.read_day(BehaviorKind.OCCURRENCE, day)
-    }
-    missing = sorted(set(records) - set(by_uri))
-    if missing:
-        raise ConceptMapperError(
-            f"the series holds {len(missing)} occurrences on {day} that the tree does not: {missing[0]}"
-        )
-    documents = [by_uri[uri] for uri in records]
-    on_disk = len(store.read_day(day))
-    if len(documents) < on_disk and not force:
-        # 盘上比树上多：树读不到（根指错 / 封口日算错）或缩水了。静默清掉多出来的再盖章，就是"做完了但内容不对"。
-        raise ConceptMapperError(
-            f"the behaviour tree shows {len(documents)} occurrences on {day} but the hit store holds {on_disk}; pass force=True to drop the extra records"
-        )
-    removed = store.retain_only(day, frozenset(document.address.identity_name for document in documents))
-    gaps = tuple(TimelineEntry.from_gap(gap) for gap in series.gaps_on(day))
-    timelines = {
-        lane: tuple(TimelineEntry.from_record(item) for item in records.values() if item.lane == lane) + gaps
-        for lane in {item.lane for item in records.values()}
-    }
-    recent = _RecentRecords(series, day, mapper.config.recent_days)
-    resumed = rewritten = refreshed = 0
-    for uri, document in zip(records, documents, strict=True):
-        entry = records[uri]
-        classified = entry.classified
-        token = entry.kind_token
-        lane = entry.lane
-        baseline = baseline_for(document)
-        rows = recent.of(token) if classified and ContextScope.RECENT in mapper.needs(token) else None
-        situations = situation_for(document)
-        if isinstance(situations, SituationOutcome):
-            hits, checked = situations.hits, situations.checked
-        else:
-            hits, checked = tuple(situations), ()
-        seen_until = records[uri].last_observed_at
-        timeline = tuple(item for item in timelines[lane] if item.started_at <= seen_until)
-        day_material = timeline if classified and ContextScope.DAY in mapper.needs(token) else None
-        if store.exists(document.address):
-            existing = store.read(document.address)
-            if existing.mapper == mapper.version_for(token) and _inputs_unchanged(
-                existing, token, baseline, rows, day_material
-            ):
-                if _same_situations(existing, hits, checked):
-                    resumed += 1
-                else:
-                    # 候选没变、只是情境概念变了：情境由算法算，就地重算，不问模型
-                    store.write(replace(existing, situation_hits=tuple(hits), situations_checked=tuple(checked)))
-                    refreshed += 1
-                continue
-            rewritten += 1
-        material = MappingMaterial(baseline=baseline, timeline=timeline, recent=rows)
-        record = await mapper.map(
-            document,
-            lane=lane,
-            classified=classified,
-            situation_hits=hits,
-            situations_checked=checked,
-            material=material,
-        )
-        store.write(record)
-    reasons = [reason for item in store.read_day(day) for reason in item.unresolved.values()]
-    failed = reasons.count(UnresolvedReason.MODEL_FAILED)
-    inconsistent = reasons.count(UnresolvedReason.INCONSISTENT)
-    if failed:
-        # 模型这一次没答成的不盖章：盖了章这一天就不会再被访问，"没答成"就永远是"看不到"（第四轮评审 E10）
-        return DayMappingReport(
-            day=day,
-            mapped=len(documents) - resumed - refreshed,
-            resumed=resumed,
-            refreshed=refreshed,
-            duplicates_skipped=series.skipped_on(day, SkipReason.DUPLICATE),
-            stale_removed=len(removed),
-            unresolved=len(reasons),
-            rewritten=rewritten,
-            not_events_skipped=series.skipped_on(day, SkipReason.NOT_EVENT),
-            model_failed=failed,
-            inconsistent=inconsistent,
-        )
-    marker = store.complete_day(
-        day,
-        records=len(documents),
-        completed_at=now,
-        mapper=mapper.day_version(str(document.fields["kind_token"]) for document in documents),
-        expected=mapper.version_for,
-    )
-    return DayMappingReport(
-        day=day,
-        mapped=len(documents) - resumed - refreshed,
-        resumed=resumed,
-        refreshed=refreshed,
-        duplicates_skipped=series.skipped_on(day, SkipReason.DUPLICATE),
-        stale_removed=len(removed),
-        unresolved=marker.unresolved,
-        rewritten=rewritten,
-        not_events_skipped=series.skipped_on(day, SkipReason.NOT_EVENT),
-        inconsistent=inconsistent,
-    )
-
-
-class _RecentRecords:
-    """``day`` 之前 ``days`` 天序列里的记录，按编号分组；第一次有人要时才分。编号是树上现在的编号（迁移过的就是新编号）。"""
-
-    def __init__(self, series: EventSeries, day: date, days: int) -> None:
-        self._series, self._day, self._days = series, day, days
-        self._by_token: dict[str, list[TimelineEntry]] | None = None
-
-    def of(self, token: str) -> tuple[TimelineEntry, ...]:
-        if self._by_token is None:
-            self._by_token = {}
-            since = self._day - timedelta(days=self._days)
-            for record in self._series.records:
-                if since <= record.day < self._day:
-                    self._by_token.setdefault(record.kind_token, []).append(TimelineEntry.from_record(record))
-        return tuple(self._by_token.get(token, ()))
-
-
-def _same_situations(existing: ConceptHits, hits: Sequence[ConceptHit], checked: Sequence[str]) -> bool:
-    fresh = {(hit.identity, hit.grade) for hit in hits}
-    held = {(hit.identity, hit.grade) for hit in existing.situation_hits}
-    return fresh == held and set(existing.situations_checked) == set(checked) | {hit.concept for hit in hits}
-
-
-def _inputs_unchanged(
-    existing: ConceptHits,
-    token: str,
-    baseline: Mapping[str, str],
-    recent: Sequence[TimelineEntry] | None,
-    timeline: Sequence[TimelineEntry] | None,
-) -> bool:
-    """续跑判据是"输入没变"，不是"没有未决"。
-
-    - 编号变了（词表迁移改写了这一条）一律重判：候选是挂在类上的细分概念，类换了候选就换了；
-    - "近几天同类记录"变了（别的日子被迁移改了编号）重判：要它的细分概念答案可能变；
-    - "当天时间线"变了（同一天后来补进了记录或空白）重判：答过"没有""看不到"的，补进来的那条可能正是判据要找的；
-    - 带未决的：模型这一次没答成、或当时材料没给到 → 重问；因缺常态 / 常态解不出而未决的，常态表变了才重问；
-      模型答"看不到"的，材料没变就不重问（再问一遍答案不会变）。
-    """
-
-    if existing.kind_token != token:
-        return False
-    if existing.recent_digest != (None if recent is None else recent_digest(recent)):
-        return False
-    if existing.timeline_digest != (None if timeline is None else timeline_digest(timeline)):
-        return False
-    reasons = set(existing.unresolved.values())
-    if reasons & _RETRY_REASONS:
-        return False
-    if reasons & {UnresolvedReason.BASELINE_MISSING, UnresolvedReason.BASELINE_UNPARSEABLE}:
-        return dict(existing.baseline_snapshot) == dict(baseline)
-    return True
-
-
 __all__ = [
     "MAPPER_PROMPT_VERSION",
     "MAPPER_SYSTEM_PROMPT",
@@ -868,13 +655,13 @@ __all__ = [
     "VERDICTS",
     "ConceptMapper",
     "ConceptMapperError",
-    "DayMappingReport",
     "MapperConfig",
     "MappingMaterial",
     "OccurrenceFacts",
     "TimelineEntry",
     "assemble_verdicts",
     "build_request",
-    "map_closed_day",
     "mapper_json_schema",
+    "recent_digest",
+    "timeline_digest",
 ]

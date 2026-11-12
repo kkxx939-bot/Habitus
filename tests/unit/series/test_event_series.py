@@ -16,7 +16,7 @@ from habitus.behavior.kinds.ids import Lane, not_event_token, pending_token
 from habitus.scene.concepts import ConceptSet
 from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.scene.occurrences import ConceptHitStore
-from habitus.scene.occurrences.mapper import ConceptMapper, MapperConfig, map_closed_day
+from habitus.scene.occurrences.mapper import ConceptMapper, MapperConfig
 from habitus.scene.recurrence import recurrences_of
 from habitus.series import (
     SILENT_DAY_UNWATCHED_LANES,
@@ -30,6 +30,7 @@ from habitus.series import (
 from habitus.series.reader import read_series
 from tests.unit.foresight.scripted_model import recording_client
 from tests.unit.scene.concept_fixtures import BEDTIME, BREAKFAST, CODING
+from tests.unit.scene.day_mapping import map_closed_day
 from tests.unit.scene.fixtures import DAY1, SUBJECT, Site, at, publish, publish_gap
 
 NOW = datetime(2026, 9, 1, 3, 0, tzinfo=UTC)

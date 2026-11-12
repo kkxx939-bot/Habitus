@@ -25,10 +25,12 @@ def test_the_same_offset_under_another_name_is_not_reported() -> None:
 
 
 def test_the_service_compares_the_configured_zone_even_without_a_generation(monkeypatch) -> None:
-    """用户 11-10「都比」：配置时区由 runtime 直接交给健康服务，没接换代时偏移不一致照样报出；没给时区不比。"""
+    """用户 11-10「都比」：配置时区由 runtime 直接交给健康服务，没接换代时偏移不一致照样报出；没给时区不比。
+
+    不改系统时区（``time.tzset`` 只有 POSIX 有，用户 11-11）：按本机此刻的 UTC 偏移，从 ``Etc/GMT+12``（-12）与
+    ``Etc/GMT-14``（+14）里挑偏移不同的那个当配置时区，三个平台跑同一条断言。"""
 
     import asyncio
-    import time
     from types import SimpleNamespace
 
     from habitus.runtime.health import RuntimeHealthService
@@ -36,13 +38,15 @@ def test_the_service_compares_the_configured_zone_even_without_a_generation(monk
     async def none_check(*_args):  # type: ignore[no-untyped-def]
         return RuntimeHealthCheck("stub", RuntimeHealthStatus.HEALTHY, "")
 
+    local_offset = datetime.now().astimezone().utcoffset()
+    configured = "Etc/GMT-14" if local_offset == timedelta(hours=-12) else "Etc/GMT+12"
     service = RuntimeHealthService(
         SimpleNamespace(
             generation=None,
             memory=SimpleNamespace(vector_index=SimpleNamespace(store=None)),
             conversation=SimpleNamespace(summary_vector_index=SimpleNamespace(store=None)),
         ),
-        zone=ZoneInfo("Europe/London"),
+        zone=ZoneInfo(configured),
     )  # type: ignore[arg-type]
     for name in (
         "_runtime_check",
@@ -59,15 +63,9 @@ def test_the_service_compares_the_configured_zone_even_without_a_generation(monk
     monkeypatch.setattr(service, "_foresight_checks", lambda *_args: [])
     monkeypatch.setattr(service, "_queue_check", lambda: none_check())
     monkeypatch.setattr(service, "_vector_check", lambda *_args: none_check())
-    monkeypatch.setenv("TZ", "Asia/Singapore")
-    time.tzset()
-    try:
-        report = asyncio.run(service.report("running"))
-        found = {item.name: item for item in report.checks}
-        assert found["generation"].detail == "disabled"
-        assert found["timezone"].status is RuntimeHealthStatus.DEGRADED and "Europe/London" in found["timezone"].detail
-        service.zone = None
-        assert "timezone" not in {item.name for item in asyncio.run(service.report("running")).checks}
-    finally:
-        monkeypatch.undo()
-        time.tzset()
+    report = asyncio.run(service.report("running"))
+    found = {item.name: item for item in report.checks}
+    assert found["generation"].detail == "disabled"
+    assert found["timezone"].status is RuntimeHealthStatus.DEGRADED and configured in found["timezone"].detail
+    service.zone = None
+    assert "timezone" not in {item.name for item in asyncio.run(service.report("running")).checks}

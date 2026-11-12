@@ -9,37 +9,47 @@
 - 预测拍水位过了 max(昨天日终, 最后一段「未观测」的结尾) 再 ``margin`` 那么久（用户 11-10「按槽留余量」）：没在看的空白先写成
   判断、再给归约留几槽把它落树，结算与读序列才看得到它（必须边"没在看的空白写进树 → 读那天的记录、结算"）。
 
+**换代里没有模型调用**（实时化阶段 2）：出错重试、词表的每晚新增与定期拆改、迁移牵到的重映射、写概念、映射、候选条件
+与先验的补问都归模型队列（``runtime.model_queue``），模型多慢、调不通都不影响这里写出今天这一代。换代不等队列：队列没做完的
+按"不知道"算（没映射完的日子关系检验读不到、缺的先验权重按 1），下一代补上。
+
 **先后**（各步一个子 span ``generation.<步>``，挂在 ``generation.run`` 下；每步记它读到的输入是哪一代）：
 
 =====  ==================================================  ==========  ==================================================
  #      步                                                  必须成      没做成时
 =====  ==================================================  ==========  ==================================================
- 1      探模型                                              否          记"模型调不通"，后面调模型的步照样试、各自报
+ 1      待生效的拆改交给迁移器、续做没做完的词表迁移        迁移是      没做完由结算（跳过）与读序列（这一代不成）各自挡下
  2      重读放假数据                                        否          照用上一次读到的日历
- 3      重试收尾（through = 昨天）                          否          这一代跳过结算（守住"重试 → 结算"），下一代补结
- 4      结算（持预测根租约）                                否          下一代补结（幂等）
- 5      词表：续迁移 → 每晚新增 → 定期拆改 → 迁移          迁移是      新增、拆改尽力；迁移没做完由读序列那一步挡下
- 6      读序列（前后各看一次词表状态）                      是          这一代不成，下一眼从头
- 7      语义树：同步词表 → 写概念 → 映射 → 先验 / 候选条件  否          关系判定没做成、或这一代里模型整个调不通 → 这一代不写
-        → 关系判定 → 关系表 → 补日历取值                                关系表，机会表退到上一代
- 8      机会表（持预测根租约，含各类的日历）                是          今天没有这一代
- 9      单元历史 → 压实（同上，跟在机会表后面）              否          表照用、压实跳过
- 10     当天的日子预期（持预测根租约，从零点起看）          是          今天没有这一代
- 11     完成标记 ``generation/<今天>.json``（持预测根租约）  是          —
+ 3      重试收尾（through = 昨天；只丢弃、撤回，不试）      否          这一代跳过结算（守住"重试 → 结算"），下一代补结
+ 4      结算                                                否          下一代补结（幂等）
+ 5      读序列（前后各看一次词表状态）                      是          这一代不成，下一眼从头
+ 6      语义树（整步持语义树写锁）：同步词表（概念落盘）→    否          关系判定没做成、或换代那一刻模型队列在整体退避 →
+        按缓存判关系 → 关系表 → 补日历取值                              这一代不写关系表，机会表退到上一代
+ 7      机会表（含各类的日历）                              是          今天没有这一代
+ 8      单元历史 → 压实（同上，跟在机会表后面）              否          表照用、压实跳过
+ 9      当天的日子预期（从零点起看）                        是          今天没有这一代
+ 10     完成标记 ``generation/<今天>.json``                  是          —
 =====  ==================================================  ==========  ==================================================
 
 只有必须成的那几步失败才算"今天没有这一代"（不写完成标记，下一眼从头再做：各步本来可重做）；其余失败大声报出（step 的结局、
-健康面）、走退路、计数（``fallbacks``）、接着做。**模型调不通不停一天**：调模型的那几步各按尽力而为处理，换代照做、预测照常、
-关系沿用上一次判定的。同一代不重写：完成标记存在就不再做。
+健康面）、走退路、计数（``fallbacks``）、接着做。同一代不重写：完成标记存在就不再做。
 
-这里只有"做一代"本身；什么时候做、租约、心跳、报告、指标与健康面在 ``runtime.generation_worker``。
+``sealed_day`` 是"已封口的日子的活现在可以做了"的那一天：触发条件里除了"今天的完成标记还没有"之外的那几条都满足时是今天。
+模型队列据它认已封口的日子的欠账（早于这一刻读序列，「未观测」的空白可能还没落树）；完成标记有没有不影响欠账。
+
+**锁**（阶段 2 第二小步）：整代在预测 worker 那一槽的预测根租约之内做（``runtime.foresight_worker``：先看一眼换代、再做预测拍），
+账本只有一个写者，各步不再各自拿它。语义树一步整步持语义树写锁（``runtime.scene_lock``）：模型队列的落盘等它做完，读到的语义树是
+一份停住的样子；等一个租期还拿不到（另一个进程的队列正写着）是还没准备好，这一代到此为止、下一槽再看，不算失败、不退避。
+换代在做时立一个标志（``generating``），同一进程的模型队列在两项之间看到就先不取下一项。
+
+这里只有"做一代"本身；什么时候做、报告、指标与健康面在 ``runtime.generation_runner``。
 """
 
 from __future__ import annotations
 
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, nullcontext
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as clock_time
@@ -52,7 +62,6 @@ from habitus.runtime import generation_steps as steps
 from habitus.runtime.foresight_days import DayExpectationStage
 from habitus.runtime.foresight_nightly import ForesightNightlyRun
 from habitus.runtime.foresight_settlement import SettlementStage
-from habitus.runtime.generation_lease import Lease
 from habitus.runtime.generation_marks import GenerationMarkError, GenerationMarks
 from habitus.runtime.generation_result import (
     ALREADY_DONE,
@@ -68,7 +77,6 @@ from habitus.runtime.generation_result import (
     MODEL_UNREACHABLE,
     MUST,
     OPPORTUNITIES,
-    PROBE,
     RETRY,
     REWOUND,
     SCENE,
@@ -76,7 +84,6 @@ from habitus.runtime.generation_result import (
     SETTLE,
     SKIPPED,
     UNREACHABLE_ERRORS,
-    VOCABULARY,
     Degrade,
     GenerationResult,
     MustFailed,
@@ -89,6 +96,7 @@ from habitus.runtime.generation_result import (
 from habitus.runtime.generation_summary import flatten, reason_code
 from habitus.runtime.generation_trace import GENERATION_SPAN, STEP_SPAN_PREFIX
 from habitus.runtime.generation_watermark import TickWatermark
+from habitus.runtime.scene_lock import SceneWriteLock
 from habitus.runtime.scene_night import NightReport, SceneNightlyRun
 from habitus.series import EventSeries
 from habitus.series.reader import SeriesReader
@@ -111,12 +119,14 @@ class Generation:
         series: SeriesReader | None = None,
         retry: RetryStage | None = None,
         days: DayExpectationStage | None = None,
-        probe: Callable[[], Awaitable[None]] | None = None,
-        vocabulary_jobs: Sequence[Callable[[date], Awaitable[object]]] = (),
         migration_jobs: Sequence[Callable[[], Awaitable[object]]] = (),
+        models_down: Callable[[], bool] | None = None,
+        queue_owed: Callable[[], Mapping[str, int]] | None = None,
         watermark: Callable[[], TickWatermark] | None = None,
         margin: timedelta = timedelta(0),
-        ledger_lease: Lease | None = None,
+        scene_lock: SceneWriteLock | None = None,
+        generating: Callable[[bool], None] | None = None,
+        revisions: Callable[[], int] | None = None,
         closed_at: Callable[[date], datetime | None] | None = None,
         unreduced_gaps: Callable[[date], int] | None = None,
     ) -> None:
@@ -141,19 +151,16 @@ class Generation:
         self.settlement = settlement
         self.days = days
         self.refresh_calendar = refresh_calendar
-        self.probe = probe
-        #: 各支的每晚新增、这一天所在周期里还没做的定期拆改（持 sweep 锁、锁被占抛 ``BehaviorReductionBusyError``）。
-        self.vocabulary_jobs = tuple(vocabulary_jobs)
         self.migration_jobs = tuple(migration_jobs)  # 各支续做没做完的词表迁移：排在最前（``steps.migrate_step``）
-        #: 预测拍的水位（没接预测层就没有：触发不看它）。
-        self.watermark = watermark
-        self.margin = margin
-        #: 预测根租约：只包写账本的那几步（结算、机会表 → 单元历史 → 压实、日子预期、完成标记）。
-        self.ledger_lease = ledger_lease
-        #: 某一天什么时候定的稿（归约的定稿日账）：量"从昨天定稿到今天这一代写出"。
-        self.closed_at = closed_at
-        #: 截止日之前还没归约的空判断条数（会话一支的判断存储与消费账本）。
-        self.unreduced_gaps = unreduced_gaps
+        #: 同一进程的模型队列：此刻是不是在整体退避（是就这一代不判关系、沿用上一代，裁定 96）、各类此刻还欠着几项。没接是 None。
+        self.models_down, self.queue_owed = models_down, queue_owed
+        #: 预测拍的水位（没接预测层就没有：触发不看它）与要过的余量。
+        self.watermark, self.margin = watermark, margin
+        #: 语义树写锁（语义树一步整步持有）、换代开始 / 做完时立撤的标志（模型队列看它）、各支待生效的拆改有几份（续做迁移
+        #: 那一步先把它们交给迁移器）；没接都是 None。
+        self.scene_lock, self.generating, self.revisions = scene_lock, generating, revisions
+        #: 某一天什么时候定的稿（归约的定稿日账：量"从昨天定稿到今天这一代写出"）；截止日之前还没归约的空判断条数。
+        self.closed_at, self.unreduced_gaps = closed_at, unreduced_gaps
         self.clock: Callable[[], datetime] = clock if clock is not None else lambda: datetime.now(UTC)
 
     def today(self) -> date:
@@ -170,6 +177,16 @@ class Generation:
                 return Readiness(None, ALREADY_DONE)
         except GenerationMarkError:
             pass  # 今天的标记坏了：不当已做（重做时整份重写），健康面另报读不了
+        return self._sealed(today)
+
+    def sealed_day(self) -> date | None:
+        """已封口的日子的活现在可以做了的那一天（今天）：触发条件里除"今天的完成标记还没有"之外的那几条都满足；否则 None。"""
+
+        return self._sealed(self.today()).day
+
+    def _sealed(self, today: date) -> Readiness:
+        """触发条件里不看今天完成标记的那几条：日期没有回退、连续定稿到昨天、预测拍水位过了余量。"""
+
         try:
             latest = max(self.marks.days(), default=None)
         except GenerationMarkError:
@@ -197,7 +214,7 @@ class Generation:
         return Readiness(today, "")
 
     def clean_leftovers(self) -> int:
-        """进程起来、第一次拿到换代租约时调：上一次中途被杀剩下的重试项撤回、删掉（裁定 68 第 3 条）。"""
+        """进程起来后第一眼调：上一次中途被杀剩下的重试项撤回、删掉（裁定 68 第 3 条）。"""
 
         return 0 if self.retry is None else self.retry.clean_leftovers()
 
@@ -205,24 +222,30 @@ class Generation:
         """做第 ``day`` 代（``day`` 是今天，序列截止到它、含昨天）。必须成的那一步没成时结果的 ``failed`` 是它。"""
 
         result = GenerationResult(day, self.clock())
-        with span(GENERATION_SPAN, {"day": day.isoformat()}) as attributes:
-            try:
-                await self._run(result)
-            except MustFailed:
-                pass  # 必须成的那一步没成、或还没准备好：这一代到此为止
+        if self.queue_owed is not None:
+            result.queue_owed = dict(self.queue_owed())
+        if self.generating is not None:
+            self.generating(True)
+        try:
+            with span(GENERATION_SPAN, {"day": day.isoformat()}) as attributes:
+                try:
+                    await self._run(result)
+                except MustFailed:
+                    pass  # 必须成的那一步没成、或还没准备好：这一代到此为止
 
-            set_attributes(attributes, generation_attributes(result))
+                set_attributes(attributes, generation_attributes(result))
+        finally:
+            if self.generating is not None:
+                self.generating(False)
         return result
 
     async def _run(self, result: GenerationResult) -> None:
         day = result.day
         deferred: list[str] = []
-        await self._step(result, PROBE, lambda report: steps.probe_step(self, report, result))
         await self._step(result, MIGRATE, lambda report: steps.migrate_step(self, report))
         await self._step(result, CALENDAR, lambda report: steps.calendar_step(self, report, result))
         await self._step(result, RETRY, lambda report: steps.retry_step(self, report, day, deferred, result))
         await self._step(result, SETTLE, lambda report: steps.settle_step(self, report, deferred, result))
-        await self._step(result, VOCABULARY, lambda report: steps.vocabulary_step(self, report, day, result))
         holder: list[EventSeries] = []
         await self._step(result, SERIES, lambda report: steps.series_step(self, report, day, result, holder))
         series = holder[0]
@@ -254,7 +277,6 @@ class Generation:
                 outcome, reason = (FAILED if name in MUST else DEGRADED), degrade.reason
             except UNREACHABLE_ERRORS as exc:
                 outcome, reason = (FAILED if name in MUST else DEGRADED), f"{MODEL_UNREACHABLE}: {exc}"
-                result.unreachable.append(name)
             except Exception as exc:  # noqa: BLE001 - 一步抛了：必须成的这一代不成，尽力的报出、走退路、接着做
                 outcome, reason = (FAILED if name in MUST else DEGRADED), f"{LABELS[name]}出错: {type(exc).__name__}"
             record = current_span()
@@ -274,10 +296,10 @@ class Generation:
             result.failed, result.reason = name, reason
             raise MustFailed
 
-    def ledger(self) -> AbstractAsyncContextManager[object]:
-        """写账本的那几步持预测根租约（没接就不持）。"""
+    def scene_writes(self) -> AbstractAsyncContextManager[object]:
+        """语义树一步持语义树写锁（没接就不持）。"""
 
-        return self.ledger_lease.held() if self.ledger_lease is not None else nullcontext()
+        return self.scene_lock.held() if self.scene_lock is not None else nullcontext()
 
 
 __all__ = ["Generation"]

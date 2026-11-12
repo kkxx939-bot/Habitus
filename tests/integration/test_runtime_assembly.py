@@ -709,7 +709,7 @@ def test_runtime_memory_search_facades_use_the_real_search_service_and_lifecycle
     asyncio.run(scenario())
 
 
-def _fully_enabled_runtime(tmp_path: Path, *, lifecycle: dict | None = None):  # type: ignore[no-untyped-def]
+def _fully_enabled_runtime(tmp_path: Path, *, lifecycle: dict | None = None, foresight: bool = True):  # type: ignore[no-untyped-def]
     payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     if lifecycle:
         payload["lifecycle"] = {**payload.get("lifecycle", {}), **lifecycle}
@@ -724,7 +724,7 @@ def _fully_enabled_runtime(tmp_path: Path, *, lifecycle: dict | None = None):  #
         route.update(provider="fake", adapter=adapter, credential_ref="")
     payload["behavior"] = {"primary_subject": "家庭成员A"}
     payload["scene"] = {"enabled": True}
-    payload["foresight"] = {"enabled": True}
+    payload["foresight"] = {"enabled": foresight}
     config = HabitusConfig.from_mapping(payload)
     providers, vectors = runtime_dependencies()
     return build_runtime(
@@ -743,22 +743,30 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     branches = runtime.components.behavior
     worker = runtime.components.generation
     assert branches is not None and worker is not None
-    # 换代与预测层（与结算）现在只接会话那一支；预测树删了（裁定 59），换代一个常驻 worker（实时化方案第 3 节，取代夜线 Job 账）。
+    # 换代与预测层（与结算）现在只接会话那一支；预测树删了（裁定 59）。换代不是常驻 worker（阶段 2 第二小步）：预测 worker 每槽先调它。
     behavior = branches.session
     generation = worker.generation
     assert generation.marks.root == runtime.config.scene_root / "generation"
     assert worker.reports is not None and worker.reports.root == runtime.config.scene_root / "generation" / "reports"
     assert worker.traces is not None and worker.traces.root == runtime.config.scene_root / "generation" / "traces"
-    # 换代租约：组合根共用的那一份 SQLite 锁库；运维数都来自 ``config.scene.generation_*``
-    assert worker.lease.lock_store is runtime.components.infrastructure.path_lock.lock_store
-    assert worker.lease.key.startswith("scene:generation:")
-    assert worker.settings.poll_seconds == runtime.config.scene.generation_poll_seconds
+    # 三把锁都在组合根共用的那一份 SQLite 锁库上；运维数都来自 ``config.scene.generation_*``。换代租约没有了：
+    # 语义树写锁沿用它的键，换代与模型队列共用同一个实例
+    scene_lock = generation.scene_lock
+    queue_worker = runtime.components.model_queue
+    assert scene_lock is not None and queue_worker is not None and queue_worker.queue.scene_lock is scene_lock
+    assert scene_lock.lease.lock_store is runtime.components.infrastructure.path_lock.lock_store
+    assert scene_lock.lease.key.startswith("scene:generation:")
+    assert queue_worker.queue.lease.key.startswith("scene:model-queue:")
     assert worker.settings.kept_days == runtime.config.scene.generation_kept_days
-    # 预测根租约（另一个键）：换代写账本的那几步与每个预测拍共用同一个实例
+    # 预测根租约（另一个键）在预测拍手里：预测 worker 每槽持一次，先调换代的那一眼、再做这一拍
     assert runtime.components.foresight is not None and runtime.components.foresight.worker is not None
-    ledger_lease = runtime.components.foresight.worker.tick.lease
-    assert ledger_lease is not None and generation.ledger_lease is ledger_lease
-    assert ledger_lease.key.startswith("foresight:root:") and ledger_lease.key != worker.lease.key
+    slots = runtime.components.foresight.worker
+    assert slots.generation is worker and runtime.components.slot_worker is slots
+    assert runtime.components.generation_slots is None  # 开了预测层：那个 worker 在预测层的部件里
+    ledger_lease = slots.tick.lease
+    assert ledger_lease is not None and slots.lease is None
+    assert ledger_lease.key.startswith("foresight:root:") and ledger_lease.key != scene_lock.lease.key
+    assert generation.generating == queue_worker.queue.state.set_generating  # 换代在做的标志立在队列读的那一份状态上
     # 预测拍的 ``foresight.tick`` span 落换代同一份本地 trace
     assert runtime.components.foresight.worker.tick.trace == worker.traces.sink
     # 换代开头的重试收尾接着两支各自的重试堆（裁定 67）；会话一支连同它的会话 lane
@@ -782,7 +790,6 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert runtime.components.foresight is not None and runtime.components.foresight.worker is not None
     assert runtime.components.foresight.worker.tick.reread is not None
     assert runtime.reminders_enabled()
-    assert worker.shutdown_timeout_seconds == runtime.config.scene.generation_shutdown_timeout_seconds
     foresight = runtime.components.foresight
     assert foresight is not None
     assert foresight.read_side.behavior_tree is behavior.tree
@@ -827,10 +834,25 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert nightly.foresight is not None and nightly.foresight.store is foresight.opportunities
     assert nightly.closed_days == behavior.reduction_runner.closed_days
     assert nightly.settlement is foresight.settlement
-    # 当天的日子预期是换代必须成的一步，与预测拍读同一座未封口的桥（同一口径：模型调不通不抛）、写同一本账
+    # 当天的日子预期是换代必须成的一步，与预测拍读同一座未封口的桥、写同一本账。实时化阶段 2（A1）：换代里没有模型调用，
+    # 日子预期读的是那座桥只读缓存的那一份（归类由模型队列在换代之前做，不再在换代里问模型）
     assert nightly.days is foresight.days and foresight.days is not None
     assert foresight.days.ledger is foresight.ledger and foresight.days.opportunities is foresight.opportunities
-    assert foresight.days.forming.unsealed is tick.forming.unsealed
+    assert foresight.days.forming.unsealed.bridge is tick.forming.unsealed  # type: ignore[attr-defined]
+    # 模型队列（A1）：做的是换代那棵语义树的活，换代读它的状态认"是不是在整体退避""各类还欠着几项"；与换代共用重试堆的编排、
+    # 未封口的桥、完成标记；租约与语义树写锁不同键
+    queue_worker = runtime.components.model_queue
+    assert queue_worker is not None
+    queue = queue_worker.queue
+    assert queue.scene is nightly.scene and queue.sealed_day == nightly.sealed_day
+    assert nightly.models_down == queue.state.down and nightly.queue_owed == queue.state.owed_now
+    assert queue.daily.retry is nightly.retry and queue.daily.bridge is tick.forming.unsealed
+    assert queue.marks is nightly.marks
+    assert [branch.name for branch in queue.daily.vocabulary_branches] == ["session", "physical"]
+    assert queue.lease.key.startswith("scene:model-queue:") and queue.lease.key != scene_lock.lease.key
+    assert queue.settings.poll_seconds == runtime.config.scene.model_queue_poll_seconds
+    assert queue_worker.shutdown_timeout_seconds == runtime.config.scene.model_queue_shutdown_timeout_seconds
+    assert queue.sealed.reader.tree is behavior.tree and queue.sealed.reader.name == "model_queue"
     # 完成标记只有一份：换代写，结算读同一个"这一天的换代做完了没有"（裁定 94 第 9 条）
     assert foresight.settlement.finished == generation.marks.finished
     # 白天那道闸读同一份完成标记（F5）；续做迁移接着两支、排在最前（F1）
@@ -890,6 +912,42 @@ def test_the_runtime_starts_and_stops_the_foresight_worker(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
+def test_with_the_scene_on_and_foresight_off_the_slot_worker_drives_the_generation_without_a_tick(
+    tmp_path: Path,
+) -> None:
+    """只开语义树、不开预测层（配置校验允许）：换代没有自己的循环，仍由预测 worker 的位置驱动——同一个对齐槽边界的 worker，
+    每槽持预测根租约看一眼换代，没有预测拍。它挂在 ``generation_slots``，Runtime 起停它，健康面看它活着。漏装的话进程照常、
+    健康全绿，一代都不会做。"""
+
+    import asyncio
+
+    from habitus.runtime.foresight_worker import NO_TICK, ForesightWorker
+
+    runtime = _fully_enabled_runtime(tmp_path, foresight=False)
+    components = runtime.components
+    slots = components.generation_slots
+    assert components.foresight is None and components.generation is not None
+    assert isinstance(slots, ForesightWorker) and components.slot_worker is slots
+    assert slots.tick is None and slots.generation is components.generation
+    assert slots.lease is not None and slots.lease.key.startswith("foresight:root:")
+    assert slots.interval_seconds == runtime.config.temporal.slot_minutes * 60
+    with pytest.raises(ValueError, match="the slot worker must drive this generation"):
+        replace(components, generation_slots=None)
+
+    async def scenario() -> None:
+        assert (await slots.slot()).skipped == NO_TICK  # 一槽：只看换代（一天都还没定稿，不做）
+        await runtime.start()
+        await asyncio.sleep(0.05)
+        assert slots.running
+        report = await runtime.health()
+        names = {item.name: item.status.value for item in report.checks}
+        assert names["generation_slots"] == "healthy" and "generation_worker" not in names
+        await runtime.stop()
+        assert not slots.running
+
+    asyncio.run(scenario())
+
+
 def test_an_enabled_foresight_layer_that_is_not_attached_to_the_generation_is_refused(tmp_path: Path) -> None:
     """接线漏了的话，进程照常启动、health 全绿、结算与新语义树的各步一代都不会跑，而配置里还开着——无处可查。"""
 
@@ -901,17 +959,28 @@ def test_an_enabled_foresight_layer_that_is_not_attached_to_the_generation_is_re
     with pytest.raises(ValueError, match="settlement stage must be a step of the generation"):
         replace(components)
     with pytest.raises(ValueError, match="the generation must be enabled"):
-        replace(components, generation=None)
+        replace(components, generation=None, model_queue=None)
+    # A1：模型队列随换代一起有、一起没有
+    with pytest.raises(ValueError, match="the model queue and the generation come together"):
+        replace(components, model_queue=None)
     components.generation.generation.settlement = runtime.components.foresight.settlement  # type: ignore[union-attr]
     components.generation.generation.foresight = None
     with pytest.raises(ValueError, match="opportunity table the foresight layer reads"):
+        replace(components)
+    # A2：换代没有自己的循环，驱动它的必须是预测层部件里的那个每槽的 worker；语义树写锁换代与队列必须是同一把
+    assert components.foresight is not None
+    with pytest.raises(ValueError, match="the slot worker must drive this generation"):
+        replace(components, foresight=replace(components.foresight, worker=None))
+    components.generation.generation.scene_lock = None
+    with pytest.raises(ValueError, match="share one scene write lock"):
         replace(components)
 
 
 def test_the_runtime_starts_and_stops_the_generation_worker_and_reports_how_old_the_opportunity_table_is(
     tmp_path: Path,
 ) -> None:
-    """换代自己一个常驻 worker，Runtime 起停它；健康面看它活着，接了预测层时再看机会表最晚一晚有多旧（清单 5.1、5.3）。"""
+    """换代没有自己的循环（阶段 2 第二小步）：Runtime 起停的是预测 worker（每槽先看一眼换代）与模型队列；健康面上没有
+    ``generation_worker`` 一项（A2-12），循环存活看 ``foresight_worker``；接了预测层时再看机会表最晚一晚有多旧（清单 5.1、5.3）。"""
 
     import asyncio
     from datetime import UTC, datetime, timedelta
@@ -921,7 +990,10 @@ def test_the_runtime_starts_and_stops_the_generation_worker_and_reports_how_old_
     runtime = _fully_enabled_runtime(tmp_path)
     worker = runtime.components.generation
     foresight = runtime.components.foresight
-    assert worker is not None and foresight is not None
+    queue_worker = runtime.components.model_queue
+    assert worker is not None and foresight is not None and queue_worker is not None
+    slots = foresight.worker
+    assert slots is not None
 
     def check(report, name):  # type: ignore[no-untyped-def]
         return next(item for item in report.checks if item.name == name)
@@ -931,11 +1003,13 @@ def test_the_runtime_starts_and_stops_the_generation_worker_and_reports_how_old_
         assert check(report, "opportunities_session").detail == "never_written"  # 第一夜还没到：不算故障
         await runtime.start()
         await asyncio.sleep(0.05)
-        assert worker.running
+        assert slots.running and queue_worker.running  # A1：模型队列的 worker 也由 Runtime 起停
         report = await runtime.health()
-        assert check(report, "generation_worker").status.value == "healthy"
+        assert not [item for item in report.checks if item.name == "generation_worker"]
+        assert check(report, "foresight_worker").status.value == "healthy"
+        assert check(report, "model_queue_worker").status.value == "healthy"
         await runtime.stop()
-        assert not worker.running
+        assert not slots.running and not queue_worker.running
 
     asyncio.run(scenario())
     zone = runtime.config.locale.zone()

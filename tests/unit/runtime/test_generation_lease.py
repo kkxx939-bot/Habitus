@@ -1,10 +1,10 @@
-"""换代与预测拍的两把租约（``runtime.generation_lease.Lease``；实时化方案第 9 节、用户 11-10「两把锁」）。
+"""换代、预测拍与模型队列的跨进程租约（``runtime.generation_lease.Lease``；实时化方案第 9 节，阶段 2 第二小步「三把锁」）。
 
 - ``Lease`` 本身：进程内两段互斥；另一个持有者（另一份锁库连接，等同另一个进程）拿着时拿不到；持有者崩了（不放、不续）
   要等租约过期才能接管，接管拿到的是更大的 fencing 序号；续不上、租约要过期时取消持有它的那一段并抛 ``LeaseLostError``，
   一次续不上而租约还没到期不取消。
-- 预测根租约的持有范围：换代里写账本的那几步（结算、机会表、日子预期、完成标记）持有它，调模型的语义树那一步不持有；
-  预测拍整拍持有它——别人拿着时这一拍不写账本、不推进水位（报 ``LEDGER_BUSY``），放开后下一拍照常建。
+- 预测根租约的持有范围：预测 worker 的一槽（先换代、再预测拍）整槽持有它——整代每一步都在它里面，语义树写锁只有语义树
+  那一步持有；别人拿着时这一拍不写账本、不推进水位（报 ``LEDGER_BUSY``），放开后下一拍照常建。
 
 用真实的 ``SQLiteLockStore``（两个实例连同一个文件，等同两个进程）。
 """
@@ -27,12 +27,14 @@ from habitus.runtime.foresight import ForesightReadSide
 from habitus.runtime.foresight_tick import LEDGER_BUSY, ForesightTick
 from habitus.runtime.generation_lease import Lease, LeaseBusyError, LeaseLostError
 from habitus.runtime.generation_watermark import TickTrack, TickWatermarkStore
+from habitus.runtime.scene_lock import SceneWriteLock
 from tests.unit.runtime.test_foresight_tick import TODAY as TICK_DAY
 from tests.unit.runtime.test_foresight_tick import TOLERANCE, site_with_three_mornings, stores
-from tests.unit.runtime.test_generation import generate, wired
+from tests.unit.runtime.test_generation import wired
 from tests.unit.scene.fixtures import SUBJECT, at, publish
 
 KEY = "foresight:root:test"
+SCENE_KEY = "scene:generation:test"
 
 
 def locks(tmp_path: Path) -> SQLiteLockStore:
@@ -43,11 +45,11 @@ def lease(store: SQLiteLockStore, *, ttl: float = 5.0, heartbeat: float = 1.0) -
     return Lease(store, KEY, ttl_seconds=ttl, heartbeat_seconds=heartbeat, poll_seconds=0.05)
 
 
-def held_elsewhere(store: SQLiteLockStore) -> bool:
+def held_elsewhere(store: SQLiteLockStore, key: str = KEY) -> bool:
     """此刻这把租约是不是被人拿着：用另一份锁库连接试拿一下（拿到就马上放掉）。"""
 
     try:
-        token = store.acquire(KEY, 1)
+        token = store.acquire(key, 1)
     except TimeoutError:
         return True
     store.release(token)
@@ -161,72 +163,86 @@ def test_one_missed_renewal_before_expiry_does_not_cancel(tmp_path) -> None:
 # ── 预测根租约的持有范围 ────────────────────────────────────────────────
 
 
-def test_the_generation_holds_the_ledger_lease_only_around_its_ledger_writes(tmp_path) -> None:
-    """换代租约之外，写账本的那几步（结算、机会表、日子预期、完成标记）持预测根租约；探模型、续做迁移、词表、调模型的语义树
-    都不持有它（换代调模型的几个小时不挡预测拍）。"""
+def test_the_whole_generation_runs_inside_the_slots_ledger_lease_and_only_the_scene_step_holds_the_scene_lock(
+    tmp_path,
+) -> None:
+    """阶段 2 第二小步（三把锁）：换代并进预测 worker 的那一槽——拿到预测根租约之后先做换代、再做预测拍，整代每一步都在这一次
+    持有之内（原来只有写账本的那几步各自拿它）；语义树写锁只有语义树那一步持有，别的步都不持。换代里的步自己再去拿预测根
+    租约（进程内那把锁不可重入）、或语义树一步不拿写锁，这里都会变红。"""
 
     order: list[str] = []
-    run = wired(tmp_path, order)
+    (tmp_path / "gen").mkdir()
+    run = wired(tmp_path / "gen", order)
     probe = locks(tmp_path)
-    run.ledger_lease = lease(locks(tmp_path))
-    seen: dict[str, bool] = {}
+    run.scene_lock = SceneWriteLock(
+        Lease(locks(tmp_path), SCENE_KEY, ttl_seconds=5.0, heartbeat_seconds=1.0, poll_seconds=0.05)
+    )
+    seen: dict[str, tuple[bool, bool]] = {}
+
+    def both() -> tuple[bool, bool]:
+        return held_elsewhere(probe), held_elsewhere(probe, SCENE_KEY)
 
     settle = run.settlement.run_once  # type: ignore[union-attr]
 
     def settle_probe():  # type: ignore[no-untyped-def]
-        seen["结算"] = held_elsewhere(probe)
+        seen["结算"] = both()
         return settle()
 
     run.settlement.run_once = settle_probe  # type: ignore[union-attr,method-assign]
     table = run.foresight.run  # type: ignore[union-attr]
 
     def table_probe(**kwargs):  # type: ignore[no-untyped-def]
-        seen["机会表"] = held_elsewhere(probe)
+        seen["机会表"] = both()
         return table(**kwargs)
 
     run.foresight.run = table_probe  # type: ignore[union-attr,method-assign]
     day_run = run.days.run_once  # type: ignore[union-attr]
 
     async def days_probe():  # type: ignore[no-untyped-def]
-        seen["日子"] = await asyncio.to_thread(held_elsewhere, probe)
+        seen["日子"] = await asyncio.to_thread(both)
         return await day_run()
 
     run.days.run_once = days_probe  # type: ignore[union-attr,method-assign]
     write = run.marks.write
 
     def mark_probe(mark):  # type: ignore[no-untyped-def]
-        seen["完成标记"] = held_elsewhere(probe)
+        seen["完成标记"] = both()
         return write(mark)
 
     run.marks.write = mark_probe  # type: ignore[method-assign]
-    scene = run.scene.run
+    scene = run.scene.generate  # A1：换代调的是不调模型的 ``generate``；词表那一步归模型队列，不在换代里
 
     async def scene_probe(**kwargs):  # type: ignore[no-untyped-def]
-        seen["语义树"] = await asyncio.to_thread(held_elsewhere, probe)
+        seen["语义树"] = await asyncio.to_thread(both)
         return await scene(**kwargs)
 
-    run.scene.run = scene_probe  # type: ignore[method-assign]
+    run.scene.generate = scene_probe  # type: ignore[method-assign]
 
-    async def vocabulary_probe(_night) -> None:  # type: ignore[no-untyped-def]
-        seen["词表"] = await asyncio.to_thread(held_elsewhere, probe)
+    migrating = [True]  # 修复轮 G1：有没做完的迁移时才调续做迁移
 
     async def migrate_probe() -> None:
-        seen["迁移"] = await asyncio.to_thread(held_elsewhere, probe)
+        seen["迁移"] = await asyncio.to_thread(both)
+        migrating[0] = False
 
-    run.vocabulary_jobs = (vocabulary_probe,)
+    run.vocabulary = lambda: (1, migrating[0])
     run.migration_jobs = (migrate_probe,)
-    result = generate(run)
-    assert result.complete
+    tick, _ledger = _tick(tmp_path, lease(locks(tmp_path)))
+    results = []
+
+    async def generation() -> None:
+        results.append(await run.run(run.today()))
+
+    report = asyncio.run(tick.run_once(before=generation))
+    assert results[0].complete and report.skipped is None  # 换代做完、同一次持有之内这一拍也做了
     assert seen == {
-        "迁移": False,
-        "结算": True,
-        "词表": False,
-        "语义树": False,
-        "机会表": True,
-        "日子": True,
-        "完成标记": True,
+        "迁移": (True, False),
+        "结算": (True, False),
+        "语义树": (True, True),
+        "机会表": (True, False),
+        "日子": (True, False),
+        "完成标记": (True, False),
     }
-    assert held_elsewhere(probe) is False  # 做完放开
+    assert both() == (False, False)  # 做完都放开
 
 
 def _tick(tmp_path: Path, held: Lease) -> tuple[ForesightTick, object]:

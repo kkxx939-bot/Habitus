@@ -1,5 +1,8 @@
-"""每晚跑批的第一步：按天重试白天读不懂的（裁定 67、68）——补回、按天收、每项试完就删、探活只停会话轮、上一晚中途被杀
-剩下的不再试只撤回、重启时就清。"""
+"""重试堆的两段编排（裁定 67、68）——就近试（``run_once``）：补回、每项试完就删、探活只停会话轮；重试收尾（``close``）：
+按天收、不试、丢弃并撤回、按类计数；重启时就清。
+
+实时化阶段 2（A1）起出错重试就近：``run_once`` 由模型队列调、试还没封口的日子的项、不再推"重试到哪一天"；推日子、丢弃、
+撤回、不白试的那几类的计数挪到换代调的 ``close``。原来守着"夜里一次做完"的那几条按新行为改了（各条里写了改了什么）。"""
 
 from __future__ import annotations
 
@@ -100,11 +103,15 @@ def test_a_turn_is_recovered_and_its_day_is_closed_to_new_items(tmp_path: Path) 
     stores.backlog.put(_turn_item(turn))
     reduce = _Reduce()
 
-    report = asyncio.run(_stage(stores, session, reduce=reduce).run_once(through=DAY))
+    stage = _stage(stores, session, reduce=reduce)
+    report = asyncio.run(stage.run_once(through=DAY))
 
     assert report == RetryReport(taken=1, recovered=1)
     assert provider.calls == 1 and reduce.runs == 1 and stores.backlog.count() == 0
-    assert stores.backlog.through() == DAY
+    # A1：就近试不推"重试到哪一天"（那一天还没封口，再来的项照收）；封口由换代的重试收尾做，报告并上就近试出的计数
+    assert stores.backlog.through() is None
+    assert stage.close(through=DAY) == RetryReport(taken=1, recovered=1)
+    assert stores.backlog.through() == DAY and provider.calls == 1 and reduce.runs == 1
     # 当天重试、当天废弃：那一天跑过之后再来属于它的不收（裁定 68 第 3 条）
     assert stores.backlog.put(_turn_item(_turn("晚到的一轮", 30))) is Admission.LATE
     assert stores.backlog.refused() == {"full": 0, "late": 1}
@@ -123,8 +130,8 @@ def test_items_of_today_wait_for_todays_night(tmp_path: Path) -> None:
 
 
 def test_the_first_unavailable_turn_stops_the_night(tmp_path: Path) -> None:
-    """模型整个调不通不重试（裁定 94 第 4 条）：第一条会话轮就额度满——记一项 ``unavailable``（线据它停下这一晚），剩下的不逐条
-    等、链也不再放回；堆里的留着，属于已推过的日子，下一晚按上一晚剩下的撤回。"""
+    """模型整个调不通不重试（裁定 94 第 4 条）：第一条会话轮就额度满——记一项 ``unavailable``（模型队列据它整体退避），剩下的
+    不逐条等、链也不再放回；堆里的都留着（A1：模型用不了的那一次不算试过，日子也没推），恢复后再试。"""
 
     stores = Stores(tmp_path)
     session, _provider = lane(stores, [])
@@ -142,12 +149,13 @@ def test_the_first_unavailable_turn_stops_the_night(tmp_path: Path) -> None:
 
     assert report.unreachable and report == RetryReport(taken=3, unavailable=1)
     assert chains.attempted == [] and stores.backlog.count() == 3
-    assert stores.backlog.through() == DAY
+    assert stores.backlog.through() is None
 
 
 def test_a_night_killed_midway_leaves_no_item_to_be_tried_twice(tmp_path: Path) -> None:
-    """被杀在第二项上：第一项写回了、还没归约（等归约之后才删），第二项没试——两项都属于已经跑过的那天，下一晚只撤回、不再试
-    （第一项写回的判断也撤回，不让它之后在白天落进已经结算的日子），重启时就清（裁定 68 第 3 条：同一轮不会补两遍）。"""
+    """被杀在第二项上：第一项写回了、还没归约（等归约之后才删），第二项没试——那一天封口时（A1：换代的重试收尾，不试）两项
+    都丢弃、撤回（第一项写回的判断也撤回，不让它之后在白天落进已经结算的日子），计成到封口还没补回；重启时就清
+    （裁定 68 第 3 条）。"""
 
     stores = Stores(tmp_path)
     session, provider = lane(stores, [description(), description()])
@@ -173,8 +181,9 @@ def test_a_night_killed_midway_leaves_no_item_to_be_tried_twice(tmp_path: Path) 
 
     withdrawn: list[str] = []
     handler.abandon = lambda item: withdrawn.append(item.item_id)  # type: ignore[method-assign]
-    report = asyncio.run(stage.run_once(through=DAY + timedelta(days=1)))
-    assert report == RetryReport(taken=2, leftover=2) and set(withdrawn) == left and provider.calls == 1
+    report = stage.close(through=DAY)
+    assert report == RetryReport(taken=2, unavailable=2) and set(withdrawn) == left and provider.calls == 1
+    assert stores.backlog.count() == 0 and stores.backlog.through() == DAY
 
     # 重启时就清：不等下一晚
     stores.backlog.put(_turn_item(_turn("又一轮", 20), day=DAY + timedelta(days=2)))
@@ -315,8 +324,8 @@ def test_cleaning_last_nights_leftovers_withdraws_what_they_half_wrote_first(tmp
 
 
 def test_errors_we_cannot_process_or_refused_by_content_safety_are_not_tried_again(tmp_path: Path) -> None:
-    """裁定 94 错误分类：内容安全拦下的、我们自己处理不了的（链无可读名 / 物化失败、写不成）夜里不白试——直接删、按类计数
-    （健康面列出），处理器一次也不调；能重试的照常试。"""
+    """裁定 94 错误分类：内容安全拦下的、我们自己处理不了的（链无可读名 / 物化失败、写不成）不白试——处理器一次也不调；
+    能重试的照常试。A1：就近试时它们留在堆里，那一天封口时（重试收尾）才删、按类计数（健康面列出）。"""
 
     stores = Stores(tmp_path)
     session, provider = lane(stores, [description()])
@@ -330,9 +339,12 @@ def test_errors_we_cannot_process_or_refused_by_content_safety_are_not_tried_aga
         )
     )
 
-    report = asyncio.run(_stage(stores, session, chains).run_once(through=DAY))
+    stage = _stage(stores, session, chains)
+    report = asyncio.run(stage.run_once(through=DAY))
 
-    assert report == RetryReport(taken=3, recovered=1, deterministic=1, refused=1)
+    assert report == RetryReport(taken=1, recovered=1)
+    assert chains.attempted == ["归类调不通"] and provider.calls == 0 and stores.backlog.count() == 2
+    assert stage.close(through=DAY) == RetryReport(taken=3, recovered=1, deterministic=1, refused=1)
     assert chains.attempted == ["归类调不通"] and provider.calls == 0 and stores.backlog.count() == 0
 
 
@@ -361,7 +373,7 @@ def test_a_bug_on_one_item_is_held_to_that_item_and_the_written_ones_are_reduced
 
 def test_a_lock_held_by_another_process_is_not_ready_and_the_next_look_tries_that_item_again(tmp_path: Path) -> None:
     """裁定 94 第 9 条：一项的锁被另一进程拿着（``TimeoutError``）不是错误、更不是模型调不通，是还没准备好——这一项不删，
-    这一支记成在等（线停在前置处理、不结算）；后面的照试、写回的照常归约。下一眼同一晚接着跑：只再试那一项，计数接着往下数。"""
+    这一支记成在等；后面的照试、写回的照常归约。下一次只再试那一项（A1：一趟的报告只数这一趟的，按天的计数在重试收尾里合）。"""
 
     stores = Stores(tmp_path)
     session, provider = lane(stores, [description(), description()])
@@ -386,8 +398,9 @@ def test_a_lock_held_by_another_process_is_not_ready_and_the_next_look_tries_tha
     assert provider.calls == 1 and stores.backlog.count() == 1
 
     again = asyncio.run(stage.run_once(through=DAY))
-    assert again == RetryReport(taken=2, recovered=2) and again.ready
+    assert again == RetryReport(taken=1, recovered=1) and again.ready
     assert provider.calls == 2 and stores.backlog.count() == 0
+    assert stage.close(through=DAY) == RetryReport(taken=2, recovered=2)
 
 
 def test_a_busy_reduction_keeps_the_written_items_and_resumes_without_asking_the_model_again(tmp_path: Path) -> None:
@@ -410,13 +423,13 @@ def test_a_busy_reduction_keeps_the_written_items_and_resumes_without_asking_the
 
     second = asyncio.run(stage.run_once(through=DAY))
 
-    assert second == RetryReport(taken=1, recovered=1) and second.ready
+    assert second == RetryReport(recovered=1) and second.ready  # 这一趟没有新取出的项，只归约上一趟写回的
     assert provider.calls == 1 and reduce.runs == 2 and stores.backlog.count() == 0
 
 
 def test_a_reduction_that_finds_the_model_unusable_stops_the_night_and_keeps_tonights_counts(tmp_path: Path) -> None:
-    """review-94b 低 7：重试段里这一支的归约碰到模型整个用不了——报告照样带着这一晚的计数（取出几项、哪几项没补回），并标
-    ``unreachable`` 交线停下；不是抛出去让线丢掉整份计数。"""
+    """review-94b 低 7：重试段里这一支的归约碰到模型整个用不了——报告照样带着这一趟的计数（取出几项、哪几项没补回），并标
+    ``unreachable``（模型队列据它整体退避）；不是抛出去丢掉整份计数。A1：模型用不了的那一次不算试过，没补回的项留在堆里。"""
 
     stores = Stores(tmp_path)
     chains = _Chains()
@@ -426,7 +439,7 @@ def test_a_reduction_that_finds_the_model_unusable_stops_the_night_and_keeps_ton
     report = asyncio.run(_stage(stores, None, chains, _Reduce(Reduction.UNREACHABLE)).run_once(through=DAY))
 
     assert report == RetryReport(taken=2, unavailable=2, reduction_unreachable=True) and report.unreachable
-    assert stores.backlog.count() == 0
+    assert stores.backlog.count() == 2
 
 
 def test_a_reduction_bug_stops_the_night_and_the_written_items_are_reduced_first_next_time(tmp_path: Path) -> None:
@@ -473,3 +486,128 @@ def test_a_write_bug_on_retry_is_counted_as_ours_not_as_a_bad_model_answer(tmp_p
         report = asyncio.run(_stage(stores, session).run_once(through=DAY))
 
         assert report == RetryReport(taken=1, deterministic=1), type(error).__name__
+
+
+# ── 实时化阶段 2（A1）：就近试与重试收尾 ─────────────────────────────────────────────
+
+
+def test_closing_a_day_never_tries_and_withdraws_what_was_half_written(tmp_path: Path) -> None:
+    """重试收尾不试、不跑归约：推日子，那一天及以前还在堆里的全部丢弃——能重试的撤回它写到一半的、记到封口还没补回
+    （原来就是格式不合的记 ``invalid``）；之后属于这些天的项不再收。"""
+
+    stores = Stores(tmp_path)
+    session, provider = lane(stores, [description()])
+    chains = _Chains()
+    stores.backlog.put(_chain_item("没轮到的链"))
+    stores.backlog.put(_chain_item("格式不合的链", cause=RetryCause.INVALID))
+    tomorrow = _chain_item("明天的链", day=DAY + timedelta(days=1))
+    stores.backlog.put(tomorrow)
+    reduce = _Reduce()
+
+    report = _stage(stores, session, chains, reduce).close(through=DAY)
+
+    assert report == RetryReport(taken=2, unavailable=1, invalid=1) and not report.waiting
+    assert chains.attempted == [] and provider.calls == 0 and reduce.runs == 0
+    assert set(chains.abandoned) == {"没轮到的链", "格式不合的链"}
+    assert [item.item_id for item in stores.backlog.snapshot().items] == [tomorrow.item_id]
+    assert stores.backlog.put(_chain_item("晚到的链")) is Admission.LATE
+
+
+def test_an_item_whose_day_closes_while_it_is_being_tried_is_withdrawn(tmp_path: Path) -> None:
+    """试的时候那一天封口了（换代的重试收尾先到）：这一次写下的撤回，不交归约——写回的判断不落进已经做过重试收尾的那一天
+    （裁定 68 第 3 条）。"""
+
+    stores = Stores(tmp_path)
+    reduce = _Reduce()
+    stage_holder: list[RetryStage] = []
+
+    class _ClosedMeanwhile(_Chains):
+        async def attempt(self, item: RetryItem) -> Attempt:
+            stage_holder[0].close(through=DAY)
+            return await super().attempt(item)
+
+    chains = _ClosedMeanwhile(good=frozenset({"链"}))
+    stores.backlog.put(_chain_item("链"))
+    stage_holder.append(_stage(stores, None, chains, reduce))
+
+    report = asyncio.run(stage_holder[0].run_once(through=DAY))
+
+    assert report == RetryReport(taken=1) and reduce.runs == 0 and stores.backlog.count() == 0
+    assert chains.abandoned == ["链", "链"]  # 重试收尾撤一次，试完发现封口了再撤一次
+
+
+def test_an_item_claimed_elsewhere_is_not_tried_at_the_same_time(tmp_path: Path) -> None:
+    """就近试与时窗末当场重读共用一个堆：一方占着的项（正在试、或写回了在等归约）另一方不再问一次模型。"""
+
+    from habitus.behavior.retry.reread import Rereader
+
+    stores = Stores(tmp_path)
+    session, provider = lane(stores, [description()])
+    turn = _turn("统计一下行数", 0)
+    item = _turn_item(turn)
+    stores.backlog.put(item)
+    assert stores.backlog.claim(item.item_id) and not stores.backlog.claim(item.item_id)
+
+    report = asyncio.run(_stage(stores, session).run_once(through=DAY))
+    reread = asyncio.run(
+        Rereader(stores.backlog, TurnHandler(session)).reread(
+            turn.instructed_at, turn.instructed_at + timedelta(hours=1)
+        )
+    )
+
+    assert report == RetryReport(taken=1) and reread is False
+    assert provider.calls == 0 and stores.backlog.count() == 1
+    stores.backlog.release(item.item_id)
+    assert asyncio.run(_stage(stores, session).run_once(through=DAY)) == RetryReport(taken=1, recovered=1)
+
+
+def test_closing_waits_while_a_written_item_of_that_day_is_still_to_be_reduced(tmp_path: Path) -> None:
+    """修复轮 G6（裁定 68 第 3 条）：就近试写回了判断、这一支的归约还没做成（正做到一半、或它的锁被占）——这时做重试收尾并
+    结算，写回的判断可能落进已经结算的日子。所以重试收尾什么都不动、报告记下在等的支（换代据此把这一代的结算留到下次）；
+    归约做成之后再收尾。"""
+
+    stores = Stores(tmp_path)
+    session, provider = lane(stores, [description()])
+    turn = _turn("统计一下行数", 0)
+    stores.backlog.put(_turn_item(turn))
+    reduce = _Reduce(Reduction.BUSY)
+    stage = _stage(stores, session, reduce=reduce)
+    assert not asyncio.run(stage.run_once(through=DAY)).ready and session.retried(turn)
+
+    held = stage.close(through=DAY)
+
+    assert held == RetryReport(waiting=("session",)) and not held.ready
+    assert stores.backlog.through() is None and stores.backlog.count() == 1 and session.retried(turn)  # 什么都没动
+    assert asyncio.run(stage.run_once(through=DAY)) == RetryReport(recovered=1)
+    assert stage.close(through=DAY) == RetryReport(taken=1, recovered=1) and stores.backlog.through() == DAY
+
+
+def test_the_item_a_pass_got_stuck_on_is_reported_and_can_be_skipped_next_time(tmp_path: Path) -> None:
+    """就近试因"模型用不了"停下来时（不分起因），报告记下卡在它上面的那一项（``stuck_items``）；这一次不算试过、项留着。
+    下一遍 ``skip`` 掉那一项，排在它后面的照试。重试收尾的计数名目不变。"""
+
+    from habitus.model_client import ModelTransportError
+
+    stores = Stores(tmp_path)
+    session, provider = lane(stores, [description()])
+    real = session.describer.describe
+    slow = _turn("一直超时的一轮", 0)
+
+    async def describe(turn, reminders=()):  # type: ignore[no-untyped-def]
+        if turn.key == slow.key:
+            raise ModelTransportError("read timed out")
+        return await real(turn, reminders)
+
+    session.describer.describe = describe  # type: ignore[method-assign]
+    stuck, fine = _turn_item(slow), _turn_item(_turn("好的一轮", 10))
+    stores.backlog.put(stuck)
+    stores.backlog.put(fine)
+    stage = _stage(stores, session)
+
+    first = asyncio.run(stage.run_once(through=DAY))
+    assert first.unreachable and first.unavailable == 1 and first.stuck_items == (stuck.item_id,)
+
+    second = asyncio.run(stage.run_once(through=DAY, skip=first.stuck_items))
+    assert not second.unreachable and first.recovered + second.recovered == 1 and provider.calls == 1
+    assert [item.item_id for item in stores.backlog.snapshot().items] == [stuck.item_id]
+    assert stage.close(through=DAY) == RetryReport(taken=2, recovered=1, unavailable=1)  # 收尾的计数名目不变

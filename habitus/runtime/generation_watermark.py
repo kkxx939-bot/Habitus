@@ -111,19 +111,25 @@ class TickTrack:
         self.tolerance_slots = int(tolerance_slots)
         self.unwatched = unwatched
 
-    async def begin(self, now: datetime) -> tuple[TickWatermark, tuple[datetime, datetime] | None]:
+    async def begin(
+        self, now: datetime, entered: datetime | None = None
+    ) -> tuple[TickWatermark, tuple[datetime, datetime] | None]:
         """这一拍开头：读水位；离系统确知在看的那一刻超过容差，就把这一段写成「未观测」、落盘它的结尾。写不成往上抛
-        （这一拍报出、水位不推）。第一次启动（盘上没有水位）不写（不知道之前在不在跑）。"""
+        （这一拍报出、水位不推）。第一次启动（盘上没有水位）不写（不知道之前在不在跑）。
+
+        ``entered`` 是进这一槽（拿到预测根租约）的那一刻：这一拍之前先做了换代时，换代占用的那一段系统是在看的，空当只量到
+        ``entered``、写也只写到它；没给就是此刻。"""
 
         mark = await asyncio.to_thread(self.store.read)
         since = mark.watched_until
-        if since is None or now - since <= self.slot * self.tolerance_slots:
+        edge = now if entered is None else min(entered, now)
+        if since is None or edge - since <= self.slot * self.tolerance_slots:
             return mark, None
         if self.unwatched is not None:
-            await asyncio.to_thread(self.unwatched, since, now)
-        mark = mark.unwatched(now)
+            await asyncio.to_thread(self.unwatched, since, edge)
+        mark = mark.unwatched(edge)
         await self.write(mark)
-        return mark, (since, now)
+        return mark, (since, edge)
 
     async def write(self, mark: TickWatermark) -> None:
         await asyncio.to_thread(self.store.write, mark)

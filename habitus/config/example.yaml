@@ -524,14 +524,20 @@ workflow:
 # scene:
 #   enabled: true
 #   baseline_slack_slots: 3          # 常态按峰分份时峰两边各放宽几槽（待定档；原借预测树 pool_half_width，裁定 59）
-#   generation_shutdown_timeout_seconds: 30  # 停机时等换代 worker 多久（换代在连续定稿到昨天、预测拍水位过了余量后做，不挂固定时刻）
-#   generation_poll_seconds: 300         # 换代 worker 隔多久看一眼（昨天定稿了没有、今天这一代做过没有）
 #   generation_kept_days: 366            # 完成标记、每代报告、trace 文件留几天（scene/generation/{<日>.json,reports,traces}）
-#   generation_lease_ttl_seconds: 120    # 换代租约与预测根租约多久过期（两个进程挂同一个 storage root 时同一天只换代一次、账本只有一个写者）
+#   generation_lease_ttl_seconds: 120    # 预测根租约、语义树写锁、模型队列租约多久过期（换代由预测 worker 每个槽边界看一眼，在预测根租约之内做；两个进程挂同一个 storage root 时同一天只换代一次）
 #   generation_heartbeat_seconds: 30     # 多久续一次租约（必须小于 generation_lease_ttl_seconds）
-#   generation_stuck_ticks: 3            # 连续几眼看到定稿日不连续（较早一天没定稿、较晚一天已定稿）就在健康面报出卡住的那一天
+#   generation_stuck_ticks: 3            # 连续几槽看到定稿日不连续（较早一天没定稿、较晚一天已定稿）就在健康面报出卡住的那一天
 #   generation_retry_base_seconds: 300   # 必须成的那一步没成（改树、读序列、机会表、日子预期、完成标记）：同一天按退避一直重试，首次等多久
-#   generation_retry_max_seconds: 3600   #   ……逐次加倍，最多等这么久（锁被占不算失败、不退避，下一眼从头做）
+#   generation_retry_max_seconds: 3600   #   ……逐次加倍，最多等这么久（锁被占不算失败、不退避，下一槽从头做）
+#   model_queue_poll_seconds: 60             # 模型队列没活时隔多久从盘上看一眼有没有新欠账（原来换代里调模型的活都在它那里做）
+#   model_queue_backoff_base_seconds: 60     # 模型整个调不通时队列整体退避：首次等多久（单项失败也按它各自等；到点接着做，不另探模型）
+#   model_queue_backoff_max_seconds: 3600    #   ……逐次加倍，最多等这么久（退避只在进程里）
+#   model_queue_unreachable_after_failures: 3 # 连着几项（不同的项）都是模型失败、中间没有一项做成，就整体退避（不分失败原因）
+#   mapping_margin_slots: 2                  # 映射按槽：一条记录所在的槽过后再留几槽就映射，不等那一天封口（0–96；留小了只是多几次重判）
+#   model_queue_shutdown_timeout_seconds: 30 # 停机时等模型队列当前这一项多久，超时取消（下次从盘上重新认出来）
+#   model_queue_backlog_warning_items: 50    # 欠账到这么多项，健康面报降级（non-critical；清完自动消掉）
+#   model_queue_backlog_warning_seconds: 21600 # ……或最老一项等了这么久（秒）
 #   relations:
 #     fdr: 0.10                        # 第 1 道：当晚检验族的假发现率
 #     forward_alpha: 0.05              # 前向验证的单侧显著性

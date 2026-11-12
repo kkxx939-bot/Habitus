@@ -1,7 +1,8 @@
 """``scene/advice/`` 的存储：模型输出按输入摘要缓存，回放与回测只读缓存、不重新问模型（语义树新方案 ``13`` ②）。
 
 ```
-advice/priors/<缓存键>.json        一个后果的先验（缓存键 = 输入摘要 + 先验触点的版本与模型）
+advice/priors/<缓存键>.json        一个后果的先验（旧问法：固定后果、列前因；缓存键 = 输入摘要 + 先验触点的版本与模型）
+advice/priors-by-antecedent/<缓存键>.json  一个前因的先验（新问法：固定前因、列后果；实时化阶段 2「先验混合问法」）
 advice/conditions/<lane>.json      这条 lane 的提议簿：收下的条件、已拒清单、每个前因上次问的概念集指纹
 ```
 
@@ -22,6 +23,8 @@ from habitus.scene.advice.model import PriorLevel, Proposal, ProposalBook
 from habitus.scene.storage import SceneStore
 
 ADVICE_SEGMENT = "advice"
+#: 新问法的先验缓存目录（按前因存）。
+BY_ANTECEDENT = "priors-by-antecedent"
 MAX_RECORD_BYTES = 4 * 1024 * 1024
 
 
@@ -84,6 +87,54 @@ class AdviceStore(SceneStore):
     def discard_prior(self, key: str) -> None:
         self._discard(self._prior_path(key))
 
+    # ── 先验（新问法：按前因存）────────────────────────────────────────────
+
+    def prior_by_antecedent(self, key: str) -> Mapping[str, PriorLevel] | None:
+        payload = self._read(self._prior_path(key, BY_ANTECEDENT))
+        if payload is None:
+            return None
+        try:
+            return {str(name): PriorLevel(level) for name, level in payload["levels"].items()}
+        except (KeyError, AttributeError, ValueError) as exc:
+            raise AdviceStoreError(f"prior cache {key!r} is corrupt: {exc}") from exc
+
+    def write_prior_by_antecedent(
+        self,
+        key: str,
+        *,
+        lane: str,
+        antecedent: str,
+        levels: Mapping[str, PriorLevel],
+        version: str,
+        models: tuple[str, ...],
+    ) -> None:
+        self._write(
+            self._prior_path(key, BY_ANTECEDENT),
+            {
+                "lane": lane,
+                "antecedent": antecedent,
+                "levels": {name: level.value for name, level in levels.items()},
+                "version": version,
+                "models": list(models),
+            },
+        )
+
+    def prior_by_antecedent_keys(self, lane: str) -> tuple[str, ...]:
+        """这条 lane 按前因存的全部先验缓存键（清孤儿用）。"""
+
+        directory = self._inside(Path(ADVICE_SEGMENT, BY_ANTECEDENT))
+        records, _noise = self._content_files(directory)
+        keys = []
+        for entry in records:
+            key = entry.name.removesuffix(".json")
+            payload = self._read(self._prior_path(key, BY_ANTECEDENT))
+            if payload is not None and payload.get("lane") == lane:
+                keys.append(key)
+        return tuple(sorted(keys))
+
+    def discard_prior_by_antecedent(self, key: str) -> None:
+        self._discard(self._prior_path(key, BY_ANTECEDENT))
+
     # ── 提议簿 ──────────────────────────────────────────────────────────────
 
     def book(self, lane: str) -> ProposalBook:
@@ -122,10 +173,10 @@ class AdviceStore(SceneStore):
 
     # ── 内部 ────────────────────────────────────────────────────────────────
 
-    def _prior_path(self, key: str) -> Path:
+    def _prior_path(self, key: str, directory: str = "priors") -> Path:
         if not key.isalnum():
             raise AdviceStoreError("a prior cache key must be a digest")
-        return self._inside(Path(ADVICE_SEGMENT, "priors", f"{key}.json"))
+        return self._inside(Path(ADVICE_SEGMENT, directory, f"{key}.json"))
 
     def _book_path(self, lane: str) -> Path:
         try:

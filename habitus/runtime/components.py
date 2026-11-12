@@ -59,9 +59,12 @@ from habitus.model_client import (
 from habitus.runtime.behavior import BehaviorBranches
 from habitus.runtime.foresight import ForesightRuntimeComponents
 from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
-from habitus.runtime.generation_worker import GenerationWorker
+from habitus.runtime.foresight_worker import ForesightWorker
+from habitus.runtime.generation_runner import GenerationRunner
 from habitus.runtime.lifecycle import LifecycleWorker
 from habitus.runtime.lifecycle_memory import ConversationChainParticipant
+from habitus.runtime.model_queue_worker import ModelQueueWorker
+from habitus.runtime.resident import ResidentWorker
 from habitus.runtime.session_lane import BehaviorSessionConsumer
 from habitus.runtime.worker import MemoryWorker
 
@@ -279,9 +282,13 @@ class RuntimeComponents:
     workflow: RuntimeWorkflow
     # 行为管线的两支（会话、物理各一整套：融合→归约→行为树）；primary_subject 未配置时为 None（行为侧未启用）。
     behavior: BehaviorBranches | None = None
-    # 换代（重试收尾 → 结算 → 词表 → 语义树 → 机会表 → 日子预期 → 完成标记）的常驻 worker；语义树没启用时为 None。
-    # 它只接会话那一支（见 assembly 的 TODO）。
-    generation: GenerationWorker | None = None
+    # 换代（重试收尾 → 结算 → 读序列 → 语义树 → 机会表 → 日子预期 → 完成标记；没有模型调用）的那一眼；语义树没启用时
+    # 为 None。它不是常驻 worker：预测 worker 每槽在预测根租约之内先调它。只接会话那一支（见 assembly 的 TODO）。
+    generation: GenerationRunner | None = None
+    # 只开语义树、没开预测层时每槽看一眼换代的那个 worker（没有预测拍）；开了预测层时它在 ``foresight.worker``，这里是 None。
+    generation_slots: ForesightWorker | None = None
+    # 模型队列（出错重试、词表、同步词表牵到的重映射、写概念、映射、候选条件与先验的补问）的常驻 worker；随换代一起有、一起没有。
+    model_queue: ModelQueueWorker | None = None
     # 预测层的证据装配；foresight.enabled 为假时为 None。它现在只接会话那一支（见 assembly 的 TODO）。
     foresight: ForesightRuntimeComponents | None = None
 
@@ -292,6 +299,8 @@ class RuntimeComponents:
             # 实例同一性：换代必须读**这个** Runtime 写入的会话那一支行为树——不是另开一个同路径的实例。
             if getattr(self.generation.generation, "behavior_tree", None) is not self.behavior.session.tree:
                 raise ValueError("the generation must read the session behaviour tree")
+        self._check_model_queue()
+        self._check_slot_worker()
         if self.foresight is not None:
             if self.behavior is None or self.generation is None:
                 raise ValueError(
@@ -336,6 +345,40 @@ class RuntimeComponents:
             raise ValueError("memory search and editor must share one semantic search engine")
         if self.workflow.jobs.path_lock is not self.infrastructure.path_lock:
             raise ValueError("workflow and Runtime must share one path lock")
+
+    @property
+    def slot_worker(self) -> ResidentWorker | None:
+        """每槽先看一眼换代、再做预测拍的那个常驻 worker（没开预测层时只看换代）；两样都没有是 None。"""
+
+        return self.generation_slots if self.foresight is None else self.foresight.worker
+
+    def _check_slot_worker(self) -> None:
+        """换代没有自己的循环：漏接的话进程照常、健康全绿，一代都不会做。驱动它的必须是那一个每槽的 worker。"""
+
+        if self.generation_slots is not None and self.foresight is not None:
+            raise ValueError("with the foresight layer on, the slot worker lives in the foresight components")
+        if self.generation is None:
+            return
+        if getattr(self.slot_worker, "generation", None) is not self.generation:
+            raise ValueError("the slot worker must drive this generation")
+
+    def _check_model_queue(self) -> None:
+        """模型队列随换代一起有、一起没有，做的是换代那棵语义树的活。"""
+
+        if (self.model_queue is None) != (self.generation is None):
+            raise ValueError("the model queue and the generation come together")
+        if self.model_queue is None or self.generation is None:
+            return
+        queue, generation = self.model_queue.queue, self.generation.generation
+        # 两份存储对不上的话，换代折叠时读不到队列问来的缓存、映射的命中，一处都不报错
+        if queue.scene is not getattr(generation, "scene", None):
+            raise ValueError("the model queue must work on the generation's scene")
+        # 换代问"模型队列是不是在整体退避"读的必须是这个队列自己的状态（裁定 96：是就不判关系、沿用上一代）
+        if getattr(generation, "models_down", None) != queue.state.down:
+            raise ValueError("the generation must read this model queue's backoff state")
+        # 语义树写锁两边必须是同一把：各持各的话，换代读语义树时队列照写，一处都不报错
+        if queue.scene_lock is not getattr(generation, "scene_lock", None):
+            raise ValueError("the model queue and the generation must share one scene write lock")
 
 
 __all__ = [

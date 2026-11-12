@@ -15,8 +15,10 @@ from habitus.runtime.components import RuntimeComponents
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.generation_marks import GenerationMarkError
 from habitus.runtime.generation_result import REWOUND
-from habitus.runtime.generation_worker import GenerationWorker
+from habitus.runtime.generation_runner import GenerationRunner
 from habitus.runtime.lifecycle import LifecycleWorkerState
+from habitus.runtime.model_queue_health import queue_pending, queue_problems
+from habitus.runtime.model_queue_worker import ModelQueueWorker
 from habitus.runtime.resident import ResidentWorker
 from habitus.runtime.worker import MemoryWorkerState
 
@@ -150,16 +152,16 @@ class RuntimeHealthService:
         return checks
 
     def _generation_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
-        """换代的健康面；同样 non-critical。换代死掉不会让任何请求出错——它只是让语义树和机会表停在昨天，而这**恰恰是最难自己发现的故障**：白天照常递送，只是依据
-        越来越旧、新的预期一条都不建。所以循环存活必须上健康面；另报：今天没有这一代（必须成的那一步没成）、走了退路的步、
-        定稿日不连续卡住的那一天、最新的完成标记读不了；接了预测层时再看机会表最晚一晚有多旧（清单 5.3）。
-        """
+        """换代的健康面；同样 non-critical。换代不做不会让任何请求出错——它只是让语义树和机会表停在昨天，而这**恰恰是最难自己发现的故障**：白天照常递送，只是依据
+        越来越旧、新的预期一条都不建。换代没有自己的循环（预测 worker 每槽先看一眼，循环存活在 ``foresight_worker``、没开预测层时
+        在 ``generation_slots``）；这里报：那一眼出了错、今天没有这一代、走了退路的步、卡住的那一天、日期回退、完成标记读不了；
+        接了预测层时再看机会表最晚一晚有多旧（清单 5.3）。"""
 
         worker = self.components.generation
         if worker is None:
             return [RuntimeHealthCheck("generation", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
-        checks = self._worker_checks(runtime_state, (("generation_worker", worker),))
-        checks.extend(_generation_state_checks(worker))
+        checks = self._worker_checks(runtime_state, _slot_loops(self.components))
+        checks.extend([*_generation_state_checks(worker), *_model_queue_checks(self.components.model_queue)])
         calendar = getattr(getattr(worker.generation, "scene", None), "calendar", None)
         problems = tuple(getattr(calendar, "problems", ()))
         if problems:
@@ -467,13 +469,13 @@ def _system_zone_name(moment: datetime) -> str:
     return name or moment.tzname() or "local"
 
 
-def _generation_state_checks(worker: GenerationWorker) -> list[RuntimeHealthCheck]:
+def _generation_state_checks(worker: GenerationRunner) -> list[RuntimeHealthCheck]:
     """换代要人看的（都是 non-critical：白天照常递送）：
 
     - ``generation``：最近一次做的那一代没写成（必须成的那一步没成），今天没有这一代，带下一次重试的时刻；
     - ``generation_fallbacks``：最近一次写成的那一代走了退路（关系判定退到上一代、结算留到下次、单元历史跳过……），逐步列出；
     - ``generation_errors``：重试收尾之后仍保持「错误·看不到」的（我们自己处理不了的、内容安全拦下的、格式不合再试仍不合的）；
-    - ``generation_stuck``：定稿日不连续、连着几眼都卡在同一天（有判断一直封不了口）；最新的完成标记读不了也报（日期回退见 ``_rewound_checks``）。"""
+    - ``generation_stuck``：定稿日不连续、连着几眼都卡在同一天（有判断一直封不了口）；最新的完成标记读不了也报（那一眼抛了见 ``_look_checks``，日期回退见 ``_rewound_checks``）。"""
 
     checks: list[RuntimeHealthCheck] = []
     result = worker.last_result
@@ -526,10 +528,49 @@ def _generation_state_checks(worker: GenerationWorker) -> list[RuntimeHealthChec
                 critical=False,
             )
         )
-    return [*checks, *_rewound_checks(worker)]
+    return [*_look_checks(worker), *checks, *_rewound_checks(worker)]
 
 
-def _rewound_checks(worker: GenerationWorker) -> list[RuntimeHealthCheck]:
+def _slot_loops(components: RuntimeComponents) -> tuple[tuple[str, ResidentWorker], ...]:
+    """随换代一起有的循环：没开预测层时每槽看一眼换代的那个 worker（开了预测层时它是 ``foresight_worker`` 那一项）、模型队列。"""
+
+    slots = components.generation_slots
+    return (*((("generation_slots", slots),) if slots is not None else ()), *_queue_workers(components))
+
+
+def _queue_workers(components: RuntimeComponents) -> tuple[tuple[str, ResidentWorker], ...]:
+    """模型队列的循环（随换代一起有）：它停住不会让任何请求出错——只是新记录一直没映射、新概念一直没有先验，换代照做、
+    关系越来越旧。所以循环存活要上健康面。"""
+
+    return () if components.model_queue is None else (("model_queue_worker", components.model_queue),)
+
+
+def _model_queue_checks(worker: ModelQueueWorker | None) -> list[RuntimeHealthCheck]:
+    """模型队列要人看的（``runtime.model_queue_health``；都是 non-critical，清完、恢复后各项自己消掉）。"""
+
+    if worker is None:
+        return []
+    checks = [
+        RuntimeHealthCheck(name, RuntimeHealthStatus.DEGRADED, detail[:500], critical=False)
+        for name, detail in queue_problems(worker.queue.state, worker.queue.settings, datetime.now(UTC))
+    ]
+    pending = queue_pending(worker.queue.state)
+    if pending:
+        # 待生效的拆改与概念、先验要问的题：等下一次换代 / 队列做完自己消掉，不算故障
+        checks.append(RuntimeHealthCheck("model_queue_pending", RuntimeHealthStatus.HEALTHY, pending, critical=False))
+    return checks
+
+
+def _look_checks(worker: GenerationRunner) -> list[RuntimeHealthCheck]:
+    """``generation_look``：看要不要换代的那一眼抛了；下一槽那一眼顺利，这一项自己消掉。"""
+
+    if worker.look_error is None:
+        return []
+    detail = f"last_error:{type(worker.look_error).__name__}"
+    return [RuntimeHealthCheck("generation_look", RuntimeHealthStatus.DEGRADED, detail, critical=False)]
+
+
+def _rewound_checks(worker: GenerationRunner) -> list[RuntimeHealthCheck]:
     """``generation_rewound``：当地日期回到了已换代的日子之前（往西改了时区），日期追上之前不换代；追上后这一项自己消掉。"""
 
     if worker.rewound is None:

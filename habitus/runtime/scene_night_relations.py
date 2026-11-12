@@ -1,5 +1,8 @@
-"""夜批 B4 关系：每条 lane 全部两两检验 → 接上盘上之前最近的一晚折叠 → 这一晚的关系表与迁移日志落盘（纯算法、零模型；
-有模型建议时先补问调节条件与先验，都按输入摘要缓存）。
+"""B4 关系：每条 lane 全部两两检验 → 接上盘上之前最近的一晚折叠 → 这一晚的关系表与迁移日志落盘（``run``：纯算法、零模型，
+模型建议只读缓存，换代调）；候选调节条件与先验的补问是另一段（``ask_conditions`` 与 ``RelationAdvice.ask_priors``：按输入摘要缓存，模型队列调）。
+
+两段用的那条 lane 的检验对象取法相同（``_examine``：接的那一晚、词表变更牵到的退回、已成立的带条件关系）——补问问出去的
+清单才与折叠时要读的缓存对得上。
 
 B4 读的是盘上**全部**已映射的命中（不只今天）：关系每晚全量重算，不做增量统计。模型建议（``RelationAdvice``）每次从
 夜批现读——组合根与运维可以在构造后换掉它。
@@ -10,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 
 from habitus.conditions import DayTypeCalendar
@@ -36,6 +39,17 @@ from habitus.scene.relations.engine import LaneNight
 from habitus.scene.relations.state import LaneState, Status, Transition, fold, revert_touched
 from habitus.scene.relations.store import RelationStore, RelationStoreError
 from habitus.series import EventSeries
+
+
+@dataclass(frozen=True)
+class _Examined:
+    """一条 lane 这一晚折叠前备好的：盘上接的那一晚（原样）、退回词表变更牵到的之后的那一份与退回的迁移、检验对象。"""
+
+    stored: LaneState | None
+    previous: LaneState | None
+    reverted: tuple[Transition, ...]
+    established: tuple[RelationKey, ...]
+    tests: LaneTests
 
 
 class RelationStage:
@@ -66,14 +80,17 @@ class RelationStage:
         *,
         vocabulary: int = 0,
         now: datetime | None = None,
+        lines: dict[str, LaneTimeline] | None = None,
     ) -> tuple[dict[str, dict[str, int]], int, dict[str, LaneTimeline]]:
         """第 ``series.cutoff`` 晚：每条 lane 检验、接上盘上之前最近的一晚折叠、落盘。返回各 lane 的计数、迁移条数与时间线。
+        模型建议只读缓存（补问在模型队列）；``lines`` 是已经算好的时间线（不给就现算）。
 
         ``vocabulary`` 是这一晚同步到的词表版本，记在关系状态上。接的那一晚的状态记着它当时的词表版本，这之间拆分 / 合并改了
         成员的类，涉及它们的关系先退回候选（裁定 59）；按状态上记的版本算，同一晚重跑也退回得一样。折叠之后，同一件事有两个以上
         单个取值（周几、几号、日型）的日历关系处在候选或成立的，补一个取值集合的日历情境，下一晚起一起检验。"""
 
-        lines = await self.timelines(series, concepts)
+        if lines is None:
+            lines = await self.timelines(series, concepts)
         counts: dict[str, dict[str, int]] = {}
         moved = 0
         for lane, line in sorted(lines.items()):
@@ -102,7 +119,7 @@ class RelationStage:
             build_timelines, series, concepts, hits, self.relation_config, calendar=self.calendar
         )
 
-    async def _fold_lane(
+    async def ask_conditions(
         self,
         lane: str,
         line: LaneTimeline,
@@ -110,9 +127,36 @@ class RelationStage:
         concepts: ConceptSet,
         signals: list[str],
         *,
-        vocabulary: int,
-    ) -> tuple[LaneState, tuple[Transition, ...]] | None:
-        """一条 lane 这一晚：退回词表变更牵到的、检验、折叠、落盘；这一晚不写（沿用上一晚的）时返回 None。"""
+        proposed_on: date,
+    ) -> LaneTests | None:
+        """一条 lane 的候选调节条件：该问的问、提议簿整理。``proposed_on`` 是这些提议记成哪一天提出的（线上是下一次换代的
+        日子：提议簿只有换代读，写进去就等于待生效）。返回带上提议的检验对象；提议簿读不了是 None。"""
+
+        advice = self._advice()
+        if advice is None:
+            return None
+        examined = self._examine(lane, line, series, concepts, signals)
+        try:
+            proposals = await advice.proposals(examined.tests, series.cutoff, signals, proposed_on=proposed_on)
+        except AdviceStoreError as exc:
+            signals.append(f"relations: {lane} 提议簿读不了（{exc}），这一回不补问")
+            return None
+        return LaneTests(
+            line, concepts, self.relation_config, series.cutoff, proposals=proposals, established=examined.established
+        )
+
+    def owed(self, lane: str, line: LaneTimeline, series: EventSeries, concepts: ConceptSet) -> int:
+        """一条 lane 的候选条件还欠几件事（``RelationAdvice.owed``），检验对象与 ``ask_conditions`` 同一个取法。纯读盘。"""
+
+        advice = self._advice()
+        if advice is None:
+            return 0
+        return advice.owed(self._examine(lane, line, series, concepts, []).tests)
+
+    def _examine(
+        self, lane: str, line: LaneTimeline, series: EventSeries, concepts: ConceptSet, signals: list[str]
+    ) -> _Examined:
+        """这条 lane 的检验对象（还没带提议）：接盘上之前最近的一晚、退回词表变更牵到的；纯计算，补问与折叠共用。"""
 
         previous = self._previous(lane, series.cutoff, signals)
         stored = previous
@@ -124,9 +168,27 @@ class RelationStage:
         # 第二个条件起只长在接的那一晚已成立的带条件关系上（裁定 62 第 1 条）：退回之后再数哪些成立
         established = tuple(item.key for item in previous.of(Status.ESTABLISHED)) if previous is not None else ()
         tests = LaneTests(line, concepts, self.relation_config, series.cutoff, established=established)
+        return _Examined(stored, previous, reverted, established, tests)
+
+    async def _fold_lane(
+        self,
+        lane: str,
+        line: LaneTimeline,
+        series: EventSeries,
+        concepts: ConceptSet,
+        signals: list[str],
+        *,
+        vocabulary: int,
+    ) -> tuple[LaneState, tuple[Transition, ...]] | None:
+        """一条 lane 这一晚：退回词表变更牵到的、检验、折叠、落盘；这一晚不写（沿用上一晚的）时返回 None。模型建议只读
+        缓存：缓存里没有的按没有先验 / 没有新提议处理（没补问完的是"不知道"）。"""
+
+        examined = self._examine(lane, line, series, concepts, signals)
+        stored, previous, reverted, tests = examined.stored, examined.previous, examined.reverted, examined.tests
         weights: dict[RelationKey, float] = {}
         advice = self._advice()
         if advice is not None:
+            advice = advice.cached()
             try:
                 proposals = await advice.proposals(tests, series.cutoff, signals)
             except AdviceStoreError as exc:
@@ -134,7 +196,12 @@ class RelationStage:
                 signals.append(f"relations: {lane} 提议簿读不了（{exc}），这一晚的关系表沿用上一晚的")
                 return None
             tests = LaneTests(
-                line, concepts, self.relation_config, series.cutoff, proposals=proposals, established=established
+                line,
+                concepts,
+                self.relation_config,
+                series.cutoff,
+                proposals=proposals,
+                established=examined.established,
             )
             weights = await advice.weights(tests, signals)
         state, transitions = await asyncio.to_thread(fold, previous, tests, weights or None)

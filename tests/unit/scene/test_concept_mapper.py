@@ -24,7 +24,6 @@ from habitus.scene.occurrences.mapper import (
     OccurrenceFacts,
     TimelineEntry,
     assemble_verdicts,
-    map_closed_day,
     mapper_json_schema,
 )
 from habitus.scene.occurrences.model import MAX_SIGNAL_CHARS, UnresolvedReason
@@ -42,6 +41,7 @@ from tests.unit.scene.concept_fixtures import (
     concept_set,
     refinement,
 )
+from tests.unit.scene.day_mapping import map_closed_day
 from tests.unit.scene.fixtures import DAY1, SUBJECT, Site, at, publish, publish_gap
 
 NOW = datetime(2026, 8, 18, 3, 0, tzinfo=UTC)

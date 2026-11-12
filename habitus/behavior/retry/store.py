@@ -10,6 +10,8 @@
 - ``discard``：删给定的那几项；``snapshot`` 之后新进来的不受影响。
 - 拒收的（满了 / 那天已过）累计在 ``_refused.json``，健康面读（``refused``）：堆满丢了几轮要数得到（裁定 67 第 8、12 条）。
 - 列目录时撞上别处正在写的临时文件（目录在枚举中变了）就重列，几次都撞上才抛。
+- ``claim`` / ``release``：这个进程里正在试的项（只在内存里）。模型队列就近重试与预测拍时窗末当场重读共用同一个堆，
+  先占上的那一方试，另一方跳过——同一项不会被两边同时各问一次模型。
 """
 
 from __future__ import annotations
@@ -60,6 +62,19 @@ class RetryBacklogStore:
         self.directory = self.root.joinpath(*_DIRECTORY)
         self.max_items = max_items
         self.max_item_bytes = max_item_bytes
+        #: 这个进程里正在试的项（就近重试、时窗末当场重读）；只在内存里，进程重启就空了。
+        self._claimed: set[str] = set()
+
+    def claim(self, identity: str) -> bool:
+        """占上这一项去试；已经有人在试（或写回了、在等归约）为假。"""
+
+        if identity in self._claimed:
+            return False
+        self._claimed.add(identity)
+        return True
+
+    def release(self, identity: str) -> None:
+        self._claimed.discard(identity)
 
     def put(self, item: RetryItem) -> Admission:
         through = self.through()

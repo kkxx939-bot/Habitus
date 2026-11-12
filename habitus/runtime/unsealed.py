@@ -15,7 +15,9 @@
   9 条，1.6%，最近一小时等于全是未归类。）
 
 归类要调模型，所以分两步：``prepare``（异步，每拍装配之前调一次）归新出现的判断；``rows``（同步，装配时调）只读缓存。
-模型此刻用不了就留着下一拍再归——预测拍与换代里的日子预期同一口径（实时化方案第 2 节：模型调不通不停一天）。
+模型此刻用不了就留着下一拍再归（实时化方案第 2 节：模型调不通不停一天）。换代里没有模型调用（实时化阶段 2）：换代里的
+日子预期读 ``cache_only`` 那一份——只对上词表版本、读缓存，不问模型；换代之前由模型队列把还没归的归好（``unclassified``
+是它认欠账的数），没归上的按未归类进场景。
 还没归上的（模型这一拍不可用、或归为「待定」）带原名进场景、标未归类，不猜；归为「非事件」的不进场景（与序列同一口径）。
 没读懂、出错的判断（``behavior`` 为 None）是一段看不到的空白，按空白行给出；依据写着"没在看"（``unobserved``）的空判断是
 「未观测」，不是看不到——照常说话（裁定 68 第 2 条、94 第 3 条），不给出。隔离的坏记录归约每轮都会报，这里不报第二遍。
@@ -50,6 +52,9 @@ class UnsealedFromJudgements:
         #: （节点身份, 词表版本）→ （结局, 编号）。只留还没封口的；词表拆改之后版本变了，自动重归（不留停用的编号）。
         self._classified: dict[tuple[str, int], tuple[Outcome, str]] = {}
         self._version = 0
+        #: 最近一次 ``prepare`` 因模型此刻用不了没归成时的那个异常（归成了、或没有要归的是 None）：模型队列读它，
+        #: 好分清是整体性的故障还是这一项自己没做成。
+        self.unavailable: BaseException | None = None
 
     async def prepare(self, *, until: datetime) -> None:
         """把还没归过的未封口判断交白天归类。模型这一拍不可用（``MODEL_UNAVAILABLE``）就留着不归（下一拍再试），不让此刻场景
@@ -57,28 +62,47 @@ class UnsealedFromJudgements:
 
         if until.utcoffset() is None:
             raise ValueError("until must be a timezone-aware datetime")
+        requests = self._unclassified()
+        vocabulary = self.stamping.store.read()
+        self.unavailable = None
+        if not requests or vocabulary.version != self._version:
+            return  # 没有要归的；或刚对上版本词表又变了：下一拍按新版本再归
+        try:
+            result = await self.stamping.classify_requests(requests, vocabulary, checkpoint=lambda: None)
+        except MODEL_UNAVAILABLE as exc:
+            self.unavailable = exc
+            return
+        for key, verdict in result.verdicts.items():
+            if verdict.outcome is Outcome.PENDING and verdict.reason == EXHAUSTED:
+                continue  # 这次没问成（结构化输出重问用尽），不是模型说"都不是"：不缓存，下一拍再试
+            self._classified[(key, vocabulary.version)] = (verdict.outcome, verdict.token)
+
+    def _unclassified(self) -> list[ClassifyRequest]:
+        """对上词表此刻的版本（换了版本的、已封口的从缓存里清掉），给出还没归过的未封口判断。不问模型。"""
+
         records = pending_judgements(self.judgements, self.ledger).occurrences
         vocabulary = self.stamping.store.read()
         self._version = vocabulary.version
         alive = {(record.chain_digest, vocabulary.version) for record in records}
         self._classified = {key: value for key, value in self._classified.items() if key in alive}
         if vocabulary.version == 0:
-            return  # 词表还是空的（还没有一类从待定池长出来）：没有类可归
+            return []  # 词表还是空的（还没有一类从待定池长出来）：没有类可归
         requests = []
         for record in records:
             content = judgement_content(record)
             if (record.chain_digest, vocabulary.version) not in self._classified and content is not None:
                 requests.append(ClassifyRequest(record.chain_digest, self.stamping.lane, content))
-        if not requests:
-            return
-        try:
-            result = await self.stamping.classify_requests(requests, vocabulary, checkpoint=lambda: None)
-        except MODEL_UNAVAILABLE:
-            return
-        for key, verdict in result.verdicts.items():
-            if verdict.outcome is Outcome.PENDING and verdict.reason == EXHAUSTED:
-                continue  # 这次没问成（结构化输出重问用尽），不是模型说"都不是"：不缓存，下一拍再试
-            self._classified[(key, vocabulary.version)] = (verdict.outcome, verdict.token)
+        return requests
+
+    def unclassified(self) -> int:
+        """还没归过类的未封口判断条数（按词表此刻的版本）。"""
+
+        return len(self._unclassified())
+
+    def cache_only(self) -> CachedUnsealed:
+        """只读缓存的那一份（换代里的日子预期用）：``prepare`` 只对上词表版本，不问模型。"""
+
+        return CachedUnsealed(self)
 
     def rows(self, *, since: datetime, until: datetime) -> tuple[UnsealedRow, ...]:
         """与 ``[since, until]`` 有交集的未封口行为与空白，按开始时刻排。"""
@@ -117,6 +141,21 @@ class UnsealedFromJudgements:
         return tuple(sorted(inside, key=_row_order))
 
 
+class CachedUnsealed:
+    """``UnsealedFromJudgements`` 只读缓存的那一份：同一座桥、同一份缓存，``prepare`` 不调模型。"""
+
+    def __init__(self, bridge: UnsealedFromJudgements) -> None:
+        self.bridge = bridge
+
+    async def prepare(self, *, until: datetime) -> None:
+        if until.utcoffset() is None:
+            raise ValueError("until must be a timezone-aware datetime")
+        self.bridge.unclassified()
+
+    def rows(self, *, since: datetime, until: datetime) -> tuple[UnsealedRow, ...]:
+        return self.bridge.rows(since=since, until=until)
+
+
 def unreduced_gaps(
     judgements: BehaviorJudgementStore, ledger: BehaviorReductionLedger, *, cutoff: date, zone: tzinfo
 ) -> int:
@@ -136,4 +175,4 @@ def _row_order(row: UnsealedRow) -> tuple[datetime, str]:
     return _instant(row.started_at), row.name or ""
 
 
-__all__ = ["UnsealedFromJudgements", "unreduced_gaps"]
+__all__ = ["CachedUnsealed", "UnsealedFromJudgements", "unreduced_gaps"]

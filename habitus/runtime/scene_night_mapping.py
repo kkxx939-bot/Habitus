@@ -1,29 +1,64 @@
-"""夜批 B3 映射：今晚封口的那天 + 还没映射的、概念集变了要回填的日子，最新的先、每晚有预算（映射的 LLM 触点）。
+"""B3 映射的编排（实时化阶段 2「映射按槽」）：按条认欠账、按条映射，一天封口时统一重算情境、盖章。
 
-B1 迁移重映射与 B3 共用这里的单日映射（``context`` / ``map``）。一夜的数值（``SceneNightConfig``）每次从夜批现读——
-组合根与运维可以在构造后换掉它。
+取材料与封口的规则在领域包（``scene.occurrences.daily``）；这里只取材料、调用、落盘：
+
+- ``plan``（纯读盘）：还没以现在的口径盖完成章的日子里，哪几条记录该映射——没有命中记录、口径不是现在的、或输入变了的。
+  先后是：还没封口的日子里的新记录 → 口径或输入变了要重判的 → 历史回填（最新的先）。没有一晚的预算：模型队列一条一项地做。
+- ``map_one``：映射一条（情境留空）。
+- 封口在 ``runtime.scene_night_seal``（``SealStage``）：已封口的日子里每条记录都作数的，重算情境、写回、核条数、盖日完成章。
+- ``rejudge_day``：词表迁移改了编号的日子，重判受影响的那几条（不盖章，章由封口盖）。
+
+一条记录的常态取它那一天的那一代的：命中历史是那一天之前已完成的日子，节律由 ``rhythms`` 给（那一代落盘的那一份，没有就按
+截止到那一天的序列现算）。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from datetime import date, datetime, timedelta, tzinfo
+import asyncio
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import date, tzinfo
 from typing import TYPE_CHECKING
 
+from habitus.behavior.document import BehaviorDocument
 from habitus.behavior.tree import BehaviorTree
 from habitus.conditions import DayTypeCalendar
-from habitus.foundation.tracing import annotate
-from habitus.infrastructure.lifecycle import RetryLedger
+from habitus.foundation.integrity import canonical_digest
 from habitus.runtime.scene_situations import SceneDayContext
 from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.concepts.rhythm import Rhythm
-from habitus.scene.occurrences.mapper import ConceptMapper, ConceptMapperError, DayMappingReport, map_closed_day
-from habitus.scene.occurrences.situations import history_days
+from habitus.scene.occurrences.daily import (
+    DayRecords,
+    current,
+    day_documents,
+    map_record,
+    waiting_for_recent,
+)
+from habitus.scene.occurrences.mapper import ConceptMapper
+from habitus.scene.occurrences.model import ConceptHits
 from habitus.scene.occurrences.store import ConceptHitStore
-from habitus.series import EventSeries
+from habitus.series import EventSeries, SeriesRecord
 
 if TYPE_CHECKING:  # 只给类型检查看：夜批模块在运行时导入本模块
     from habitus.runtime.scene_night import SceneNightConfig
+
+
+@dataclass(frozen=True)
+class PendingRecord:
+    """一条该映射的记录：哪一条、它那一天的取材料口与全文、盘上有没有旧的命中记录（有就是重判）、它那一天封口了没有。"""
+
+    entry: SeriesRecord
+    document: BehaviorDocument
+    records: DayRecords
+    rejudged: bool
+    sealed: bool
+
+    @property
+    def key(self) -> str:
+        """重试账与进程内退避用的名字：这一条加它现在的口径（口径一变就是新键，重新给机会）。"""
+
+        version = self.records.mapper.version_for(self.entry.kind_token)
+        return f"map:{canonical_digest([self.entry.uri, version])[:24]}"
 
 
 class MappingStage:
@@ -35,145 +70,108 @@ class MappingStage:
         calendar: DayTypeCalendar,
         timezone: tzinfo,
         subject: str | None,
-        mapping_retries: RetryLedger,
         config: Callable[[], SceneNightConfig],
+        rhythms: Callable[[date, ConceptSet, EventSeries], Mapping[str, Rhythm]],
+        slack: Callable[[], int],
+        recent_given: Callable[[], Callable[[str], bool] | None] | None = None,
     ) -> None:
         self.behavior_tree = behavior_tree
         self.hits = hits
         self.calendar = calendar
         self.timezone = timezone
         self.subject = subject
-        self.mapping_retries = mapping_retries
         self._config = config
+        #: （日子, 概念集, 序列）→ 那一天的那一代的节律（``SceneNightlyRun.rhythms_for``）。
+        self._rhythms = rhythms
+        self._slack = slack
+        #: 现在哪些类的"近几天同类记录"给得出（最近一代之后才有或才变的类给不出）；没接就都给。
+        self._recent_given = recent_given
 
-    async def map_backlog(
+    # ── 认欠账、按条映射（模型队列）─────────────────────────────────────────
+
+    def pending_days(self, series: EventSeries, mapper: ConceptMapper) -> tuple[date, ...]:
+        """序列里有记录、还没以现在的口径盖完成章的日子（最新的先）：完成标记按这一天自己的口径认（那天出现的类各自的口径
+        + 情境；E9），条数也要与序列对得上（盖章之后又补发了记录就重做；E1）。"""
+
+        done = self.hits.days_done()
+        pending = []
+        for day in sorted({record.day for record in series.records}, reverse=True):
+            marker = self.hits.read_marker(day) if day in done else None
+            tokens = [record.kind_token for record in series.on(day)]
+            if marker is None or marker.records != len(tokens) or marker.mapper != mapper.day_version(tokens):
+                pending.append(day)
+        return tuple(pending)
+
+    def records_of(
+        self, day: date, concepts: ConceptSet, mapper: ConceptMapper, series: EventSeries
+    ) -> tuple[DayRecords, SceneDayContext]:
+        """一天的取材料口与它的情境、常态。"""
+
+        context = self.context(day, concepts, series)
+        gate = self._recent_given() if self._recent_given is not None else None
+        return DayRecords(series, day, mapper, baseline_for=context.baseline_for, recent_given=gate), context
+
+    def plan(
         self,
         series: EventSeries,
         concepts: ConceptSet,
         mapper: ConceptMapper,
-        rhythms: Mapping[str, Rhythm],
-        slack_minutes: int,
-        now: datetime,
-        signals: list[str],
-    ) -> tuple[list[DayMappingReport], tuple[date, ...], int]:
-        """要映射的日子：序列里有记录、还没以现在的概念集口径完成的（没映射过、或概念集变了要回填），最新的先；
-        今晚封口的那天总在里面，其余按预算。返回（各天的报告, 映射了哪几天, 还剩几天）。"""
+        *,
+        sealed_before: date | None,
+        ready: Callable[[SeriesRecord], bool],
+    ) -> tuple[PendingRecord, ...]:
+        """该映射的记录，按先后排好。``sealed_before`` 之前的日子已封口（None = 都没封口）；还没封口的日子里的记录要 ``ready``
+        答应才算欠着（所在的槽过后留够了余量、它那一天的那一代做完了）。纯读盘。"""
 
-        recorded = sorted({record.day for record in series.records}, reverse=True)
-        # 完成标记按这一天自己的口径认（那天出现的类各自的口径 + 情境；E9），条数也要与序列对得上（盖章之后又补发了记录就重做；E1）
-        current = {
-            day
-            for day in self.hits.days_done()
-            if (marker := self.hits.read_marker(day)) is not None
-            and marker.records == len(series.on(day))
-            and marker.mapper == mapper.day_version(record.kind_token for record in series.on(day))
-        }
-        pending = [day for day in recorded if day not in current]
-        # 模型没答成的日子按重试账退避、次数用完就放弃，不再每晚重排、不占 14 天预算（26 号清单 2.4.6）；
-        # 账的键带着这一天的映射口径，概念集一变就是新键，重新给机会。今晚封口的那天照常排进来。
-        versions = {day: mapper.day_version(record.kind_token for record in series.on(day)) for day in pending}
-        chosen, waiting = select_mapping_days(
-            pending,
-            today=series.last_day,
-            budget=self._config().mapping_days_per_night,
-            blocked=lambda day: self.mapping_retries.blocked(_mapping_key(day, versions[day])),
-        )
-        reports = []
-        # 按日子先后映射（挑哪几天仍是最新的先）：读历史的派生情境（「昨天吃过早餐」「连续研发中」）要前几天先映射好
-        for day in sorted(chosen):
-            report = await self._map_chosen(
-                day, versions[day], concepts, mapper, rhythms, slack_minutes, series, now, signals
-            )
-            if report is not None:
-                reports.append(report)
-        await self._revisit_readers(
-            [report.day for report in reports], concepts, mapper, rhythms, slack_minutes, series, now, signals
-        )
-        backlog = len(pending) - len(chosen) - len(waiting)
-        annotate(
-            {
-                "pending_days": len(pending),
-                "pending_records": sum(len(series.on(day)) for day in pending),
-                "chosen_days": len(chosen),
-                "waiting_days": len(waiting),
-                "backlog_days": backlog,
-                "budget_exhausted": backlog > 0,
-            }
-        )
-        if backlog:
-            signals.append(f"mapping: 还有 {backlog} 天没轮到（没映射过或概念集变了要回填），之后几晚接着补")
-        if waiting:
-            signals.append(f"mapping: {len(waiting)} 天模型没答成，在退避或已放弃")
-        return reports, tuple(chosen), backlog
+        fresh: list[PendingRecord] = []
+        rejudged: list[PendingRecord] = []
+        backfill: list[PendingRecord] = []
+        for day in self.pending_days(series, mapper):
+            sealed = sealed_before is not None and day < sealed_before
+            documents = day_documents(self.behavior_tree, series, day)
+            records, _context = self.records_of(day, concepts, mapper, series)
+            for uri, document in documents.items():
+                entry = records.records[uri]
+                if not sealed and not ready(entry):
+                    continue
+                existing = self.hits.read(document.address) if self.hits.exists(document.address) else None
+                material = records.material(entry, document)
+                if current(existing, mapper, entry, material) or waiting_for_recent(existing, mapper, entry, material):
+                    continue
+                item = PendingRecord(entry, document, records, existing is not None, sealed)
+                (rejudged if item.rejudged else backfill if sealed else fresh).append(item)
+        fresh.sort(key=lambda item: (item.entry.started_at, item.entry.uri))
+        return (*fresh, *rejudged, *backfill)
 
-    async def _map_chosen(
-        self,
-        day: date,
-        version: str,
-        concepts: ConceptSet,
-        mapper: ConceptMapper,
-        rhythms: Mapping[str, Rhythm],
-        slack_minutes: int,
-        series: EventSeries,
-        now: datetime,
-        signals: list[str],
-    ) -> DayMappingReport | None:
-        """映射挑中的一天、按结果记重试账；写不出的那天返回 None（不盖章，其余日子与 B4 照常）。"""
+    async def map_one(self, item: PendingRecord) -> ConceptHits:
+        """映射一条（材料按它自己现取；情境留空）。写不出抛 ``ConceptMapperError``。"""
 
-        context = self.context(day, concepts, rhythms, slack_minutes)
-        if day == series.last_day:
-            signals.extend(f"baseline: {key} 样本不够，引用它的候选会记未决" for key in context.baselines.missing)
-            signals.extend(f"drift: {item.render()}" for item in context.baselines.drifting)
-        key = _mapping_key(day, version)
-        try:
-            report = await self.map(day, mapper, context, series, now=now)
-        except ConceptMapperError as exc:
-            # 一条记录写不出（材料超了记录的上限等）：这一天不盖章、记进重试账，其余日子与 B4 照常（26 号清单 2.4.6）
-            decision = self.mapping_retries.record_failure(key, exc)
-            signals.append(
-                f"mapping: {day} 写不出（{exc}），"
-                f"{'先不再重排（概念集变了会重新给机会）' if decision.give_up else '按重试账退避后重做'}"
-            )
-            return None
-        if report.model_failed:
-            decision = self.mapping_retries.record_failure(key, MappingModelFailed(f"{report.model_failed} unresolved"))
-            if decision.give_up:
-                signals.append(f"mapping: {day} 模型几次都没答成，先不再重排（概念集变了会重新给机会）")
-        else:
-            self.mapping_retries.clear(key)
-        return report
+        material = item.records.material(item.entry, item.document)
+        return await map_record(self.hits, item.records.mapper, item.document, item.entry, material)
 
-    async def _revisit_readers(
-        self,
-        mapped: Sequence[date],
-        concepts: ConceptSet,
-        mapper: ConceptMapper,
-        rhythms: Mapping[str, Rhythm],
-        slack_minutes: int,
-        series: EventSeries,
-        now: datetime,
-        signals: list[str],
-    ) -> None:
-        """这一晚映射过的日子之后、读得到它们的那几天（派生情境往回看的天数之内），早已映射完的再过一遍：
-        候选的输入没变就只就地重算情境、不问模型（续跑），这样前一天后补的命中能进后一天的「昨天…」「连续…」。"""
+    async def rejudge_day(
+        self, day: date, concepts: ConceptSet, mapper: ConceptMapper, series: EventSeries
+    ) -> tuple[int, int]:
+        """词表迁移牵到的一天：清掉序列里已经没有的命中记录、重判不作数的那几条（章撤掉，由封口重盖）。返回（重判了几条,
+        清掉了几条）。"""
 
-        depth = len(history_days(concepts, series.last_day)) - 1
-        if depth <= 0 or not mapped:
-            return
-        done = set(self.hits.days_done())
-        readers = {day + timedelta(days=step) for day in mapped for step in range(1, depth + 1)}
-        for day in sorted(readers - set(mapped)):
-            if day not in done or day >= series.cutoff:
+        documents = day_documents(self.behavior_tree, series, day)
+        keep = frozenset(document.address.identity_name for document in documents.values())
+        stale = {item.address.identity_name for item in self.hits.read_day(day)} - keep
+        removed = self.hits.retain_only(day, keep) if stale else ()  # 没有多出来的就不动：没变的日子章留着
+        records, _context = await asyncio.to_thread(self.records_of, day, concepts, mapper, series)
+        rewritten = 0
+        for uri, document in documents.items():
+            entry = records.records[uri]
+            existing = self.hits.read(document.address) if self.hits.exists(document.address) else None
+            material = records.material(entry, document)
+            if current(existing, mapper, entry, material):
                 continue
-            context = self.context(day, concepts, rhythms, slack_minutes)
-            try:
-                await self.map(day, mapper, context, series, now=now)
-            except ConceptMapperError as exc:
-                signals.append(f"mapping: {day} 回访重算情境时写不出（{exc}），之后照常补")
+            rewritten += 1
+            await map_record(self.hits, mapper, document, entry, material)
+        return rewritten, len(removed)
 
-    def context(
-        self, day: date, concepts: ConceptSet, rhythms: Mapping[str, Rhythm], slack_minutes: int
-    ) -> SceneDayContext:
+    def context(self, day: date, concepts: ConceptSet, series: EventSeries) -> SceneDayContext:
         return SceneDayContext(
             day,
             concepts=concepts,
@@ -182,50 +180,9 @@ class MappingStage:
             timezone=self.timezone,
             subject=self.subject,
             recent_days=self._config().recent_days,
-            rhythms=rhythms,
-            slack_minutes=slack_minutes,
-        )
-
-    async def map(
-        self,
-        day: date,
-        mapper: ConceptMapper,
-        context: SceneDayContext,
-        series: EventSeries,
-        *,
-        now: datetime,
-        force: bool = False,
-    ) -> DayMappingReport:
-        return await map_closed_day(
-            self.behavior_tree,
-            self.hits,
-            mapper,
-            day,
-            now=now,
-            series=series,
-            situation_for=context.situation_for,
-            baseline_for=context.baseline_for,
-            force=force,
+            rhythms=self._rhythms(day, concepts, series),
+            slack_minutes=self._slack(),
         )
 
 
-def select_mapping_days(
-    pending: Sequence[date], *, today: date | None, budget: int, blocked: Callable[[date], bool]
-) -> tuple[list[date], list[date]]:
-    """这一晚映射哪几天（今晚封口的那天总在里面，其余最新的先、按预算）、哪几天在重试账里等着（退避中或已放弃）。"""
-
-    waiting = [day for day in pending if day != today and blocked(day)]
-    chosen = [day for day in pending if day == today]
-    chosen += [day for day in pending if day != today and day not in waiting][:budget]
-    return chosen, waiting
-
-
-class MappingModelFailed(RuntimeError):
-    """这一天有记录模型没答成（可重试：传输、限流、输出不合格）。"""
-
-
-def _mapping_key(day: date, version: str) -> str:
-    return f"map:{day.isoformat()}:{version}"
-
-
-__all__ = ["MappingModelFailed", "MappingStage", "select_mapping_days"]
+__all__ = ["MappingStage", "PendingRecord"]

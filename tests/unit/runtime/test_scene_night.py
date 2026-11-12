@@ -14,11 +14,9 @@ from datetime import timedelta
 from habitus.behavior.tree.writer import BehaviorDocumentWriter
 from habitus.behavior.uri import BehaviorURI
 from habitus.conditions import LocalCalendar
-from habitus.foundation.lifecycle import BackoffPolicy
-from habitus.infrastructure.lifecycle import RetryLedger
 from habitus.model_client import ChatClient, ModelResponse
 from habitus.model_client.structured import StructuredChatClient
-from habitus.runtime.scene_night import SceneNightConfig, SceneNightlyRun
+from habitus.runtime.scene_night import NightReport, SceneNightlyRun
 from habitus.scene.concepts import ConceptSet, ContextScope
 from habitus.scene.concepts.calendar_situations import calendar_concepts
 from habitus.scene.concepts.catalog import CatalogChanges, CatalogClass, MovedOccurrence
@@ -26,6 +24,7 @@ from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.scene.concepts.store import ConceptStore
 from habitus.scene.occurrences import ConceptHitStore
 from habitus.scene.occurrences.mapper import ConceptMapper, ConceptMapperError, MapperConfig
+from habitus.scene.occurrences.model import UnresolvedReason
 from habitus.scene.relations import RelationConfig
 from habitus.scene.relations.store import RelationStore, RelationStoreError
 from habitus.series.reader import read_series
@@ -33,7 +32,6 @@ from tests.lock_store import ProcessLocalLockStore
 from tests.unit.foresight.scripted_model import ScriptedProvider, model_config
 from tests.unit.kind_ids import kind_id
 from tests.unit.scene.concept_fixtures import (
-    BEDTIME_KEY,
     EAT_ON_WAKING,
     SLEEP_LATE,
     TRAVELLING,
@@ -174,13 +172,6 @@ def nightly(
         relation_config=RelationConfig(slot_minutes=15, transition_window_slots=3),
         subject=SUBJECT,
         rulers=RULERS,
-        mapping_retries=RetryLedger(
-            tmp_path / "scene",
-            owner="scene-mapper",
-            policy=BackoffPolicy(base_seconds=60.0, cap_seconds=3600.0),
-            max_attempts=3,
-            clock=lambda: NOW,
-        ),
     )
     return run, provider
 
@@ -196,12 +187,83 @@ RULERS = RhythmRulers(
 )
 
 
+@dataclass(frozen=True)
+class Night:
+    """一晚的读数：换代的报告（其余字段从它取）+ 这一晚队列按条映射的读数。"""
+
+    report: NightReport
+    mapped_days: tuple
+    mapped: int
+    unresolved: int
+    model_failed: int
+    remapped_days: int
+    signals: tuple
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        return getattr(self.report, name)
+
+
+async def queue_then_generate(run: SceneNightlyRun, series, now):  # type: ignore[no-untyped-def]
+    """一晚 = 模型队列的各步 + 换代的语义树一步（收口删了离线一次做完的 ``SceneNightlyRun.run``）：
+
+    1. 同步词表（含迁移牵到的重映射）——线上概念由上一代换代写、队列只重映射；测试里一晚没有"上一代"，这里一起做；
+    2. 写概念（待生效，这一代并入）；
+    3. 按条映射（已封口的日子全部算到了余量）；一条写不出只跳过它（那一天不盖章）；
+    4. 先验对着"下一次换代之后的概念集"问、候选条件对着这一代的概念集问（提议记成这一代的日子）；
+    5. ``generate``：同步 → 封口 → 并入待生效的概念 → 节律 → 折叠。
+
+    返回 ``Night``：``generate`` 的报告，加上这一晚队列映射的读数（换代的报告里没有映射），信号把队列那几步的接在前面。"""
+
+    from habitus.scene.occurrences.mapper import ConceptMapperError
+    from habitus.scene.occurrences.model import UnresolvedReason
+
+    signals: list[str] = []
+    synced = await run.syncing.run(series, now, signals, remap=True)
+    if run.authoring is not None:
+        await run.author(series, signals)
+    concepts = run.concepts.read_all()
+    mapper = run.mapper_for(concepts)
+    plan = await asyncio.to_thread(
+        run.mapping.plan, series, concepts, mapper, sealed_before=series.cutoff, ready=lambda _entry: True
+    )
+    days: set = set()  # type: ignore[type-arg]
+    mapped = unresolved = model_failed = 0
+    for item in plan:
+        try:
+            hits = await run.mapping.map_one(item)
+        except ConceptMapperError as exc:
+            signals.append(f"mapping: {item.entry.day} 写不出（{exc}）")
+            continue
+        days.add(item.entry.day)
+        mapped += 1
+        unresolved += len(hits.unresolved)
+        model_failed += sum(reason is UnresolvedReason.MODEL_FAILED for reason in hits.unresolved.values())
+    if run.advice is not None:
+        prospect, settled = await run.prospect(series, now)
+        lanes = sorted({lane for name in prospect.behaviors() if (lane := prospect.lane_of(name)) is not None})
+        for lane in lanes:
+            await run.advice.ask_priors(prospect, lane, signals, settled)
+        lines = await run.relation_stage.timelines(series, concepts)
+        for lane, line in sorted(lines.items()):
+            await run.relation_stage.ask_conditions(lane, line, series, concepts, signals, proposed_on=series.cutoff)
+    report = await run.generate(series=series, now=now)
+    return Night(
+        report=report,
+        mapped_days=tuple(sorted(days, reverse=True)),
+        mapped=mapped,
+        unresolved=unresolved,
+        model_failed=model_failed,
+        remapped_days=synced.remapped,
+        signals=tuple(dict.fromkeys((*signals, *report.signals))),  # 同步词表两边都走：同一条信号只留一次
+    )
+
+
 def night(run: SceneNightlyRun, day, now):  # type: ignore[no-untyped-def]
-    """跑一晚：序列按"夜批那天"截（``now`` 的日子）。"""
+    """跑一晚：序列按"换代那天"截（``now`` 的日子）。"""
 
     series = read_series(run.behavior_tree, cutoff=now.date())
     assert day < series.cutoff  # 第 N 晚映射 N 之前封口的日子
-    return asyncio.run(run.run(series=series, now=now))
+    return asyncio.run(queue_then_generate(run, series, now))
 
 
 def publish_tonight(site: Site, day=TONIGHT) -> tuple[str, str]:
@@ -233,7 +295,7 @@ def test_the_steps_run_in_order_on_a_real_chain(tmp_path) -> None:
     assert {hit.concept for hit in records[BREAKFAST].hits} == {"起床就吃"}
     # 映射时 lane 由词表口给（``catalog.lane_of``），记进命中记录
     assert {record.lane for record in records.values()} == {"session"}
-    assert "映射 1 天 2 条" in report.summary()
+    assert "封口 1 天" in report.summary()
     # B4：关系表这一晚落了盘（数据只有几天：全是样本不够，没有迁移）
     assert run.relations.nights("session") == (NOW.date(),) and report.transitions == 0
     assert report.relations["session"]["candidate"] == 0 and report.relations["session"]["sparse"] > 0
@@ -282,7 +344,7 @@ def test_a_moved_occurrence_on_an_earlier_day_remaps_that_day(tmp_path) -> None:
 
 
 def test_a_missing_baseline_is_reported_and_the_candidate_goes_unresolved(tmp_path) -> None:
-    """常态样本不够 → 那个键不给 → 引用它的「晚睡」记未决（不是"没命中"），而且夜批把这件事报出来。"""
+    """常态样本不够 → 那个键不给 → 引用它的「晚睡」记未决（不是"没命中"），未决原因记在命中记录上。"""
 
     site = Site(tmp_path, now=NOW)
     hits = ConceptHitStore(tmp_path / "scene")  # 一条历史都没有
@@ -291,7 +353,9 @@ def test_a_missing_baseline_is_reported_and_the_candidate_goes_unresolved(tmp_pa
 
     report = night(run, TONIGHT, NOW)
     assert report.mapped == 1 and report.unresolved == 1
-    assert any(f"{BEDTIME_KEY} 样本不够" in signal for signal in report.signals)
+    # 收口改过：原来离线一次做完的按天映射还把"样本不够"记成一条信号；按条映射（模型队列）不记，未决原因在命中记录里
+    (found,) = run.hits.read_day(TONIGHT)
+    assert set(found.unresolved.values()) == {UnresolvedReason.BASELINE_MISSING}
 
 
 def test_a_move_also_redoes_later_days_and_the_days_that_read_it_as_recent_records(tmp_path) -> None:
@@ -375,42 +439,48 @@ def test_with_model_advice_the_night_asks_priors_once_and_reads_them_from_the_ca
     assert advisor_model.calls == first
 
 
-def three_days_of_meals_and_sleep(site: Site) -> list:  # type: ignore[type-arg]
+def three_days_of_meals_and_sleep(site: Site, hits: ConceptHitStore) -> list:  # type: ignore[type-arg]
+    """连着三天各一条就寝、一碗面。其中两天与夹具里"直接写进命中盘"的合成历史重叠：那两天撤掉合成的命中与完成章（收口改过：
+    原来离线一次做完的按天映射先清掉树上没有的命中再映射；按条映射不清，封口见到"盘上比树上多"按设计拒绝盖章）。"""
+
     days = [TONIGHT - timedelta(days=offset) for offset in (2, 1, 0)]
     for day in days:
         publish_tonight(site, day)
+        if day in hits.days_done():
+            hits.retain_only(day, frozenset())
     return days
 
 
-def test_mapping_works_through_a_backlog_newest_first_within_a_nightly_budget(tmp_path) -> None:
-    """一晚最多映射今晚那天 + 预算那么多天，最新的先；没轮到的报出来，下一晚接着补。"""
+def test_mapping_works_through_the_whole_backlog_without_a_nightly_budget(tmp_path) -> None:
+    """映射按槽（阶段 2 第三小步）：一晚 14 天的预算去掉了——还没映射的日子这一晚都做完、都盖章，不剩；第二晚没有可映射的。
+    原来这条守的是"一晚最多映射今晚那天 + 预算那么多天，没轮到的下一晚接着补"。"""
 
     site, hits = site_with_three_bedtimes(tmp_path)
-    days = three_days_of_meals_and_sleep(site)
+    days = three_days_of_meals_and_sleep(site, hits)
     run, _provider = nightly(tmp_path, hits, site)
-    run.config = SceneNightConfig(mapping_days_per_night=1)
     first = night(run, TONIGHT, NOW)
-    assert first.mapped_days == (days[2], days[1]) and first.backlog == 1
-    assert any(signal.startswith("mapping: 还有 1 天") for signal in first.signals)
+    assert first.mapped_days == (days[2], days[1], days[0])
+    assert not any(signal.startswith("mapping: 还有") for signal in first.signals)
+    assert set(days) <= run.hits.days_done()
     second = night(run, TONIGHT, NOW + timedelta(days=1))
-    assert second.mapped_days == (days[0],) and second.backlog == 0
+    assert second.mapped_days == ()
 
 
 def test_a_new_refinement_backfills_only_the_records_of_its_class(tmp_path) -> None:
     """新写了一个挂在「就寝」上的语义细分概念：已映射的日子都要回填，但只有就寝那几条问模型，早餐那几条照常续跑。"""
 
     site, hits = site_with_three_bedtimes(tmp_path)
-    days = three_days_of_meals_and_sleep(site)
+    days = three_days_of_meals_and_sleep(site, hits)
     run, provider = nightly(tmp_path, hits, site)
     night(run, TONIGHT, NOW)
     asked = provider.calls
     run.concepts.write(refinement("睡前看手机", "上床之前还在看手机", "就寝"))
     report = night(run, TONIGHT, NOW + timedelta(days=1))
-    assert set(report.mapped_days) == set(days) and report.backlog == 0
+    assert set(report.mapped_days) == set(days)
     prompts = provider.prompts[asked:]
     assert provider.calls - asked == 2 * len(days)  # 每天一条就寝、判两次
     assert all("行为：就寝" in prompt and "睡前看手机" in prompt for prompt in prompts)
-    assert report.resumed == len(days)  # 早餐那几条候选没变：续跑
+    assert report.mapped == len(days)  # 只有就寝那几条重判；早餐那几条的口径没变、作数，不进按条映射的计划（原来按天映射时记"续跑"）
 
 
 def test_concepts_are_authored_when_the_class_list_changes_and_once_a_week_from_monday(tmp_path) -> None:
@@ -472,7 +542,7 @@ def test_a_day_that_gets_a_late_record_after_its_stamp_is_mapped_again(tmp_path)
     assert marker is not None and marker.records == 2
     publish(site.behavior_tree, TONIGHT, "又吃了点", 23, 50, summary="夜宵", kind="早餐")
     report = night(run, TONIGHT + timedelta(days=1), NOW + timedelta(days=1))
-    assert TONIGHT in report.mapped_days and report.resumed == 2 and report.mapped == 1
+    assert TONIGHT in report.mapped_days and report.mapped == 1  # 只映射补发的那一条；旧的两条作数（原来按天映射时记"续跑 2"）
     marker = hits.read_marker(TONIGHT)
     assert marker is not None and marker.records == 3 and len(hits.read_day(TONIGHT)) == 3
 
@@ -659,14 +729,6 @@ def test_a_class_named_like_a_concept_in_use_neither_stalls_the_nights_nor_leave
     assert f"{late}.md" not in on_disk and f"{tuesday}.md" not in on_disk
 
 
-def mapping_key(run: SceneNightlyRun, day, now) -> str:  # type: ignore[no-untyped-def]
-    """重试账里这一天的键：日子 + 这一天按现在的概念集的映射口径。"""
-
-    series = read_series(run.behavior_tree, cutoff=now.date())
-    version = run.mapper_for(run.concepts.read_all()).day_version(record.kind_token for record in series.on(day))
-    return f"map:{day.isoformat()}:{version}"
-
-
 class AnswerWithAWrongName(AnswerByCandidates):
     """假模型每次都答一个不在选项里的名字：结构层两轮都过不去，报错里带着 schema 片段（比单条信号的上限长）。"""
 
@@ -681,8 +743,9 @@ class AnswerWithAWrongName(AnswerByCandidates):
         )
 
 
-def test_a_mapping_the_model_never_answers_goes_to_the_retry_ledger_and_the_night_finishes(tmp_path) -> None:
-    """模型两轮都没答成、失败信号超长：那条记未决、那天进重试账，这一晚照样跑完 B4；下一晚那天在退避里不重排。"""
+def test_a_mapping_the_model_never_answers_leaves_its_day_unsealed_and_the_night_finishes(tmp_path) -> None:
+    """模型两轮都没答成、失败信号超长：那条记未决（模型没答成）、那天不盖章，这一晚照样跑完 B4；下一晚那条再映射。
+    收口改过：原来那天进离线路径自己的按天重试账（``scene-mapper``，已删）；队列里一项没成按队列的重试账退避，见验收 A1-7。"""
 
     site, hits = site_with_three_bedtimes(tmp_path)
     publish_tonight(site)
@@ -691,14 +754,13 @@ def test_a_mapping_the_model_never_answers_goes_to_the_retry_ledger_and_the_nigh
     report = night(run, TONIGHT, NOW)
     assert report.model_failed == 1 and run.relations.nights("session") == (NOW.date(),)
     assert TONIGHT not in run.hits.days_done()
-    key = mapping_key(run, TONIGHT, NOW)
-    assert run.mapping_retries.entry(key) is not None and run.mapping_retries.blocked(key)
     later = night(run, TONIGHT + timedelta(days=1), NOW + timedelta(days=1))
-    assert TONIGHT not in later.mapped_days and any("模型没答成" in signal for signal in later.signals)
+    assert TONIGHT in later.mapped_days and later.model_failed == 1 and TONIGHT not in run.hits.days_done()
 
 
 def test_a_record_that_cannot_be_written_fails_only_its_day(tmp_path, monkeypatch) -> None:
-    """映射器写不出一条记录（``ConceptMapperError``，比如常态表超了记录上限）：那天记进重试账、报出来，这一晚其余照常。"""
+    """映射器写不出一条记录（``ConceptMapperError``，比如常态表超了记录上限）：那天不盖章，这一晚其余照常。收口改过：
+    原来那天还进离线路径的按天重试账、记一条信号（都已删）；队列里一项抛了按队列的重试账退避，见验收 A1-7。"""
 
     site, hits = site_with_three_bedtimes(tmp_path)
     publish_tonight(site)
@@ -710,9 +772,7 @@ def test_a_record_that_cannot_be_written_fails_only_its_day(tmp_path, monkeypatc
     monkeypatch.setattr(ConceptMapper, "map", refuse)
     report = night(run, TONIGHT, NOW)
     assert run.relations.nights("session") == (NOW.date(),) and TONIGHT not in run.hits.days_done()
-    assert any(f"mapping: {TONIGHT} 写不出" in signal and "32 entries" in signal for signal in report.signals)
-    entry = run.mapping_retries.entry(mapping_key(run, TONIGHT, NOW))
-    assert entry is not None and entry.error_type == "ConceptMapperError"
+    assert report.mapped_days == ()  # 那条写不出，这一晚没有映射成的
 
 
 def _yesterday_breakfast_night(tmp_path, *, both: bool):  # type: ignore[no-untyped-def]
@@ -773,6 +833,7 @@ def test_the_heavy_steps_run_off_the_event_loop(tmp_path, monkeypatch) -> None:
 
     import habitus.runtime.scene_night as night_module
     import habitus.runtime.scene_night_relations as relations_module
+    import habitus.runtime.scene_night_sync as sync_module
 
     site, hits = site_with_three_bedtimes(tmp_path)
     publish_tonight(site)
@@ -792,8 +853,9 @@ def test_the_heavy_steps_run_off_the_event_loop(tmp_path, monkeypatch) -> None:
 
         return slow
 
-    for name in ("plan_sync", "rhythms_of", "coverage_by_lane"):
-        monkeypatch.setattr(night_module, name, slowed(name, getattr(night_module, name)))
+    # 同步词表那一段（计划、覆盖）拆到了 ``scene_night_sync``（实时化阶段 2）；节律仍在 ``scene_night``
+    for module, name in ((sync_module, "plan_sync"), (night_module, "rhythms_of"), (sync_module, "coverage_by_lane")):
+        monkeypatch.setattr(module, name, slowed(name, getattr(module, name)))
     # 时间线与折叠在 B4 那一段（``scene_night_relations``）
     for name in ("build_timelines", "fold"):
         monkeypatch.setattr(relations_module, name, slowed(name, getattr(relations_module, name)))
@@ -810,7 +872,7 @@ def test_the_heavy_steps_run_off_the_event_loop(tmp_path, monkeypatch) -> None:
 
         task = asyncio.create_task(heart())
         await asyncio.sleep(0.05)
-        await run.run(series=read_series(run.behavior_tree, cutoff=NOW.date()), now=NOW)
+        await run.generate(series=read_series(run.behavior_tree, cutoff=NOW.date()), now=NOW)  # 收口：离线 ``run`` 删了，守换代那一步
         await asyncio.sleep(0.05)
         task.cancel()
         return max(later - earlier for earlier, later in zip(beats, beats[1:], strict=False))
@@ -820,9 +882,10 @@ def test_the_heavy_steps_run_off_the_event_loop(tmp_path, monkeypatch) -> None:
 
 
 def test_the_coverage_is_computed_once_a_night(tmp_path, monkeypatch) -> None:
-    """各 lane 的观测覆盖只取决于序列：一晚算一次，节律（同步词表后、写概念后各一遍）与机会表的材料都用这一份。"""
+    """各 lane 的观测覆盖只取决于序列：换代一次算一次，节律与机会表的材料都用这一份。"""
 
     import habitus.runtime.scene_night as night_module
+    import habitus.runtime.scene_night_sync as sync_module
     import habitus.scene.concepts.rhythm as rhythm_module
     from habitus.scene.concepts.rhythm import coverage_of
 
@@ -832,17 +895,22 @@ def test_the_coverage_is_computed_once_a_night(tmp_path, monkeypatch) -> None:
     calls: list[str] = []
     real_by_lane = night_module.coverage_by_lane
 
-    def by_lane(*args, **kwargs):  # type: ignore[no-untyped-def]
-        calls.append("lanes")
-        return real_by_lane(*args, **kwargs)
+    def by_lane(series, *args, **kwargs):  # type: ignore[no-untyped-def]
+        # 映射按槽之后，没有那一代节律文件的日子按"截止到那一天的序列"现算节律（另一份序列，各算各的覆盖）：只数这一晚这一份的
+        if series.cutoff == TONIGHT + timedelta(days=1):
+            calls.append("lanes")
+        return real_by_lane(series, *args, **kwargs)
 
     def single(*args, **kwargs):  # type: ignore[no-untyped-def]
         calls.append("one lane")
         return coverage_of(*args, **kwargs)
 
+    # 覆盖在同步词表那一段算（拆到了 ``scene_night_sync``）；``scene_night`` 里只剩同步没做成时的退路，两处都数
     monkeypatch.setattr(night_module, "coverage_by_lane", by_lane)
+    monkeypatch.setattr(sync_module, "coverage_by_lane", by_lane)
     monkeypatch.setattr(rhythm_module, "coverage_of", single)
-    report = night(run, TONIGHT, NOW)
+    # 收口：离线 ``run`` 删了，数换代那一步（模型队列的同步词表另算自己的一份，不在这一晚的换代里）
+    report = asyncio.run(run.generate(series=read_series(run.behavior_tree, cutoff=NOW.date()), now=NOW))
     assert calls == ["lanes"] and report.materials is not None and report.materials.coverage
 
 

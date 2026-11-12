@@ -19,7 +19,9 @@
 超过容差（``unwatched_tolerance_slots`` 槽），就把这一段交会话一支写成一条「未观测」空判断（由归约落树，这里不碰行为树）；写不成
 这一拍报出、水位不推（下一拍再写，不会漏）。第一次启动、盘上没有水位时不写（不知道之前在不在跑）。
 
-整拍持预测根租约（与换代写账本的那几步互斥，两个进程挂同一个根也不重复建同一身份）。词表迁移做到一半时整拍不做（归类一半新编号
+整拍持预测根租约（两个进程挂同一个根也不重复建同一身份）。常驻 worker 把换代的那一眼交进来（``run_once`` 的 ``before``）：
+拿到租约之后先做它、再做这一拍，同一次持有之内串行——换代那一槽的预测拍顺延到换代做完，``lateness_seconds`` 里含换代用时；换代
+占用的那一段系统是在看的，不算进没在看的时段（空当只量到进这一槽的那一刻）。词表迁移做到一半时整拍不做（归类一半新编号
 一半旧编号，结算那一拍同一口径），水位照推（那一拍系统在看）。建不出来（派生树读不到、装配失败）留观测、抛出，让调用方决定
 下一拍。账本里读不出来的文件条数进观测。
 """
@@ -63,7 +65,7 @@ from habitus.scene.views import DayIndexCache
 
 #: 递送只为「没读懂」与「错误」不说（都是在看却看不到；「未观测」照常说，裁定 68 第 2 条、94 第 3 条）。
 _UNREADABLE = UNSEEN_GAPS
-#: 预测根租约被另一个持有者（换代写账本、另一个进程的预测拍）拿着、等到时限也没拿到：这一拍不做，水位不推。
+#: 预测根租约被另一个持有者（另一个进程的换代与预测拍）拿着、等到时限也没拿到：这一槽不换代、这一拍不做，水位不推。
 LEDGER_BUSY = "预测根租约被占"
 
 
@@ -164,21 +166,35 @@ class ForesightTick:
         #: 今天这一代完成了没有（完成标记）：白天那道闸要它为真才建预期（F5）；没接就只看表是不是今天的。
         self.finished = finished
 
-    async def run_once(self, *, scheduled: datetime | None = None) -> TickReport:
-        """跑一拍。``scheduled`` 是这一拍该开始的槽边界（常驻 worker 给）：span 上记离它晚了多少。"""
+    async def run_once(
+        self, *, scheduled: datetime | None = None, before: Callable[[], Awaitable[object]] | None = None
+    ) -> TickReport:
+        """跑一拍。``scheduled`` 是这一拍该开始的槽边界（常驻 worker 给）：span 上记离它晚了多少。``before`` 是拿到预测根租约
+        之后、这一拍之前先做的事（换代的那一眼）：同一次持有之内串行，它自己的 span 排在 ``foresight.tick`` 之前。"""
+
+        try:
+            async with self._held():
+                entered = self._clock()
+                if before is not None:
+                    await before()
+                return await self._traced(scheduled, entered)
+        except LeaseBusyError:
+            return await self._traced(scheduled, None)
+
+    async def _traced(self, scheduled: datetime | None, entered: datetime | None) -> TickReport:
+        """这一拍的 span 与观测；``entered`` 是拿到预测根租约的那一刻，None 是租约被占（这一拍不做）。"""
 
         started = time.monotonic()
         now = self._clock().astimezone(self.read_side.zone)
         traced = open_trace(self.trace(now.date())) if self.trace is not None else nullcontext()
         with traced, span("foresight.tick", {"at": now.isoformat(), "lane": self.lane}) as attributes:
             if scheduled is not None:
-                # 这一拍离它该开始的槽边界晚了多少（实时化方案第 10 节：预测拍不被卡）
+                # 这一拍离它该开始的槽边界晚了多少（实时化方案第 10 节：预测拍不被卡；换代那一槽含换代用时）
                 attributes["lateness_seconds"] = max(0.0, (now - scheduled).total_seconds())
             try:
-                async with self._held():
-                    report = await self._run(now)
-            except LeaseBusyError:
-                report = TickReport(now, 0, 0, skipped=LEDGER_BUSY)
+                report = (
+                    TickReport(now, 0, 0, skipped=LEDGER_BUSY) if entered is None else await self._run(now, entered)
+                )
             except Exception as exc:
                 observe_foresight(
                     self.observer, "tick", ObservationStatus.FAILURE, {"error_type": type(exc).__name__}, started
@@ -199,8 +215,8 @@ class ForesightTick:
     def _held(self) -> AbstractAsyncContextManager[object]:
         return self.lease.held() if self.lease is not None else nullcontext()
 
-    async def _run(self, now: datetime) -> TickReport:
-        mark, gap = await self.track.begin(now) if self.track is not None else (TickWatermark(), None)
+    async def _run(self, now: datetime, entered: datetime) -> TickReport:
+        mark, gap = await self.track.begin(now, entered) if self.track is not None else (TickWatermark(), None)
         previous = gap[0] if gap is not None else mark.watched_until  # 刚写了「未观测」：``begin`` 已把水位推到此刻
         ticks = None if previous is None or self.track is None else round((now - previous) / self.track.slot)
         held = held_by_migration(self.migrating)
@@ -304,7 +320,7 @@ class ForesightTick:
             now,
             JudgeMaterials(
                 materials.table,
-                lambda uris: self._rows_for(uris, materials.recent.cache, materials.recent.unsealed, seen, now),
+                lambda uris: _rows_for(uris, materials.recent.cache, materials.recent.unsealed, seen, now),
                 lambda item: done_since(item, seen, now=now, current=current),
                 lambda day: day_note(self.read_side.calendar, day),
                 lambda item: _unobserved(item, materials.recent, now),
@@ -316,42 +332,42 @@ class ForesightTick:
             ),
         )
 
-    @staticmethod
-    def _rows_for(
-        uris: Iterable[str],
-        cache: DayIndexCache,
-        unsealed: Sequence[UnsealedRow],
-        seen: Sequence[Seen],
-        now: datetime,
-    ) -> dict[str, Seen]:
-        """按出处取行：最近几天的在 ``seen`` 里已经填全（按出处，也按开始时刻——事件触发的实例是前因的开始时刻）；
-        更早的已封口记录按 URI 里的日子到行为树取。"""
 
-        found: dict[str, Seen] = {}
-        recent = {row.source: row for row in seen}
-        recent.update({row.started_at.astimezone(UTC).isoformat(): row for row in seen})
-        for uri in uris:
-            if uri in recent:
-                found[uri] = recent[uri]
-                continue
-            try:
-                day = BehaviorURI.parse(uri).to_address().occurred_on
-            except (TypeError, ValueError):
-                # 不是行为树 URI 的出处（``unsealed:<开始时刻>``）只在最近几天的 ``seen`` 里有，过了就取不到行
-                continue
-            sealed = cache.day(day).by_uri.get(uri)
-            if sealed is not None:
-                found[uri] = Seen(
-                    sealed.at,
-                    sealed.last_observed_at,
-                    sealed.kind_token,
-                    uri,
-                    sealed.name,
-                    sealed.summary,
-                    place=sealed.place,
-                    subjects=sealed.subjects,
-                )
-        return found
+def _rows_for(
+    uris: Iterable[str],
+    cache: DayIndexCache,
+    unsealed: Sequence[UnsealedRow],
+    seen: Sequence[Seen],
+    now: datetime,
+) -> dict[str, Seen]:
+    """按出处取行：最近几天的在 ``seen`` 里已经填全（按出处，也按开始时刻——事件触发的实例是前因的开始时刻）；
+    更早的已封口记录按 URI 里的日子到行为树取。"""
+
+    found: dict[str, Seen] = {}
+    recent = {row.source: row for row in seen}
+    recent.update({row.started_at.astimezone(UTC).isoformat(): row for row in seen})
+    for uri in uris:
+        if uri in recent:
+            found[uri] = recent[uri]
+            continue
+        try:
+            day = BehaviorURI.parse(uri).to_address().occurred_on
+        except (TypeError, ValueError):
+            # 不是行为树 URI 的出处（``unsealed:<开始时刻>``）只在最近几天的 ``seen`` 里有，过了就取不到行
+            continue
+        sealed = cache.day(day).by_uri.get(uri)
+        if sealed is not None:
+            found[uri] = Seen(
+                sealed.at,
+                sealed.last_observed_at,
+                sealed.kind_token,
+                uri,
+                sealed.name,
+                sealed.summary,
+                place=sealed.place,
+                subjects=sealed.subjects,
+            )
+    return found
 
 
 def delivery_since(now: datetime, previous: datetime | None, reach: timedelta | None) -> datetime | None:

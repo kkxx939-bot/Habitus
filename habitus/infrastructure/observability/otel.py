@@ -186,7 +186,7 @@ class OpenTelemetryBackend:
 
 
 #: 事件属性全部放进 span 事件的类别（见 ``_trace_attributes``）。
-_OPEN_CATEGORIES = frozenset({"generation", "scene", "foresight"})
+_OPEN_CATEGORIES = frozenset({"generation", "scene", "foresight", "model_queue"})
 
 
 #: span 属性里不导出的键（最后一段）：信号是带用户派生文字的句子（概念名、关系两端名、迁移原因），只留在本地每代报告。
@@ -207,6 +207,7 @@ _CONTROLLED_TEXT_KEYS = frozenset(
         "day",
         "failed_step",
         "touch",
+        "category",
     }
 )
 

@@ -1,16 +1,21 @@
-"""换代的常驻 worker（实时化方案第 3、9、10 节，阶段 1）：在原来夜线执行器的位置，取代它与它的 Job 账。
+"""换代的那一眼（实时化方案第 3、9、10 节；阶段 2 第二小步）：不是常驻 worker——预测 worker 每个槽边界、在预测根租约之内
+先调它看一眼，再做预测拍（``runtime.foresight_worker``）。没有自己的循环、没有自己的租约："同一个根同一天只换一次"由预测根租约
+加完成标记保证。
 
-每隔一会儿（``scene.generation_poll_seconds``）看一眼：先拿**换代租约**（语义树根派生，``SQLiteLockStore``；拿不到就是别的进程
-在做、下一眼再看），在独立线程续租（续不上就取消这一代：没有完成标记，下一眼从头做），然后：
+一眼（``look``）：
 
-1. 进程起来后第一次拿到租约：上一次中途被杀剩下的重试项撤回（裁定 68 第 3 条，``clean_leftovers``；等锁的状态只在进程里）；
+1. 进程起来后第一眼：上一次中途被杀剩下的重试项撤回（裁定 68 第 3 条，``clean_leftovers``；等锁的状态只在进程里）；
 2. 看能不能换代（``Generation.ready``）：连续定稿到昨天、预测拍水位过了余量、今天的完成标记还没有。定稿日不连续的那一天连着
    ``generation_stuck_ticks`` 眼都没好，``stuck`` 记下它（健康面报出）；
-3. 能就做一代（``Generation.run``），整代持有换代租约；写账本的那几步另拿预测根租约（在 ``Generation`` 里）。
+3. 能就做一代（``Generation.run``）。必须成的那一步没成：按退避（``scene.generation_retry_*``）在之后的槽再试；还没准备好（锁被
+   占）不算失败、不退避，下一槽再看。
+
+``slot`` 是预测 worker 调的口：一眼抛了只记 ``last_error`` 与观测，不挡这一槽的预测拍。
 
 可查的痕迹：这一代一个 ``generation.run`` span、每步一个子 span（落本地 trace 文件，一天一份）；每步一条指标事件（耗时、结局）、
 每代一条（写成没有、多久、从昨天定稿到写出隔多久）、每个退路一条计数；开始 / 结束各一行 INFO 日志；每代一份报告（没写成的
-也写），写成时算一次关系表的双向变化。健康面读这里的 ``last_result``、``stuck``、``last_error`` 与最新的完成标记。
+也写），写成时算一次关系表的双向变化。健康面读这里的 ``last_result``、``stuck``、``rewound``、``retry_at``、``last_error`` 与最新
+的完成标记。
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import uuid
 from collections import Counter
 from collections.abc import Callable
@@ -26,15 +32,13 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
 from habitus.foundation.lifecycle.backoff import BackoffPolicy
-from habitus.foundation.observability import ObservationStatus, Observer, record_observation
+from habitus.foundation.observability import NullObserver, ObservationStatus, Observer, record_observation
 from habitus.foundation.tracing import open_trace
-from habitus.infrastructure.store.contracts import LockStore
 from habitus.runtime.generation import Generation
-from habitus.runtime.generation_lease import Lease, LeaseBusyError
 from habitus.runtime.generation_report import GenerationReports
 from habitus.runtime.generation_result import ALREADY_DONE, DEGRADED, FAILED, FALLBACKS, HELD, GenerationResult
 from habitus.runtime.generation_trace import TraceFiles
-from habitus.runtime.resident import ResidentWorker
+from habitus.runtime.scene_rhythms import prune_rhythms
 
 logger = logging.getLogger("habitus.generation")
 
@@ -50,29 +54,20 @@ _OUTCOME_STATUS = {
 
 @dataclass(frozen=True)
 class GenerationSettings:
-    """换代 worker 的运维数（``config.scene.generation_*``，组合根换算过来）。"""
+    """换代的运维数（``config.scene.generation_*``，组合根换算过来）。"""
 
-    poll_seconds: float = 300.0
     kept_days: int = 366
-    lease_ttl_seconds: float = 120.0
-    heartbeat_seconds: float = 30.0
     stuck_ticks: int = 3
     #: 必须成的那一步没成之后的退避（用户 11-10 失败重试第 2 条：5 分钟起、逐次加倍、封顶 1 小时，同一天一直重试、不放弃）。
     retry_base_seconds: float = 300.0
     retry_max_seconds: float = 3_600.0
 
 
-class GenerationWorker(ResidentWorker):
-    _task_name = "habitus-generation"
-    _observation_category = "generation"
-
+class GenerationRunner:
     def __init__(
         self,
         generation: Generation,
         *,
-        lock_store: LockStore,
-        lease_key: str,
-        shutdown_timeout_seconds: float,
         settings: GenerationSettings | None = None,
         reports: GenerationReports | None = None,
         traces: TraceFiles | None = None,
@@ -80,25 +75,21 @@ class GenerationWorker(ResidentWorker):
         clock: Callable[[], datetime] | None = None,
         worker_id: str | None = None,
     ) -> None:
-        super().__init__(shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer)
-        if not lease_key:
-            raise ValueError("lease_key must be non-empty text")
         self.generation = generation
         self.settings = settings or GenerationSettings()
-        self.lease = Lease(
-            lock_store,
-            lease_key,
-            ttl_seconds=self.settings.lease_ttl_seconds,
-            heartbeat_seconds=self.settings.heartbeat_seconds,
-        )
         self.reports = reports
         self.traces = traces
+        self.observer: Observer = observer if observer is not None else NullObserver()
         self.worker_id = worker_id or f"generation-{os.getpid()}-{uuid.uuid4().hex[:12]}"
         self._clock = clock or (lambda: datetime.now(UTC))
-        #: 进程起来后清过上一次剩下的重试项没有（第一次拿到租约时清一次）。
+        #: 进程起来后清过上一次剩下的重试项没有（第一眼清一次）。
         self._cleaned = False
         #: 最近一次做一代的结果（健康面读：没写成的那一代停在哪一步、写成了走了哪些退路）。
         self.last_result: GenerationResult | None = None
+        #: 最近一次出的错：一眼抛了、或这一代没写成、走了退路（健康面报；之后一眼顺利就清掉）。
+        self.last_error: BaseException | None = None
+        #: ``last_error`` 是不是一眼抛出来的（不是这一代的结果）：下一眼顺利就清掉。
+        self._look_failed = False
         #: 定稿日不连续卡住的那一天，与连着几眼都是它。
         self._stuck: tuple[date, int] | None = None
         #: 最近一眼当地日期回到了已换代的日子之前：（今天, 最晚完成标记的日子）；日期追上后下一眼清掉（健康面报）。
@@ -119,49 +110,60 @@ class GenerationWorker(ResidentWorker):
             return None
         return self._stuck[0]
 
+    @property
+    def look_error(self) -> BaseException | None:
+        """看那一眼抛出来的错（不是某一代的结果）；下一眼顺利就没有了。"""
+        return self.last_error if self._look_failed else None
+
     def finished(self, day: date) -> bool | None:
         """这一天的换代做完了没有（完成标记的三值，``GenerationMarks.finished``）。"""
 
         return self.generation.marks.finished(day)
 
-    async def _run_loop(self) -> None:
-        while not self._stop_requested.is_set():
-            try:
-                await self.look()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - 常驻循环必须活过基础设施抖动；下一眼从头看
-                self.last_error = exc
-                self._observe("look", ObservationStatus.FAILURE, {"error_type": type(exc).__name__})
-            await self._wait(self.settings.poll_seconds)
+    async def slot(self) -> None:
+        """预测 worker 每槽调的口（已在预测根租约之内）：看一眼；抛了只记下、报出，不挡这一槽的预测拍。取消原样抛。"""
+
+        started = time.monotonic()
+        try:
+            result = await self.look()
+        except Exception as exc:  # noqa: BLE001 - 换代这一眼出错不挡预测拍；下一槽从头看
+            self.last_error, self._look_failed = exc, True
+            self._observe("look", ObservationStatus.FAILURE, {"error_type": type(exc).__name__}, started=started)
+            return
+        if self._look_failed:
+            self._look_failed = False
+            if result is None:
+                self.last_error = None  # 上一眼抛的错过去了（这一眼做了一代的话 ``_after`` 已按结果重写）
 
     async def look(self) -> GenerationResult | None:
-        """看一眼：拿得到换代租约、能换代就做今天这一代并返回结果；拿不到租约、不能换代是 None。"""
+        """看一眼：能换代就做今天这一代并返回结果；不能换代、还在退避是 None。调用方持预测根租约。"""
 
-        try:
-            async with self.lease.held(wait_seconds=0.0):
-                if not self._cleaned:
-                    self._cleaned = True
-                    await asyncio.to_thread(self.generation.clean_leftovers)
-                readiness = await asyncio.to_thread(self.generation.ready)
-                self._track_stuck(readiness.stuck)
-                self.rewound = readiness.rewound
-                if readiness.reason == ALREADY_DONE and self.last_result is not None and not self.last_result.complete:
-                    # 今天这一代已有完成标记（另一个进程写成的、或日期已越过没写成的那一天）：上一次没写成的那一代过时了，
-                    # 健康面不再挂着它
-                    self.last_result = None
-                    self.last_error = None
-                if (
-                    readiness.day is None
-                    or self._stop_requested.is_set()
-                    or self._retries.waiting(readiness.day, self._clock())
-                ):
-                    return None
-                result = await self._generate(readiness.day)
-        except LeaseBusyError:
+        if not self._cleaned:
+            self._cleaned = True
+            await asyncio.to_thread(self.generation.clean_leftovers)
+        readiness = await asyncio.to_thread(self.generation.ready)
+        self._track_stuck(readiness.stuck)
+        self.rewound = readiness.rewound
+        if readiness.reason == ALREADY_DONE and self.last_result is not None and not self.last_result.complete:
+            # 今天这一代已有完成标记（另一个进程写成的、或日期已越过没写成的那一天）：上一次没写成的那一代过时了，
+            # 健康面不再挂着它
+            self.last_result = None
+            self.last_error = None
+        if readiness.day is None or self._retries.waiting(readiness.day, self._clock()):
             return None
+        result = await self._generate(readiness.day)
         self._after(result)
         return result
+
+    def _observe(
+        self,
+        operation: str,
+        status: ObservationStatus,
+        attributes: dict[str, str | int | float | bool],
+        *,
+        started: float | None = None,
+    ) -> None:
+        record_observation(self.observer, "generation", operation, status, started=started, attributes=attributes)
 
     def _track_stuck(self, day: date | None) -> None:
         if day is None:
@@ -298,11 +300,12 @@ class GenerationWorker(ResidentWorker):
                 self.reports.prune(day, kept)
             if self.traces is not None:
                 self.traces.prune(day, kept)
+            prune_rhythms(self.generation.scene, day, kept)
         except Exception as exc:  # noqa: BLE001 - 留存清理是旁路：清不掉下一代再清
             self._observe("prune", ObservationStatus.FAILURE, {"error_type": type(exc).__name__})
 
     def _refresh_health(self, result: GenerationResult) -> None:
-        """常驻循环的 ``last_error``：这一代没写成、或走了退路就挂上（健康面另读 ``last_result`` 给出原因）。"""
+        """``last_error``：这一代没写成、或走了退路就挂上（健康面另读 ``last_result`` 给出原因）。"""
 
         problems: list[str] = []
         if not result.complete and result.held is None:
@@ -337,4 +340,4 @@ class _Retries:
             self.state = (result.day, count, now + timedelta(seconds=self.backoff.delay(count)))
 
 
-__all__ = ["GenerationSettings", "GenerationWorker"]
+__all__ = ["GenerationRunner", "GenerationSettings"]

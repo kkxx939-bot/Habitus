@@ -711,10 +711,13 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
     # 模型触点一个都不许多：写概念（①）、映射器、先验、候选调节条件，加上它们共用的调模型那一段。
     # **都不从包根导出**——包根一 import 它们，任何 ``from habitus.scene.concepts import ConceptSet`` 都把
     # model_client 拖进来，这条边界就只剩一句注释了。
+    # ``occurrences.daily`` 不是新触点：它是映射器的按条入口与一天的封口（实时化阶段 2「映射按槽」，从 ``mapper``
+    # 里搬过去的），经映射器调模型，自己不拼提示词、不碰模型客户端。
     assert _scene_modules_reaching(graph, "habitus.model_client") == [
         "habitus.scene.advice.conditions",
         "habitus.scene.advice.prior",
         "habitus.scene.concepts.author",
+        "habitus.scene.occurrences.daily",
         "habitus.scene.occurrences.mapper",
     ]
     # 建议（先验、候选条件）只引用概念与关系检验里纯的那几块：看不到命中、看不到关系表，也碰不到行为树

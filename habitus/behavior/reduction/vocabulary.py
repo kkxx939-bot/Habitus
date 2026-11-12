@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -31,6 +32,8 @@ class VocabularyJobReport:
     split: int = 0
     merged: int = 0
     moves: int = 0
+    #: 这一次持 sweep 锁多久（秒）：整段持锁、包括调模型的那几次，期间归约不能发布（实时化阶段 2 的读数）。
+    lock_seconds: float = 0.0
 
 
 class VocabularyRunner:
@@ -60,13 +63,18 @@ class VocabularyRunner:
         return await self.run(job)
 
     async def resume(self) -> VocabularyJobReport:
-        """只续做没做完的迁移（换代最前那一步，实时化方案第 3 节）：同一条持锁路径，不做整理活本身。没有没做完的迁移时是空操作
-        （只拿一下 sweep 锁）；锁被占抛 ``BehaviorReductionBusyError``。"""
+        """换代最前那一步（实时化方案第 3 节）：续做没做完的迁移，再把待生效的拆改交给迁移器（``VocabularyJobs.apply_revision``）。
+        同一条持锁路径，不做整理活本身；两样都没有时是空操作（只拿一下 sweep 锁）；锁被占抛 ``BehaviorReductionBusyError``。"""
 
-        async def nothing(_now: datetime, *, checkpoint: Callable[[], object]) -> JobsOutcome:
-            return JobsOutcome()
+        async def pending(_now: datetime, *, checkpoint: Callable[[], object]) -> JobsOutcome:
+            return self.jobs.apply_revision(checkpoint)
 
-        return await self.run(nothing)
+        return await self.run(pending)
+
+    def revision_pending(self) -> bool:
+        """有没有待生效的拆改（换代据它决定最前那一步要不要拿 sweep 锁）。"""
+
+        return self.jobs.store.read_revision() is not None
 
     async def grow(self) -> VocabularyJobReport:
         return await self.run(self.jobs.grow)
@@ -79,6 +87,7 @@ class VocabularyRunner:
 
         with ExitStack() as held:
             guard = self._hold_lock(held)
+            locked = time.monotonic()
             self.checkpoints.require_none("vocabulary job")
             outcome = self.resume_migration(guard) + await job(self._now(), checkpoint=guard.checkpoint)
             self.refresh_pending.touch(outcome.days, guard)
@@ -93,6 +102,7 @@ class VocabularyRunner:
                 split=outcome.split,
                 merged=outcome.merged,
                 moves=outcome.moves,
+                lock_seconds=max(0.0, time.monotonic() - locked),
             )
 
     def resume_migration(self, guard: LeaseGuard) -> JobsOutcome:

@@ -3,6 +3,10 @@
 没有完成标记、没有代：概念不是按天产出的作业，写一份就是一份。另有两个点文件（列目录时归为噪音跳过）：
 ``.vocabulary-version`` 记"同步词表同步到了哪一版"——夜批据此只读那之后的变更；``.authored.json`` 记触点①上次给每条
 lane 写概念时那条 lane 的类清单指纹与哪一晚——清单变了、或这一周还没写过，就再问（裁定 23）。
+
+**待生效的概念**（实时化阶段 2「生效时点」）：触点①写出的概念不直接进概念集，先放在 ``concepts-pending/``（同样一个概念
+一份 ``<身份>.md``）；下一次换代的语义树一步在同步词表之后把它们并进概念集、这时才定创建时刻。并入之前它们不在
+``read_all`` 里——映射、关系检验、预测层都看不到。
 """
 
 from __future__ import annotations
@@ -21,6 +25,8 @@ from habitus.scene.concepts.model import ConceptDefinition, ConceptError, Concep
 from habitus.scene.storage import SceneStore
 
 CONCEPTS_SEGMENT = "concepts"
+#: 待生效的概念（写概念的结果，等下一次换代并入）。
+PENDING_SEGMENT = "concepts-pending"
 MAX_RECORD_BYTES = 64 * 1024
 SYNCED_FILENAME = ".vocabulary-version"
 #: 触点①上次给每条 lane 写概念：那时的类清单指纹（清单变了就再问）与哪一晚写的（每周一次看这个，裁定 23）。
@@ -45,6 +51,7 @@ class ConceptStore(SceneStore):
     def __init__(self, scene_root: str | Path, **options: int) -> None:
         super().__init__(scene_root, **options)
         self.directory = self._inside(Path(CONCEPTS_SEGMENT))
+        self.pending_directory = self._inside(Path(PENDING_SEGMENT))
 
     def initialize(self) -> Path:
         self._ensure_directory(self.directory)
@@ -59,6 +66,19 @@ class ConceptStore(SceneStore):
         path = self.path_for(definition.identity)
         self._atomic_write(path, encode(definition).encode("utf-8"), maximum=MAX_RECORD_BYTES)
         return path
+
+    def write_pending(self, definition: ConceptDefinition) -> Path:
+        """写一份待生效的概念（同身份覆写）。不进概念集。"""
+
+        self._ensure_directory(self.pending_directory)
+        path = self._pending_path(definition.identity)
+        self._atomic_write(path, encode(definition).encode("utf-8"), maximum=MAX_RECORD_BYTES)
+        return path
+
+    def discard_pending(self, name: str) -> None:
+        """撤掉一份待生效的概念（已并入、或并不进去）。"""
+
+        self._discard(self._pending_path(self._identity(name)))
 
     def write_synced_version(self, version: int) -> None:
         """同步词表做完之后记下同步到的版本（最后一步：概念写完、迁移的日子重映射完才记）。"""
@@ -132,6 +152,20 @@ class ConceptStore(SceneStore):
             names.append(leaf)
         return tuple(sorted(names))
 
+    def pending(self) -> tuple[ConceptDefinition, ...]:
+        """待生效的概念，按身份排好；没有是空。"""
+
+        found: list[ConceptDefinition] = []
+        records, _noise = self._content_files(self.pending_directory)
+        for entry in sorted(records, key=lambda item: item.name):
+            if not entry.name.endswith(".md") or self._identity(entry.name[:-3]) != entry.name[:-3]:
+                raise ConceptStoreError(f"unexpected entry among the pending concepts: {entry.name!r}")
+            identity = entry.name[:-3]
+            payload = self._read_bytes(self._pending_path(identity), MAX_RECORD_BYTES)
+            if payload is not None:
+                found.append(self._decode(payload, identity))
+        return tuple(found)
+
     def read_all(self) -> ConceptSet:
         """整支读成一个自洽的概念集；情境盯的概念缺失在这里报出来。"""
 
@@ -142,6 +176,9 @@ class ConceptStore(SceneStore):
 
     def path_for(self, name: str) -> Path:
         return self._inside(Path(CONCEPTS_SEGMENT, f"{self._identity(name)}.md"))
+
+    def _pending_path(self, identity: str) -> Path:
+        return self._inside(Path(PENDING_SEGMENT, f"{identity}.md"))
 
     # ── 内部 ────────────────────────────────────────────────────────────────
 

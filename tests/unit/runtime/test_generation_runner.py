@@ -1,5 +1,5 @@
-"""换代 worker（实时化方案第 3、9、10 节）：换代租约下同一天只做一次、进程起来第一次拿到租约撤回剩下的重试项、定稿日不连续
-连着几眼就报卡住的那一天、每代一份报告、trace 里各步子 span 按先后挂在 ``generation.run`` 下、指标有每步耗时与各个退路的计数。"""
+"""换代的那一眼（实时化方案第 3、9、10 节；阶段 2 第二小步起不是常驻 worker，由预测 worker 每槽在预测根租约之内调）：同一把
+预测根租约下同一天只做一次、进程起来第一眼撤回剩下的重试项、定稿日不连续连着几眼就报卡住的那一天、每代一份报告、trace 里各步子 span 按先后挂在 ``generation.run`` 下、指标有每步耗时与各个退路的计数。"""
 
 from __future__ import annotations
 
@@ -8,10 +8,11 @@ from datetime import timedelta
 
 from habitus.foundation.observability import ObservationEvent
 from habitus.infrastructure.observability import MetricRegistry
+from habitus.runtime.generation_lease import Lease
 from habitus.runtime.generation_report import GenerationReports
 from habitus.runtime.generation_result import FALLBACKS, STEPS
+from habitus.runtime.generation_runner import GenerationRunner, GenerationSettings
 from habitus.runtime.generation_trace import GENERATION_SPAN, TraceFiles
-from habitus.runtime.generation_worker import GenerationSettings, GenerationWorker
 from habitus.scene.relations.store import RelationStore
 from tests.lock_store import ProcessLocalLockStore
 from tests.unit.runtime.test_generation import TODAY, StubRetry, wired
@@ -25,13 +26,10 @@ class Recorder:
         self.events.append(event)
 
 
-def worker_for(run, tmp_path, *, lock_store=None, observer=None, stuck_ticks=3):  # type: ignore[no-untyped-def]
+def worker_for(run, tmp_path, *, observer=None, stuck_ticks=3):  # type: ignore[no-untyped-def]
     root = tmp_path / "scene" / "generation"
-    return GenerationWorker(
+    return GenerationRunner(
         run,
-        lock_store=lock_store if lock_store is not None else ProcessLocalLockStore(),
-        lease_key="scene:generation:test",
-        shutdown_timeout_seconds=1.0,
         settings=GenerationSettings(stuck_ticks=stuck_ticks),
         reports=GenerationReports(root / "reports", artifact_root=tmp_path, relations=RelationStore(tmp_path / "scene")),
         traces=TraceFiles(root / "traces", artifact_root=tmp_path),
@@ -40,15 +38,20 @@ def worker_for(run, tmp_path, *, lock_store=None, observer=None, stuck_ticks=3):
 
 
 def test_two_workers_on_one_root_generate_the_day_once_and_clean_leftovers_once(tmp_path) -> None:
-    """E10：两个 worker 挂同一个根（共用租约库）：同一天只做一次；进程起来第一次拿到租约时撤回剩下的重试项，只撤一次。"""
+    """E10：两个进程挂同一个根（各一把预测根租约、共用租约库，像预测 worker 那样在租约之内看一眼）：同一天只做一次；
+    进程起来第一眼撤回剩下的重试项，只撤一次。"""
 
     order: list[str] = []
     run = wired(tmp_path, order)
     locks = ProcessLocalLockStore()
-    first, second = worker_for(run, tmp_path, lock_store=locks), worker_for(run, tmp_path, lock_store=locks)
+    first, second = worker_for(run, tmp_path), worker_for(run, tmp_path)
+
+    async def under_lease(runner):  # type: ignore[no-untyped-def]
+        async with Lease(locks, "foresight:root:test", ttl_seconds=30.0, heartbeat_seconds=5.0, poll_seconds=0.05).held():
+            return await runner.look()
 
     async def both():  # type: ignore[no-untyped-def]
-        return await asyncio.gather(first.look(), second.look())
+        return await asyncio.gather(under_lease(first), under_lease(second))
 
     results = asyncio.run(both())
     assert sum(result is not None for result in results) == 1 and order.count("机会表") == 1
@@ -147,16 +150,18 @@ def test_a_held_generation_does_not_back_off(tmp_path) -> None:
     from habitus.behavior.reduction import BehaviorReductionBusyError
 
     order: list[str] = []
-    run = wired(tmp_path, order)
+    migrating = [True]  # 修复轮 G1：有没做完的迁移时才去拿 sweep 锁
+    run = wired(tmp_path, order, vocabulary=lambda: (1, migrating[0]))
     busy = [True]
 
-    async def vocabulary(_night) -> None:  # type: ignore[no-untyped-def]
+    async def migrate() -> None:  # A1：换代里会碰 sweep 锁的只剩续做迁移（每晚新增归模型队列）
         if busy[0]:
             raise BehaviorReductionBusyError("sweep lock held")
+        migrating[0] = False
 
-    run.vocabulary_jobs = (vocabulary,)
+    run.migration_jobs = (migrate,)
     worker = worker_for(run, tmp_path)
     held = asyncio.run(worker.look())
-    assert held is not None and held.held == "vocabulary" and worker.retry_at is None and worker.last_error is None
+    assert held is not None and held.held == "migrate" and worker.retry_at is None and worker.last_error is None
     busy[0] = False
     assert asyncio.run(worker.look()) is not None and run.marks.finished(TODAY) is True  # 下一眼从头做、写成

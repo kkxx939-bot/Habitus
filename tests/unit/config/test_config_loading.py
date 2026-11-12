@@ -502,26 +502,25 @@ def test_foresight_carries_the_loss_ratios_and_protective_limits_and_needs_both_
 
 def test_the_generation_has_no_clock_time_only_operating_numbers() -> None:
     """换代在连续定稿到昨天、预测拍水位过了余量后做，不挂固定时刻（实时化方案第 3 节）：语义树那一段只留换代的运维数
-    （停机等多久、隔多久看一眼、留几天、两把租约的租期与续租、卡住几眼报出），越界硬拒；夜线的 ``nightly_*`` 与更早的
-    ``nightly_at`` 都是未知字段。"""
+    （留几天、三把锁共用的租期与续租、卡住几槽报出、必须成那一步的退避），越界硬拒；夜线的 ``nightly_*`` 与更早的
+    ``nightly_at`` 都是未知字段。换代并进预测 worker 之后没有独立的循环（阶段 2 第二小步，A2-11）：
+    ``generation_poll_seconds``、``generation_shutdown_timeout_seconds`` 也是未知字段，不留别名。"""
 
     from habitus.config.scene import SceneConfig
 
     config = SceneConfig()
     assert (
-        config.generation_shutdown_timeout_seconds,
-        config.generation_poll_seconds,
         config.generation_kept_days,
         config.generation_lease_ttl_seconds,
         config.generation_heartbeat_seconds,
         config.generation_stuck_ticks,
         config.generation_retry_base_seconds,
         config.generation_retry_max_seconds,
-    ) == (30.0, 300.0, 366, 120.0, 30.0, 3, 300.0, 3600.0)
+    ) == (366, 120.0, 30.0, 3, 300.0, 3600.0)
+    for removed in ("generation_poll_seconds", "generation_shutdown_timeout_seconds"):
+        with pytest.raises(ConfigError, match=removed):
+            SceneConfig.from_mapping({removed: 30.0})
     for field_name, bad in (
-        ("generation_shutdown_timeout_seconds", 0.5),
-        ("generation_shutdown_timeout_seconds", "30"),
-        ("generation_poll_seconds", 0.5),
         ("generation_kept_days", 0),
         ("generation_lease_ttl_seconds", 1.0),
         ("generation_stuck_ticks", 0),
@@ -536,6 +535,56 @@ def test_the_generation_has_no_clock_time_only_operating_numbers() -> None:
     for retired in ("nightly_at", "nightly_poll_seconds", "nightly_kept_nights"):
         with pytest.raises(ConfigError, match=retired):
             SceneConfig.from_mapping({retired: 1})
+
+
+def test_b_10_the_mapping_margin_is_in_the_example_and_bad_values_are_refused() -> None:
+    """映射按槽（实时化阶段 2 第三小步，B-10）：一条记录所在的槽过后再留几槽就映射是配置 ``scene.mapping_margin_slots``，
+    默认 2、可以是 0；示例 YAML 里列着；负数、越界、小数、文本、布尔都硬拒。"""
+
+    from habitus.config.scene import SceneConfig
+
+    assert SceneConfig().mapping_margin_slots == 2
+    assert SceneConfig.from_mapping({"mapping_margin_slots": 0}).mapping_margin_slots == 0
+    example = (Path(__file__).resolve().parents[3] / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8")
+    assert "#   mapping_margin_slots: 2 " in example
+    for bad in (-1, 97, 1.5, "2", True):
+        with pytest.raises(ConfigError, match="scene.mapping_margin_slots"):
+            SceneConfig.from_mapping({"mapping_margin_slots": bad})
+
+
+def test_the_model_queue_operating_numbers_are_validated_and_listed_in_the_example() -> None:
+    """实时化阶段 2（A1）：模型队列的运维数（隔多久看一眼、整体退避的起点与封顶、停机等多久、欠账报出的两个阈值）住语义树
+    那一段，越界、类型不对、未知字段都硬拒；示例 YAML 里逐项列出。"""
+
+    from habitus.config.scene import SceneConfig
+
+    config = SceneConfig()
+    defaults = {
+        "model_queue_poll_seconds": 60.0,
+        "model_queue_backoff_base_seconds": 60.0,
+        "model_queue_backoff_max_seconds": 3600.0,
+        "model_queue_shutdown_timeout_seconds": 30.0,
+        "model_queue_backlog_warning_items": 50,
+        "model_queue_backlog_warning_seconds": 21600.0,
+    }
+    assert {name: getattr(config, name) for name in defaults} == defaults
+    example = (Path(__file__).resolve().parents[3] / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8")
+    assert all(f"#   {name}: " in example for name in defaults)
+    for field_name, bad in (
+        ("model_queue_poll_seconds", 0.5),
+        ("model_queue_poll_seconds", "60"),
+        ("model_queue_backoff_base_seconds", 0.5),
+        ("model_queue_backoff_base_seconds", 7200.0),  # 起点不能超过封顶
+        ("model_queue_backoff_max_seconds", 100_000.0),
+        ("model_queue_shutdown_timeout_seconds", 0.5),
+        ("model_queue_backlog_warning_items", 0),
+        ("model_queue_backlog_warning_items", 1.5),
+        ("model_queue_backlog_warning_seconds", 30.0),
+    ):
+        with pytest.raises(ConfigError, match="scene.model_queue_"):
+            SceneConfig.from_mapping({field_name: bad})
+    with pytest.raises(ConfigError, match="model_queue_backoff_seconds"):
+        SceneConfig.from_mapping({"model_queue_backoff_seconds": 60.0})  # 未知字段
 
 
 def test_a_tick_is_one_slot(tmp_path) -> None:

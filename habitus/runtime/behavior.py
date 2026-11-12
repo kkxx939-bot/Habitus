@@ -489,8 +489,8 @@ def _build_branch(
 
 
 def retry_stage_of(branches: Iterable[BehaviorRuntimeComponents]) -> RetryStage | None:
-    """换代里重试收尾那一步（裁定 67、68）：各支有重试堆的接进来——会话一支的会话轮交给会话 lane，两支的链交给各自的
-    归约；一支都没有就是 None。"""
+    """重试堆的编排（裁定 67、68；模型队列就近试、换代的重试收尾丢弃，共用这一份）：各支有重试堆的接进来——会话一支的
+    会话轮交给会话 lane，两支的链交给各自的归约；一支都没有就是 None。"""
 
     found: list[RetryBranch] = []
     for branch in branches:
@@ -511,13 +511,13 @@ def rereader_of(branch: BehaviorRuntimeComponents) -> Callable[[datetime, dateti
     return Rereader(branch.retry_backlog, TurnHandler(branch.fusion)).reread
 
 
-#: 重试段的归约碰到它就是模型整个用不了（与换代同一口径，``runtime.generation``）。
+#: 重试段的归约碰到它就是模型用不了（与模型队列同一口径，``runtime.generation_result``）。
 _UNREACHABLE: tuple[type[BaseException], ...] = (ModelUnreachable, *MODEL_UNUSABLE)
 
 
 def _reduce(branch: BehaviorRuntimeComponents) -> Callable[[], Awaitable[Reduction]]:
-    """重试段里这一支的那一次归约（裁定 94 第 9 条）：锁被另一进程拿着 = 还没准备好（``BUSY``，这一代跳过结算）；
-    归类时模型整个用不了 = ``UNREACHABLE``（同样跳过结算）；别的异常是 bug，原样抛给换代报出、跳过结算。"""
+    """就近重试里这一支的那一次归约（裁定 94 第 9 条）：锁被另一进程拿着 = ``BUSY``（写回的项留着等下一次）；归类时模型
+    用不了 = ``UNREACHABLE``（抛的、或归约自己吞了只在报告里记的；没补回的项留着等下一次）；别的异常是 bug，原样抛出。"""
 
     async def reduce() -> Reduction:
         try:

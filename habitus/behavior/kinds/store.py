@@ -47,6 +47,9 @@ CHANGES_FILENAME = "kinds.changes.jsonl"
 PENDING_FILENAME = "kinds.pending.json"
 MIGRATION_FILENAME = "kinds.migration.json"
 JOBS_FILENAME = "kinds.jobs.json"
+#: 待生效的拆改：计划连同拆改状态（实时化阶段 2「生效时点」）。它不是迁移计划——``read_migration`` 不认它，预测拍与结算
+#: 不会因为它当成"迁移中"；下一次换代最前那一步才把它交给迁移器。
+REVISION_FILENAME = "kinds.revision.json"
 
 
 # 变更日志的追加（归约 sweep）、截断（生命周期）、写迁移计划都是"读整份、改、整份写回"，分在不同线程里：同一份日志
@@ -88,6 +91,7 @@ class BehaviorKindStore:
         self.pending_path = self.root / PENDING_FILENAME
         self.migration_path = self.root / MIGRATION_FILENAME
         self.jobs_path = self.root / JOBS_FILENAME
+        self.revision_path = self.root / REVISION_FILENAME
         self._journal_lock = _journal_lock(self.changes_path)
         self.journal = VocabularyJournal(
             self.changes_path, self.root / SNAPSHOT_FILENAME, read_text=self._read_text, write_text=self._write
@@ -221,6 +225,44 @@ class BehaviorKindStore:
         except DurablePathIntegrityError as exc:
             raise BehaviorKindStoreError("migration plan cannot be removed safely") from exc
 
+    # ── 待生效的拆改 ─────────────────────────────────────────────────────────────
+
+    def read_revision(self) -> tuple[VersionRecord, JobState] | None:
+        """待生效的拆改（计划, 拆改之后的状态）；没有是 None。"""
+
+        text = self._read_text(self.revision_path)
+        if text is None:
+            return None
+        try:
+            payload = json.loads(text)
+            return record_from(payload["record"]), job_state_from(payload["state"])
+        except (json.JSONDecodeError, KeyError, TypeError, BehaviorKindCodecError) as exc:
+            raise BehaviorKindStoreError(f"pending revision is invalid: {exc}") from exc
+
+    def write_revision(self, record: VersionRecord, state: JobState) -> None:
+        """拆改出了计划：连同拆改状态存成待生效。计划必须是对着现在这一版词表出的下一版、应用得上。"""
+
+        current = self.read()
+        if record.version != current.version + 1:
+            raise BehaviorKindConflictError("a pending revision must be the next version")
+        try:
+            apply(current, record)
+        except BehaviorKindError as exc:
+            raise BehaviorKindStoreError(f"pending revision does not apply: {exc}") from exc
+        payload = json.dumps(
+            {"record": record_payload(record), "state": job_state_payload(state)},
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=1,
+        )
+        self._write(self.revision_path, payload + "\n")
+
+    def clear_revision(self) -> None:
+        try:
+            durable_unlink(self.revision_path, artifact_root=self.root)
+        except DurablePathIntegrityError as exc:
+            raise BehaviorKindStoreError("pending revision cannot be removed safely") from exc
+
     # ── 拆改状态 ─────────────────────────────────────────────────────────────────
 
     def read_jobs(self) -> JobState:
@@ -266,6 +308,7 @@ __all__ = [
     "MIGRATION_FILENAME",
     "JOBS_FILENAME",
     "PENDING_FILENAME",
+    "REVISION_FILENAME",
     "BehaviorKindConflictError",
     "BehaviorKindJournalFullError",
     "BehaviorKindStore",

@@ -1,6 +1,10 @@
 """换代（实时化方案第 3 节，阶段 1）：取代夜线的五段 Job。迁自 ``test_nightly.py`` / ``test_nightly_line.py`` 里仍须成立的不变式
 （先后、只读一次序列、词表迁移中不读、结算在语义树之前、重试 → 结算、本地日、同一棵树），加上换代自己的：触发要连续定稿到
-昨天与预测拍水位过了余量、必须成 / 尽力而为、各个退路的计数、完成标记的三值。"""
+昨天与预测拍水位过了余量、必须成 / 尽力而为、各个退路的计数、完成标记的三值。
+
+实时化阶段 2（A1）起换代里没有模型调用：探模型、词表的每晚新增与定期拆改、语义树里调模型的那几段归模型队列
+（``test_model_queue.py``），重试收尾只丢弃不试，关系沿用上一代的条件来自"模型队列是不是在整体退避"。这里原来守着
+"换代里调模型"的那几条按新行为改了（各条的文档串里写了改了什么）。"""
 
 from __future__ import annotations
 
@@ -13,7 +17,7 @@ import pytest
 
 from habitus.behavior.reduction import BehaviorReductionBusyError
 from habitus.behavior.retry import RetryReport
-from habitus.model_client import ModelQuotaError, ModelUnreachable
+from habitus.model_client import ModelUnreachable
 from habitus.runtime.foresight_days import DayReport
 from habitus.runtime.foresight_forming import Formed
 from habitus.runtime.foresight_nightly import LaneOpportunitySummary, OpportunityReport
@@ -28,25 +32,23 @@ from habitus.runtime.generation_result import (
     FALLBACK_CALENDAR,
     FALLBACK_RELATIONS,
     FALLBACK_SETTLEMENT,
-    FALLBACK_VOCABULARY,
+    FALLBACK_UNMAPPED,
     HELD,
     MARK,
     MIGRATE,
     MIGRATING,
     NO_RECORDS,
     OPPORTUNITIES,
-    PROBE,
     RETRY,
     SCENE,
     SERIES,
     SETTLE,
     SKIPPED,
-    VOCABULARY,
     VOCABULARY_MOVED,
     GenerationResult,
 )
 from habitus.runtime.generation_watermark import TickWatermark
-from tests.unit.runtime.test_scene_night import NOW, TONIGHT, nightly, publish_tonight, site_with_three_bedtimes
+from tests.unit.runtime.test_scene_night import NOW, nightly, publish_tonight, site_with_three_bedtimes
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 TODAY = NOW.astimezone(SHANGHAI).date()
@@ -95,7 +97,8 @@ def generate(run: Generation, day: date | None = None) -> GenerationResult:
 
 
 class StubRetry:
-    """重试收尾的替身：按顺序交出 ``reports``（最后一份之后重复它）；``order`` 记每次调到的 ``through``。"""
+    """重试收尾的替身：按顺序交出 ``reports``（最后一份之后重复它）；``order`` 记每次调到的 ``through``。A1 起换代调的是
+    不试的 ``close``（同步、不调模型），不再是 ``run_once``。"""
 
     branches = ()
 
@@ -109,7 +112,7 @@ class StubRetry:
         self.cleaned += 1
         return 0
 
-    async def run_once(self, *, through):  # type: ignore[no-untyped-def]
+    def close(self, *, through):  # type: ignore[no-untyped-def]
         report = self.reports[0] if len(self.reports) == 1 else self.reports.pop(0)
         if isinstance(report, BaseException):
             raise report
@@ -141,9 +144,6 @@ def wired(tmp_path, order: list[str], *, retried=None, **options):  # type: igno
     site, run = assembled(tmp_path, **options)
     publish_tonight(site)
 
-    async def probe() -> None:
-        order.append("探模型")
-
     class Foresight:
         def run(self, *, night, **_materials):  # type: ignore[no-untyped-def]
             order.append("机会表")
@@ -154,30 +154,26 @@ def wired(tmp_path, order: list[str], *, retried=None, **options):  # type: igno
             order.append("日子")
             return DayReport(datetime.now().astimezone(), Formed())
 
-    async def vocabulary(night) -> None:  # type: ignore[no-untyped-def]
-        order.append("词表")
-
     async def migrate() -> None:
         order.append("迁移")
 
-    scene_run = run.scene.run
+    scene_run = run.scene.generate
 
     async def scene_then(**kwargs):  # type: ignore[no-untyped-def]
         order.append("语义树")
         return await scene_run(**kwargs)
 
-    run.scene.run = scene_then  # type: ignore[method-assign]
-    run.probe = probe
+    run.scene.generate = scene_then  # type: ignore[method-assign]
     run.retry = StubRetry(*(() if retried is None else (retried,)), order=order)  # type: ignore[assignment]
     run.settlement = StubSettlement(order)  # type: ignore[assignment]
     run.foresight = Foresight()  # type: ignore[assignment]
     run.days = Days()  # type: ignore[assignment]
-    run.vocabulary_jobs = (vocabulary,)
     run.migration_jobs = (migrate,)
     return run
 
 
-ALL = ["探模型", "迁移", "重试", "结算", "词表", "语义树", "机会表", "日子"]
+#: A1：探模型、词表两步不在换代里了；修复轮 G1：没有没做完的词表迁移时，续做迁移那一步不调迁移（不去拿 sweep 锁）。
+ALL = ["重试", "结算", "语义树", "机会表", "日子"]
 
 
 def outcomes(result: GenerationResult) -> dict[str, str]:
@@ -190,12 +186,10 @@ def test_a_generation_runs_its_steps_in_the_ruled_order_and_writes_its_mark(tmp_
     result = generate(run)
     assert order == ALL
     assert [item.step for item in result.steps] == [
-        PROBE,
         MIGRATE,
         CALENDAR,
         RETRY,
         SETTLE,
-        VOCABULARY,
         SERIES,
         SCENE,
         OPPORTUNITIES,
@@ -224,7 +218,8 @@ def test_one_read_feeds_the_semantic_layer_and_is_done_off_the_event_loop(tmp_pa
     assert reads == [TODAY] and threads == [False]
     scene = result.step(SCENE)
     assert scene is not None and scene.outcome == DONE
-    assert TONIGHT.isoformat() in scene.report["mapped_days"]  # type: ignore[operator]
+    # A1：换代不映射（映射归模型队列）——今晚封口的那天还没盖章，它的两条记录计入"换代时还没映射的记录"
+    assert "mapped_days" not in scene.report and result.fallbacks[FALLBACK_UNMAPPED] == 2
 
 
 def test_nothing_to_build_on_an_empty_tree_still_writes_the_mark(tmp_path) -> None:
@@ -315,7 +310,7 @@ def test_the_calendar_is_refreshed_first_and_a_failing_refresh_is_a_fallback(tmp
     run = wired(tmp_path, order)
     run.refresh_calendar = lambda: order.append("日历")
     generate(run)
-    assert order[:4] == ["探模型", "迁移", "日历", "重试"]
+    assert order[:2] == ["日历", "重试"]
 
     def broken() -> None:
         raise TypeError("unhashable type: 'list'")
@@ -329,22 +324,27 @@ def test_the_calendar_is_refreshed_first_and_a_failing_refresh_is_a_fallback(tmp
 
 
 def test_the_retry_runs_before_the_settlement_and_an_unfinished_retry_skips_the_settlement(tmp_path) -> None:
-    """裁定 68 第 3 条：重试收尾处理昨天及更早的，结算在它之后；重试没完成（模型调不通、抛了）这一代跳过结算、记"结算留到
-    下次"，其余照做（用户 11-10）。锁被占另见 ``test_a_busy_lock_is_not_ready_and_writes_no_mark``。"""
+    """裁定 68 第 3 条：重试收尾处理昨天及更早的，结算在它之后；重试收尾没完成（抛了）这一代跳过结算、记"结算留到下次"，
+    其余照做（用户 11-10）。A1：重试收尾不试、不调模型，报告里的 ``unavailable`` 是"到封口还没补回、丢弃了"的项数——不再是
+    "模型调不通"，不跳过结算。"""
 
     order: list[str] = []
     run = wired(tmp_path, order)
     run.retry = StubRetry(RetryReport(taken=1, recovered=1), order=order, label="重试到 {through}")  # type: ignore[assignment]
     generate(run)
-    assert order[2:4] == [f"重试到 {TODAY - timedelta(days=1)}", "结算"]
-    for retried in (RetryReport(taken=2, unavailable=1), OSError("disk")):
-        order.clear()
-        run = wired(tmp_path / type(retried).__name__ / str(id(retried)), order)
-        run.retry = StubRetry(retried, order=order)  # type: ignore[assignment]
-        result = generate(run)
-        assert "结算" not in order and result.complete
-        assert outcomes(result)[RETRY] == DEGRADED and outcomes(result)[SETTLE] == SKIPPED
-        assert result.fallbacks[FALLBACK_SETTLEMENT] == 1
+    assert order[:2] == [f"重试到 {TODAY - timedelta(days=1)}", "结算"]
+    order.clear()
+    run = wired(tmp_path / "dropped", order)
+    run.retry = StubRetry(RetryReport(taken=2, unavailable=1), order=order)  # type: ignore[assignment]
+    result = generate(run)
+    assert "结算" in order and outcomes(result)[RETRY] == DONE and result.fallbacks[FALLBACK_SETTLEMENT] == 0
+    order.clear()
+    run = wired(tmp_path / "broken", order)
+    run.retry = StubRetry(OSError("disk"), order=order)  # type: ignore[assignment]
+    result = generate(run)
+    assert "结算" not in order and result.complete
+    assert outcomes(result)[RETRY] == DEGRADED and outcomes(result)[SETTLE] == SKIPPED
+    assert result.fallbacks[FALLBACK_SETTLEMENT] == 1
 
 
 def test_a_failing_settlement_is_left_to_the_next_generation(tmp_path) -> None:
@@ -356,27 +356,43 @@ def test_a_failing_settlement_is_left_to_the_next_generation(tmp_path) -> None:
     assert result.complete and order == ALL
 
 
-def test_vocabulary_and_model_failures_do_not_stop_the_generation(tmp_path) -> None:
-    """模型调不通不停一天（实时化方案第 2 节）：探模型、每晚新增词表都是尽力而为——报出、计数、接着做（锁被占另见下面那条）。"""
+def test_a_generation_makes_no_model_call_and_completes_while_the_model_throws(tmp_path) -> None:
+    """A1（实时化方案第 4 节"换代里没有模型调用"）：模型客户端一调就抛，这一代照样写成——机会表、日子预期、完成标记都写出，
+    而且一次都没调到模型（把换代里任一处模型调用放回去，``attempts`` 就不是 0）。取代原来的"探模型、每晚新增词表失败不停
+    这一代"：那两步不在换代里了。"""
 
-    for failure in (ModelQuotaError("quota"), KeyError("bug")):
-        order: list[str] = []
-        run = wired(tmp_path / type(failure).__name__, order)
+    order: list[str] = []
+    site, hits = site_with_three_bedtimes(tmp_path)
+    scene, provider = nightly(tmp_path, hits, site)
+    attempts: list[str] = []
 
-        async def broken(_night, failure=failure, order=order) -> None:  # type: ignore[no-untyped-def]
-            order.append("词表")
-            raise failure
+    async def exploding(request):  # type: ignore[no-untyped-def]
+        attempts.append("call")
+        raise RuntimeError("the model must not be called inside a generation")
 
-        async def down(order=order) -> None:  # type: ignore[no-untyped-def]
-            order.append("探模型")
-            raise ModelUnreachable("MODEL_TRANSPORT")
+    provider.complete_async = exploding  # type: ignore[method-assign]
+    publish_tonight(site)
+    run = assembled_with(tmp_path, site, scene, models_down=lambda: False, queue_owed=lambda: {"mapping": 1})
 
-        run.vocabulary_jobs = (broken,)
-        run.probe = down
-        result = generate(run)
-        assert order == ALL and result.complete
-        assert outcomes(result)[VOCABULARY] == DEGRADED and outcomes(result)[PROBE] == DEGRADED
-        assert result.fallbacks[FALLBACK_VOCABULARY] == 1
+    class Foresight:
+        def run(self, *, night, **_materials):  # type: ignore[no-untyped-def]
+            order.append("机会表")
+            return OpportunityReport(night)
+
+    class Days:
+        async def run_once(self):  # type: ignore[no-untyped-def]
+            order.append("日子")
+            return DayReport(datetime.now().astimezone(), Formed())
+
+    run.retry = StubRetry(order=order)  # type: ignore[assignment]
+    run.settlement = StubSettlement(order)  # type: ignore[assignment]
+    run.foresight = Foresight()  # type: ignore[assignment]
+    run.days = Days()  # type: ignore[assignment]
+    result = generate(run)
+    assert result.complete and run.marks.finished(TODAY) is True and attempts == []
+    assert order == ["重试", "结算", "机会表", "日子"]
+    assert outcomes(result)[SCENE] == DONE and run.scene.relations.nights("session") == (TODAY,)
+    assert result.queue_owed == {"mapping": 1}  # 换代时模型队列各类还欠着几项记进结果
 
 
 def test_an_unwritten_opportunity_table_or_day_expectation_means_no_generation_today(tmp_path) -> None:
@@ -407,7 +423,7 @@ def test_an_unwritten_opportunity_table_or_day_expectation_means_no_generation_t
 
 
 def test_a_scene_step_failing_falls_back_and_the_table_is_still_written(tmp_path) -> None:
-    """E3 / E4：语义树里调模型的那几步抛了（关系判定、映射、模型整个调不通）——走退路，机会表照样拿到时间线写出来。"""
+    """E3 / E4：语义树那一步里抛了（关系判定）——走退路，机会表照样拿到时间线写出来。"""
 
     order: list[str] = []
     run = wired(tmp_path, order)
@@ -442,32 +458,33 @@ def test_completion_marks_answer_finished_in_three_values_and_refuse_a_corrupt_m
 
 
 def test_a_busy_lock_is_not_ready_and_writes_no_mark(tmp_path) -> None:
-    """F2（用户 11-10 失败重试第 1 条）：续做迁移、重试收尾、每晚新增碰到锁被另一进程拿着，是还没准备好——这一眼到此为止、
-    不写完成标记、不算失败（``held``），下一眼从头做；不再"跳过结算 / 跳过新增照常写完这一代"。"""
+    """F2（用户 11-10 失败重试第 1 条）：续做迁移碰到锁被另一进程拿着，是还没准备好——这一眼到此为止、不写完成标记、不算失败
+    （``held``），下一眼从头做。A1：重试收尾不跑归约、每晚新增不在换代里，换代里会碰锁的只剩续做迁移这一步。
 
-    busy = BehaviorReductionBusyError("sweep lock held")
+    修复轮 G1：只有真有没做完的迁移时才去拿 sweep 锁。没有时这一步直接算做完——模型队列的词表一项等模型时整段持着这把锁，
+    换代不为一个空操作等它，这一代照常写成。"""
 
     async def locked(*_args) -> None:  # type: ignore[no-untyped-def]
-        raise busy
+        raise BehaviorReductionBusyError("sweep lock held")
 
-    for where in ("migrate", "retry", "vocabulary"):
-        order: list[str] = []
-        run = wired(tmp_path / where, order)
-        if where == "migrate":
-            run.migration_jobs = (locked,)
-        elif where == "retry":
-            run.retry = StubRetry(RetryReport(taken=1, waiting=("session",)), order=order)  # type: ignore[assignment]
-        else:
-            run.vocabulary_jobs = (locked,)
-        result = generate(run)
-        assert result.held == where and result.failed is None and not result.complete, where
-        assert outcomes(result)[where] == HELD and MARK not in outcomes(result)
-        assert run.marks.finished(TODAY) is None and "机会表" not in order
-        assert result.fallbacks[FALLBACK_SETTLEMENT] == 0
+    order: list[str] = []
+    run = wired(tmp_path, order, vocabulary=lambda: (1, True))
+    run.migration_jobs = (locked,)
+    result = generate(run)
+    assert result.held == MIGRATE and result.failed is None and not result.complete
+    assert outcomes(result)[MIGRATE] == HELD and MARK not in outcomes(result)
+    assert run.marks.finished(TODAY) is None and "机会表" not in order
+    assert result.fallbacks[FALLBACK_SETTLEMENT] == 0
+
+    order = []
+    run = wired(tmp_path / "idle", order)  # 没有没做完的迁移：sweep 锁被谁拿着都不影响
+    run.migration_jobs = (locked,)
+    result = generate(run)
+    assert result.complete and result.held is None and outcomes(result)[MIGRATE] == DONE and order == ALL
 
 
 def test_the_migration_is_resumed_first_and_a_migration_left_unfinished_defers_the_settlement_loudly(tmp_path) -> None:
-    """F1：续做没做完的词表迁移排在最前（探模型之后、重读放假数据与结算之前）；续完了照常结算。续不完（迁移还挂着）时结算
+    """F1：续做没做完的词表迁移排在最前（重读放假数据与结算之前）；续完了照常结算。续不完（迁移还挂着）时结算
     跳过，计入"结算留到下次"并报出（``degraded``），读序列那一步再挡下这一代——不再静默跳过。"""
 
     order: list[str] = []
@@ -480,7 +497,7 @@ def test_the_migration_is_resumed_first_and_a_migration_left_unfinished_defers_t
 
     run.migration_jobs = (migrate,)
     result = generate(run)
-    assert order[:2] == ["探模型", "迁移"] and "结算" in order and result.complete
+    assert order[:1] == ["迁移"] and "结算" in order and result.complete
 
     order.clear()
     run = wired(tmp_path / "stuck", order, vocabulary=lambda: (1, True))
@@ -524,10 +541,10 @@ def test_a_corrupt_mark_is_reported_not_taken_for_done(tmp_path) -> None:
 # ── 第二轮修复（06-第二轮修复清单 G1）────────────────────────────────────
 
 
-def test_an_unreachable_model_holds_the_relations_to_the_previous_generation(tmp_path) -> None:
-    """G1（实时化方案第 2 节"模型调不通 → 关系沿用上一次判定的"）：这一代里探模型探到调不通、或前面哪一步因模型整个调不通
-    没做成，B4 这一代即使不必问模型也不判——不写这一代的关系表（同一代不重写，判出来就一直留着），时间线照算、机会表退到
-    上一代关系表，计入 ``relations_previous`` 并报出原因，日子预期照建。别的原因的失败照判。"""
+def test_a_backing_off_model_queue_holds_the_relations_to_the_previous_generation(tmp_path) -> None:
+    """G1（实时化方案第 2 节"模型调不通 → 关系沿用上一次判定的"，裁定 96）：A1 起换代自己看不到模型通不通——换代那一刻同一
+    进程的模型队列正在整体退避，这一代不判关系：不写这一代的关系表（同一代不重写，判出来就一直留着），时间线照算、机会表退到
+    上一代关系表，计入 ``relations_previous`` 并报出原因，日子预期照建。队列没在退避（模型只是慢）照判。"""
 
     def with_table_night(run, order):  # type: ignore[no-untyped-def]
         relations = run.scene.relations
@@ -540,37 +557,15 @@ def test_an_unreachable_model_holds_the_relations_to_the_previous_generation(tmp
 
         run.foresight = Foresight()  # type: ignore[assignment]
 
-    async def down() -> None:
-        raise ModelUnreachable("MODEL_TRANSPORT")
-
-    async def vocabulary_down(_night) -> None:  # type: ignore[no-untyped-def]
-        raise ModelUnreachable("MODEL_TRANSPORT")
-
-    async def vocabulary_bug(_night) -> None:  # type: ignore[no-untyped-def]
-        raise KeyError("bug")
-
-    cases = {
-        "ok": (None, None),
-        "probe": (down, None),
-        "vocabulary": (None, vocabulary_down),
-        "retry": (None, None),
-        "bug": (None, vocabulary_bug),
-    }
-    for name, (probe, vocabulary) in cases.items():
+    for name, down in (("ok", False), ("down", True)):
         order: list[str] = []
-        run = wired(tmp_path / name, order)
-        if name == "retry":  # 重试收尾碰到模型整个用不了
-            run.retry = StubRetry(RetryReport(taken=1, unavailable=1), order=order)  # type: ignore[assignment]
+        run = wired(tmp_path / name, order, models_down=lambda down=down: down)
         with_table_night(run, order)
-        if probe is not None:
-            run.probe = probe
-        if vocabulary is not None:
-            run.vocabulary_jobs = (vocabulary,)
         result = generate(run)
         assert result.complete and order[-2:] == ["机会表", "日子"], name
         scene = result.step(SCENE)
         assert scene is not None
-        if name in ("ok", "bug"):
+        if not down:
             assert run.scene.relations.nights("session") == (TODAY,), name
             assert result.fallbacks[FALLBACK_RELATIONS] == 0 and scene.report["relations_held"] == "", name
             continue
@@ -581,20 +576,3 @@ def test_an_unreachable_model_holds_the_relations_to_the_previous_generation(tmp
         assert any("关系沿用上一代" in item for item in result.problems), name
 
 
-def test_a_scene_step_unreachable_before_b4_holds_the_relations(tmp_path) -> None:
-    """G1：语义树里 B4 之前的一步（写概念、映射）因模型整个调不通没做成，B4 同样不判；别的异常照判。"""
-
-    for name, failure in (("down", ModelUnreachable("MODEL_TRANSPORT")), ("bug", KeyError("bug"))):
-        order: list[str] = []
-        run = wired(tmp_path / name, order)
-        mapping = run.scene.mapping
-
-        async def broken(*_args, failure=failure, **_kwargs):  # type: ignore[no-untyped-def]
-            raise failure
-
-        mapping.map_backlog = broken  # type: ignore[method-assign]
-        result = generate(run)
-        assert result.complete, name
-        held = name == "down"
-        assert (run.scene.relations.nights("session") == ()) is held, name
-        assert ("关系沿用上一代" in str(result.step(SCENE).reason)) is held, name  # type: ignore[union-attr]

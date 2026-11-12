@@ -15,7 +15,7 @@ from habitus.runtime.foresight_forming import Formed
 from habitus.runtime.generation_marks import GenerationMark
 from habitus.runtime.health import _generation_state_checks
 from tests.unit.runtime.test_generation import NOW, TODAY, wired
-from tests.unit.runtime.test_generation_worker import worker_for
+from tests.unit.runtime.test_generation_runner import worker_for
 
 LONDON = ZoneInfo("Europe/London")
 

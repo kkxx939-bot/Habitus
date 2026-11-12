@@ -4,7 +4,8 @@
 - ``TraceFiles.sink(day)`` 给 ``foundation.tracing.open_trace`` 用：活的 span 开始时进 OTel 的当前 span（子 span、模型调用都
   挂在它下面），结束时把属性一并挂上、写一行本地文件。
 - ``ModelCallTracer`` 是一个观测后端：调用链上有 span 时，每一次模型调用（``model`` 类事件）补一个 ``model.call`` 子 span，挂在
-  发起它的段或子步下面，并把调用次数按（触点, 后端, 模型）累计到各级父 span 上；同时按（段, 触点）记一条指标事件。
+  发起它的段或子步下面，并把调用次数按（触点, 后端, 模型）累计到各级父 span 上（没成的另计
+  ``model_calls_failed``）；同时按（换代的那一步, 触点）或（模型队列的那一类, 触点）记一条指标事件。
 """
 
 from __future__ import annotations
@@ -33,6 +34,8 @@ _MAX_FILES = 4_096
 STEP_SPAN_PREFIX = "generation."
 #: 换代那一个父 span（各步的子 span 挂在它下面）。
 GENERATION_SPAN = "generation.run"
+#: 模型队列一项的 span（``runtime.model_queue.ITEM_SPAN``；类别在属性 ``category`` 上）。
+QUEUE_ITEM_SPAN = "model_queue.item"
 
 
 class SpanBackend(Protocol):
@@ -204,6 +207,15 @@ class ModelCallTracer:
         chain = ancestors()
         for item in chain:
             item.count_model_call(touch, provider, model)
+            if failed:
+                _bump(item, "model_calls_failed")  # 没成的调用数（不分种类：超时、连不上、额度、答得不合格……）
+        if self.metrics is not None:
+            self._count(chain, event.status, touch)
+
+    def _count(self, chain: tuple[SpanRecord, ...], status: ObservationStatus, touch: str) -> None:
+        """按（换代的那一步, 触点）或（模型队列的那一类, 触点）记一条指标事件。"""
+
+        assert self.metrics is not None
         step = next(
             (
                 item.name.removeprefix(STEP_SPAN_PREFIX)
@@ -212,10 +224,22 @@ class ModelCallTracer:
             ),
             None,
         )
-        if self.metrics is not None and step is not None:
+        if step is not None:
             record_observation(
-                self.metrics, "generation", "model_call", event.status, attributes={"step": step, "touch": touch}
+                self.metrics, "generation", "model_call", status, attributes={"step": step, "touch": touch}
             )
+        category = next(
+            (str(item.attributes.get("category") or "") for item in reversed(chain) if item.name == QUEUE_ITEM_SPAN),
+            None,
+        )
+        if category:
+            attributes: dict[str, str | int | float | bool] = {"category": category, "touch": touch}
+            record_observation(self.metrics, "model_queue", "model_call", status, attributes=attributes)
+
+
+def _bump(record: SpanRecord, name: str) -> None:
+    value = record.attributes.get(name, 0)
+    record.attributes[name] = (value if isinstance(value, int) else 0) + 1
 
 
 def prune_dated(directory: Path, artifact_root: Path, floor: date, *, suffix: str) -> int:
@@ -234,4 +258,12 @@ def prune_dated(directory: Path, artifact_root: Path, floor: date, *, suffix: st
     return removed
 
 
-__all__ = ["GENERATION_SPAN", "STEP_SPAN_PREFIX", "ModelCallTracer", "SpanBackend", "TraceFiles", "prune_dated"]
+__all__ = [
+    "GENERATION_SPAN",
+    "QUEUE_ITEM_SPAN",
+    "STEP_SPAN_PREFIX",
+    "ModelCallTracer",
+    "SpanBackend",
+    "TraceFiles",
+    "prune_dated",
+]

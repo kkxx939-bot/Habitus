@@ -86,6 +86,31 @@ def plan_sync(
     return SyncPlan(version=changes.version, write=accepted, moved=changes.moved, rejected=rejected)
 
 
+def prospective(
+    existing: ConceptSet, written: Iterable[ConceptDefinition], pending: Iterable[ConceptDefinition]
+) -> tuple[ConceptSet, tuple[tuple[ConceptDefinition, str], ...]]:
+    """下一次换代之后概念集会是什么样（实时化阶段 2「生效时点」）：现在的概念集 + 同步词表将要写的（``SyncPlan.write``：新类的
+    基础概念、改名改判据、停用）+ 待生效的概念。写概念与补问先验对着它做——概念进概念集的那一代，先验已经备好。
+
+    待生效的概念按身份的先后一份一份加：与同步之后的概念集撞了身份、或加进去不自洽的那份不加，连同理由返回（换代并入时
+    同一个核法，``SceneNightlyRun.merge_pending``）。概念按身份排好，与整支读出来的先后相同。"""
+
+    merged = dict(existing.items())
+    merged.update((item.identity, item) for item in written)
+    refused: list[tuple[ConceptDefinition, str]] = []
+    for item in sorted(pending, key=lambda definition: definition.identity):
+        if item.identity in merged:
+            refused.append((item, "a concept of this name is already in the set"))
+            continue
+        try:
+            ConceptSet((*merged.values(), item))
+        except ConceptError as exc:
+            refused.append((item, str(exc)))
+        else:
+            merged[item.identity] = item
+    return ConceptSet(merged[identity] for identity in sorted(merged)), tuple(refused)
+
+
 def _consistent(
     existing: ConceptSet, write: tuple[ConceptDefinition, ...]
 ) -> tuple[tuple[ConceptDefinition, ...], tuple[tuple[ConceptDefinition, str], ...]]:
@@ -175,4 +200,4 @@ def _regroup(item: ConceptDefinition, changes: CatalogChanges) -> ConceptDefinit
     return replace(item, classes=tuple(members))
 
 
-__all__ = ["SyncPlan", "base_concept", "plan_sync"]
+__all__ = ["SyncPlan", "base_concept", "plan_sync", "prospective"]

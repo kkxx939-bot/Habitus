@@ -63,7 +63,7 @@
     "habitus/pre/conversation/adapters.py": 1219,
     "habitus/pre/conversation/messages/model.py": 612,
     "habitus/pre/conversation/summaries/model.py": 659,
-    "habitus/runtime/assembly.py": 899,
+    "habitus/runtime/assembly.py": 898,
     "habitus/runtime/behavior.py": 664,
     "habitus/runtime/foresight_delivery.py": 776,
     "habitus/runtime/foresight_ledger.py": 709,
@@ -72,7 +72,7 @@
     "habitus/runtime/runtime.py": 852,
     "habitus/scene/concepts/author.py": 696,
     "habitus/scene/concepts/model.py": 944,
-    "habitus/scene/occurrences/mapper.py": 880
+    "habitus/scene/occurrences/mapper.py": 667
   },
   "functions": {
     "habitus/behavior/fusion/lanes/session/material.py::split_turns": 77,
@@ -80,7 +80,6 @@
     "habitus/behavior/observation/model.py::BehaviorObservation.create": 68,
     "habitus/behavior/reduction/runner.py::BehaviorReductionRunner.__init__": 69,
     "habitus/behavior/reduction/runner.py::BehaviorReductionRunner._run_locked": 115,
-    "habitus/behavior/retry/stage.py::RetryStage._branch": 66,
     "habitus/benchmark/cli.py::build_parser": 163,
     "habitus/benchmark/cli.py::main": 188,
     "habitus/benchmark/context.py::select_answer_context": 78,
@@ -149,14 +148,13 @@
     "habitus/pre/conversation/adapters.py::CodexRolloutConversationAdapter.adapt": 108,
     "habitus/pre/conversation/adapters.py::_add_anthropic_content": 76,
     "habitus/pre/conversation/messages/model.py::ConversationMessage.__post_init__": 67,
-    "habitus/runtime/assembly.py::build_runtime": 671,
+    "habitus/runtime/assembly.py::build_runtime": 670,
     "habitus/runtime/behavior.py::_build_branch": 134,
     "habitus/runtime/foresight.py::build_foresight_components": 78,
     "habitus/runtime/foresight_delivery.py::DeliveryStage._due": 74,
     "habitus/runtime/foresight_delivery.py::DeliveryStage.run_once": 130,
     "habitus/runtime/foresight_settlement.py::SettlementStage._run": 64,
     "habitus/scene/concepts/author.py::concept_author_json_schema": 108,
-    "habitus/scene/occurrences/mapper.py::map_closed_day": 127,
     "habitus/scene/relations/state.py::fold": 67,
     "habitus/scene/relations/timeline.py::build_timelines": 81
   }

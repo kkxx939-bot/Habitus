@@ -157,14 +157,15 @@ def test_the_settlement_runs_first_so_the_relabelled_history_sees_tonights_resul
 
     built, foresight, scene, site = _night_with_settlement(tmp_path)
     order: list[str] = []
-    settle, scene_run, relabel = built.settlement.run_once, scene.run, built.history.run
+    # 实时化阶段 2（A1）：换代调的是语义树不调模型的那一步（``generate``），不再是一次做完的 ``run``
+    settle, scene_run, relabel = built.settlement.run_once, scene.generate, built.history.run
     monkeypatch.setattr(built.settlement, "run_once", lambda: (order.append("结算"), settle())[1])
 
     async def scene_then(**kwargs):  # type: ignore[no-untyped-def]
         order.append("语义树")
         return await scene_run(**kwargs)
 
-    monkeypatch.setattr(scene, "run", scene_then)
+    monkeypatch.setattr(scene, "generate", scene_then)
     monkeypatch.setattr(built.history, "run", lambda *a, **k: (order.append("重标历史"), relabel(*a, **k))[1])
     run = assembled_with(tmp_path, site, scene, foresight=foresight, settlement=built.settlement)
     result = generate(run)

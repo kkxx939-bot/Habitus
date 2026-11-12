@@ -1,4 +1,8 @@
-"""换代的结果与口径（``runtime.generation``）：各步与它们的先后、哪几步必须成、一步的结局、各个退路的计数名、做一代的结果。"""
+"""换代的结果与口径（``runtime.generation``）：各步与它们的先后、哪几步必须成、一步的结局、各个退路的计数名、做一代的结果。
+
+换代里没有模型调用（实时化阶段 2）：词表的每晚新增与定期拆改、语义树里调模型的那几段都归模型队列
+（``runtime.model_queue``），步骤表里没有它们；换代只记下"换代时模型队列各类还欠着几项"（``GenerationResult.queue_owed``）
+与"换代那一刻模型队列是不是在整体退避"（是就不判关系、沿用上一代）。"""
 
 from __future__ import annotations
 
@@ -9,20 +13,18 @@ from datetime import date, datetime
 from habitus.model_client import MODEL_UNUSABLE, ModelUnreachable
 from habitus.runtime.generation_summary import UNREACHABLE, reason_code
 
-PROBE, MIGRATE, CALENDAR, RETRY, SETTLE = "probe", "migrate", "calendar", "retry", "settle"
-VOCABULARY, SERIES, SCENE, OPPORTUNITIES, DAYS, MARK = "vocabulary", "series", "scene", "opportunities", "days", "mark"
-#: 换代的各步，按先后（实时化方案第 3 节：续做没做完的词表迁移排在最前，每晚新增与定期拆改在结算之后）。单元历史与压实在机会表
-#: 那一步里、跟在表后面（各自一个 ``foresight.*`` 子 span）。
-STEPS = (PROBE, MIGRATE, CALENDAR, RETRY, SETTLE, VOCABULARY, SERIES, SCENE, OPPORTUNITIES, DAYS, MARK)
+MIGRATE, CALENDAR, RETRY, SETTLE = "migrate", "calendar", "retry", "settle"
+SERIES, SCENE, OPPORTUNITIES, DAYS, MARK = "series", "scene", "opportunities", "days", "mark"
+#: 换代的各步，按先后（实时化方案第 3 节：续做没做完的词表迁移排在最前）。单元历史与压实在机会表那一步里、跟在表后面
+#: （各自一个 ``foresight.*`` 子 span）。
+STEPS = (MIGRATE, CALENDAR, RETRY, SETTLE, SERIES, SCENE, OPPORTUNITIES, DAYS, MARK)
 #: 必须成的几步：失败 = 今天没有这一代（改树是否做完由读序列那一步看词表状态挡下）。
 MUST = frozenset({SERIES, OPPORTUNITIES, DAYS, MARK})
 LABELS = {
-    PROBE: "探模型",
     MIGRATE: "续做词表迁移",
     CALENDAR: "重读放假数据",
     RETRY: "重试收尾",
     SETTLE: "结算",
-    VOCABULARY: "词表",
     SERIES: "读序列",
     SCENE: "语义树",
     OPPORTUNITIES: "机会表",
@@ -40,6 +42,8 @@ MIGRATING = "词表迁移还没做完"
 VOCABULARY_MOVED = "读序列时词表变了"
 NO_RECORDS = "序列里还没有记录"
 RETRY_UNFINISHED = "重试收尾没完成"
+RETRY_REDUCING = "就近重试写回的判断还在等归约"
+QUEUE_BACKING_OFF = "模型队列在整体退避"
 NO_MATERIALS = "语义树没有交出材料"
 #: ``Generation.ready`` 的两个"不换代"原因：worker 按它们清掉过时的失败、记下日期回退（健康面报）。
 ALREADY_DONE = "今天这一代已经做完"
@@ -52,9 +56,7 @@ FALLBACK_HISTORY = "unit_history_skipped"  # 单元历史没做成（压实因�
 FALLBACK_COMPACTION = "compaction_failed"  # 账本压实没做成的条数
 FALLBACK_UNMAPPED = "unmapped_records"  # 换代时序列里还没映射的记录数
 FALLBACK_CALENDAR = "calendar_stale"  # 放假数据重读失败，照用上一次的
-FALLBACK_MODEL = "model_unreachable"  # 探模型探到调不通
-FALLBACK_VOCABULARY = "vocabulary_failed"  # 词表的每晚新增 / 定期拆改没做成的支数
-FALLBACK_SCENE = "scene_step_failed"  # 语义树某一步（B1–B4）没做成的步数
+FALLBACK_SCENE = "scene_step_failed"  # 语义树那一步里没做成的段数（同步词表、关系判定）
 FALLBACKS = (
     FALLBACK_RELATIONS,
     FALLBACK_SETTLEMENT,
@@ -62,8 +64,6 @@ FALLBACKS = (
     FALLBACK_COMPACTION,
     FALLBACK_UNMAPPED,
     FALLBACK_CALENDAR,
-    FALLBACK_MODEL,
-    FALLBACK_VOCABULARY,
     FALLBACK_SCENE,
 )
 
@@ -122,9 +122,8 @@ class GenerationResult:
     #: 还没准备好：哪一步、为什么（锁被占；不是失败，不退避）。
     held: str | None = None
     held_reason: str | None = None
-    #: 这一代里因模型整个调不通没做成的步（探模型、重试收尾、词表……，按先后）：有它，关系判定这一代不做、沿用上一代
-    #: （实时化方案第 2 节"模型调不通 → 关系沿用上一次判定的"）。
-    unreachable: list[str] = field(default_factory=list)
+    #: 换代那一刻模型队列各类还欠着几项（没接模型队列是 None）：进每代报告与 ``generation.run`` 的 span。
+    queue_owed: dict[str, int] | None = None
 
     @property
     def complete(self) -> bool:
@@ -143,7 +142,7 @@ class MustFailed(Exception):
 
 
 class NotReady(Exception):
-    """锁被另一进程拿着（词表、重试收尾、续做迁移）：还没准备好，这一眼到此为止，下一眼从头做。"""
+    """锁被另一进程拿着（续做迁移的 sweep 锁、语义树一步的语义树写锁）：还没准备好，这一眼到此为止，下一眼从头做。"""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -192,6 +191,7 @@ def generation_attributes(result: GenerationResult) -> dict[str, object]:
             for lane, night in sorted(result.relation_nights.items())
         },
         **{f"outcome.{item.step}": item.outcome for item in result.steps},
+        **{f"queue_owed.{category}": count for category, count in sorted((result.queue_owed or {}).items())},
     }
     if result.lag_seconds is not None:
         found["lag_seconds"] = result.lag_seconds
@@ -216,8 +216,10 @@ __all__ = [
     "MUST",
     "NO_RECORDS",
     "OPPORTUNITIES",
-    "PROBE",
+    "QUEUE_BACKING_OFF",
     "RETRY",
+    "RETRY_REDUCING",
+    "RETRY_UNFINISHED",
     "REWOUND",
     "SCENE",
     "SERIES",
@@ -225,7 +227,6 @@ __all__ = [
     "SKIPPED",
     "STEPS",
     "UNREACHABLE_ERRORS",
-    "VOCABULARY",
     "Degrade",
     "GenerationResult",
     "MustFailed",

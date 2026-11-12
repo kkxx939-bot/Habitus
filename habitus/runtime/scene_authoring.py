@@ -10,12 +10,15 @@
 **拿什么问**：每个在用的类给类名、判据与几条**真例子**（序列里这个类的记录，按时间均匀挑，名字 + 概要）——模型只看类名会凭联想
 写区别；再给已有的概念（不要重写、不要重名）与这些类平常的作息（节律）。
 
-写成的概念直接落盘；没答成的这一回不写，类清单指纹也不记，下一晚再问。新写的细分概念之后由 B3 的回填补映射历史。
+写成的概念**待生效**（实时化阶段 2「生效时点」）：存进待生效那一份、不进概念集，下一次换代的语义树一步在同步词表之后并入、
+那时才定创建时刻（``SceneNightlyRun.merge_pending``）。问的时候"已有的概念"是下一次换代之后概念集会有的样子（概念集 +
+同步词表将要生成的基础概念 + 已经待生效的，``existing``），所以新类当天就能写它的细分概念。没答成的这一回不写，类清单指纹
+也不记，之后再问。新并入的细分概念再由映射回填历史。
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, timedelta
 
 from habitus.foundation.integrity import canonical_digest
@@ -83,6 +86,16 @@ class ConceptAuthoring:
             return "这一周还没写过"
         return None
 
+    def due_lanes(self, store: ConceptStore, classes: Sequence[CatalogClass], night: date) -> tuple[str, ...]:
+        """这一晚该问的 lane（纯读盘；模型队列据它认"写概念"欠没欠）。"""
+
+        authored = store.authored()
+        return tuple(
+            lane
+            for lane, digest in lane_digests(classes).items()
+            if self.due(lane, digest, night, authored) is not None
+        )
+
     async def run(
         self,
         store: ConceptStore,
@@ -90,12 +103,16 @@ class ConceptAuthoring:
         series: EventSeries,
         rhythms: Mapping[str, Rhythm],
         signals: list[str],
-    ) -> ConceptSet:
-        """该问的 lane 各问一遍（一批最多 ``MAX_CONCEPTS_PER_BATCH`` 个类），写成的落盘，返回最新的概念集。"""
+        *,
+        existing: Callable[[], ConceptSet],
+    ) -> int:
+        """该问的 lane 各问一遍（一批最多 ``MAX_CONCEPTS_PER_BATCH`` 个类），写成的存成待生效，返回写了几个。``existing`` 给
+        "已有的概念"（每写完一批重取：后一批看得到前一批刚写的）。"""
 
         night = series.cutoff
-        concepts = store.read_all()
+        concepts = existing()
         authored = store.authored()
+        written = 0
         for lane, digest in lane_digests(classes).items():
             reason = self.due(lane, digest, night, authored)
             if reason is None:
@@ -110,13 +127,14 @@ class ConceptAuthoring:
                     complete = False
                     continue
                 for definition in proposal.definitions:
-                    store.write(definition)
-                    signals.append(f"concepts: {lane} 新概念「{definition.label}」")
-                concepts = store.read_all()
+                    store.write_pending(definition)
+                    written += 1
+                    signals.append(f"concepts: {lane} 新概念「{definition.label}」（待生效，下一次换代并入）")
+                concepts = existing()
             if complete:
                 authored[lane] = Authored(digest=digest, night=night)
                 store.write_authored(authored)
-        return concepts
+        return written
 
 
 __all__ = ["EXAMPLES_PER_CLASS", "ConceptAuthoring", "briefs_for", "lane_digests"]

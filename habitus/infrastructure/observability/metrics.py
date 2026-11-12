@@ -147,7 +147,9 @@ _BEHAVIOR_GAUGES: tuple[tuple[str, str, str], ...] = (
 
 #: 换代一步一跑可以是几个小时：它的耗时直方图另用一组到数小时的桶（通用直方图最高 30 秒，一整代都落进 +Inf）。
 LONG_DURATION_BUCKETS = (1.0, 10.0, 30.0, 60.0, 300.0, 600.0, 1800.0, 3600.0, 7200.0, 14400.0, 28800.0)
-_LONG_DURATION_METRICS = frozenset({"generation_step_duration_seconds", "generation_duration_seconds"})
+_LONG_DURATION_METRICS = frozenset(
+    {"generation_step_duration_seconds", "generation_duration_seconds", "model_queue_item_duration_seconds"}
+)
 #: 关系变化计数的标签（取值都是封闭枚举：lane、变化种类、状态、跨度段、带不带条件）。
 _RELATION_CHANGE_LABELS = ("lane", "kind", "status_from", "status_to", "segment", "conditioned")
 #: 预测拍按触发种类计的建了几条（种类是封闭枚举：日子、事件、情境）。
@@ -161,6 +163,54 @@ def _domain_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
         return _generation_metric_updates(event)
     if event.category == "foresight" and event.operation == "tick":
         return _tick_metric_updates(event)
+    if event.category == "model_queue":
+        return _model_queue_metric_updates(event)
+    return ()
+
+
+def _model_queue_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
+    """模型队列：每一项的用时与结局（按类别）、各类还欠多少与最老一项等了多久、整体退避的次数与时长、按（类别, 触点）的
+    调模型次数与其中没成的、词表整理活持 sweep 锁多久。标签只放低基数的（类别、结局、触点都是封闭枚举）。"""
+
+    attributes = event.attributes
+    category = (("category", _label_value(attributes.get("category"))),)
+    if event.operation == "item":
+        duration = _non_negative_number(attributes.get("duration_seconds")) or 0.0
+        updates = [
+            MetricUpdate("model_queue_item_duration_seconds", "histogram", duration, category),
+            MetricUpdate(
+                "model_queue_items_total",
+                "counter",
+                1.0,
+                category + (("outcome", _label_value(attributes.get("outcome"))),),
+            ),
+        ]
+        held = _non_negative_number(attributes.get("sweep_lock_seconds"))
+        if held is not None:
+            updates.append(MetricUpdate("model_queue_sweep_lock_seconds", "gauge", held))
+        return tuple(updates)
+    if event.operation == "owed":
+        return (
+            MetricUpdate("model_queue_owed", "gauge", _non_negative_number(attributes.get("count")) or 0.0, category),
+            MetricUpdate(
+                "model_queue_oldest_wait_seconds",
+                "gauge",
+                _non_negative_number(attributes.get("oldest_wait_seconds")) or 0.0,
+                category,
+            ),
+        )
+    if event.operation == "backoff":
+        delay = _non_negative_number(attributes.get("delay_seconds")) or 0.0
+        return (
+            MetricUpdate("model_queue_backoffs_total", "counter", 1.0),
+            MetricUpdate("model_queue_backoff_seconds_total", "counter", delay),
+        )
+    if event.operation == "model_call":
+        touch = category + (("touch", _label_value(attributes.get("touch"))),)
+        updates = [MetricUpdate("model_queue_model_calls_total", "counter", 1.0, touch)]
+        if event.status is ObservationStatus.FAILURE:  # 没成的调用（不分种类）
+            updates.append(MetricUpdate("model_queue_model_call_failures_total", "counter", 1.0, touch))
+        return tuple(updates)
     return ()
 
 

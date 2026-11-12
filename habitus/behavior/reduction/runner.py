@@ -256,7 +256,7 @@ class BehaviorReductionRunner:
         # 600s 租约耗死，续约点再多也救不了已过期的租约）。因此每段边界都续，长循环内部按条数续。
         guard.checkpoint()
         # 没做完的词表迁移排在检查点重放之后、本轮归类之前续做：本轮新封口的链就按改过的清单归类；改过的日子并进本轮刷新。
-        # 词表的每晚新增与定期拆改不在这里，在换代里、读序列之前（裁定 94 第 9 条，``nightly_vocabulary``）。
+        # 词表的每晚新增与定期拆改不在这里，由模型队列在前一天封口之后做（裁定 94 第 9 条，``nightly_vocabulary``）。
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_vocabulary") as attributes:
             jobs = self.vocabulary.resume_migration(guard)
             self.refresh_pending.touch(jobs.days, guard)
@@ -391,18 +391,18 @@ class BehaviorReductionRunner:
         return _Sealed(horizon, ready_indexes, ready_gaps, unsealed_days)
 
     async def nightly_vocabulary(self, night: date) -> VocabularyJobReport:
-        """换代在读序列之前调它（裁定 94 第 8、9 条）：这一天的每晚新增，与这一天所在拆改周期里还没做的定期拆改。锁被占抛
-        ``BehaviorReductionBusyError``（换代这一眼到此为止）；模型用不了、代码出错原样抛给换代（记这一支词表没做成、照常往下做）。"""
+        """模型队列在前一天封口之后调它（裁定 94 第 8、9 条）：这一天的每晚新增，与这一天所在拆改周期里还没做的定期拆改。锁被占抛
+        ``BehaviorReductionBusyError``（还没准备好，下一轮再来）；模型用不了、代码出错原样抛给模型队列（整体退避，或按重试账退避）。"""
 
         return await self.vocabulary.nightly(night)
 
     async def grow_vocabulary(self) -> VocabularyJobReport:
-        """立刻跑一次每晚新增（运维与实验用；常规路径是换代的 ``nightly_vocabulary``）。"""
+        """立刻跑一次每晚新增（运维与实验用；常规路径是模型队列调的 ``nightly_vocabulary``）。"""
 
         return await self.vocabulary.grow()
 
     async def revise_vocabulary(self) -> VocabularyJobReport:
-        """立刻跑一次定期拆改（运维与实验用；常规路径是换代的 ``nightly_vocabulary``）。"""
+        """立刻跑一次定期拆改（运维与实验用；常规路径是模型队列调的 ``nightly_vocabulary``）。"""
 
         return await self.vocabulary.revise()
 

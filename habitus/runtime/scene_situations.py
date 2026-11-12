@@ -1,6 +1,6 @@
 """映射那两个必填参数的生产者：``situation_for`` 与 ``baseline_for``。
 
-``map_closed_day`` 要的两个 callable 都在这里装好——它们的材料横跨三处（当地日历、命中历史、
+按条映射（``DayRecords`` 的 ``baseline_for``）与封口（``plan_seal`` 的 ``situation_for``）要的两个 callable 都在这里装好——它们的材料横跨三处（当地日历、命中历史、
 这条 occurrence 自己的字段），而 ``occurrences`` 那一支不许触达别的存储，``views`` 不能被底层引用。
 
 **一天一装**：情境与常态都是"这一天的"，所以按天构造一次，一天里的每条 occurrence 复用。
@@ -35,7 +35,7 @@ from habitus.scene.occurrences.store import ConceptHitStore
 
 
 class SceneDayContext:
-    """一天的情境与常态。``situation_for`` / ``baseline_for`` 直接交给 ``map_closed_day``。"""
+    """一天的情境与常态。``baseline_for`` 交给按条映射的取材料口，``situation_for`` 交给封口。"""
 
     def __init__(
         self,
@@ -58,6 +58,8 @@ class SceneDayContext:
         self.note = calendar.describe(day)
         self.calendar_conditions = dict(calendar.of_day(day))
         self.reads_today = day in history_days(concepts, day)
+        #: 当天的命中记录读好的一份（``hold_today``）；None = 每次问的时候现读。
+        self._today: tuple[ConceptHits, ...] | None = None
         self.history: tuple[HitEvent, ...] = hit_events(
             (record for past in history_days(concepts, day) if past < day for record in hits.read_day(past)), concepts
         )
@@ -71,6 +73,12 @@ class SceneDayContext:
             timezone=timezone,
         )
 
+    def hold_today(self) -> None:
+        """当天的命中记录只读一遍、之后都用这一份：封口时这一天的命中已经不动了（逐条现读的话一天要把整个目录解码
+        "记录数"遍）。边映射边落盘的调用方不要调它。"""
+
+        self._today = self.hits.read_day(self.day)
+
     def situation_for(self, document: BehaviorDocument) -> SituationOutcome:
         if document.kind is not BehaviorKind.OCCURRENCE:
             raise TypeError("situation_for reads occurrence documents")
@@ -79,9 +87,8 @@ class SceneDayContext:
         moment = document.address.started_at
         history = self.history
         if self.reads_today:
-            today = hit_events(
-                (record for record in self.hits.read_day(self.day) if record.started_at < moment), self.concepts
-            )
+            records = self._today if self._today is not None else self.hits.read_day(self.day)
+            today = hit_events((record for record in records if record.started_at < moment), self.concepts)
             history = tuple(sorted((*history, *today), key=lambda item: (item.at.timestamp(), item.identity)))
         return situation_hits(
             self.concepts,

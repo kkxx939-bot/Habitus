@@ -156,11 +156,12 @@ from habitus.runtime.foresight import (
     build_foresight_components,
     build_foresight_days,
     build_foresight_tick,
-    build_foresight_worker,
     build_outlet_consumer,
     build_reminded_lookup,
     build_reminder_responses,
     foresight_ledger_lease,
+    unsealed_bridge,
+    with_slot_worker,
 )
 from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
 from habitus.runtime.lifecycle import LifecycleWorker
@@ -180,7 +181,6 @@ from habitus.runtime.session_lane import (
     session_salvager,
     unwatched_writer,
 )
-from habitus.runtime.unsealed import UnsealedFromJudgements
 from habitus.runtime.vector_stores import build_vector_store
 from habitus.runtime.worker import MemoryWorker
 
@@ -583,15 +583,13 @@ def build_runtime(
     calendar = None if session_behavior is None else local_calendar(config)
     # 读账的两个值（裁定 49）：α 借关系检验前向验证的显著性；遗忘半衰期是几次机会（裁定 57，config.foresight 的临时值）
     evidence = None if session_behavior is None or not config.foresight.enabled else evidence_of(config)
-    # 换代的完成标记与本地 trace 各一份：换代写标记，结算认没有这一代的那天读它（裁定 94 第 9 条）；trace 换代与预测拍都写。
-    # 没有语义树就没有换代
+    # 换代的完成标记与本地 trace 各一份（没有语义树就没有换代）：换代写标记，结算读它（裁定 94 第 9 条）；trace 换代与预测拍都写
     generating = config.scene.enabled and session_behavior is not None
     marks = generation_marks(config) if generating else None
     traces = generation_traces(config, managed_observability) if generating else None
-    # 预测根租约（写账本的那几步与每个预测拍持有，用户 11-10「两把锁」）：换代与预测拍共用这一个实例（含进程内那把锁）
-    ledger_lease = (
-        foresight_ledger_lease(config, resolved_lock.lock_store) if generating and config.foresight.enabled else None
-    )
+    # 预测根租约：预测 worker 每槽持一次，在它里面先看一眼换代、再做预测拍（没开预测层时只看换代）
+    ledger_lease = foresight_ledger_lease(config, resolved_lock.lock_store) if generating else None
+    tick = None
     foresight_components = (
         None
         if session_behavior is None or evidence is None
@@ -613,14 +611,11 @@ def build_runtime(
             finished=None if marks is None else marks.finished,
         )
     )
-    if foresight_components is not None and session_behavior is not None and evidence is not None:
-        # 预测拍的常驻 worker：未封口的判断经那座桥（判断存储 + 消费账本 + 归约的白天归类）读，词表版本记在预期上。
-        # 换代里的日子预期读同一座桥（模型此刻用不了只是这一次没归上类，不抛：与预测拍同口径）
-        unsealed = UnsealedFromJudgements(
-            session_behavior.judgements,
-            session_behavior.reduction_runner.ledger,
-            session_behavior.reduction_runner.kinds,
-        )
+    # 未封口的判断经那座桥（判断存储 + 消费账本 + 归约的白天归类）读：预测拍用它；换代里的日子预期读只读缓存的那一份
+    # （换代里没有模型调用；换代之前由模型队列把还没归的归好）
+    unsealed = None if session_behavior is None or evidence is None else unsealed_bridge(session_behavior)
+    if foresight_components is not None and session_behavior is not None and evidence is not None and unsealed:
+        # 预测拍（常驻 worker 在语义树那一段装：每槽先看一眼换代、再做这一拍）：词表版本记在预期上。
         kind_store = session_behavior.kind_store
         tick = build_foresight_tick(
             foresight_components,
@@ -639,12 +634,11 @@ def build_runtime(
         )
         foresight_components = dataclasses.replace(
             foresight_components,
-            worker=build_foresight_worker(tick, config=config, observer=operation_observer),
-            # 当天的日子预期：换代必须成的一步，与预测拍读同一座未封口的桥
+            # 当天的日子预期：换代必须成的一步，与预测拍读同一座未封口的桥（只读缓存）
             days=build_foresight_days(
                 foresight_components,
                 config=config,
-                unsealed=unsealed,
+                unsealed=unsealed.cache_only(),
                 evidence=evidence,
                 vocabulary_version=lambda: kind_store.read().version,
                 vocabulary_migrating=lambda: kind_store.read_migration() is not None,
@@ -748,9 +742,9 @@ def build_runtime(
         ConversationSourceRecoveryParticipant(source_recovery, source_coordinator, wake_memory=worker.wake),
     ]
 
-    scene, generation_worker = (None, None)
-    if session_behavior is not None and behavior_components is not None and marks is not None and traces is not None:
-        scene, generation_worker = assemble_generation(
+    scene, generation, model_queue_worker, slots = (None, None, None, None)
+    if behavior_components is not None and marks is not None and traces is not None and ledger_lease is not None:
+        scene, generation, model_queue_worker, slots = assemble_generation(
             config,
             behavior=behavior_components,
             calendar=calendar,
@@ -761,7 +755,10 @@ def build_runtime(
             ledger_lease=ledger_lease,
             lock_store=resolved_lock.lock_store,
             observer=operation_observer,
+            unsealed=unsealed,
+            tick=tick,
         )
+        foresight_components = with_slot_worker(foresight_components, slots)
     # 行为侧、语义树、预测层的释放各一个参与者（26 号清单 6.14），挂进同一个生命周期 Worker
     scene_versions = None
     if scene is not None:
@@ -792,7 +789,7 @@ def build_runtime(
             (
                 source_recovery.retries,
                 *(item for branch in branches for item in branch.retry_ledgers),
-                *(() if scene is None else (scene.mapping_retries,)),
+                *(() if model_queue_worker is None else (model_queue_worker.queue.retries,)),
             ),
             keep_days=config.lifecycle.retry.given_up_days,
             backlogs=tuple(branch.retry_backlog for branch in branches if branch.retry_backlog is not None),
@@ -863,7 +860,9 @@ def build_runtime(
             lifecycle_worker=lifecycle_worker,
         ),
         behavior=behavior_components,
-        generation=generation_worker,
+        generation=generation,
+        generation_slots=slots if foresight_components is None else None,
+        model_queue=model_queue_worker,
         foresight=foresight_components,
     )
     return Runtime(config, components, conversation_adapters=adapters)

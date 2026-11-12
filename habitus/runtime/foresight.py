@@ -2,11 +2,11 @@
 
 现在接上的：账本（``ForesightLedgerStore``）与结算这一拍（``SettlementStage``，换代里的一步）；机会表的存储
 （``OpportunityStore``）与算它的那一拍（``ForesightNightlyRun``，由 ``build_foresight_nightly`` 装、挂在
-``runtime.generation.Generation`` 的语义树之后，同一拍重标单元的历史 ``HistoryStage``，换代由 ``GenerationWorker`` 在连续定稿到
-昨天之后做）；当天的日子预期（``DayExpectationStage``，由 ``build_foresight_days`` 装，换代必须成的一步）；
+``runtime.generation.Generation`` 的语义树之后，同一拍重标单元的历史 ``HistoryStage``，换代由预测 worker 每槽先看一眼、在连续
+定稿到昨天之后做）；当天的日子预期（``DayExpectationStage``，由 ``build_foresight_days`` 装，换代必须成的一步）；
 预测拍（``ForesightTick``，由 ``build_foresight_tick`` 装：事件与情境的触发、候选、前因清单，落账；到了时窗按账的级决定
-说不说；落盘的水位、没在看的时段、预测根租约）；常驻 worker（``ForesightWorker``，由
-``build_foresight_worker`` 装，拍点对齐槽边界，assembly 接进 ``worker``，Runtime 起停它）。读账的两个借用值（α、遗忘半衰期）由组合根从
+说不说；落盘的水位、没在看的时段、预测根租约）；常驻 worker（``ForesightWorker``，在 ``runtime.scene.assemble_generation`` 里
+与换代一起装：拍点对齐槽边界，每槽先看一眼换代、再做这一拍；``with_slot_worker`` 接进 ``worker``，Runtime 起停它）。读账的两个借用值（α、遗忘半衰期）由组合根从
 关系检验与 ``config.foresight`` 的配置装成 ``Evidence`` 传进来（裁定 49：全系统一个"多大把握"、一种"过去多快淡掉"）。
 
 三件只有组合根知道的事定在这里：此刻是主体本地时刻（时区来自 ``config.locale``）；预测层只接会话一支（按不按 lane 分
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable, Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -49,11 +49,11 @@ from habitus.runtime.foresight_reminded import RemindedLookup
 from habitus.runtime.foresight_responses import ReminderResponses
 from habitus.runtime.foresight_settlement import SettlementStage
 from habitus.runtime.foresight_tick import ForesightTick
-from habitus.runtime.foresight_worker import ForesightWorker
 from habitus.runtime.generation_lease import Lease
 from habitus.runtime.generation_watermark import TickTrack, TickWatermarkStore
 from habitus.runtime.resident import ResidentWorker
 from habitus.runtime.session_lane import BehaviorSessionConsumer
+from habitus.runtime.unsealed import UnsealedFromJudgements
 from habitus.scene.relations import RelationConfig
 from habitus.scene.relations.store import RelationStore
 
@@ -320,30 +320,24 @@ def build_foresight_days(
     )
 
 
-def build_foresight_worker(
-    tick: ForesightTick, *, config: HabitusConfig, observer: Observer | None = None
-) -> ForesightWorker:
-    """常驻 worker：每个槽边界跑一拍（``tick_interval_seconds`` 已由配置根校验等于槽宽）。"""
+def with_slot_worker(
+    components: ForesightRuntimeComponents | None, worker: ResidentWorker | None
+) -> ForesightRuntimeComponents | None:
+    """把每槽先看一眼换代、再做预测拍的那个常驻 worker 接进预测层的部件（没开预测层就没有这份部件，原样返回）。"""
 
-    return ForesightWorker(
-        tick,
-        interval_seconds=config.foresight.tick_interval_seconds,
-        shutdown_timeout_seconds=config.foresight.worker_shutdown_timeout_seconds,
-        zone=config.locale.zone(),
-        observer=observer,
-    )
+    return components if components is None or worker is None else replace(components, worker=worker)
 
 
 def foresight_lease_key(config: HabitusConfig, branch: str = "session") -> str:
-    """预测根租约的键：由这一支的预测根派生（与换代租约不同键）。"""
+    """预测根租约的键：由这一支的预测根派生。"""
 
     digest = hashlib.sha256(str((config.foresight_root / branch).expanduser().absolute()).encode("utf-8")).hexdigest()
     return f"foresight:root:{digest[:24]}"
 
 
 def foresight_ledger_lease(config: HabitusConfig, lock_store: LockStore, branch: str = "session") -> Lease:
-    """预测根租约（写账本的那几步与每个预测拍持有，用户 11-10「两把锁」）：换代与预测拍共用这一个实例（含进程内那把锁）；
-    租期与续租间隔同换代租约（``scene.generation_lease_*``）。"""
+    """预测根租约：预测 worker 每槽持一次，在它里面先看一眼换代（要就做今天这一代）、再做预测拍——账本只有一个写者，两个
+    进程挂同一个根时同一天只换代一次。租期与续租间隔是三把锁共用的那两个数（``scene.generation_lease_*``）。"""
 
     return Lease(
         lock_store,
@@ -408,6 +402,13 @@ def _tolerance(config: HabitusConfig) -> Tolerance:
     return Tolerance(line=1.0 - foresight.false_alarm_rate)
 
 
+def unsealed_bridge(branch: BehaviorRuntimeComponents) -> UnsealedFromJudgements:
+    """预测层那座未封口的桥，取自这一支：判断存储 + 消费账本 + 归约的白天归类。"""
+
+    runner = branch.reduction_runner
+    return UnsealedFromJudgements(branch.judgements, runner.ledger, runner.kinds)
+
+
 __all__ = [
     "ForesightReadSide",
     "ForesightRuntimeComponents",
@@ -415,10 +416,11 @@ __all__ = [
     "build_foresight_days",
     "build_foresight_nightly",
     "build_foresight_tick",
-    "build_foresight_worker",
     "build_outlet_consumer",
     "foresight_lease_key",
     "foresight_ledger_lease",
     "build_reminded_lookup",
     "build_reminder_responses",
+    "unsealed_bridge",
+    "with_slot_worker",
 ]

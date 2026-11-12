@@ -37,7 +37,7 @@ _SIGNALS_KEPT = 200
 
 
 def pending_by_branch(retry: RetryStage, through: date) -> dict[str, int]:
-    """重试收尾开始前各支重试堆里属于这一代（``through`` 及以前）的项数。"""
+    """重试收尾开始前各支重试堆里属于这一代（``through`` 及以前）的项数：就近没补回、封口时要丢弃的。"""
 
     return {branch.name: len(branch.backlog.snapshot(through=through).ids) for branch in retry.branches}
 
@@ -82,6 +82,7 @@ def vocabulary_summary(report: object) -> dict[str, object]:
         "split": report.split,
         "merged": report.merged,
         "moves": report.moves,
+        "lock_seconds": round(report.lock_seconds, 3),
         "signals": list(report.signals[:_SIGNALS_KEPT]),
     }
 
@@ -90,15 +91,14 @@ def scene_summary(report: NightReport) -> dict[str, object]:
     return {
         "night": report.night.isoformat(),
         "concepts": report.concepts,
-        "mapped_days": [day.isoformat() for day in report.mapped_days],
-        "mapped": report.mapped,
-        "resumed": report.resumed,
-        "refreshed": report.refreshed,
-        "unresolved": report.unresolved,
-        "model_failed": report.model_failed,
-        "inconsistent": report.inconsistent,
-        "backlog": report.backlog,
-        "remapped_days": report.remapped_days,
+        # 封口：盖了章的日子、写回了情境的记录、还不能盖章的日子与其中没映射好的记录、跟着重算情境的读者日、用时
+        "sealed_days": report.sealed_days,
+        "seal_rewritten": report.seal_rewritten,
+        "unsealed_days": report.unsealed_days,
+        "unsealed_records": report.unsealed_records,
+        "reader_days": report.reader_days,
+        "seal_seconds": round(report.seal_seconds, 3),
+        "merged_concepts": report.merged_concepts,
         "relations": {lane: dict(sorted(counts.items())) for lane, counts in sorted(report.relations.items())},
         "transitions": report.transitions,
         "relations_held": report.relations_held or "",
@@ -139,7 +139,7 @@ def day_summary(report: DayReport) -> dict[str, object]:
 
 def kept_errors(retried: object) -> str | None:
     """重试收尾之后仍保持「错误·看不到」、要人看的（裁定 94 第 4 条）：我们自己处理不了的是 bug，内容安全拦下的单独列，格式不合
-    再试仍不合的也列出来；都没有是 None。读的是这一代重试收尾那一步报告的重试计数。"""
+    再试仍不合的也列出来；都没有是 None。读的是这一代重试收尾那一步报告的重试计数（含模型队列就近试出的）。"""
 
     if not isinstance(retried, dict):
         return None

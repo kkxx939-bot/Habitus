@@ -1,9 +1,14 @@
-"""词表的两件整理活，在归约 sweep 锁下执行（改树与发布互斥）。都在换代里、读序列之前，不挂任何钟点（裁定 94 第 8、9 条）：
-换代经 ``BehaviorReductionRunner.nightly_vocabulary`` 调 ``nightly``——
+"""词表的两件整理活，在归约 sweep 锁下执行（改树与发布互斥）。不挂任何钟点（裁定 94 第 8、9 条）：前一天封口之后由模型
+队列做（实时化阶段 2；``due`` 是它认"这一晚还欠不欠"的判据），经 ``BehaviorReductionRunner.nightly_vocabulary`` 调 ``nightly``——
 
 - 每晚新增（``grow``）：每晚一次；
 - 定期拆改（``revise``）：这一晚所在的拆改周期里还没拆改过才跑（``revision_due``；所有用户每周都跑，放行靠证据规则与锚点自检，
   裁定 17）。
+
+**生效时点**（实时化阶段 2）：每晚新增做完即生效（树上的编号当场改）。定期拆改只出计划——计划连同拆改状态存成一份
+"待生效"（``BehaviorKindStore.write_revision``），不算"迁移中"，白天的预测拍与结算照常；下一次换代最前那一步才把它交给
+迁移器（``apply_revision``：写迁移计划 → 写拆改状态 → 执行迁移）。有待生效的拆改时这一天不再长新类、也不再拆改（计划是
+对着某一版词表出的）。
 
 每晚新增认作"已有某类"的待定条目交白天归类重判一次（内容从树上取，``_content_of``），重判过的在池里打标记。
 三者都只从词表要"下一版"这份事实，再交 ``KindMigrator`` 落到树上；返回受影响的日子，由 runner 去刷新语义面。
@@ -15,13 +20,13 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, tzinfo
 
-from habitus.behavior.kinds.changes import AddClass, Branch, RetireClass, VersionRecord
+from habitus.behavior.kinds.changes import AddClass, Branch, ChangeReason, RetireClass, VersionRecord
 from habitus.behavior.kinds.classify import OccurrenceContent
 from habitus.behavior.kinds.ids import is_marker, lane_of_token
 from habitus.behavior.kinds.nightly import NightlyGrower
 from habitus.behavior.kinds.revision import Member, Reviser
 from habitus.behavior.kinds.schedule import JobState, revision_due, revision_period
-from habitus.behavior.kinds.store import BehaviorKindJournalFullError, BehaviorKindStore
+from habitus.behavior.kinds.store import BehaviorKindConflictError, BehaviorKindJournalFullError, BehaviorKindStore
 from habitus.behavior.model import BehaviorKind
 from habitus.behavior.reduction.kinds_migration import KindMigrator
 from habitus.behavior.reduction.kinds_step import KindStamping, content_from_fields, is_countable
@@ -34,7 +39,7 @@ class JobsOutcome:
     days: frozenset[date] = frozenset()
     model_calls: int = 0
     signals: tuple[str, ...] = ()
-    #: 只给观测（换代词表那一步的 ``generation.vocabulary`` span 与每代报告）：每晚新增开始时待定池里几条、建了哪些类、这一晚拆改到没到期、
+    #: 只给观测（模型队列词表那一项的 span 与本地流水）：每晚新增开始时待定池里几条、建了哪些类、这一晚拆改到没到期、
     #: 拆出 / 并掉几类、迁移计划挪了几条。
     pool: int = 0
     created: tuple[str, ...] = ()
@@ -102,13 +107,34 @@ class VocabularyJobs:
         self.config = grower.config
 
     async def nightly(self, now: datetime, *, night: date, checkpoint: Callable[[], object]) -> JobsOutcome:
-        """线上的这一晚：先每晚新增，再看这一晚所在的拆改周期里拆改过没有，没有就拆改。"""
+        """线上的这一晚：先每晚新增，再看这一晚所在的拆改周期里拆改过没有，没有就拆改（只出计划，待生效）。有待生效的
+        拆改时什么都不做。"""
 
+        if self.store.read_revision() is not None:
+            return JobsOutcome()
         outcome = await self.grow(now, checkpoint=checkpoint)
         last = self.store.read_jobs().revision_at
         if revision_due(night, None if last is None else last.astimezone(self.zone).date(), weekday=self.weekday):
             outcome += JobsOutcome(revision_due=True) + await self.revise(now, checkpoint=checkpoint, night=night)
         return outcome
+
+    def due(self, night: date) -> bool:
+        """这一晚的整理活还欠着（纯读盘，模型队列据它认欠账）：这一晚所在的拆改周期里还没拆改过；或待定池里有没聚组过的
+        新条目、而这一晚还没长过新类——没有哪条是这一晚聚组的，变更日志里也没有这一晚的每晚新增（一晚只交一次：超过上限的
+        新条目留到下一晚）。有待生效的拆改时不欠：这个周期已经拆改过（等换代生效），这一天也不再长新类。"""
+
+        if self.store.read_revision() is not None:
+            return False
+        last = self.store.read_jobs().revision_at
+        if revision_due(night, None if last is None else last.astimezone(self.zone).date(), weekday=self.weekday):
+            return True
+        entries = self.store.read_pending().pool.entries.values()
+        if not any(entry.fresh for entry in entries) or any(entry.grouped_on == night for entry in entries):
+            return False
+        return not any(
+            record.reason is ChangeReason.NIGHTLY and record.at.astimezone(self.zone).date() == night
+            for record in self.store.records()
+        )
 
     @property
     def weekday(self) -> int:
@@ -167,7 +193,33 @@ class VocabularyJobs:
             checkpoint=checkpoint,
         )
         outcome = JobsOutcome(model_calls=result.model_calls, signals=result.signals)
-        return outcome + self._migrate(result.record, result.state, checkpoint)
+        if result.record is None:
+            return outcome + self._migrate(None, result.state, checkpoint)  # 没有要改的：只记拆改状态
+        # 出了计划：连同拆改状态存成待生效，下一次换代最前那一步才改树（``apply_revision``）
+        self.store.write_revision(result.record, result.state)
+        note = f"kind_revision_pending v{result.record.version}: {result.record.note}"
+        return outcome + JobsOutcome(signals=(note,)) + _record_counts(result.record)
+
+    def apply_revision(self, checkpoint: Callable[[], object]) -> JobsOutcome:
+        """把待生效的拆改交给迁移器（换代最前那一步，持 sweep 锁）：写迁移计划 → 写拆改状态 → 执行迁移，再撤掉待生效那一份。
+        没有待生效的是空操作。上一次崩在"迁移计划已写、待生效那一份还没撤"时不重写计划（迁移器续做）；计划已经不是下一版
+        （这期间词表动过）就作废、留信号，拆改状态照记——不每天重做这次拆改。"""
+
+        pending = self.store.read_revision()
+        if pending is None:
+            return JobsOutcome()
+        record, state = pending
+        if self.store.read_migration() is not None or self.store.read().version >= record.version:
+            self.store.replace_jobs(state)
+            outcome = JobsOutcome()
+        else:
+            try:
+                outcome = self._migrate(record, state, checkpoint)
+            except BehaviorKindConflictError as exc:
+                self.store.replace_jobs(state)
+                outcome = JobsOutcome(signals=(f"kind_revision_dropped v{record.version}: {exc}",))
+        self.store.clear_revision()
+        return outcome
 
     def _migrate(
         self, record: VersionRecord | None, state: JobState | None, checkpoint: Callable[[], object]

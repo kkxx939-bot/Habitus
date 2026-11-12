@@ -22,13 +22,13 @@ def test_scene_cannot_be_enabled_without_the_behaviour_side(tmp_path) -> None:
         HabitusConfig.from_mapping(raw)
 
 
-def test_the_generation_worker_only_paces_the_generation_and_takes_no_stage_hooks() -> None:
-    """换代是线性的：串法自己排先后（重试收尾 → 结算 → 词表 → 语义树 → 机会表 → 日子预期，``runtime.generation``），
-    常驻 worker 只管节奏，不另开前置 / 后置钩子（原来预测树重建 worker 上的 ``after_rebuild`` 随它删了，裁定 59）。"""
+def test_the_generation_runner_only_paces_the_generation_and_takes_no_stage_hooks() -> None:
+    """换代是线性的：串法自己排先后（重试收尾 → 结算 → 语义树 → 机会表 → 日子预期，``runtime.generation``），
+    看那一眼的只管什么时候做，不另开前置 / 后置钩子（原来预测树重建 worker 上的 ``after_rebuild`` 随它删了，裁定 59）。"""
 
     import inspect
 
-    from habitus.runtime.generation_worker import GenerationWorker
+    from habitus.runtime.generation_runner import GenerationRunner
 
-    parameters = set(inspect.signature(GenerationWorker.__init__).parameters)
+    parameters = set(inspect.signature(GenerationRunner.__init__).parameters)
     assert not {name for name in parameters if name.startswith(("before", "after"))}
