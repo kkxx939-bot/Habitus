@@ -171,11 +171,11 @@ argument-hint: "change <清单条目> | review <范围> | fix <问题号> | audi
 
 | 产物 | 位置 |
 |---|---|
-| 共享说明、执行提示词、测试工程师提示词、各方报告 | 桌面 `~/Desktop/Habitus改造/<阶段>-<条目>/`：`00-共享说明.md`、`01-测试工程师.md`、`02-执行.md`、`报告-*.md`（另开的 session 读不到主 session 的 scratchpad，所以放桌面） |
-| 复现脚本、A/B 基线产物、对抗测试记录 | 各自 session 的 scratch，`baseline/` 与 `verify/` 子目录；结论和证据路径写进报告；体积大的跑完压缩或删除 |
-| 报告原文归档 | `~/Desktop/Habitus实验数据/事件融合与词表重做/37-材料/` 下按条目、按轮次分目录，不覆盖旧报告 |
-| 问题总清单 | `~/Desktop/38-README核对问题清单.md`（新一轮开一节；用户另行指定的，以用户为准） |
-| 设计决定（编号裁定） | 以仓库 `docs/rulings/README.md` 为准（W14 已完成，2026-11-07）；桌面 `裁定.md` 只留讨论过程。代码里的「裁定 N」都能在仓库那份查到，架构测试 `tests/architecture/test_rulings_documented.py` 守着 |
-| 边角与范围外的发现 | 同目录 `待办.md` |
+| 共享说明、执行提示词、测试工程师提示词、各方报告 | 桌面 `~/Desktop/Habitus/experiments/<日期>-<条目>/`（不放仓库，另开的 session 也读得到）：`00-共享说明.md`、`01-测试工程师.md`、`02-执行.md`、`报告-*.md` |
+| 复现脚本、A/B 基线产物、对抗测试记录 | 同一实验目录的 `scripts/`、`out/`（`baseline/`、`verify/`）；只留最终产物，过程副本跑完即删，不整份复制盘面 |
+| 只读输入 | 数据集 `~/Desktop/Habitus/datasets/`，跑数检查点与录好的模型答案 `~/Desktop/Habitus/runs/`，留作对照的最终盘面 `~/Desktop/Habitus/results/`；索引见 `~/Desktop/Habitus/README.md` |
+| 问题总清单、待办、处理进度 | `~/Desktop/Habitus/notes/`（`38-README核对问题清单.md` 新一轮开一节；`待办.md` 记边角与范围外的发现） |
+| 设计决定（编号裁定） | 以仓库 `docs/rulings/README.md` 为准。代码里的「裁定 N」都能在仓库那份查到，架构测试 `tests/architecture/test_rulings_documented.py` 守着 |
 
+实验做完、结论进了裁定或待办，整个实验目录可删（用户 2026-11-12：不留过程；Habitus 的数据只放桌面 `~/Desktop/Habitus/` 这一个目录）。
 一次性脚本不进仓库。git 操作全部由用户自己做。

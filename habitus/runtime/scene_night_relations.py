@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 
+from habitus.behavior.kinds.ids import lane_of_token, pending_token
 from habitus.conditions import DayTypeCalendar
 from habitus.foundation.tracing import annotate, span
 from habitus.runtime.scene_advice import RelationAdvice
@@ -36,9 +37,11 @@ from habitus.scene.relations import (
 )
 from habitus.scene.relations.diff import diff_states
 from habitus.scene.relations.engine import LaneNight
+from habitus.scene.relations.retirement import Watching
 from habitus.scene.relations.state import LaneState, Status, Transition, fold, revert_touched
 from habitus.scene.relations.store import RelationStore, RelationStoreError
 from habitus.series import EventSeries
+from habitus.temporal.coverage import coverage_of
 
 
 @dataclass(frozen=True)
@@ -204,7 +207,13 @@ class RelationStage:
                 established=examined.established,
             )
             weights = await advice.weights(tests, signals)
-        state, transitions = await asyncio.to_thread(fold, previous, tests, weights or None)
+        # 判退休的观测材料：这条 lane 的观测覆盖、日型（答不出是 None）、空白算到最后一个已封口的日子
+        watching = Watching(
+            coverage=coverage_of(series, lane, slot_minutes=self.relation_config.slot_minutes),
+            day_type=self._day_type,
+            through=series.last_day,
+        )
+        state, transitions = await asyncio.to_thread(fold, previous, tests, weights or None, watching=watching)
         state = replace(state, vocabulary=vocabulary)
         transitions = (*reverted, *transitions)
         try:
@@ -216,6 +225,10 @@ class RelationStage:
             return None
         annotate(lane_attributes(tests.last_night, stored, state, transitions, weights))
         return state, transitions
+
+    def _day_type(self, day: date) -> str | None:
+        found = self.calendar.day_type(day)
+        return None if found is None else found.value
 
     def _all_hits(self) -> dict[str, ConceptHits]:
         return {record.occurrence_uri: record for day in self.hits.days_done() for record in self.hits.read_day(day)}
@@ -264,13 +277,16 @@ def lane_attributes(
     weights: Mapping[RelationKey, float],
 ) -> dict[str, object]:
     """一条 lane 这一晚的读数（``scene.b4.lane`` span）：要量的键数、逐条量的 / 跳过的（按段）、四族的族大小与过第 1 道数、
-    进族路径计数、各状态的新增与消失（对上一晚的表）、先验权重数与"靠先验"数。逐条的变化不进 span，在每晚报告里。"""
+    进族路径计数、各状态的新增与消失（对上一晚的表）、先验权重数与"靠先验"数、带着要读数的行数与这一代退休了几条。
+    逐条的变化不进 span，在每晚报告里。"""
 
     found: dict[str, object] = {
         "transitions": len(transitions),
         "prior_weights": len(weights),
         "prior_only": sum(1 for item in state.relations if item.prior_only and item.discovered_on == state.night),
         "sparse": state.count(Status.SPARSE),
+        "carried": len(state.carried()),
+        "retired_tonight": sum(1 for item in transitions if item.after is Status.RETIRED),
     }
     if night is not None:
         skipped = sum(night.skipped.values())
@@ -290,10 +306,14 @@ def lane_attributes(
 
 
 def _changed_classes(changes: CatalogChanges) -> frozenset[str]:
-    """这一段词表变更里成员变了的类：拆出与交出的、并掉与并入的、条目被搬过的两头。"""
+    """这一段词表变更里成员变了的类：拆出与交出的、并掉与并入的、在两个类之间搬过的条目的两头（改判据的搬动这次照旧算）。
+    从「待定」搬出来的（待定归入已有类、长新类）不算成员变化（缺陷 2，用户 11-12）：类只是多了以前没归上的记录，
+    不该把它上面的候选、成立打回、重置发现日。"""
 
     found = {*changes.split_from, *changes.split_from.values(), *changes.merged_into, *changes.merged_into.values()}
     for moved in changes.moved:
+        if moved.source == pending_token(lane_of_token(moved.source)):
+            continue
         found.update((moved.source, moved.target))
     return frozenset(found)
 

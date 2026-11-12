@@ -10,7 +10,7 @@ import pytest
 from habitus.scene.relations import LaneTests, Status, Transition, build_timelines, fold
 from habitus.scene.relations import store as relation_store
 from habitus.scene.relations.store import RelationStore
-from tests.unit.scene.relation_fixtures import CODE, CONCEPTS, CONFIG, DISCUSS, key, planted, workdays
+from tests.unit.scene.relation_fixtures import CODE, CONCEPTS, CONFIG, DISCUSS, key, planted, watching, workdays
 
 
 def _nights(count: int):
@@ -20,7 +20,7 @@ def _nights(count: int):
     for day in workdays(40)[5 : 5 + count]:
         tonight = series.until(day + timedelta(days=1))
         line = build_timelines(tonight, CONCEPTS, {}, CONFIG)["session"]
-        previous, transitions = fold(previous, LaneTests(line, CONCEPTS, CONFIG, tonight.cutoff))
+        previous, transitions = fold(previous, LaneTests(line, CONCEPTS, CONFIG, tonight.cutoff), watching=watching(tonight))
         found.append((previous, transitions))
     return found
 

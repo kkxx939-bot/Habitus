@@ -7,13 +7,17 @@ from datetime import date, datetime, timedelta, timezone
 
 from habitus.scene.concepts import ConceptSet
 from habitus.scene.relations import RelationConfig, RelationKey, Segment
+from habitus.scene.relations.retirement import Watching
 from habitus.series import EventSeries, SeriesRecord
+from habitus.temporal.coverage import coverage_of
 from tests.unit.kind_ids import kind_id
 from tests.unit.scene.concept_fixtures import base
 
 CST = timezone(timedelta(hours=8))
 START = date(2026, 6, 1)  # 周一
-CONFIG = RelationConfig(slot_minutes=15, transition_window_slots=3)
+CONFIG = RelationConfig(
+    slot_minutes=15, transition_window_slots=3, absence_typical_multiple=8.0, absence_min_gaps=2
+)
 TITLES = ("讨论方案", "修改代码", "调研", "写文档", "提交推送")
 CONCEPTS = ConceptSet([base(title) for title in TITLES])
 DISCUSS, CODE, RESEARCH, DOCS, PUSH = (kind_id(title) for title in TITLES)
@@ -94,6 +98,16 @@ def planted(
     records.sort(key=lambda item: (item.started_at, item.uri))
     cutoff = workdays(days)[-1] + timedelta(days=1)
     return EventSeries(cutoff=cutoff, records=tuple(records))
+
+
+def watching(series: EventSeries, lane: str = "session") -> Watching:
+    """``fold`` 判退休要的观测材料，取法同 runtime：这条 lane 的观测覆盖、空白算到序列最后一个已封口的日子；不给放假数据（日型一律答不出）。"""
+
+    return Watching(
+        coverage=coverage_of(series, lane, slot_minutes=CONFIG.slot_minutes),
+        day_type=lambda _day: None,
+        through=series.last_day,
+    )
 
 
 def key(antecedent: str, consequent: str, segment: Segment = Segment.CHAIN, *, condition: str = "") -> RelationKey:

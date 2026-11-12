@@ -155,7 +155,7 @@
     "habitus/runtime/foresight_delivery.py::DeliveryStage.run_once": 130,
     "habitus/runtime/foresight_settlement.py::SettlementStage._run": 64,
     "habitus/scene/concepts/author.py::concept_author_json_schema": 108,
-    "habitus/scene/relations/state.py::fold": 67,
+    "habitus/scene/relations/state.py::fold": 66,
     "habitus/scene/relations/timeline.py::build_timelines": 81
   }
 }

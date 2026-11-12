@@ -51,6 +51,7 @@ from habitus.runtime.scene_config import relation_config
 from habitus.runtime.scene_lock import SceneWriteLock, unlocked
 from habitus.runtime.scene_night import SceneNightConfig, SceneNightlyRun
 from habitus.runtime.scene_rhythms import RhythmFiles
+from habitus.runtime.scene_seal_files import SealFiles
 from habitus.runtime.scene_vocabulary import VocabularyCatalog
 from habitus.runtime.unsealed import UnsealedFromJudgements, unreduced_gaps
 from habitus.scene.advice.conditions import ConditionProposer
@@ -113,6 +114,8 @@ def build_scene_nightly(
         rulers=rhythm_rulers(config),
         # 每一代的节律落盘一份（映射读它），与完成标记放在一起、一起留存与清理
         rhythm_files=RhythmFiles(scene_root / "generation" / "rhythms", artifact_root=scene_root),
+        # 每一代的封口记录：并入之后被杀、接着做时不再按并入之后的概念集封一次（裁定 97 第 3 条）
+        seal_files=SealFiles(scene_root / "generation" / "seals", artifact_root=scene_root),
         frozen_vocabulary=None if marks is None else lambda: _frozen_vocabulary(marks),
     )
 

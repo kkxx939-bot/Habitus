@@ -2,7 +2,8 @@
 
 规范化：解码时把读到的对象按规范形式重新序列化比对，一个字节不同就是损坏，不做"尽力解析"。只认当前版：项目没上线，
 不为旧版文件留迁移（用户 10-19 定，26 号清单第四节第 9 条）。
-样本不够的只存各段的条数，已检的只存几项读数（每晚从数据重算，不跨夜带历史）；候选、成立、失效、前向未复现存全。
+样本不够的只存各段的条数，已检的只存几项读数（每晚从数据重算，不跨夜带历史）；候选、成立、失效、前向未复现存全；
+退休行只存键、状态、方向与退休那一代（``retired_on`` 只出现在退休行上，其余状态的规范形不变）。
 """
 
 from __future__ import annotations
@@ -101,6 +102,8 @@ def decode_transition(text: str, *, lane: str) -> Transition:
 
 def _relation(item: Relation) -> dict[str, Any]:
     body: dict[str, Any] = {"key": _key(item.key), "status": item.status, "upward": item.upward}
+    if item.status is Status.RETIRED:
+        return {**body, "retired_on": item.retired_on}
     if item.tonight is not None:
         body["tonight"] = _test(item.tonight, full=item.status.carried)
     if item.status.carried or item.forward is not None:
@@ -182,6 +185,12 @@ def _subset(item: Subset) -> dict[str, Any]:
 def _relation_from(body: dict[str, Any], lane: str) -> Relation:
     key = _key_from(body["key"], lane)
     status = Status(body["status"])
+    if status is Status.RETIRED:
+        if set(body) != _RETIRED_FIELDS or body["retired_on"] is None:
+            raise ValueError("a retired relation holds only its key, status, direction and retirement day")
+        return Relation(key=key, status=status, upward=bool(body["upward"]), retired_on=_day(body["retired_on"]))
+    if "retired_on" in body:
+        raise ValueError("only a retired relation records a retirement day")
     tonight = None if "tonight" not in body else _test_from(body["tonight"], key)
     return Relation(
         key=key,
@@ -201,6 +210,9 @@ def _relation_from(body: dict[str, Any], lane: str) -> Relation:
         misses=int(body.get("misses", 0)),
         maintenance_needed=None if body.get("maintenance_needed") is None else int(body["maintenance_needed"]),
     )
+
+
+_RETIRED_FIELDS = frozenset({"key", "status", "upward", "retired_on"})
 
 
 def _key_from(body: dict[str, Any], lane: str) -> RelationKey:

@@ -46,6 +46,7 @@ from tests.unit.scene.relation_fixtures import (
     RESEARCH,
     key,
     record,
+    watching,
     workdays,
 )
 
@@ -151,7 +152,7 @@ def test_a_condition_with_two_chains_on_one_side_leaves_every_consequent_and_seg
     group = [item for item in keys if item.antecedent == DISCUSS and item.condition == PUSHED]
     assert {item.segment for item in group} == set(SEGMENTS)
     assert {item.consequent for item in group} == {CODE, RESEARCH, DOCS}  # 推送自己是条件，不当后果
-    state, transitions = fold(None, tests)
+    state, transitions = fold(None, tests, watching=watching(_series(2)))
     stored = {item.key for item in state.relations}
     assert not stored & set(group)
     assert sum(state.sparse.values()) + len(state.relations) == len(set(keys))
@@ -214,7 +215,7 @@ def test_carried_rows_keep_a_full_reading_even_when_one_side_has_two_chains() ->
     series = _series(2)
     previous = _carried_previous(series.cutoff)
     tests = _tests(2, previous)
-    state, transitions = fold(previous, tests)
+    state, transitions = fold(previous, tests, watching=watching(series))
     rows = {item.key: item for item in state.relations}
     carried = {item.key: item for item in previous.relations}
     assert set(carried) <= set(rows)
@@ -253,9 +254,9 @@ def test_prior_only_marks_exactly_the_candidates_the_unweighted_night_would_not_
     """带一份非 1 的权重折叠：新发现的候选里，不加权折叠找不到的才打"靠先验"，其余不打；不加权能找到、加权丢了的不是候选。
     结果与基线逐字相同。"""
 
-    plain, _ = fold(None, _tests(seed))
+    plain, _ = fold(None, _tests(seed), watching=watching(_series(seed)))
     tests = _tests(seed)
-    state, transitions = fold(None, tests, _uniform(tests, weight))
+    state, transitions = fold(None, tests, _uniform(tests, weight), watching=watching(_series(seed)))
     unweighted = _candidates(plain)
     for row in state.relations:
         if row.status is Status.CANDIDATE:
@@ -274,9 +275,9 @@ def test_prior_only_on_a_second_night_reads_the_unweighted_night_on_the_same_new
 
     series = _series(5)
     previous = _carried_previous(series.cutoff)
-    plain, _ = fold(previous, _tests(5, previous))
+    plain, _ = fold(previous, _tests(5, previous), watching=watching(series))
     tests = _tests(5, previous)
-    state, transitions = fold(previous, tests, _uniform(tests, 0.5))
+    state, transitions = fold(previous, tests, _uniform(tests, 0.5), watching=watching(series))
     unweighted = _candidates(plain)
     for row in state.relations:
         if row.status is Status.CANDIDATE and row.discovered_on == state.night:
@@ -307,10 +308,10 @@ def test_prior_only_reaches_a_moderated_relation_through_its_parent(name: str) -
     series = hierarchy._series(days, primed=primed, on=on, off=0.0)
     previous = _carried_previous(series.cutoff) if second else None
     established = tuple(item.key for item in previous.of(Status.ESTABLISHED)) if previous is not None else ()
-    plain, _ = fold(previous, hierarchy._tests(series, established=established))
+    plain, _ = fold(previous, hierarchy._tests(series, established=established), watching=watching(series))
     tests = hierarchy._tests(series, established=established)
     weights = {item: (boost if item == hierarchy.PARENT else damp) for item in tests.keys() if not item.condition}
-    state, transitions = fold(previous, tests, weights)
+    state, transitions = fold(previous, tests, weights, watching=watching(series))
     unweighted = _candidates(plain)
     for row in state.relations:
         if row.status is Status.CANDIDATE and row.discovered_on == state.night:
@@ -336,8 +337,8 @@ def test_weights_are_normalised_over_every_key_including_the_hopeless_moderated_
     tests = _tests(2)
     hopeless = [item for item in tests.keys() if item.antecedent == DISCUSS and item.condition == PUSHED]
     assert len(hopeless) == 12
-    plain, _ = fold(None, _tests(2))
-    state, transitions = fold(None, tests, _uniform(tests, 0.1))
+    plain, _ = fold(None, _tests(2), watching=watching(_series(2)))
+    state, transitions = fold(None, tests, _uniform(tests, 0.1), watching=watching(_series(2)))
     assert (plain.family, state.family) == GOLDEN_NORMALISED_FAMILY
     assert sorted(_short(item.key) for item in state.relations if item.status is Status.CANDIDATE) == GOLDEN_NORMALISED
     assert Counter(item.status for item in state.relations) == GOLDEN_NORMALISED_COUNTS

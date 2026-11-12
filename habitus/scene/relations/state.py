@@ -7,6 +7,8 @@
 成立 ──维持检验：从上一次判过起不重叠地攒满一段（成立那晚按功效算好的次数、至少 2 块），连续两段区间都够不上第 3 道
       ──▶ 失效（记那晚 R）
 失效 / 前向未复现 ──只用 R 之后的数据又过第 1 道──▶ 候选（数据变了还能回来）
+候选 / 失效 / 前向未复现 ──上一代就是这样、这一代没迁移，前因或后果久没来──▶ 退休（记那一代 T）
+退休 ──只用 T 之后的数据又过第 1 道──▶ 候选
 ```
 
 - **又回来要靠新数据**：失效与前向未复现之后，第 1 道只看 R 之后的数据。不然旧数据里那段强关系会让它每晚都"又过第 1 道"、
@@ -24,11 +26,15 @@
   不能成立之后就一直是 None。
 - 样本不够与已检两种不跨夜保留任何东西（每晚从数据重算），只有候选、成立、失效带着历史。
 - 当晚测不了的关系（概念从概念集里没了）原样带着，不改状态。
+- **退休**（方案 ``19`` §8，用户 11-10、11-12）：候选、失效、前向未复现在前因或后果久没来时退休（``retirement``：账的久别
+  同一把尺，日历情境当前因只判后果），只留键与退休那一代，不再每代存读数、不做前向验证；以后只能靠退休之后的数据重新过
+  第 1 道回到候选。成立的不退。一条键一代只迁移一次：这一代刚迁移过的（含折叠之前被词表拆改打回候选的）下一代才判。
+  退休行不算"带着的行"（``carried``），从 ``LaneState.of(Status.RETIRED)`` 取。
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
@@ -44,6 +50,7 @@ from habitus.scene.relations.engine import (
 )
 from habitus.scene.relations.lane_tests import LaneTests
 from habitus.scene.relations.longspan import MEASURE_VERSIONS, measure_name
+from habitus.scene.relations.retirement import Absence, Watching, absences, retirement_reason
 
 #: 维持检验一段至少几块：一天里的几次不是几个独立样本（与前向验证的 ``blocks ≥ 2`` 同一条理由）。
 _MIN_MAINTENANCE_BLOCKS = 2
@@ -57,10 +64,12 @@ class Status(str, Enum):
     EXPIRED = "expired"
     #: 候选在前向验证上没复现。
     REJECTED = "rejected"
+    #: 候选、失效、前向未复现在前因或后果久没来时退休：只留键与退休那一代（和概念被词表停用 ``_retired`` 不是一回事）。
+    RETIRED = "retired"
 
     @property
     def carried(self) -> bool:
-        """跨夜带着历史的四种。"""
+        """跨夜带着历史、每一代要完整读数的四种（不含退休）。"""
 
         return self in (Status.CANDIDATE, Status.ESTABLISHED, Status.EXPIRED, Status.REJECTED)
 
@@ -97,11 +106,15 @@ class Relation:
     misses: int = 0
     #: 维持检验每段要攒几次独立的前因（成立那晚按功效算定，之后不变；None = 还没成立）。
     maintenance_needed: int | None = None
+    #: 退休那一代（只在退休行上）。
+    retired_on: date | None = None
 
     @property
     def reset_on(self) -> date | None:
-        """失效 / 前向未复现那晚：重新发现只看这之后的数据。"""
+        """失效 / 前向未复现 / 退休那一代：重新发现只看这之后的数据。"""
 
+        if self.status is Status.RETIRED:
+            return self.retired_on
         return self.expired_on if self.status is Status.EXPIRED else self.rejected_on
 
 
@@ -159,9 +172,14 @@ class StateError(ValueError):
 
 
 def fold(
-    previous: LaneState | None, tests: LaneTests, weights: Mapping[RelationKey, float] | None = None
+    previous: LaneState | None,
+    tests: LaneTests,
+    weights: Mapping[RelationKey, float] | None = None,
+    *,
+    watching: Watching,
 ) -> tuple[LaneState, tuple[Transition, ...]]:
-    """第 ``tests.cutoff`` 晚的状态与这一晚的迁移。``previous`` 是这条 lane 之前最近的一晚（没有就是第一晚）。"""
+    """第 ``tests.cutoff`` 晚的状态与这一晚的迁移。``previous`` 是这条 lane 之前最近的一晚（没有就是第一晚）；``watching`` 是
+    这条 lane 的观测材料（覆盖、日型、空白算到哪天），判退休用。"""
 
     if previous is not None:
         if previous.lane != tests.line.lane:
@@ -170,7 +188,8 @@ def fold(
             raise StateError(f"night {tests.cutoff} does not come after the stored night {previous.night}")
         previous = _drop_stale_measures(previous)
     carried: Mapping[RelationKey, Relation] = previous.carried() if previous is not None else {}
-    since = {key: relation.reset_on for key, relation in carried.items() if relation.reset_on is not None}
+    retired = {relation.key: relation for relation in previous.of(Status.RETIRED)} if previous is not None else {}
+    since = {key: row.reset_on for key, row in (*carried.items(), *retired.items()) if row.reset_on is not None}
     outside = frozenset(
         key for key, relation in carried.items() if relation.status in (Status.CANDIDATE, Status.ESTABLISHED)
     )
@@ -182,25 +201,18 @@ def fold(
     # 没逐条量的那些必是稀疏，与逐条量出来的稀疏一样只按段计数
     sparse: dict[str, int] = dict(night.skipped)
     transitions: list[Transition] = []
-    for key in sorted(set(tonight) | set(carried)):
-        before = carried.get(key)
-        if before is not None and key not in tonight and _expired_row(before, tests):
-            # 再也用不上的行清掉（26 号清单 5.6、5.7）；清掉还在用的行时留一条迁移，说清楚为什么
-            if before.status in (Status.CANDIDATE, Status.ESTABLISHED):
-                transitions.append(
-                    Transition(
-                        night=night.cutoff,
-                        key=key,
-                        before=before.status,
-                        after=Status.EXPIRED,
-                        reason="它依赖的段或条件已经不在了（变点重算后整段没了、条件被拒或消失），这一行清掉",
-                    )
-                )
+    away = absences(tests.line, watching, tests.config)
+    for key in sorted(set(tonight) | set(carried) | set(retired)):
+        before = carried.get(key, retired.get(key))
+        if before is not None and (gone := _cleared(before, key in tonight, tests, night.cutoff)) is not None:
+            transitions.extend(gone)
             continue
         after, reason = _step(before, tonight.get(key), tests, night.cutoff)
         if after.status is Status.CANDIDATE and after.discovered_on == night.cutoff and key not in unweighted:
             after = replace(after, prior_only=True)
             reason = f"{reason}（靠先验：不加权过不了）" if reason else reason
+        if before is not None and reason is None:
+            after, reason = _retire(before, after, tests, night.cutoff, away)
         if after.status is Status.SPARSE:
             sparse[key.segment.value] = sparse.get(key.segment.value, 0) + 1
         else:
@@ -225,6 +237,39 @@ def fold(
         measure_versions=MEASURE_VERSIONS,
     )
     return state, (*transitions, *dropped)
+
+
+#: 会退休的三种：成立的不退。
+_RETIRABLE = (Status.CANDIDATE, Status.EXPIRED, Status.REJECTED)
+
+
+def _cleared(before: Relation, measured: bool, tests: LaneTests, night: date) -> tuple[Transition, ...] | None:
+    """这一行这一代清不清掉：清就返回要留的迁移（可以没有），留着是 None。概念被词表停用的退休行有没有读数都清；
+    别的行当晚没读数、再也用不上（``_expired_row``，26 号清单 5.6、5.7）时清，清掉还在用的行时留一条迁移说清楚为什么。"""
+
+    if before.status is Status.RETIRED and _retired(before.key, tests):
+        return ()
+    if measured or not _expired_row(before, tests):
+        return None
+    if before.status not in (Status.CANDIDATE, Status.ESTABLISHED):
+        return ()
+    reason = "它依赖的段或条件已经不在了（变点重算后整段没了、条件被拒或消失），这一行清掉"
+    return (Transition(night=night, key=before.key, before=before.status, after=Status.EXPIRED, reason=reason),)
+
+
+def _retire(
+    before: Relation, after: Relation, tests: LaneTests, night: date, away: Callable[[str], Absence | None]
+) -> tuple[Relation, str | None]:
+    """这一代没迁移的行判不判退休、退不退（共享说明 3.3）。只判上一代带进来、这一代之后仍是候选 / 失效 / 前向未复现的；
+    发现日是这一代的候选只能是折叠之前被词表拆改打回的（``revert_touched``：上一代的发现日都早于这一代），它这一代已经
+    迁移过（一条键一代只迁移一次），下一代才判。"""
+
+    if before.status not in _RETIRABLE or after.status not in _RETIRABLE or before.discovered_on == night:
+        return after, None
+    reason = retirement_reason(after.key, tests.concepts, away)
+    if reason is None:
+        return after, None
+    return Relation(key=after.key, status=Status.RETIRED, upward=after.upward, retired_on=night), reason
 
 
 def _drop_orphaned_combinations(relations: list[Relation], night: date) -> tuple[list[Relation], list[Transition]]:
@@ -276,7 +321,8 @@ def revert_touched(
 ) -> tuple[LaneState, tuple[Transition, ...]]:
     """词表拆分 / 合并改了某些类的成员（裁定 59）：以这些概念为前因或后果的候选与成立退回候选，发现日记成 ``night``，
     在新成员上重新做前向验证——这期间不开口，影子照记。否则"查看信息"拆出"看日程"之后，"起床 → 查看信息"还靠搬走的那批
-    记录成立着、照样开口，要等维持检验连判两段才失效。只改运行中的状态，不迁移任何旧数据。"""
+    记录成立着、照样开口，要等维持检验连判两段才失效。只改运行中的状态，不迁移任何旧数据。退休行不动（它不带读数，
+    回来时本就在新数据上从第 1 道重新过）。发现日记成 ``night`` 也是 ``fold`` 认出"这一代被打回过、这一代不判退休"的依据。"""
 
     reverted: list[Relation] = []
     transitions: list[Transition] = []
@@ -327,7 +373,7 @@ def _step(
         if before is None:
             raise StateError("a relation with no history must have a test tonight")
         return before, None  # 概念不在了，测不了：原样带着
-    if before is None or before.status.dormant:
+    if before is None or before.status.dormant or before.status is Status.RETIRED:
         if test.verdict is Verdict.SIGNIFICANT:
             reason = "过了第 1 道" if before is None else f"{before.reset_on} 之后的新数据上又过了第 1 道"
             needed = _forward_needed(test, tests)
@@ -339,6 +385,8 @@ def _step(
                 discovered_on=night,
                 forward_needed=needed,
             ), f"{reason}（前向验证要攒 {needed} 次）"
+        if before is not None and before.status is Status.RETIRED:
+            return before, None  # 退休行不存读数
         if before is not None:
             return replace(before, tonight=test, maintenance=None, forward=None), None
         return Relation(key=test.key, status=_plain(test), upward=test.upward, tonight=test), None
@@ -461,8 +509,9 @@ def _established(before: Relation, test: RelationTest, tests: LaneTests, night: 
 
 
 def _expired_row(before: Relation, tests: LaneTests) -> bool:
-    """冻住的行（当晚没有读数）还留不留：停用概念的休眠行永远不会再用；依赖的段或条件已经不在的行也不会。只是前因这阵子
-    没有新链的照旧冻着；休眠行的 ``reset_on`` 留着，重新显著时从它之后的新数据算。"""
+    """冻住的行（当晚没有读数）还留不留：停用概念的休眠行永远不会再用（停用概念的退休行在 ``_cleared`` 里先清掉）；依赖的段或条件
+    已经不在的行也不会，退休行同样。只是前因这阵子没有新链的照旧冻着（久没来的由退休规则处理）；休眠行与退休行的 ``reset_on``
+    留着，重新显著时从它之后的新数据算。"""
 
     if before.status.dormant and _retired(before.key, tests):
         return True
@@ -470,6 +519,8 @@ def _expired_row(before: Relation, tests: LaneTests) -> bool:
 
 
 def _retired(key: RelationKey | None, tests: LaneTests) -> bool:
+    """前因或后果的概念被词表停用（不是关系退休 ``Status.RETIRED``）。"""
+
     if key is None:
         return False
     concepts = tests.concepts

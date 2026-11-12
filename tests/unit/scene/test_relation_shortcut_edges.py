@@ -40,7 +40,7 @@ from habitus.series import EventSeries, SeriesRecord
 from tests.unit.scene import test_relation_exact_shortcuts as exact
 from tests.unit.scene.concept_fixtures import base
 from tests.unit.scene.hit_fixtures import uri_for
-from tests.unit.scene.relation_fixtures import CODE, CONFIG, DISCUSS, PUSH, TITLES, record, workdays
+from tests.unit.scene.relation_fixtures import CODE, CONFIG, DISCUSS, PUSH, TITLES, record, watching, workdays
 
 SITUATION = "出差中"
 AWAY = Condition(Template.CONCEPT, SITUATION)
@@ -217,12 +217,15 @@ def _outcome(
     make: Callable[[], LaneTests],
     previous: LaneState | None = None,
     weights: Callable[[LaneTests], dict[RelationKey, float]] = _hashed,
+    *,
+    series: EventSeries,
 ) -> Outcome:
-    """（不加权折叠的摘要, 加权折叠的摘要, 不加权的各段稀疏, 不加权的族, 加权的族）。``make`` 每次造一份新的 ``LaneTests``。"""
+    """（不加权折叠的摘要, 加权折叠的摘要, 不加权的各段稀疏, 不加权的族, 加权的族）。``make`` 每次造一份新的 ``LaneTests``；
+    ``series`` 是它的序列（判退休的观测材料从它取）。"""
 
-    plain, plain_moves = fold(previous, make())
+    plain, plain_moves = fold(previous, make(), watching=watching(series))
     tests = make()
-    weighted, weighted_moves = fold(previous, tests, weights(tests))
+    weighted, weighted_moves = fold(previous, tests, weights(tests), watching=watching(series))
     return (
         _digest(plain, plain_moves),
         _digest(weighted, weighted_moves),
@@ -272,9 +275,9 @@ def test_a_proposed_condition_on_the_gate_edge_matches_the_baseline(name: str) -
     assert _sides(tests, (AWAY,), Segment.CHAIN) == AWAY_EDGES[name]
     if name == "strong":
         assert _sides(tests, (AWAY,), Segment.DAYS_2_7)[0] == 2
-        state, _moves = fold(None, make())
+        state, _moves = fold(None, make(), watching=watching(_series(plan)[0]))
         assert _rows(state, group) == GOLDEN_STRONG_ROWS["away"]
-    assert _outcome(make) == GOLDEN_AWAY[name]
+    assert _outcome(make, series=_series(plan)[0]) == GOLDEN_AWAY[name]
 
 
 # ── 条件判不了（None）的链：地点没给的日子 ──────────────────────────────────────
@@ -309,9 +312,9 @@ def test_conditions_with_undecidable_chains_on_the_gate_edge_match_the_baseline(
     assert (_sides(tests, (OFFICE,), Segment.CHAIN), _sides(tests, (HOME,), Segment.CHAIN)) == PLACE_EDGES[name]
     if name == "strong":
         assert _sides(tests, (OFFICE,), Segment.DAYS_2_7) == (2, (2,))
-        state, _moves = fold(None, make())
+        state, _moves = fold(None, make(), watching=watching(_series(plan)[0]))
         assert _rows(state, {item for item in tests.keys() if item.condition}) == GOLDEN_STRONG_ROWS["place"]
-    assert _outcome(make) == GOLDEN_PLACE[name]
+    assert _outcome(make, series=_series(plan)[0]) == GOLDEN_PLACE[name]
 
 
 # ── 几个条件合起来的组合键（裁定 62 第 1 条）在门 1 边缘 ───────────────────────────
@@ -381,7 +384,7 @@ def test_a_grown_combination_on_the_gate_edge_matches_the_baseline(name: str) ->
     grown = [item for item in tests.keys() if len(item.conditions) == 2]
     assert grown and {item.condition for item in grown} >= {f"{OFFICE.text}+{PUSHED.text}"}
     assert _sides(tests, (OFFICE, PUSHED), Segment.CHAIN) == GROWN_EDGES[name]
-    assert _outcome(make, previous) == GOLDEN_GROWN[name]
+    assert _outcome(make, previous, series=series) == GOLDEN_GROWN[name]
 
 
 # ── 非同一条链段：合并之后链比原来少 ─────────────────────────────────────────────
@@ -419,7 +422,7 @@ def test_segments_whose_merged_chains_fall_to_the_gate_edge_match_the_baseline(n
     tests = make()
     found = {segment: _sides(tests, (PUSHED,), segment)[0] for segment in MERGED_EDGES[name]}
     assert found == MERGED_EDGES[name]
-    assert _outcome(make) == GOLDEN_MERGED[name]
+    assert _outcome(make, series=_series(plan)[0]) == GOLDEN_MERGED[name]
 
 
 # ── 回退：跳过的键在加权归一之后可能进族，必须逐条量回来 ─────────────────────────────
@@ -447,7 +450,7 @@ def test_skipped_keys_that_could_enter_the_family_after_normalisation_are_measur
     short = [item for item in keys if not item.segment.long]
     total = sum(0.001 if not item.condition else 1.0 for item in short)
     assert total / len(short) <= CONFIG.thresholds.fdr
-    assert _outcome(make, weights=tiny) == GOLDEN_FALLBACK
+    assert _outcome(make, weights=tiny, series=_series(plan)[0]) == GOLDEN_FALLBACK
 
 
 # ── 调用方给跳过的带条件键非 1 的权重；``night`` 直接传 ``outside`` 不传 ``keep`` ─────────────────
@@ -465,7 +468,7 @@ def test_weights_given_to_skipped_moderated_keys_are_normalised_like_the_baselin
     assert len(group) == 12
     weights = {} if plain_rest else exact._uniform(tests, 0.5)
     weights.update({item: hopeless for item in group})
-    state, transitions = fold(None, tests, weights)
+    state, transitions = fold(None, tests, weights, watching=watching(exact._series(2)))
     assert (state.family, dict(state.sparse), _digest(state, transitions)) == GOLDEN_HOPELESS_WEIGHTS[
         (hopeless, plain_rest)
     ]
@@ -516,7 +519,9 @@ def test_skipped_keys_under_a_passing_parent_count_in_the_moderated_normalisatio
 
     tests = _tests(ADMITTED)
     group = _admitted_premise(tests)
-    state, transitions = fold(None, _tests(ADMITTED), {item: hopeless for item in group})
+    state, transitions = fold(
+        None, _tests(ADMITTED), {item: hopeless for item in group}, watching=watching(_series(ADMITTED)[0])
+    )
     family, sparse, digest = GOLDEN_ADMITTED_WEIGHTS[hopeless]
     assert (state.family, dict(state.sparse)) == (family, sparse)
     assert _stable_digest(state, transitions) == digest, _stable_text(state, transitions)
@@ -534,7 +539,7 @@ def test_a_skipped_key_that_may_enter_the_moderated_family_is_measured_like_the_
     night = _tests(CROWDED).night(weights)
     verdicts = {test.key: test.verdict.value for test in night.tests}
     assert verdicts[PUSHED_CHILD] == "tested"
-    state, transitions = fold(None, _tests(CROWDED), weights)
+    state, transitions = fold(None, _tests(CROWDED), weights, watching=watching(_series(CROWDED)[0]))
     assert (night.family, state.family, dict(state.sparse), _digest(state, transitions)) == GOLDEN_MAY_ENTER
 
 

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from habitus.temporal.slots import MINUTES_PER_DAY
@@ -86,6 +87,10 @@ class RelationConfig:
     slot_minutes: int
     #: 转移窗口（同一条链）有几槽，由 ``config.temporal`` 的合并窗口与槽宽换算（裁定 59）。
     transition_window_slots: int
+    #: 关系行退休的"久没来"（``temporal.absence.long_absence``）：空白不短于几个典型间隔（H）、历史上至少几个没截尾的间隔才判。
+    #: 与账的久别同一把尺，组合根从预测层的遗忘半衰期与 ``MIN_HISTORY`` 抄过来，不另开可调项（两边才不会被调成不同的值）。
+    absence_typical_multiple: float
+    absence_min_gaps: int
     thresholds: RelationThresholds = field(default_factory=RelationThresholds)
 
     def __post_init__(self) -> None:
@@ -93,6 +98,10 @@ class RelationConfig:
             raise RelationConfigError("slot_minutes must be a positive divisor of 1440")
         if not _positive_int(self.transition_window_slots) or self.transition_window_slots >= self.slots_per_day:
             raise RelationConfigError("transition_window_slots must be a positive number of slots below a day")
+        if not math.isfinite(self.absence_typical_multiple) or self.absence_typical_multiple <= 0:
+            raise RelationConfigError("absence_typical_multiple must be a positive finite number")
+        if not _positive_int(self.absence_min_gaps):
+            raise RelationConfigError("absence_min_gaps must be a positive integer")
 
     @property
     def slots_per_day(self) -> int:

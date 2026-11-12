@@ -32,7 +32,7 @@ from habitus.scene.relations.conditions import (
 from habitus.scene.relations.config import RelationThresholds
 from habitus.scene.relations.longspan import MEASURE_VERSIONS
 from habitus.scene.relations.measures import ChainMeasure
-from tests.unit.scene.relation_fixtures import CODE, CONCEPTS, CONFIG, DISCUSS, PUSH, RESEARCH, key, planted
+from tests.unit.scene.relation_fixtures import CODE, CONCEPTS, CONFIG, DISCUSS, PUSH, RESEARCH, key, planted, watching
 
 PRIMED = Condition(Template.TIMELINE, RESEARCH)
 WROTE = Condition(Template.TIMELINE, PUSH)
@@ -157,7 +157,7 @@ def test_a_combination_whose_parent_stopped_being_established_is_cleared_with_it
     with_parent = LaneState(
         lane="session", night=night, family=1, relations=(held, growing), measure_versions=MEASURE_VERSIONS
     )
-    state, moved = fold(with_parent, lane_tests(series, established=(parent,)))
+    state, moved = fold(with_parent, lane_tests(series, established=(parent,)), watching=watching(series))
     kept = {item.key: item for item in state.relations}
     assert kept[parent].status is Status.ESTABLISHED and kept[combo].status is Status.CANDIDATE
     # 父关系不在了（退回候选）：组合整行清掉，迁移写清楚为什么
@@ -168,7 +168,7 @@ def test_a_combination_whose_parent_stopped_being_established_is_cleared_with_it
         relations=(replace(held, status=Status.CANDIDATE), growing),
         measure_versions=MEASURE_VERSIONS,
     )
-    state, moved = fold(orphaned, lane_tests(series, established=()))
+    state, moved = fold(orphaned, lane_tests(series, established=()), watching=watching(series))
     assert combo not in {item.key for item in state.relations}
     dropped = [item for item in moved if item.key == combo]
     assert dropped and dropped[0].before is Status.CANDIDATE and "一起退回" in dropped[0].reason
@@ -187,7 +187,11 @@ def test_an_established_relation_is_assessed_every_night_so_its_effect_size_is_k
         maintained_through=night,
         maintenance_needed=40,
     )
-    state, _ = fold(LaneState(lane="session", night=night, family=1, relations=(held,)), lane_tests(series))
+    state, _ = fold(
+        LaneState(lane="session", night=night, family=1, relations=(held,)),
+        lane_tests(series),
+        watching=watching(series),
+    )
     (relation,) = (item for item in state.relations if item.key == held.key)
     assert relation.status is Status.ESTABLISHED
     assert relation.tonight is not None and relation.tonight.large_enough is True
@@ -214,7 +218,9 @@ def test_the_nightly_effect_size_of_an_established_relation_has_hysteresis() -> 
     def tonight(previous: Relation, line: float) -> RelationTest:
         config = replace(CONFIG, thresholds=replace(CONFIG.thresholds, min_absolute_lift=line, min_relative_lift=0.0))
         state, _ = fold(
-            LaneState(lane="session", night=night, family=1, relations=(previous,)), lane_tests(series, config=config)
+            LaneState(lane="session", night=night, family=1, relations=(previous,)),
+            lane_tests(series, config=config),
+            watching=watching(series),
         )
         (relation,) = (item for item in state.relations if item.key == held.key)
         assert relation.status is Status.ESTABLISHED and relation.tonight is not None

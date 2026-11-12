@@ -47,6 +47,7 @@ from tests.unit.scene.relation_fixtures import (
     TITLES,
     key,
     record,
+    watching,
     workdays,
 )
 
@@ -205,7 +206,8 @@ def test_a_plain_relation_is_not_crowded_out_by_a_flood_of_moderated_keys() -> N
     night = crowded.night()
     assert _by_key(night)[PARENT] is Verdict.SIGNIFICANT
     assert _family_matches_verdicts(night)
-    state, _ = fold(None, _tests(_series(40, primed=0.0, on=0.2, off=0.2, people=30)))
+    again = _series(40, primed=0.0, on=0.2, off=0.2, people=30)
+    state, _ = fold(None, _tests(again), watching=watching(again))
     assert _statuses(state)[PARENT] is Status.CANDIDATE
 
 
@@ -227,7 +229,7 @@ def test_a_moderated_relation_whose_parent_did_not_pass_stays_sparse_unless_its_
     assert tests[CHILD].p_value < 0.05  # 读数照量：它自己不弱
     assert tests[CHILD].verdict is Verdict.SPARSE
     assert _family_matches_verdicts(night)
-    state, _ = fold(None, _tests(weak))
+    state, _ = fold(None, _tests(weak), watching=watching(weak))
     assert CHILD not in _statuses(state)  # 稀疏的只计数
 
     strong = _series(40, primed=0.3, on=1.0, off=0.0)
@@ -237,7 +239,7 @@ def test_a_moderated_relation_whose_parent_did_not_pass_stays_sparse_unless_its_
     assert tests[CHILD].p_value < 1e-3
     assert tests[CHILD].verdict is Verdict.SIGNIFICANT
     assert _family_matches_verdicts(night)
-    state, _ = fold(None, _tests(strong))
+    state, _ = fold(None, _tests(strong), watching=watching(strong))
     assert _statuses(state)[CHILD] is Status.CANDIDATE
 
 
@@ -253,7 +255,7 @@ def test_a_moderated_relation_enters_when_its_parent_passes_tonight() -> None:
     assert verdicts[PARENT] is Verdict.SIGNIFICANT
     assert verdicts[CHILD] is Verdict.SIGNIFICANT
     assert _family_matches_verdicts(night)
-    state, _ = fold(None, _tests(series))
+    state, _ = fold(None, _tests(series), watching=watching(series))
     assert _statuses(state)[CHILD] is Status.CANDIDATE
 
 
@@ -278,7 +280,7 @@ def test_a_parent_carried_as_candidate_or_established_lets_the_moderated_relatio
     series = _series(40, primed=0.3, on=0.6, off=0.0)
     previous = _previous(series, _carried(PARENT, status, workdays(40)))
     tests = _tests(series, established=tuple(item.key for item in previous.of(Status.ESTABLISHED)))
-    state, _ = fold(previous, tests)
+    state, _ = fold(previous, tests, watching=watching(series))
     rows = {item.key: item for item in state.relations}
     assert _tonight(state, PARENT).verdict is not Verdict.SIGNIFICANT  # 前提：当晚它自己没过
     if enters:
@@ -306,7 +308,7 @@ def test_a_combination_enters_when_its_single_condition_parent_is_established() 
     alone = _by_key(_tests(series, established=(CHILD,)).night())
     assert alone[PARENT] is not Verdict.SIGNIFICANT
     assert alone[combination] is Verdict.SPARSE  # 反例：父关系都不放行、组也过不了，组合不进族
-    state, _ = fold(previous, tests)
+    state, _ = fold(previous, tests, watching=watching(series))
     rows = {item.key: item for item in state.relations}
     assert PARENT not in previous.carried()
     assert _tonight(state, PARENT).verdict is not Verdict.SIGNIFICANT
@@ -344,7 +346,7 @@ def test_long_span_family_and_results_are_unchanged_by_the_split() -> None:
     assert len(found) == 20
     assert [row for row in found if row[1] != "sparse"] == GOLDEN_LONG_FAMILY
     assert sum(1 for row in found if row[1] == "sparse") == 17
-    state, _ = fold(None, _tests(series, concepts=LONG_CONCEPTS))
+    state, _ = fold(None, _tests(series, concepts=LONG_CONCEPTS), watching=watching(series))
     assert sorted(
         item.key.text for item in state.relations if item.key.segment.long and item.status is Status.CANDIDATE
     ) == sorted(row[0] for row in GOLDEN_LONG_FAMILY if row[1] == "significant")
@@ -373,7 +375,7 @@ def test_prior_only_follows_the_same_hierarchy_in_the_unweighted_pass() -> None:
         item.condition and not any(parent in night.plain_significant for parent in item.parents())
         for item in night.plain_significant
     )
-    state, _ = fold(None, tests, weights)
+    state, _ = fold(None, tests, weights, watching=watching(series))
     rows = {item.key: item for item in state.relations}
     assert rows[PARENT].status is Status.CANDIDATE and rows[PARENT].prior_only
     assert rows[CHILD].status is Status.CANDIDATE and rows[CHILD].prior_only

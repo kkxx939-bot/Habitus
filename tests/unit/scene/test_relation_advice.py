@@ -38,6 +38,7 @@ from tests.unit.scene.relation_fixtures import (
     TITLES,
     key,
     planted,
+    watching,
 )
 
 TRAVEL = situation("出差中", "人在常住地之外过夜")
@@ -289,11 +290,11 @@ def test_a_relation_that_passes_only_with_its_prior_is_tagged() -> None:
         for item in tests.keys()
         if not item.condition
     }
-    state, moved = fold(None, tests, weights)
+    state, moved = fold(None, tests, weights, watching=watching(series))
     found = next(item for item in state.relations if item.key == key(DISCUSS, CODE))
     assert found.status is Status.CANDIDATE and found.prior_only
     assert any("靠先验" in item.reason for item in moved if item.key == key(DISCUSS, CODE))
-    plain, _moved = fold(None, lane_tests(series))
+    plain, _moved = fold(None, lane_tests(series), watching=watching(series))
     assert all(item.key != key(DISCUSS, CODE) or item.status is not Status.CANDIDATE for item in plain.relations)
 
 

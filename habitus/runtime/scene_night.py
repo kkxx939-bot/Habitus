@@ -56,6 +56,7 @@ from habitus.runtime.scene_night_relations import RelationStage
 from habitus.runtime.scene_night_seal import SealStage
 from habitus.runtime.scene_night_sync import Synced, SyncStage
 from habitus.runtime.scene_rhythms import RhythmFiles
+from habitus.runtime.scene_seal_files import SealFiles
 from habitus.scene.concepts.calendar_situations import calendar_key, most_specific
 from habitus.scene.concepts.catalog import ClassCatalog
 from habitus.scene.concepts.model import ConceptSet
@@ -131,7 +132,7 @@ class NightReport:
 
     def summary(self) -> str:
         counts = "；".join(
-            f"{lane} 候选 {numbers.get('candidate', 0)}、成立 {numbers.get('established', 0)}、失效 {numbers.get('expired', 0)}、前向未复现 {numbers.get('rejected', 0)}"
+            f"{lane} 候选 {numbers.get('candidate', 0)}、成立 {numbers.get('established', 0)}、失效 {numbers.get('expired', 0)}、前向未复现 {numbers.get('rejected', 0)}、退休 {numbers.get('retired', 0)}"
             for lane, numbers in sorted(self.relations.items())
         )
         return (
@@ -169,6 +170,7 @@ class SceneNightlyRun:
         rulers: RhythmRulers,
         config: SceneNightConfig | None = None,
         rhythm_files: RhythmFiles | None = None,
+        seal_files: SealFiles | None = None,
         frozen_vocabulary: Callable[[], int | None] | None = None,
     ) -> None:
         resolved = config or SceneNightConfig()
@@ -188,6 +190,8 @@ class SceneNightlyRun:
         self.rulers = rulers
         #: 每一代的节律文件（换代写、映射读）；没接就每次按截止到那一天的序列现算。
         self.rhythm_files = rhythm_files
+        #: 每一代的封口记录（封口做完就写；接着做同一代时有它就不再封）；没接就每次都封。
+        self.seal_files = seal_files
         #: 最近一代做完时的词表版本（完成标记上记的）；没接、或一代都还没有是 None。那之后才有或成员才变的类，
         #: "近几天同类记录"这份材料按没给（``recent_gate``）。
         self.frozen_vocabulary = frozen_vocabulary

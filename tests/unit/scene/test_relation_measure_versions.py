@@ -9,7 +9,7 @@ from habitus.scene.relations.conditions import Condition, Template
 from habitus.scene.relations.longspan import CHAIN_MODERATED, MEASURE_VERSIONS
 from habitus.scene.relations.spans import Segment
 from habitus.scene.relations.state import Relation, _drop_stale_measures
-from tests.unit.scene.relation_fixtures import CODE, CONCEPTS, CONFIG, DISCUSS, RESEARCH, key, planted
+from tests.unit.scene.relation_fixtures import CODE, CONCEPTS, CONFIG, DISCUSS, RESEARCH, key, planted, watching
 
 NIGHT = date(2026, 10, 18)
 
@@ -74,7 +74,7 @@ def test_a_v2_state_drops_established_moderated_chain_rows_and_keeps_plain_chain
     )
     line = build_timelines(series, CONCEPTS, {}, CONFIG)["session"]
     tests = LaneTests(line, CONCEPTS, CONFIG, series.cutoff, established=(moderated, plain))
-    state, _ = fold(previous, tests)
+    state, _ = fold(previous, tests, watching=watching(series))
     rows = {item.key: item for item in state.relations}
     assert rows[plain].status is Status.ESTABLISHED  # 不带条件的同一条链量法没变：照旧带着
     # 带条件的那条旧行清掉了：今晚若又出现，也只能是新判据下当晚重新量出来的，不是带过来的成立

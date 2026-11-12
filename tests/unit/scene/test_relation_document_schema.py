@@ -9,7 +9,7 @@ import pytest
 
 from habitus.scene.relations import LaneState, LaneTests, build_timelines, fold
 from habitus.scene.relations.document import SCHEMA, RelationRecordError, decode_night, encode_night
-from tests.unit.scene.relation_fixtures import CONCEPTS, CONFIG, planted, workdays
+from tests.unit.scene.relation_fixtures import CONCEPTS, CONFIG, planted, watching, workdays
 
 
 def _last_night() -> LaneState:
@@ -18,7 +18,7 @@ def _last_night() -> LaneState:
     for day in workdays(40)[5:]:
         tonight = series.until(day + timedelta(days=1))
         line = build_timelines(tonight, CONCEPTS, {}, CONFIG)["session"]
-        previous, _moved = fold(previous, LaneTests(line, CONCEPTS, CONFIG, tonight.cutoff))
+        previous, _moved = fold(previous, LaneTests(line, CONCEPTS, CONFIG, tonight.cutoff), watching=watching(tonight))
     assert previous is not None
     return previous
 

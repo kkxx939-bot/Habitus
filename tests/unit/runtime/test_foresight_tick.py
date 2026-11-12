@@ -31,7 +31,9 @@ from tests.unit.scene.fixtures import DAY1, SUBJECT, Site, at, publish
 TODAY = DAY1 + timedelta(days=3)  # 2026-08-18
 DISCUSS, CODE = kind_id("讨论方案"), kind_id("修改代码")
 CONCEPTS = ConceptSet([base("讨论方案"), base("修改代码")])
-CONFIG = RelationConfig(slot_minutes=15, transition_window_slots=3)
+CONFIG = RelationConfig(
+    slot_minutes=15, transition_window_slots=3, absence_typical_multiple=8.0, absence_min_gaps=2
+)
 RULERS = RhythmRulers(15, 2700, 3, 5.0, 5.0, 0.10, 35)
 TOLERANCE = Tolerance(line=1.0 - ForesightConfig().false_alarm_rate)  # 产品默认的线
 

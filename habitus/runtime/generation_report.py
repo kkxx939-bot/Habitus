@@ -7,7 +7,7 @@
 - 昨天没在看的时段（「未观测」空白，从这一代读到的序列里取）；
 - **关系表双向变化**（用户 11-09：「关系的变化，无论是增加还是减少，这些都需要看」）：每条 lane 这一代的关系表比上一晚多出 /
   少了 / 状态变了的每一条，带键、前后状态、当晚读数（p、最小可达 p、方向、靠先验）、族、进族路径、迁移日志里的原因。两晚的表都从
-  盘上读（``scene.relations.store``），差由 ``scene.relations.diff`` 算。
+  盘上读（``scene.relations.store``），差由 ``scene.relations.diff`` 算；另报带着要读数的行数、退休行总数与这一代退了几条。
 
 一代一份，没写成的那一代也写（看得见停在哪一步）；与完成标记同一保留期。写报告失败只记观测，不挡换代。
 """
@@ -23,7 +23,7 @@ from habitus.infrastructure.store.filesystem import atomic_replace_bytes, read_r
 from habitus.runtime.generation_result import FALLBACKS, GenerationResult
 from habitus.runtime.generation_trace import prune_dated
 from habitus.scene.relations.diff import RelationChange, diff_states, entry_paths, family_of
-from habitus.scene.relations.state import LaneState, Transition
+from habitus.scene.relations.state import LaneState, Status, Transition
 from habitus.scene.relations.store import RelationStore, RelationStoreError
 
 _SCHEMA = "generation_report_v1"
@@ -111,12 +111,12 @@ class GenerationReports:
                     continue  # 这一代没写这条 lane 的关系表（关系判定没做成、沿用上一代）：没有变化可报
                 after = self.relations.read(lane, night)
                 before = self.relations.previous(lane, night)
-                reasons = _reasons(self.relations.transitions(lane), night)
+                transitions = self.relations.transitions(lane)
             except RelationStoreError as exc:
                 section[lane] = {"error": str(exc)[:500]}
                 continue
             changes = diff_states(before, after)
-            section[lane] = _lane_section(before, after, changes, reasons)
+            section[lane] = _lane_section(before, after, changes, transitions)
             flat.extend((lane, change) for change in changes)
         return section, tuple(flat)
 
@@ -124,15 +124,14 @@ class GenerationReports:
         return prune_dated(self.root, self.artifact_root, newest - timedelta(days=kept_days), suffix=".json")
 
 
-def _reasons(transitions: tuple[Transition, ...], night: date) -> dict[str, str]:
-    """这一晚每条关系最后一条迁移的原因（键的文本 → 原因）。"""
-
-    return {item.key.text: item.reason for item in transitions if item.night == night}
-
-
 def _lane_section(
-    before: LaneState | None, after: LaneState, changes: tuple[RelationChange, ...], reasons: Mapping[str, str]
+    before: LaneState | None, after: LaneState, changes: tuple[RelationChange, ...], transitions: tuple[Transition, ...]
 ) -> dict[str, object]:
+    """一条 lane 一代的那一节：各类变化的条数、带着要读数的行数（``carried``）、退休行总数（``retired``）、这一代退了几条
+    （``retired_tonight``，这一代迁移日志里变成退休的条数）与逐条变化（原因取这一代每条关系最后一条迁移的）。"""
+
+    moved = tuple(item for item in transitions if item.night == after.night)
+    reasons = {item.key.text: item.reason for item in moved}
     paths = entry_paths((change.key for change in changes), before, after)
     rows = []
     for change in changes:
@@ -163,6 +162,9 @@ def _lane_section(
         "night": after.night.isoformat(),
         "previous_night": None if before is None else before.night.isoformat(),
         **counts,
+        "carried": len(after.carried()),
+        "retired": after.count(Status.RETIRED),
+        "retired_tonight": sum(1 for item in moved if item.after is Status.RETIRED),
         "changes": rows,
     }
 

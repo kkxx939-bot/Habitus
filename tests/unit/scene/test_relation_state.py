@@ -35,6 +35,7 @@ from tests.unit.scene.relation_fixtures import (
     key,
     planted,
     record,
+    watching,
     workdays,
 )
 
@@ -51,7 +52,7 @@ def nights_of(
     for day in workdays(days)[5:]:
         tonight = series.until(day + timedelta(days=1))
         line = build_timelines(tonight, concepts, {}, CONFIG)["session"]
-        state, transitions = fold(previous, LaneTests(line, concepts, CONFIG, tonight.cutoff))
+        state, transitions = fold(previous, LaneTests(line, concepts, CONFIG, tonight.cutoff), watching=watching(tonight))
         found.append((state, transitions))
         previous = state
     return found
@@ -158,7 +159,7 @@ def test_forward_validation_waits_until_the_new_data_spans_more_than_one_block()
         ),
     )
     line = build_timelines(tonight, CONCEPTS, {}, CONFIG)["session"]
-    state, moved = fold(before, LaneTests(line, CONCEPTS, CONFIG, tonight.cutoff))
+    state, moved = fold(before, LaneTests(line, CONCEPTS, CONFIG, tonight.cutoff), watching=watching(tonight))
     waiting = next(item for item in state.relations if item.key == PLANTED)
     assert waiting.status is Status.CANDIDATE and waiting.forward is not None
     assert waiting.forward_needed is not None and waiting.forward.antecedents >= waiting.forward_needed
@@ -178,12 +179,12 @@ def test_folding_runs_forward_only_and_carries_relations_it_cannot_test() -> Non
     last = nights[-1][0]
     line = build_timelines(series.until(last.night), CONCEPTS, {}, CONFIG)["session"]
     with pytest.raises(StateError, match="does not come after"):
-        fold(last, LaneTests(line, CONCEPTS, CONFIG, last.night))
+        fold(last, LaneTests(line, CONCEPTS, CONFIG, last.night), watching=watching(series.until(last.night)))
     # 前因的概念从概念集里没了：带着的关系原样留着（不改状态、不报迁移）
     fewer = ConceptSet([item for item in CONCEPTS.values() if item.name != DISCUSS])
     later = series.until(last.night + timedelta(days=3))
     line = build_timelines(later, fewer, {}, CONFIG)["session"]
-    state, moved = fold(last, LaneTests(line, fewer, CONFIG, later.cutoff))
+    state, moved = fold(last, LaneTests(line, fewer, CONFIG, later.cutoff), watching=watching(later))
     kept = next(item for item in state.relations if item.key == PLANTED)
     assert kept.status is Status.ESTABLISHED and kept == next(item for item in last.relations if item.key == PLANTED)
     assert all(item.key != PLANTED for item in moved)
@@ -277,7 +278,7 @@ def test_a_retired_concept_takes_its_relations_down_with_a_clear_reason() -> Non
     tonight = series.until(series.cutoff)
     later = EventSeries(cutoff=previous.night + timedelta(days=1), records=tonight.records)
     line = build_timelines(later, retired, {}, CONFIG)["session"]
-    state, moved = fold(previous, LaneTests(line, retired, CONFIG, later.cutoff))
+    state, moved = fold(previous, LaneTests(line, retired, CONFIG, later.cutoff), watching=watching(later))
     assert status_of(state, PLANTED) is Status.EXPIRED
     (reason,) = [item.reason for item in moved if item.key == PLANTED]
     assert "概念停用" in reason
@@ -305,7 +306,7 @@ def test_a_refinement_whose_source_class_was_merged_away_is_no_longer_frozen_as_
     line = build_timelines(series, retired, {}, CONFIG)["session"]
     tests = LaneTests(line, retired, CONFIG, series.cutoff)
     assert not any(REWORK.identity in (key.antecedent, key.consequent) for key in tests.keys())
-    state, moved = fold(previous, tests)
+    state, moved = fold(previous, tests, watching=watching(series))
     assert status_of(state, frozen.key) is Status.EXPIRED
     assert any(item.key == frozen.key and "概念停用" in item.reason for item in moved)
 
@@ -355,7 +356,7 @@ def test_rows_that_can_never_be_used_again_are_cleared_and_quiet_ones_stay_froze
         measure_versions=MEASURE_VERSIONS,
     )
     line = build_timelines(series, concepts, {}, CONFIG)["session"]
-    state, moved = fold(previous, LaneTests(line, concepts, CONFIG, series.cutoff))
+    state, moved = fold(previous, LaneTests(line, concepts, CONFIG, series.cutoff), watching=watching(series))
     kept = {relation.key: relation for relation in state.relations}
     assert burst.key not in kept and conditioned.key not in kept and gone_dormant.key not in kept
     assert kept[frozen.key].status is Status.CANDIDATE
@@ -398,7 +399,7 @@ def test_folding_onto_a_night_with_an_older_return_measure_drops_only_those_rows
     later = EventSeries(cutoff=previous.night + timedelta(days=1), records=tonight.records)
     line = build_timelines(later, CONCEPTS, {}, CONFIG)["session"]
 
-    state, _moved = fold(older, LaneTests(line, CONCEPTS, CONFIG, later.cutoff))
+    state, _moved = fold(older, LaneTests(line, CONCEPTS, CONFIG, later.cutoff), watching=watching(later))
 
     assert stale.key not in {relation.key for relation in state.relations if relation.status is Status.CANDIDATE}
     assert status_of(state, PLANTED) is Status.ESTABLISHED

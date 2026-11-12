@@ -42,7 +42,9 @@ from tests.unit.scene.concept_fixtures import base
 from tests.unit.scene.fixtures import SUBJECT, Site, at, publish, publish_gap
 
 ZONE = ZoneInfo("Asia/Shanghai")
-CONFIG = RelationConfig(slot_minutes=15, transition_window_slots=3)
+CONFIG = RelationConfig(
+    slot_minutes=15, transition_window_slots=3, absence_typical_multiple=8.0, absence_min_gaps=2
+)
 RULERS = RhythmRulers(15, 2700, 3, 5.0, 5.0, 0.10, 35)
 TICK = timedelta(minutes=15)
 START = date(2026, 10, 2)

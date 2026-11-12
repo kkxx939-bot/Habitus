@@ -260,6 +260,10 @@ def _generation_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, .
         count = _non_negative_number(attributes.get("count")) or 0.0
         change = tuple((name, _label_value(attributes.get(name))) for name in _RELATION_CHANGE_LABELS)
         return (MetricUpdate("scene_relations_changed_total", "counter", count, change),) if count else ()
+    if operation == ("scene", "relation_rows"):
+        rows = _non_negative_number(attributes.get("count"))
+        labels = (("lane", _label_value(attributes.get("lane"))), ("kind", _label_value(attributes.get("kind"))))
+        return (MetricUpdate("scene_relation_rows", "gauge", rows, labels),) if rows is not None else ()
     return ()
 
 

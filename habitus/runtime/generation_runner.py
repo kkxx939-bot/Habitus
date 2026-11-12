@@ -26,7 +26,7 @@ import os
 import time
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -39,6 +39,8 @@ from habitus.runtime.generation_report import GenerationReports
 from habitus.runtime.generation_result import ALREADY_DONE, DEGRADED, FAILED, FALLBACKS, HELD, GenerationResult
 from habitus.runtime.generation_trace import TraceFiles
 from habitus.runtime.scene_rhythms import prune_rhythms
+from habitus.runtime.scene_seal_files import prune_seals
+from habitus.scene.relations.diff import RelationChange
 
 logger = logging.getLogger("habitus.generation")
 
@@ -204,33 +206,7 @@ class GenerationRunner:
         except Exception as exc:  # noqa: BLE001 - 报告是旁路：算不出关系变化不挡换代
             self._observe("report", ObservationStatus.FAILURE, {"error_type": type(exc).__name__})
             return None
-        grouped = Counter(
-            (
-                lane,
-                change.kind,
-                "none" if change.before is None else change.before.value,
-                "none" if change.after is None else change.after.value,
-                change.key.segment.value,
-                bool(change.key.condition),
-            )
-            for lane, change in changes
-        )
-        for (lane, kind, before, after, segment, conditioned), count in sorted(grouped.items()):
-            record_observation(
-                self.observer,
-                "scene",
-                "relation_change",
-                ObservationStatus.SUCCESS,
-                attributes={
-                    "lane": lane,
-                    "kind": kind,
-                    "status_from": before,
-                    "status_to": after,
-                    "segment": segment,
-                    "conditioned": conditioned,
-                    "count": count,
-                },
-            )
+        _record_relation_metrics(self.observer, section, changes)
         return section
 
     def _record(self, result: GenerationResult) -> None:
@@ -301,6 +277,7 @@ class GenerationRunner:
             if self.traces is not None:
                 self.traces.prune(day, kept)
             prune_rhythms(self.generation.scene, day, kept)
+            prune_seals(self.generation.scene, day, kept)
         except Exception as exc:  # noqa: BLE001 - 留存清理是旁路：清不掉下一代再清
             self._observe("prune", ObservationStatus.FAILURE, {"error_type": type(exc).__name__})
 
@@ -338,6 +315,52 @@ class _Retries:
         elif result.held is None:
             count = 1 if self.state is None or self.state[0] != result.day else self.state[1] + 1
             self.state = (result.day, count, now + timedelta(seconds=self.backoff.delay(count)))
+
+
+def _record_relation_metrics(
+    observer: Observer, section: Mapping[str, object], changes: tuple[tuple[str, RelationChange], ...]
+) -> None:
+    """这一代关系表的指标：逐条变化按（lane、种类、前后状态、段、带不带条件）计数（``scene_relations_changed_total``）；
+    各 lane 的行数（gauge ``scene_relation_rows{lane, kind}``）：带着要读数的与退休的，取报告那一节的数。"""
+
+    grouped = Counter(
+        (
+            lane,
+            change.kind,
+            "none" if change.before is None else change.before.value,
+            "none" if change.after is None else change.after.value,
+            change.key.segment.value,
+            bool(change.key.condition),
+        )
+        for lane, change in changes
+    )
+    for (lane, kind, before, after, segment, conditioned), count in sorted(grouped.items()):
+        record_observation(
+            observer,
+            "scene",
+            "relation_change",
+            ObservationStatus.SUCCESS,
+            attributes={
+                "lane": lane,
+                "kind": kind,
+                "status_from": before,
+                "status_to": after,
+                "segment": segment,
+                "conditioned": conditioned,
+                "count": count,
+            },
+        )
+    for lane, numbers in sorted(section.items()):
+        if not isinstance(numbers, dict) or "carried" not in numbers:
+            continue  # 这条 lane 的表读不了：报告里记了原因，行数不报
+        for kind in ("carried", "retired"):
+            record_observation(
+                observer,
+                "scene",
+                "relation_rows",
+                ObservationStatus.SUCCESS,
+                attributes={"lane": lane, "kind": kind, "count": numbers[kind]},
+            )
 
 
 __all__ = ["GenerationRunner", "GenerationSettings"]

@@ -47,7 +47,7 @@ observability:
     enabled: true
     level: INFO
   tracing:
-    enabled: false
+    enabled: true
     endpoint: http://127.0.0.1:4318
     protocol: http
     service_name: habitus

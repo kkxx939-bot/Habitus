@@ -169,7 +169,9 @@ def nightly(
         timezone=CST,
         mapper_for=mapper_for,
         relations=RelationStore(tmp_path / "scene"),
-        relation_config=RelationConfig(slot_minutes=15, transition_window_slots=3),
+        relation_config=RelationConfig(
+            slot_minutes=15, transition_window_slots=3, absence_typical_multiple=8.0, absence_min_gaps=2
+        ),
         subject=SUBJECT,
         rulers=RULERS,
     )
@@ -670,7 +672,7 @@ def test_the_night_grows_value_sets_from_the_relations_it_just_folded(tmp_path, 
             RelationKey("session", antecedent, MEAL, Segment.SITUATION), Status.CANDIDATE, True, discovered_on=TONIGHT
         )
 
-    def folded(previous, tests, weights):  # type: ignore[no-untyped-def]
+    def folded(previous, tests, weights, *, watching):  # type: ignore[no-untyped-def]
         return LaneState("session", tests.cutoff, 1, (held("周一"), held("周五"))), ()
 
     monkeypatch.setattr(relations_module, "fold", folded)

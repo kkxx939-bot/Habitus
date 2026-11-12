@@ -156,9 +156,13 @@ def test_pairs_that_read_the_same_records_are_never_compared() -> None:
 
 def test_the_configuration_refuses_contradictions() -> None:
     with pytest.raises(RelationConfigError):
-        RelationConfig(slot_minutes=7, transition_window_slots=3)
+        RelationConfig(
+            slot_minutes=7, transition_window_slots=3, absence_typical_multiple=8.0, absence_min_gaps=2
+        )
     with pytest.raises(RelationConfigError):
-        RelationConfig(slot_minutes=15, transition_window_slots=96)
+        RelationConfig(
+            slot_minutes=15, transition_window_slots=96, absence_typical_multiple=8.0, absence_min_gaps=2
+        )
     with pytest.raises(RelationConfigError):
         RelationThresholds(fdr=1.0)
 

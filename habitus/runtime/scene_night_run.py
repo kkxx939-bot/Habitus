@@ -80,7 +80,32 @@ class NightRun:
 
     async def _seal(self, concepts: ConceptSet) -> SealReport:
         """封口（换代）：已封口的日子里每条记录都作数的，重算情境、写回、核条数、盖章。没做成就这一代不盖新章——那几天
-        对细分概念算看不到，下一代再封。"""
+        对细分概念算看不到，下一代再封。
+
+        这一代已经封过口（``runtime.scene_seal_files`` 有这一天的记录：上一次做到并入之后被杀了）就不再封、直接用记下的
+        结果——再封就是按并入之后的概念集封口，违背裁定 97 第 3 条的先后。"""
+
+        day = self.series.cutoff
+        files = self.scene.seal_files
+        try:
+            done = None if files is None else await asyncio.to_thread(files.read, day)
+        except Exception as exc:
+            self._tolerate("seal", exc)
+            return SealReport()
+        if done is not None:
+            report, failed = done
+            self.signals.append(f"mapping: {day} 这一代已经封过口{'（没做成）' if failed else ''}，接着做不再封")
+            return report
+        report, failed = await self._seal_once(concepts)
+        if files is not None:
+            try:
+                await asyncio.to_thread(files.write, day, report, failed=failed)
+            except Exception as exc:
+                self._tolerate("seal", exc)
+        return report
+
+    async def _seal_once(self, concepts: ConceptSet) -> tuple[SealReport, bool]:
+        """封一次口：结果与"没做成"。"""
 
         scene = self.scene
         started = time.monotonic()
@@ -93,10 +118,10 @@ class NightRun:
                 set_attributes(attributes, {"seal_seconds": round(seconds, 3)})
             return SealReport(
                 report.sealed, report.rewritten, report.unready_days, report.unready_records, report.readers, seconds
-            )
+            ), False
         except Exception as exc:
             self._tolerate("seal", exc)
-        return SealReport(seconds=max(0.0, time.monotonic() - started))
+        return SealReport(seconds=max(0.0, time.monotonic() - started)), True
 
     async def _merge(self, concepts: ConceptSet) -> tuple[ConceptSet, int]:
         """把待生效的概念并进概念集（换代）。没做成就这一代不并——它们留着，下一代再并。"""

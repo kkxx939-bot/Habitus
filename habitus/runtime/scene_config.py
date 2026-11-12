@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from habitus.config import HabitusConfig
 from habitus.config.loader import construct_overrides
+from habitus.foresight.strength import MIN_HISTORY
 from habitus.scene.relations import RelationConfig, RelationThresholds
 
 
 def relation_config(config: HabitusConfig) -> RelationConfig:
     """关系检验的配置：槽宽与"同一条链"的槽数只认 ``config.temporal``（裁定 59）；统计门槛见 ``relation_thresholds``。
-    久别重来不再借固定天数窗，按 temporal 的逐次判法。"""
+    久别重来不再借固定天数窗，按 temporal 的逐次判法。关系行退休的"久没来"与账的久别同一把尺：H 取预测层的遗忘半衰期、
+    最少间隔数取 ``foresight.strength.MIN_HISTORY``，不另开 YAML 项。"""
 
     return RelationConfig(
         slot_minutes=config.temporal.slot_minutes,
         transition_window_slots=config.temporal.transition_window_slots,
+        absence_typical_multiple=config.foresight.half_life_opportunities,
+        absence_min_gaps=MIN_HISTORY,
         thresholds=relation_thresholds(config),
     )
 

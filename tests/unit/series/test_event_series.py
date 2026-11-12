@@ -202,9 +202,12 @@ def test_a_disproved_unreadable_gap_is_dropped_once_for_every_reader(tmp_path) -
     publish_gap(site.behavior_tree, DAY1, (6, 0), (7, 0), kind="未观测")
     series = read_series(site.behavior_tree, cutoff=DAY1 + timedelta(days=1))
     assert [gap.kind for gap in series.gaps] == [GapKind.UNOBSERVED]
-    line = build_timelines(series, concept_set(), {}, RelationConfig(slot_minutes=15, transition_window_slots=3))[
-        "session"
-    ]
+    line = build_timelines(
+        series,
+        concept_set(),
+        {},
+        RelationConfig(slot_minutes=15, transition_window_slots=3, absence_typical_multiple=8.0, absence_min_gaps=2),
+    )["session"]
     assert 41 in line.present[DAY1]
 
 
@@ -336,9 +339,12 @@ def test_a_last_seen_written_with_another_offset_is_read_in_the_start_offset(tmp
     series = read_series(site.behavior_tree, cutoff=day(1))
     (record,) = series.records
     assert record.last_observed_at == last and record.last_observed_at.utcoffset() == started.utcoffset()
-    line = build_timelines(series, ConceptSet([]), {}, RelationConfig(slot_minutes=15, transition_window_slots=3))[
-        "session"
-    ]
+    line = build_timelines(
+        series,
+        ConceptSet([]),
+        {},
+        RelationConfig(slot_minutes=15, transition_window_slots=3, absence_typical_multiple=8.0, absence_min_gaps=2),
+    )["session"]
     ((ended, _uri),) = line.ends[DAY1]
     assert ended == DAY1.toordinal() * 96 + 95
 
