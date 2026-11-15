@@ -8,6 +8,7 @@ from habitus.series.model import (
     SILENT_DAY_UNWATCHED_LANES,
     EventSeries,
     GapKind,
+    KindResolution,
     SeriesError,
     SeriesGap,
     SeriesRecord,
@@ -20,6 +21,7 @@ from habitus.series.model import (
 __all__ = [
     "EventSeries",
     "GapKind",
+    "KindResolution",
     "SeriesError",
     "SeriesGap",
     "SeriesRecord",

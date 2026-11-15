@@ -49,7 +49,7 @@ from habitus.runtime.scene_advice import RelationAdvice
 from habitus.runtime.scene_config import relation_config
 from habitus.runtime.scene_lock import SceneWriteLock, unlocked
 from habitus.runtime.scene_night import SceneNightlyRun
-from habitus.runtime.scene_vocabulary import VocabularyCatalog
+from habitus.runtime.scene_vocabulary import VocabularyCatalog, kind_resolution
 from habitus.runtime.unsealed import UnsealedFromJudgements, unreduced_gaps
 from habitus.scene.advice.conditions import ConditionProposer
 from habitus.scene.advice.prior import PriorAdvisor
@@ -135,7 +135,12 @@ def build_generation(
     marker = None if foresight is None else foresight.watermark
     return Generation(
         behavior_tree=behavior_tree,
-        series=SeriesReader(behavior_tree, () if dirty_days is None else (dirty_days,), name="generation"),
+        series=SeriesReader(
+            behavior_tree,
+            () if dirty_days is None else (dirty_days,),
+            name="generation",
+            kinds=kind_resolution(kind_store),
+        ),
         scene=scene,
         zone=config.locale.zone(),
         # 每一代开头重读放假数据（用户 10-18：节假日在换代时判断）；语义树与预测层读的是同一份，换了两边一起换
@@ -272,7 +277,10 @@ def build_model_queue(
     return ModelQueue(
         scene=scene,
         series=SeriesReader(
-            behavior.session.tree, () if runner.dirty_days is None else (runner.dirty_days,), name="model_queue"
+            behavior.session.tree,
+            () if runner.dirty_days is None else (runner.dirty_days,),
+            name="model_queue",
+            kinds=kind_resolution(behavior.session.kind_store),
         ),
         today=generation.today,
         sealed_day=generation.sealed_day,

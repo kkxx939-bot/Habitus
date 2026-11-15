@@ -34,6 +34,7 @@ from habitus.behavior.schema.model import BehaviorFieldType
 from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.tree.writer import BehaviorDocumentWriter
 from habitus.behavior.uri import BehaviorURI
+from habitus.infrastructure.store.sqlite import SQLiteLockStore
 from habitus.runtime.generation_report import GenerationReports
 from habitus.runtime.generation_result import generation_attributes
 from habitus.series.reader import read_series
@@ -175,7 +176,7 @@ def test_the_in_use_state_is_on_disk_with_the_day_it_turned_and_is_not_recounted
     site.record("conv-a", at(D13, 9), "帮我写一份本周周报", Word("s-k0002"))
     site.record("conv-a", at(D14, 9), "这周的周报也帮我写一下", Word("s-k0002"))
     site.generate(D15)
-    store = BehaviorKindStore(site.session.tree.root, lane=Lane.SESSION)
+    store = site.session.kind_store
     assert (store.root / STATE_FILENAME).is_file()
     first = store.read()
     assert dict(first.active) == {ClassId(Lane.SESSION, 2): D15} and first.revision == 1
@@ -188,11 +189,10 @@ def test_the_in_use_state_is_on_disk_with_the_day_it_turned_and_is_not_recounted
 
 
 def test_a_word_in_use_stays_in_use_even_if_the_series_no_longer_shows_two_days(site: Site) -> None:
-    """在用只增不减：盘上已经在用的词，下一代即使序列里数不到两天也不退出（二甲里在用的词不退出）。"""
+    """盘上已经在用的词，下一代即使序列里数不到两天也不退出（二乙起只有退出天数没被选中才退出，见 word_grow）。"""
 
-    store = BehaviorKindStore(site.session.tree.root, lane=Lane.SESSION)
-    fresh = store.read()
-    store.replace(fresh.with_active({ClassId(Lane.SESSION, 4): D13}), expected_revision=fresh.revision)
+    store = site.session.kind_store
+    store.update(lambda current: current.with_active({ClassId(Lane.SESSION, 4): D13}))
     site.record("conv-a", at(D14, 9), "帮我写一份本周周报", Word("s-k0002"))
     site.generate(D15)
     assert set(behaviours(site)) == {"s-k0004"}
@@ -249,9 +249,10 @@ def test_a_broken_initial_word_file_is_refused_and_names_the_file(label: str, co
 
 
 def _state_store(tmp_path: Path) -> tuple[BehaviorKindStore, Path, dict[str, Any]]:
-    store = BehaviorKindStore(tmp_path, lane=Lane.SESSION)
-    fresh = store.read()
-    store.replace(fresh.with_active({ClassId(Lane.SESSION, 2): D15}), expected_revision=0)
+    store = BehaviorKindStore(
+        tmp_path, lane=Lane.SESSION, lock_store=SQLiteLockStore(tmp_path / "locks.sqlite3"), lock_ttl_seconds=30
+    )
+    store.update(lambda current: current.with_active({ClassId(Lane.SESSION, 2): D15}))
     path = tmp_path / STATE_FILENAME
     return store, path, json.loads(path.read_text(encoding="utf-8"))
 
@@ -285,8 +286,9 @@ def test_a_broken_in_use_state_file_stops_the_generation_count(site: Site) -> No
     path = site.session.tree.root / STATE_FILENAME
     path.write_text('{"schema_version": "behavior_kinds_state_v1", "lane": "session"', encoding="utf-8")
     result = site.generate(D15)
-    (counting,) = [step for step in result.steps if step.step == "active"]
-    assert counting.outcome != "done"
+    # 二乙起读序列也要过词表状态的换算口：状态文件坏了，必须成的读序列一步就没成，这一代没有、不写完成标记
+    assert not result.complete
+    assert [step.outcome for step in result.steps if step.step == "series"] == ["failed"]
     assert behaviours(site) == {}  # 没数成：语义树没有凭空长出概念
 
 

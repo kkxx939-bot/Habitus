@@ -70,7 +70,7 @@ class StubVocabulary:
 
     def count(self, series, today):  # type: ignore[no-untyped-def]
         self.counts += 1
-        return Counted(self.catalog.current(), 0, 0)
+        return Counted(self.catalog.current(), added=0, waiting=0, deleted=0, exited=0, candidates=0)
 
 
 def assembled(tmp_path, *, clock=lambda: NOW, closed_days=None, vocabulary=None, **options):  # type: ignore[no-untyped-def]

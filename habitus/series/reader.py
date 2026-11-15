@@ -7,7 +7,7 @@
 - 只读不写；只读**截止日之前**的日子（第 N 晚读 N 之前，已封口）；
 - ``original_name`` 非空的 occurrence 是撞车消歧的已知重复，**机械跳过**——标记在写入时由归约层打好，这里只认标记、
   不做判重（判重只在融合层解决）；
-- ``kind_token`` 在这里分流（裁定 18、19）：类编号进序列（``classified``）；「待定」进序列但不是类（只占先后顺序）；
+- ``kind_token`` 先过组合根注入的换算口（``KindResolution``：删掉的节点换成最近的活着的上级，词表方案二乙），再在这里分流（裁定 18、19）：类编号进序列（``classified``）；「待定」进序列但不是类（只占先后顺序）；
   「非事件」不进序列，连顺序里也当它不存在；既不是编号也不是占位标记的硬拒；lane 取编号前缀；
 - 观测空白两种都进（``GapKind``），按本地日切开、只留截止日之前那几天的段；空白的类型在这里翻译一次，上游改名时以未知取值硬失败；
 - ``reminded`` 原样带着：被提醒过的发生要不要算进自然率，是消费方的事（``temporal`` 算它做了、但不是自然发生，见 ``temporal.episodes``）。
@@ -23,7 +23,7 @@ TODO(BHV-SESSION-LANE-001)：会话 lane 一轮一条之后（裁定 32），同
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import date, datetime
 
 from habitus.behavior.document import BehaviorDocument
@@ -36,6 +36,7 @@ from habitus.behavior.uri import BehaviorURI
 from habitus.series.model import (
     EventSeries,
     GapKind,
+    KindResolution,
     SeriesError,
     SeriesGap,
     SeriesRecord,
@@ -54,9 +55,18 @@ class SeriesReader:
     第一次读（缓存是空的）先记下日志读到哪、再读全部日子，期间新记的日子下一次照常重读。新出现的日子（树上有、缓存里没有）
     当场读。"""
 
-    def __init__(self, tree: BehaviorTree, logs: Sequence[DirtyDayLog] = (), *, name: str = "series") -> None:
+    def __init__(
+        self,
+        tree: BehaviorTree,
+        logs: Sequence[DirtyDayLog] = (),
+        *,
+        name: str = "series",
+        kinds: KindResolution | None = None,
+    ) -> None:
         self.tree = tree
         self.logs = tuple(logs)
+        #: ``kind_token`` 的换算口（缓存的是解码好的文档，换算每次拼装时按此刻的词表重做）。
+        self.kinds = kinds
         #: 读者名：消费水位按它落盘（同一份日志的几个读者各记各的）。
         self.name = name
         self._days: dict[tuple[BehaviorKind, date], tuple[BehaviorDocument, ...]] = {}
@@ -72,7 +82,10 @@ class SeriesReader:
             self._days.clear()
         self._forget_dirty_days()
         return _assemble(
-            self._documents(BehaviorKind.OCCURRENCE, cutoff), self._documents(BehaviorKind.GAP, cutoff), cutoff
+            self._documents(BehaviorKind.OCCURRENCE, cutoff),
+            self._documents(BehaviorKind.GAP, cutoff),
+            cutoff,
+            None if self.kinds is None else self.kinds(),
         )
 
     def _forget_dirty_days(self) -> None:
@@ -102,14 +115,17 @@ class SeriesReader:
         return found
 
 
-def read_series(tree: BehaviorTree, *, cutoff: date) -> EventSeries:
+def read_series(tree: BehaviorTree, *, cutoff: date, kinds: KindResolution | None = None) -> EventSeries:
     """第 ``cutoff`` 晚的序列，读一次不缓存（夜批用常驻的 ``SeriesReader``）。"""
 
-    return SeriesReader(tree).read(cutoff=cutoff)
+    return SeriesReader(tree, kinds=kinds).read(cutoff=cutoff)
 
 
 def _assemble(
-    occurrences: Sequence[BehaviorDocument], gap_documents: Sequence[BehaviorDocument], cutoff: date
+    occurrences: Sequence[BehaviorDocument],
+    gap_documents: Sequence[BehaviorDocument],
+    cutoff: date,
+    resolve: Callable[[str], str] | None,
 ) -> EventSeries:
     records: list[SeriesRecord] = []
     skipped: list[SkippedRecord] = []
@@ -121,6 +137,8 @@ def _assemble(
             skipped.append(SkippedRecord(uri, day, reason))
             continue
         token = _text(document.fields.get("kind_token"), "kind_token")
+        if resolve is not None:
+            token = resolve(token)
         records.append(_record(document, uri, token, _lane(token)))
     # 空白在这里消解一次（``standing_parts``：按天切开、每天那段由那一天的记录判）：之后 temporal、关系检验读到的是同一份
     starts: dict[date, list[datetime]] = {}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import date
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from habitus.behavior.kinds.store import (
     BehaviorKindStoreError,
 )
 from habitus.behavior.kinds.words import initial_words, parse_words
+from habitus.infrastructure.store.sqlite import SQLiteLockStore
 
 S1, S2, S3 = (ClassId(Lane.SESSION, number) for number in (1, 2, 3))
 
@@ -97,22 +99,58 @@ def test_counting_needs_two_distinct_days_and_waits_when_full() -> None:
         ("s-k0003", date(2026, 4, 15)),
         ("s-续话", date(2026, 4, 16)),
     ]
-    counted = count_active(words, picks, today=date(2026, 4, 16), min_days=2, cap=1)
+    counted = count_active(words, picks, today=date(2026, 4, 16), min_days=2, cap=1, retire_days=20)
     # 「写文档」只在一天里被选：不在用；另两个的"第二个日子"都是 04-15，同一天按编号，写周报（s-k0002）先进
     assert dict(counted.vocabulary.active) == {S2: date(2026, 4, 16)}
     assert counted.waiting == (S3,) and counted.vocabulary.revision == 1
-    again = count_active(counted.vocabulary, picks, today=date(2026, 4, 17), min_days=2, cap=1)
+    again = count_active(counted.vocabulary, picks, today=date(2026, 4, 17), min_days=2, cap=1, retire_days=20)
     assert again.vocabulary is counted.vocabulary  # 集合没变：修订号不动
 
 
-def test_the_state_store_is_strict_and_compare_and_set(tmp_path: Path) -> None:
-    store = BehaviorKindStore(tmp_path, lane=Lane.SESSION, config=BehaviorKindConfig())
+def test_the_state_store_is_strict_and_writes_under_one_lease(tmp_path: Path) -> None:
+    def kinds(ttl: int, locks: str = "locks.sqlite3") -> BehaviorKindStore:
+        return BehaviorKindStore(
+            tmp_path,
+            lane=Lane.SESSION,
+            lock_store=SQLiteLockStore(tmp_path / locks),
+            lock_ttl_seconds=ttl,
+            config=BehaviorKindConfig(),
+        )
+
+    store = kinds(30)
     fresh = store.read()
     assert fresh.revision == 0
-    updated = store.replace(fresh.with_active({ClassId(Lane.SESSION, 2): date(2026, 4, 16)}), expected_revision=0)
+    s2, s3 = ClassId(Lane.SESSION, 2), ClassId(Lane.SESSION, 3)
+    updated = store.update(lambda vocabulary: vocabulary.with_active({s2: date(2026, 4, 16)}))
     assert store.read() == updated and (tmp_path / "kinds.md").read_text(encoding="utf-8").count("起在用") == 1
+    # 另一个写者正持着租约：等满一个租约时长还拿不到，照 PathLock 抛 TimeoutError，盘上不动
+    holding, release = threading.Event(), threading.Event()
+
+    def slow(vocabulary: Vocabulary) -> Vocabulary:
+        holding.set()
+        release.wait(10)
+        return vocabulary.with_active({**vocabulary.active, s3: date(2026, 4, 17)})
+
+    holder = threading.Thread(target=store.update, args=(slow,))
+    holder.start()
+    assert holding.wait(10)
+    try:
+        with pytest.raises(TimeoutError):
+            kinds(1).update(lambda vocabulary: vocabulary.with_active({}))
+        assert set(store.read().active) == {s2}
+    finally:
+        release.set()
+        holder.join(10)
+    assert set(store.read().active) == {s2, s3}
+
+    # 第二道防线：租约在手时盘上的写入序号还是变了（别的锁库上的写者绕过了这把租约），这一次不写、明确报错
+    def overtaken(vocabulary: Vocabulary) -> Vocabulary:
+        kinds(30, "other.sqlite3").update(lambda other: other.with_active({}))
+        return vocabulary.with_active({**vocabulary.active, ClassId(Lane.SESSION, 4): date(2026, 4, 18)})
+
     with pytest.raises(BehaviorKindConflictError):
-        store.replace(updated.with_active({}), expected_revision=0)
+        store.update(overtaken)
+    assert dict(store.read().active) == {}
     state = tmp_path / "kinds.state.json"
     raw = json.loads(state.read_text(encoding="utf-8"))
     for broken in ({**raw, "extra": 1}, {**raw, "active": [{"id": "s-k9999", "since": "2026-04-16"}]}):
@@ -128,4 +166,6 @@ def test_the_state_store_is_strict_and_compare_and_set(tmp_path: Path) -> None:
 def test_an_old_vocabulary_file_on_disk_is_refused_by_name(tmp_path: Path, name: str) -> None:
     (tmp_path / name).write_text("{}", encoding="utf-8")
     with pytest.raises(BehaviorKindStoreError, match=name):
-        BehaviorKindStore(tmp_path, lane=Lane.SESSION).check()
+        BehaviorKindStore(
+            tmp_path, lane=Lane.SESSION, lock_store=SQLiteLockStore(tmp_path / "locks.sqlite3"), lock_ttl_seconds=30
+        ).check()

@@ -19,7 +19,7 @@ from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.uri import BehaviorURI
 from habitus.conditions import DayTypeCalendar, LocalCalendar
 from habitus.scene.views.model import FlowRow, ObservationGap
-from habitus.series.model import GapKind, SeriesGap, standing_parts
+from habitus.series.model import GapKind, KindResolution, SeriesGap, standing_parts
 
 #: 空白文档只落在**起始日**目录，而一段"未观测"可以横跨好几天（出差一周）。读某一天的空白时往前
 #: 回看这么多天的起始目录，把延续到本日的裁进来；比这更长的空白从它中间那些天看不见。
@@ -47,11 +47,14 @@ class DayIndex:
         subject: str,
         admits: Callable[[BehaviorDocument], bool],
         day_note: str | None = None,
+        resolve: Callable[[str], str] | None = None,
     ) -> None:
         """``admits``：一条 occurrence 算不算数——组合根注入事件序列的那一条规则（``series.reader.admitted``：
-        撞车重复、「非事件」都不算），读侧不自己再写一遍。"""
+        撞车重复、「非事件」都不算），读侧不自己再写一遍。``resolve``：``kind_token`` 的换算（删掉的节点换成最近的活着的
+        上级，与事件序列同一个口 ``KindResolution``），按天的计数也按换算后的编号数。"""
 
         self.day = day
+        self._resolve = resolve
         self.subject = subject
         # 当地日历对这一天的一句话（补班、节假日……）；没有日历数据时恒为空。由缓存按注入的
         # 日历算好传进来，索引自己不认识日历——它只是把这个事实带给视图。
@@ -67,7 +70,7 @@ class DayIndex:
         self.ordered: tuple[str, ...] = tuple(
             sorted(self.occurrences, key=lambda uri: (self.occurrences[uri].address.started_at.astimezone(UTC), uri))
         )
-        counts = Counter(str(self.occurrences[uri].fields["kind_token"]) for uri in self.ordered)
+        counts = Counter(self._kind(uri) for uri in self.ordered)
         self.rows: tuple[FlowRow, ...] = tuple(self._row(uri, counts) for uri in self.ordered)
         self.by_uri: Mapping[str, FlowRow] = MappingProxyType({row.uri: row for row in self.rows})
         self.gaps: tuple[ObservationGap, ...] = self._read_gaps(behavior_tree)
@@ -75,7 +78,7 @@ class DayIndex:
     def _row(self, uri: str, counts: Mapping[str, int]) -> FlowRow:
         document = self.occurrences[uri]
         fields = document.fields
-        kind_token = str(fields["kind_token"])
+        kind_token = self._kind(uri)
         place = fields.get("place")
         subjects = fields.get("subjects") or ()
         return FlowRow(
@@ -91,6 +94,10 @@ class DayIndex:
             place=place if isinstance(place, str) and place else None,
             subjects=tuple(str(item) for item in subjects if isinstance(item, str) and item),
         )
+
+    def _kind(self, uri: str) -> str:
+        token = str(self.occurrences[uri].fields["kind_token"])
+        return token if self._resolve is None else self._resolve(token)
 
     def _read_gaps(self, behavior_tree: BehaviorTree) -> tuple[ObservationGap, ...]:
         starts = sorted(self.occurrences[uri].address.started_at for uri in self.ordered)
@@ -121,7 +128,7 @@ class DayIndexCache:
     """一次查询里同一天只读一次。
 
     ``calendar`` 决定每一天的 ``day_note``（见 ``conditions.calendar``）；不给就是名义日历，
-    即"没有当地日历数据"这个显式的零修正。
+    即"没有当地日历数据"这个显式的零修正。``kinds`` 是 ``kind_token`` 的换算口：建缓存时取此刻的一份，这一次查询都用它。
     """
 
     def __init__(
@@ -131,8 +138,10 @@ class DayIndexCache:
         subject: str,
         admits: Callable[[BehaviorDocument], bool],
         calendar: DayTypeCalendar | None = None,
+        kinds: KindResolution | None = None,
     ) -> None:
         self.admits = admits
+        self.resolve = None if kinds is None else kinds()
         if not subject.strip():
             raise ValueError("subject must be non-empty text")
         self.behavior_tree = behavior_tree
@@ -144,7 +153,12 @@ class DayIndexCache:
         cached = self._days.get(day)
         if cached is None:
             cached = self._days[day] = DayIndex(
-                self.behavior_tree, day, subject=self.subject, admits=self.admits, day_note=self._note(day)
+                self.behavior_tree,
+                day,
+                subject=self.subject,
+                admits=self.admits,
+                day_note=self._note(day),
+                resolve=self.resolve,
             )
         return cached
 

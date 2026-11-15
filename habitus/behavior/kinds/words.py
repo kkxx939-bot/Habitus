@@ -13,7 +13,7 @@ from functools import cache
 from importlib import resources
 
 from habitus.behavior.kinds.ids import ClassId, KindIdError, Lane
-from habitus.behavior.kinds.model import BehaviorKindError, Vocabulary, Word
+from habitus.behavior.kinds.model import BehaviorKindError, Vocabulary, Word, WordOrigin
 
 WORDS_SCHEMA_VERSION = "behavior_initial_words_v1"
 _TOP_KEYS = frozenset({"schema_version", "lane", "words"})
@@ -67,6 +67,7 @@ def _word(raw: object, index: int) -> Word:
         parent=None if parent is None else ClassId.parse(parent),
         definition=raw["definition"],
         domain=raw["domain"],
+        origin=WordOrigin.INITIAL,
     )
 
 

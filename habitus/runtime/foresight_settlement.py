@@ -67,10 +67,9 @@ from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement_diagnosis import SettlementDiagnosis
-from habitus.runtime.foresight_tree_rows import basis_row, rows_between
+from habitus.runtime.foresight_tree_rows import basis_row, day_cache, rows_between
 from habitus.scene.views import DayIndexCache
-from habitus.series.model import silent_day_unwatched
-from habitus.series.reader import admitted
+from habitus.series.model import KindResolution, silent_day_unwatched
 
 
 @dataclass(frozen=True)
@@ -127,6 +126,9 @@ class BehaviorReadSide(Protocol):
 
     @property
     def calendar(self) -> DayTypeCalendar: ...
+
+    @property
+    def kinds(self) -> KindResolution | None: ...
 
 
 @dataclass(frozen=True)
@@ -211,12 +213,7 @@ class SettlementStage:
     def _run(self) -> SettlementReport:
         days = self.ledger.open_days()
         closed = frozenset(self.closed_days())
-        cache = DayIndexCache(
-            self.read_side.behavior_tree,
-            subject=self.read_side.subject,
-            admits=admitted,
-            calendar=self.read_side.calendar,
-        )
+        cache = day_cache(self.read_side)
         now = self._clock()
         outcomes: dict[str, int] = {}
         rulings = feedback_written = 0
@@ -391,12 +388,7 @@ class SettlementStage:
         此刻，后写的覆盖先写的；旧记录不改，裁定 54）。只碰结算事实，不碰后补这类之后才有的改判，也不碰单元的提醒反馈。
         改回过期待决的日子若已标结完，重新打开，让之后每一代照常看有没有补做。返回改了几条预期。"""
 
-        cache = DayIndexCache(
-            self.read_side.behavior_tree,
-            subject=self.read_side.subject,
-            admits=admitted,
-            calendar=self.read_side.calendar,
-        )
+        cache = day_cache(self.read_side)
         table = self.opportunities.latest(self.lane) if self.opportunities is not None else None
         now = self._clock()
         with self._caching_facts():

@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import TYPE_CHECKING
 
 from habitus.behavior.uri import BehaviorURI
 from habitus.scene.views import DayIndexCache, FlowRow
+from habitus.series.reader import admitted
+
+if TYPE_CHECKING:
+    from habitus.runtime.foresight_settlement import BehaviorReadSide
 
 
 def basis_row(cache: DayIndexCache, uri: str) -> FlowRow | None:
@@ -25,4 +30,16 @@ def rows_between(cache: DayIndexCache, first: date, last: date) -> tuple[FlowRow
     return tuple(rows)
 
 
-__all__ = ["basis_row", "rows_between"]
+def day_cache(read_side: BehaviorReadSide) -> DayIndexCache:
+    """一次查询用的按天索引：撞车重复、「非事件」不算（与事件序列同一条规则），树上的编号过同一个换算口。"""
+
+    return DayIndexCache(
+        read_side.behavior_tree,
+        subject=read_side.subject,
+        admits=admitted,
+        calendar=read_side.calendar,
+        kinds=read_side.kinds,
+    )
+
+
+__all__ = ["basis_row", "day_cache", "rows_between"]

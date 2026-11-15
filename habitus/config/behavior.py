@@ -87,6 +87,10 @@ class BehaviorConfig:
     kinds_earlier_turns: int | None = None
     kinds_earlier_chars: int | None = None
     kinds_prompt_max_steps: int | None = None
+    kinds_max_name_chars: int | None = None
+    kinds_candidate_slots: int | None = None
+    kinds_retire_days: int | None = None
+    kinds_max_level: int | None = None
     # 存储的容量闸（26 号清单 8.2：生命周期相关、原来写死在各存储的默认值里；只挪不改值，不写就是领域模块的默认值）。
     # 字段名 = 前缀 + 那份配置的同名字段：``observation_`` → BehaviorObservationConfig、``fusion_`` → BehaviorFusionConfig、
     # ``tree_`` → BehaviorTreeConfig。

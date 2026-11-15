@@ -7,22 +7,32 @@ from pathlib import Path
 
 from habitus.behavior.kinds.ids import ClassId, Lane
 from habitus.behavior.kinds.store import BehaviorKindStore
+from habitus.infrastructure.store.sqlite import SQLiteLockStore
 from habitus.runtime.scene_vocabulary import VocabularyCatalog
 from habitus.scene.concepts.catalog import ClassCatalog
 
 
 def test_the_adapter_implements_the_catalog_protocol(tmp_path: Path) -> None:
-    assert isinstance(VocabularyCatalog(BehaviorKindStore(tmp_path, lane=Lane.SESSION)), ClassCatalog)
+    assert isinstance(
+        VocabularyCatalog(
+            BehaviorKindStore(
+                tmp_path, lane=Lane.SESSION, lock_store=SQLiteLockStore(tmp_path / "locks.sqlite3"), lock_ttl_seconds=30
+            )
+        ),
+        ClassCatalog,
+    )
 
 
 def test_only_words_in_use_are_handed_over_with_the_state_revision(tmp_path: Path) -> None:
-    store = BehaviorKindStore(tmp_path, lane=Lane.SESSION)
+    store = BehaviorKindStore(
+        tmp_path, lane=Lane.SESSION, lock_store=SQLiteLockStore(tmp_path / "locks.sqlite3"), lock_ttl_seconds=30
+    )
     catalog = VocabularyCatalog(store)
     fresh = catalog.current()
     assert fresh.version == 0 and fresh.words == ()
     vocabulary = store.read()
     word = ClassId(Lane.SESSION, 2)
-    store.replace(vocabulary.with_active({word: date(2026, 4, 16)}), expected_revision=0)
+    store.update(lambda current: current.with_active({word: date(2026, 4, 16)}))
     current = catalog.current()
     (only,) = current.words
     assert current.version == 1

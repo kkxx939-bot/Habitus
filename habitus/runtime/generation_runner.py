@@ -36,7 +36,15 @@ from habitus.foundation.observability import NullObserver, ObservationStatus, Ob
 from habitus.foundation.tracing import open_trace
 from habitus.runtime.generation import Generation
 from habitus.runtime.generation_report import GenerationReports
-from habitus.runtime.generation_result import ALREADY_DONE, DEGRADED, FAILED, FALLBACKS, HELD, GenerationResult
+from habitus.runtime.generation_result import (
+    ALREADY_DONE,
+    DEGRADED,
+    FAILED,
+    FALLBACKS,
+    HELD,
+    GenerationResult,
+    word_counts,
+)
 from habitus.runtime.generation_trace import TraceFiles
 from habitus.scene.relations.diff import RelationChange
 
@@ -247,8 +255,7 @@ class GenerationRunner:
             "failed_step": result.failed or "",
             "duration_seconds": duration,
             "unreduced_gaps": -1 if result.unreduced_gaps is None else result.unreduced_gaps,
-            "active_words": -1 if result.active_words is None else result.active_words,
-            "waiting_words": -1 if result.waiting_words is None else result.waiting_words,
+            **word_counts(result),
         }
         if result.lag_seconds is not None:
             attributes["lag_seconds"] = result.lag_seconds

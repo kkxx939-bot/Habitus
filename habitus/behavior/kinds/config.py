@@ -19,6 +19,10 @@ _INTEGER_BOUNDS: tuple[tuple[str, int, int], ...] = (
     ("earlier_turns", 0, 20),
     ("earlier_chars", 1, 100_000),
     ("prompt_max_steps", 0, 200),
+    ("max_name_chars", 1, 100),
+    ("candidate_slots", 1, 100),
+    ("retire_days", 1, 3650),
+    ("max_level", 1, 10),
 )
 
 
@@ -32,7 +36,9 @@ class BehaviorKindConfig:
     - 会话 lane 选词给模型看的上文（实验原数）：最近 ``recent_records`` 条成了记录的轮，加同一会话最近
       ``recent_same_conversation`` 条；这场对话里之前最多 ``earlier_turns`` 轮，每轮材料截 ``earlier_chars`` 字。
     - 物理 lane 选词时每条最多列几步（``prompt_max_steps``）。
-    - ``max_encoded_bytes``：在用状态文件与清单视图的字节上限（保护闸）。
+    - ``max_encoded_bytes``：词表状态文件与清单视图的字节上限（保护闸）。
+    - 新节点（只在会话 lane，词表方案第 4–6 节）：模型写的名字最多 ``max_name_chars`` 个字；词表最多 ``max_level`` 层；每个上级
+      下面最多 ``candidate_slots`` 个候选，满了挤掉最久没被选中的；``retire_days`` 天没被直接选中的节点退出在用或删掉。
     """
 
     pick_retries: int = 2
@@ -46,6 +52,10 @@ class BehaviorKindConfig:
     earlier_turns: int = 3
     earlier_chars: int = 600
     prompt_max_steps: int = 12
+    max_name_chars: int = 6
+    candidate_slots: int = 5
+    retire_days: int = 20
+    max_level: int = 3
 
     def __post_init__(self) -> None:
         for name, lower, upper in _INTEGER_BOUNDS:

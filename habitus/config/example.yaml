@@ -489,6 +489,10 @@ workflow:
 #   kinds_earlier_turns: 3             # 这场对话里之前最多几轮给模型作上文
 #   kinds_earlier_chars: 600           # 之前每一轮的材料截几字
 #   kinds_prompt_max_steps: 12         # 物理 lane 选词时每条最多列几步
+#   kinds_max_name_chars: 6            # 会话 lane 选词时模型写的新节点名字最多几个字，超过不建
+#   kinds_candidate_slots: 5           # 每个上级下面最多几个候选（自己长的、不在用的节点）；满了挤掉最久没被选中的
+#   kinds_retire_days: 20              # 一个词几天没被直接选中就退出在用；自己长的、下面没有活着的下级的删掉
+#   kinds_max_level: 3                 # 词表最多几层：建了以后超过这一层的新节点不建
 #   observation_max_files: 100000      # 观测存储最多多少份交付（保护闸；观测在发布后即释放，常态远低于它）
 #   fusion_max_receipt_files: 100000   # 回执最多多少份（保护闸；按覆盖窗口过期）
 #   fusion_max_judgement_files: 1000000  # 判断最多多少份（保护闸；发布即释放）

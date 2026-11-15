@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from habitus.behavior.kinds.store import BehaviorKindStore
 from habitus.behavior.tree import BehaviorTree
 from habitus.conditions import DayTypeCalendar
 from habitus.config import HabitusConfig
@@ -52,20 +53,24 @@ from habitus.runtime.foresight_tick import ForesightTick
 from habitus.runtime.generation_lease import Lease
 from habitus.runtime.generation_watermark import TickTrack, TickWatermarkStore
 from habitus.runtime.resident import ResidentWorker
+from habitus.runtime.scene_vocabulary import kind_label, kind_resolution
 from habitus.runtime.session_lane import BehaviorSessionConsumer
 from habitus.runtime.unsealed import UnsealedFromJudgements
 from habitus.scene.relations import RelationConfig
 from habitus.scene.relations.store import RelationStore
+from habitus.series.model import KindResolution
 
 
 @dataclass(frozen=True)
 class ForesightReadSide:
-    """预测层读行为树的那一侧：哪棵树、谁的、按什么日历、什么时区。"""
+    """预测层读行为树的那一侧：哪棵树、谁的、按什么日历、什么时区，树上的 ``kind_token`` 怎么换算（删掉的节点换成最近的
+    活着的上级，与事件序列同一个口；不给是没有删掉的节点）。"""
 
     behavior_tree: BehaviorTree
     subject: str
     calendar: DayTypeCalendar
     zone: ZoneInfo
+    kinds: KindResolution | None = None
 
     def __post_init__(self) -> None:
         if not self.subject.strip():
@@ -131,13 +136,12 @@ def build_foresight_components(
     clock: Callable[[], datetime] | None = None,
     branch: str = "session",
     calendar: DayTypeCalendar | None = None,
-    kind_label: Callable[[str], str | None] | None = None,
+    kind_store: BehaviorKindStore | None = None,
     question_tools: Sequence[QuestionTool] | None = None,
     finished: Callable[[date], bool | None] | None = None,
 ) -> ForesightRuntimeComponents | None:
-    """组装预测层；未启用时返回 None。``branch`` 是它接的那一支：账本取这一支的目录。``calendar`` 是组合根建好、与语义树共用的
-    那一份（不给就自己建）。``kind_label`` 是类编号 → 给人看的类名（词表），出口认提问时拿它配题目；``finished`` 是换代的完成标记
-    （``GenerationMarks.finished``），结算据它认没有这一代的那天（裁定 94 第 9 条）。"""
+    """组装预测层；未启用时返回 None。``branch``：接的那一支（账本目录）；``calendar``：与语义树共用的那一份（不给自己建）；
+    ``kind_store``：这一支的词表状态（编号换算、出口类名）；``finished``：换代完成标记，结算据它认没有这一代的那天（裁定 94）。"""
 
     if not config.foresight.enabled:
         return None
@@ -146,6 +150,7 @@ def build_foresight_components(
         subject=config.behavior.primary_subject,
         calendar=calendar if calendar is not None else local_calendar(config),
         zone=config.locale.zone(),
+        kinds=None if kind_store is None else kind_resolution(kind_store),
     )
     limits = config.foresight.store
     ledger = ForesightLedgerStore(config.foresight_root / branch, limits=limits)
@@ -181,7 +186,7 @@ def build_foresight_components(
         max_attempts=foresight.outlet_max_attempts,
         claim_limit=foresight.outlet_claim_limit,
         similarity=foresight.outlet_match_similarity,
-        kind_label=kind_label,
+        kind_label=None if kind_store is None else kind_label(kind_store),
         tools=question_tools,
         observer=observer,
     )
@@ -393,10 +398,12 @@ def _tolerance(config: HabitusConfig) -> Tolerance:
 
 
 def unsealed_bridge(branch: BehaviorRuntimeComponents) -> UnsealedFromJudgements:
-    """预测层那座未封口的桥，取自这一支：判断存储 + 消费账本 + 归约的选词器。"""
+    """预测层那座未封口的桥，取自这一支：判断存储 + 消费账本 + 归约的选词器 + 这一支词表的换算口。"""
 
     runner = branch.reduction_runner
-    return UnsealedFromJudgements(branch.judgements, runner.ledger, runner.kinds)
+    return UnsealedFromJudgements(
+        branch.judgements, runner.ledger, runner.kinds, kinds=kind_resolution(branch.kind_store)
+    )
 
 
 __all__ = [

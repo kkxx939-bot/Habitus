@@ -1,8 +1,9 @@
-"""选词的提示词（词表方案 2026-11-14 第 3 节）：一条记录一次调用，在固定的初始词表里选一个词。
+"""选词的提示词（词表方案 2026-11-14 第 3、4 节）：一条记录一次调用，在词表里选一个词。
 
-会话 lane 照选词实验 ``2026-11-14-词表第二步/scripts/prompt.py`` 的 ``s2-v1``，只去掉【新节点：new】一节、开头那句里的
-"并可选地写一个新节点"与输出里的 ``new``（二乙把那一节加回来就是测过的原文），别的句子逐字不动。物理 lane 同一份去掉
-``none``、``continue``、【最近的记录】、【之前的几轮】，开头改成说明这是摄像头、手表看到的现实活动（没做过实验）。
+会话 lane 照选词实验 ``2026-11-14-词表第二步/scripts/prompt.py`` 的 ``s2-v1``，只改一句：新节点的定义从"写成'选中的词那件事
++ 一个限定'"改成"只写一句，只说这一种是什么"（词表方案第 4 节；这一句没有重跑过实验）。词表是此刻的整张表：初始词加这个
+用户自己长的、还活着的节点，每轮按此刻的状态拼。物理 lane 不写新节点：同一份去掉【新节点】一节与 ``new``、``none``、
+``continue``、【最近的记录】、【之前的几轮】，开头改成说明这是摄像头、手表看到的现实活动（没做过实验），词表只有初始词。
 
 排法：不变的部分（说明、规则、整张词表、输出格式）在系统消息，这一条的材料在用户消息，便于做提示词缓存。
 词在提示词里用编号的序号（整数）：``s-k0012`` 写成 ``12``，答复里的整数按这条 lane 换回编号。
@@ -16,7 +17,7 @@ from habitus.behavior.kinds.model import Vocabulary
 from habitus.behavior.kinds.rules import SAMENESS_RULE
 
 #: 改一次升一次。
-PICK_PROMPT_VERSION = "pick-v1"
+PICK_PROMPT_VERSION = "pick-v2"
 
 NONE, CONTINUE, MISSING = "none", "continue", "missing"
 SESSION_FIXED = (NONE, CONTINUE, MISSING)
@@ -24,12 +25,13 @@ PHYSICAL_FIXED = (MISSING,)
 
 
 def vocabulary_block(vocabulary: Vocabulary) -> str:
-    """整张词表：按源文件顺序，第 1 层的词前面在领域变了时加一行 "# 领域"；下级缩进、带"（上级 的下级）"。"""
+    """整张词表（``Vocabulary.ordered`` 的顺序：初始词按源文件，自己长的紧跟在上级的初始下级后面）；第 1 层的词前面在领域
+    变了时加一行 "# 领域"；下级缩进、带"（上级 的下级）"。删掉的节点不出现。"""
 
     by_id = {word.id: word for word in vocabulary.words}
     lines: list[str] = []
     domain = None
-    for word in vocabulary.words:
+    for word in vocabulary.ordered():
         if word.level == 1 and word.domain != domain:
             domain = word.domain
             lines.append(f"# {domain}")
@@ -51,7 +53,7 @@ _PICK_RULES = """选词的规矩：
 
 
 def session_system(vocabulary: Vocabulary) -> str:
-    return f"""你在给一个人和助手的对话编码。下面有一张固定的词表，每个词是一件事。请判断【这一轮】是什么，在下面选一项。
+    return f"""你在给一个人和助手的对话编码。下面有一张固定的词表，每个词是一件事。请判断【这一轮】是什么，在下面选一项，并可选地写一个新节点。
 
 {SAMENESS_RULE}
 
@@ -65,11 +67,18 @@ def session_system(vocabulary: Vocabulary) -> str:
 
 {_PICK_RULES}
 
+【新节点：new】（可不填，默认填 null）
+- 只有同时满足这几条才填：pick 是词表里一个词的编号；这个词下面还有层数可长（见下）；这一轮的事是这个词里更具体的一种；这个词下面已有的下级都不是这件事；而且你拿得准。拿不准就填 null，这一轮记在选中的词上。
+- 新节点挂在你选中的那个词下面，位置由系统放，你不能指定挂到别处。它说的必须是选中的词那件事里更窄的一种，不能比选中的词宽，也不能和它无关。
+- 两个按顺序排的格子：first 是选中的词紧挨着的下一层，要写新节点就必须填 first；second 是 first 下面再细一层，可不填。不许只填 second。
+- 词表一共最多 3 层：不缩进的是第 1 层，缩进一级的是第 2 层，缩进两级的是第 3 层。选中的词在第 1 层，可以填 first 和 second；在第 2 层，只能填 first；在第 3 层，不能写新节点。
+- 名字和词表里的词同一个写法：一个动作 + 一种东西，四个字左右，不超过 6 个字；不带替谁、在哪、哪个行业，不带具体是哪一个（哪个人、哪个项目、哪一天），不按做法、工具命名，时间不进名字。每一格配一句定义，只写一句，只说这一种是什么。
+
 【词表】
 {vocabulary_block(vocabulary)}
 
 只输出一个 JSON 对象，不要别的文字：
-{{"pick": 词编号（整数） | "none" | "continue" | "missing", "continues": 记录编号（整数，只在 pick 为 "continue" 时填，其余填 null）}}"""
+{{"pick": 词编号（整数） | "none" | "continue" | "missing", "continues": 记录编号（整数，只在 pick 为 "continue" 时填，其余填 null）, "new": null | {{"first": {{"name": 名字, "definition": 一句定义}}, "second": null | {{"name": 名字, "definition": 一句定义}}}}}}"""
 
 
 def session_user(material: str, earlier: Sequence[str], records: Sequence[str]) -> str:

@@ -16,6 +16,7 @@
 判断与缓存。模型此刻用不了就留着下一拍再选（实时化方案第 2 节：模型调不通不停一天）。换代里没有模型调用（实时化阶段 2）：
 换代里的日子预期读 ``cache_only`` 那一份——只读缓存，不问模型；换代之前由模型队列把还没选的选好（``unclassified`` 是它认
 欠账的数），没选上的按未归类进场景。
+判断上的编号与行为树上的一样过同一个换算口（``series.model.KindResolution``：删掉的节点换成最近的活着的上级）。
 还没选上的、选成「表外」「待定」的带原名进场景、标未归类，不猜；「非事件」「续话」不进场景（与序列同一口径）。
 没读懂、出错的判断（``behavior`` 为 None）是一段看不到的空白，按空白行给出；依据写着"没在看"（``unobserved``）的空判断是
 「未观测」，不是看不到——照常说话（裁定 68 第 2 条、94 第 3 条），不给出。隔离的坏记录归约每轮都会报，这里不报第二遍。
@@ -35,6 +36,7 @@ from habitus.behavior.reduction.pending import pending_judgements
 from habitus.behavior.reduction.record import ReducibleJudgement
 from habitus.foresight import UnsealedRow
 from habitus.model_client import MODEL_UNAVAILABLE
+from habitus.series.model import KindResolution
 
 
 class UnsealedFromJudgements:
@@ -45,8 +47,11 @@ class UnsealedFromJudgements:
         judgements: BehaviorJudgementStore,
         ledger: BehaviorReductionLedger,
         stamping: KindStamping,
+        *,
+        kinds: KindResolution | None = None,
     ) -> None:
         self.judgements = judgements
+        self.kinds = kinds
         self.ledger = ledger
         self.stamping = stamping
         #: 节点身份 → 选词结果（只缓存判断上没带结果的；只留还没封口的）。
@@ -105,11 +110,14 @@ class UnsealedFromJudgements:
         pending = pending_judgements(self.judgements, self.ledger)
         lane = self.stamping.lane
         uncounted = {not_event_token(lane), continued_token(lane)}
+        resolve = None if self.kinds is None else self.kinds()
         rows: list[UnsealedRow] = []
         for record in pending.occurrences:
             token = record.kind_token if record.kind_token is not None else self._picked.get(record.chain_digest)
             if token in uncounted:
                 continue
+            if token is not None and resolve is not None:
+                token = resolve(token)
             rows.append(
                 UnsealedRow(
                     name=str(record.behavior),

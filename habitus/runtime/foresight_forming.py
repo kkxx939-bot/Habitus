@@ -29,9 +29,9 @@ from habitus.runtime.foresight_implementation import IMPLEMENTATION
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement import BehaviorReadSide
+from habitus.runtime.foresight_tree_rows import day_cache
 from habitus.runtime.generation_marks import GenerationMarkError
 from habitus.scene.views import DayIndexCache
-from habitus.series.reader import admitted
 from habitus.temporal.slots import slot_index
 
 
@@ -90,12 +90,7 @@ class ExpectationForming:
         """此刻往回看的几天。还没封口的判断读到与行为树同一个回看窗（今天与前 7 天）：过了零点、归约又落后时，昨晚还没封口的
         「没读懂」与可读的前因也在里面（``rows`` 本来就把全部未封口判断读进来，按窗过滤不省开销）。"""
 
-        cache = DayIndexCache(
-            self.read_side.behavior_tree,
-            subject=self.read_side.subject,
-            admits=admitted,
-            calendar=self.read_side.calendar,
-        )
+        cache = day_cache(self.read_side)
         since = datetime.combine(now.date() - timedelta(days=LOOKBACK_DAYS), clock_time(0), tzinfo=now.tzinfo)
         await self.unsealed.prepare(until=now)
         unsealed = self.unsealed.rows(since=since, until=now)

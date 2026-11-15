@@ -155,15 +155,15 @@ async def series_step(
         report["skipped"] = NO_RECORDS
 
 
-# ── 5：数在用的词 ─────────────────────────────────────────────────────
+# ── 5：数词表 ─────────────────────────────────────────────────────
 
 
 async def active_step(
     gen: Generation, report: dict[str, object], series: EventSeries, day: date, result: GenerationResult,
     holder: list[Counted],
 ) -> None:  # fmt: skip
-    """数在用的词（词表方案 2026-11-14 第 5、7 节）：按这一代的序列数一遍、在用状态落盘，数出来的集合交给这一代的语义树。
-    纯计数、不调模型。没做成走退路：语义树按盘上已有的在用状态（在用只增不减，下一代重数补上）。"""
+    """数词表（词表方案 2026-11-14 第 5、7 节）：按这一代的序列先退出、删掉久没被选中的，再转在用，词表状态落盘，在用的集合
+    交给这一代的语义树。纯计数、不调模型。没做成走退路：语义树按盘上已有的在用状态（下一代重数补上）。"""
 
     try:
         counted = await asyncio.to_thread(gen.vocabulary.count, series, day)
@@ -173,12 +173,17 @@ async def active_step(
     holder.append(counted)
     result.vocabulary_version = counted.words.version
     result.active_words, result.waiting_words = len(counted.words.words), counted.waiting
+    result.deleted_words, result.exited_words = counted.deleted, counted.exited
+    result.candidate_words = counted.candidates
     report.update(
         {
             "vocabulary_version": counted.words.version,
             "active_words": len(counted.words.words),
             "added_words": counted.added,
             "waiting_words": counted.waiting,
+            "deleted_words": counted.deleted,
+            "exited_words": counted.exited,
+            "candidate_words": counted.candidates,
         }
     )
 

@@ -20,6 +20,7 @@ from habitus.behavior.kinds.ids import ClassId, Lane
 from habitus.behavior.kinds.store import BehaviorKindStore
 from habitus.conditions import LocalCalendar
 from habitus.config import HabitusConfig
+from habitus.infrastructure.store.sqlite import SQLiteLockStore
 from habitus.model_client import ChatClient
 from habitus.model_client.structured import StructuredChatClient
 from habitus.runtime.scene import build_scene_nightly
@@ -86,9 +87,14 @@ def scene_config(tmp_path: Path) -> HabitusConfig:
 def vocabulary(tmp_path: Path) -> BehaviorKindStore:
     """一份真实词表（会话 lane 的初始词表）：``CLASSES`` 那三个编号在用（词表方案 2026-11-14；名字、定义取初始词表的）。"""
 
-    store = BehaviorKindStore(tmp_path / "kinds", lane=Lane.SESSION)
+    store = BehaviorKindStore(
+        tmp_path / "kinds",
+        lane=Lane.SESSION,
+        lock_store=SQLiteLockStore(tmp_path / "locks.sqlite3"),
+        lock_ttl_seconds=30,
+    )
     active = {ClassId.parse(token): NOW.date() for token in CLASSES}
-    store.replace(store.read().with_active(active), expected_revision=0)
+    store.update(lambda current: current.with_active(active))
     return store
 
 

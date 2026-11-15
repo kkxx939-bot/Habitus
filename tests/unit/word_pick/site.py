@@ -8,7 +8,7 @@
 - 模型一律用确定性替身 ``Router``：它按请求认出这是哪一种调用——"描述这一轮"（结构化输出名 ``behavior_session_turn``，
   第二步甲不动它）、选词（提示词里有【词表】一段）、旧的白天归类（``behavior_kind_classify``），其余（语义概览等）给垃圾。
 
-选词的答复按设计的输出形状写（``{"pick": …, "continues": …}``，实验 ``s2-v1`` 去掉 ``new``）。词与记录的编号不写死成某种
+选词的答复按设计的输出形状写（会话 lane ``{"pick": …, "continues": …, "new": null}``，二乙起带 ``new``）。词与记录的编号不写死成某种
 写法：替身在这一次的提示词里找到那个词所在的行、那条记录所在的行，取行首的编号原样答回（全是数字就答整数）。
 """
 
@@ -188,6 +188,8 @@ class Router:
         if RECORDS_HEADER not in text:
             # 阶段 C 改：物理 lane 的选词提示词没有【最近的记录】，输出只有 pick 一个字段（共享说明 3.2 去掉 continue）
             body = {"pick": body["pick"]}
+        else:
+            body["new"] = None  # 二乙：会话 lane 的输出形状多了 new（这里的替身从不写新节点）
         return json.dumps(body, ensure_ascii=False)
 
     def complete(self, request: Any) -> ModelResponse:  # pragma: no cover

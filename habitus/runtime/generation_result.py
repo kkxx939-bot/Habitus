@@ -109,10 +109,14 @@ class GenerationResult:
     #: 没东西可算（序列里还没有记录）：照样写完成标记。
     nothing: str | None = None
     series_cutoff: date | None = None
-    #: 这一代语义树用的词表版本（在用状态的修订号）、在用的词数、够条件却因满额等着的词数。
+    #: 这一代语义树用的词表版本（在用状态的修订号）、在用的词数、够条件却因满额等着的词数；这一代删掉的节点数、退出在用的
+    #: 词数、数完以后此刻的候选数（数词表那一步没做成都是 None）。
     vocabulary_version: int | None = None
     active_words: int | None = None
     waiting_words: int | None = None
+    deleted_words: int | None = None
+    exited_words: int | None = None
+    candidate_words: int | None = None
     relation_nights: dict[str, date | None] = field(default_factory=dict)
     stamped_days: int | None = None
     #: 截止日之前还没归约的空判断条数（按槽留余量的读数：正常为 0）。
@@ -173,6 +177,16 @@ def retry_report(result: GenerationResult) -> object:
     return None if step is None else step.report.get("retry")
 
 
+#: 数词表那一步的读数（``GenerationResult`` 上的同名字段）。
+WORD_COUNTS = ("active_words", "waiting_words", "deleted_words", "exited_words", "candidate_words")
+
+
+def word_counts(result: GenerationResult) -> dict[str, int]:
+    """数词表那一步的读数：在用、等着、这一代删掉、退出在用、此刻候选的词数；这一代没数是 -1。"""
+
+    return {name: -1 if (value := getattr(result, name)) is None else value for name in WORD_COUNTS}
+
+
 def generation_attributes(result: GenerationResult) -> dict[str, object]:
     """``generation.run`` 的读数：写成没有、哪一步没成、读到的输入是哪一代、各个退路的计数、按槽留余量的读数。"""
 
@@ -184,8 +198,7 @@ def generation_attributes(result: GenerationResult) -> dict[str, object]:
         "reason": reason_code(result.reason),
         "series_cutoff": "" if result.series_cutoff is None else result.series_cutoff.isoformat(),
         "vocabulary_version": -1 if result.vocabulary_version is None else result.vocabulary_version,
-        "active_words": -1 if result.active_words is None else result.active_words,
-        "waiting_words": -1 if result.waiting_words is None else result.waiting_words,
+        **word_counts(result),
         "stamped_days": -1 if result.stamped_days is None else result.stamped_days,
         "unreduced_gaps": -1 if result.unreduced_gaps is None else result.unreduced_gaps,
         "unwatched_spans": len(result.unwatched),
@@ -239,5 +252,6 @@ __all__ = [
     "Skip",
     "StepOutcome",
     "generation_attributes",
+    "word_counts",
     "retry_report",
 ]

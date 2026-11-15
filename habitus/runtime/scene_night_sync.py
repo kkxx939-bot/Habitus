@@ -1,4 +1,4 @@
-"""B1 同步词表（裁定 20）：让行为概念跟上在用的词、补上数据里新出现的日历情境，记下同步到的版本。不调模型。
+"""B1 同步词表（裁定 20）：让行为概念跟上在用的词（不在用了的停用）、补上数据里新出现的日历情境，记下同步到的版本。不调模型。
 
 ``plan`` 是纯读盘、纯计算；``run`` 把概念落盘（按全部在用的词核对，幂等）、记下同步到的版本（在用状态的修订号）。
 在用的词由调用方显式交进来（换代交这一代数出来的那一份，词表方案 2026-11-14）；没给就读盘上此刻的在用状态。
@@ -89,6 +89,8 @@ class SyncStage:
         for definition in plan.write:
             if definition.source.origin is ConceptOrigin.CALENDAR:
                 calendar += 1
+            elif definition.retired:
+                signals.append(f"vocabulary: 「{definition.label}」（{definition.name}）不再在用，概念停用")
             else:
                 signals.append(f"vocabulary: 「{definition.label}」（{definition.name}）已同步")
         if calendar:

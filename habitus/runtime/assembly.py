@@ -49,11 +49,9 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import timedelta
 
-from habitus.behavior.kinds.ids import ClassId, KindIdError
-from habitus.behavior.kinds.store import BehaviorKindStore
 from habitus.config import HabitusConfig
 from habitus.conversation import (
     AddressWatermarks,
@@ -603,7 +601,7 @@ def build_runtime(
             evidence=evidence,
             observer=operation_observer,
             # 出口认提问时拿词名配题目（词表给人看的名字；编号仍是身份）
-            kind_label=_kind_label(session_behavior.kind_store),
+            kind_store=session_behavior.kind_store,
             question_tools=adapters.question_tools(),
             finished=None if marks is None else marks.finished,
         )
@@ -858,20 +856,6 @@ def build_runtime(
         foresight=foresight_components,
     )
     return Runtime(config, components, conversation_adapters=adapters)
-
-
-def _kind_label(store: BehaviorKindStore) -> Callable[[str], str | None]:
-    """词编号 → 词表里给人看的词名（没有这个编号、不是编号的给 None）。"""
-
-    def label(token: str) -> str | None:
-        try:
-            word_id = ClassId.parse(token)
-            vocabulary = store.read()
-        except (KindIdError, ValueError):  # 词名只是出口配题目的辅助：不是编号、词表读不出来都不拦取
-            return None
-        return vocabulary.get(word_id).name if word_id in vocabulary else None
-
-    return label
 
 
 def _builtin_provider_factory() -> ProviderFactory:

@@ -245,9 +245,10 @@ class Generation:
         holder: list[EventSeries] = []
         await self._step(result, SERIES, lambda report: steps.series_step(self, report, day, result, holder))
         series = holder[0]
+        # 数词表在"没东西可算"之前：序列里一条记录都没有，候选照样按日子退出、删掉（从没被选中过的从写出它那天算）
+        words: list[Counted] = []
+        await self._step(result, ACTIVE, lambda report: steps.active_step(self, report, series, day, result, words))
         if result.nothing is None:
-            words: list[Counted] = []
-            await self._step(result, ACTIVE, lambda report: steps.active_step(self, report, series, day, result, words))
             scene: list[NightReport] = []
             await self._step(result, SCENE, lambda report: steps.scene_step(self, report, series, words, result, scene))
             await self._step(

@@ -70,6 +70,9 @@ class GenerationReports:
                 "vocabulary_version": result.vocabulary_version,
                 "active_words": result.active_words,
                 "waiting_words": result.waiting_words,
+                "deleted_words": result.deleted_words,
+                "exited_words": result.exited_words,
+                "candidate_words": result.candidate_words,
                 "relation_nights": {
                     lane: None if night is None else night.isoformat()
                     for lane, night in sorted(result.relation_nights.items())

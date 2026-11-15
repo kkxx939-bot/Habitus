@@ -252,7 +252,14 @@ def _order(item: SeriesRecord | SeriesGap) -> tuple[datetime, str]:
     return (item.started_at, item.uri)
 
 
+#: 读行为树上 ``kind_token`` 的换算口（词表方案二乙）：调一次给出"此刻"的一份 编号 → 编号 的函数——删掉的节点的编号换成它
+#: 最近的活着的上级，别的原样。行为树上的记录不改写，读的时候换；口只有一个，由组合根用词表状态装出来，交给每一个读者
+#: （序列、预测层按天读树的索引、未封口那座桥）。读者在一次读开头取一份，整次读用同一份。不给就是"没有删掉的节点"。
+KindResolution = Callable[[], Callable[[str], str]]
+
+
 __all__ = [
+    "KindResolution",
     "EventSeries",
     "GapKind",
     "SeriesError",

@@ -333,11 +333,11 @@ def test_c22_d1_the_session_vocabulary_block_is_the_initial_279_word_table(site:
         assert names[number] == name
 
 
-def test_c22_the_session_pick_prompt_keeps_the_fixed_choices_and_drops_the_new_node_section(site: Site) -> None:
+def test_c22_the_session_pick_prompt_keeps_the_fixed_choices_and_the_new_node_section(site: Site) -> None:
     text = _session_pick_prompt(site)
     for choice in ('"none"', '"continue"', '"missing"'):
         assert choice in text
-    assert "【新节点" not in text and "新节点" not in text
+    assert "【新节点：new】" in text  # 二乙加回来（逐字对照见 word_grow/test_prompt.py）
     assert "【最近的记录】" in text and "【这场对话里之前的几轮】" in text and "【这一轮】" in text
 
 

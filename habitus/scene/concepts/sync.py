@@ -3,8 +3,9 @@
 纯规划，不落盘：输入是现有概念集与这一代在用的词（词表方案 2026-11-14）；输出是要写的概念（行为概念与新出现的日历情境）。
 落盘由换代按这份计划做。
 
-- **每个在用的词恰好一个行为概念**：身份 = 词编号，显示名 = 词名，定义 = 词的定义。没有的生成；名字、定义变了的跟着改
-  （身份是编号，引用它的命中不动）。不在用的词没有概念（它的记录在关系时间线上不留记号）。这一条按全部在用的词核对，
+- **每个在用的词恰好一个在用的行为概念**：身份 = 词编号，显示名 = 词名，定义 = 词的定义。没有的生成；名字、定义变了的跟着改
+  （身份是编号，引用它的命中不动）；停用过、又在用了的改回来。不在用的词（从没在用过的没有概念，它的记录在关系时间线上
+  不留记号）：退出在用、被删掉的那些，它的行为概念标成停用（词表方案二乙），历史命中留着读。这一条按全部在用的词核对，
   所以中途丢了一次同步也会被补上。
 - **日历情境按数据补**：周几、几号、月末、日型由外部条件的日历机械生成（裁定 59），数据里出现过、概念集里没有的就补上。
 - **写盘前整体核对**：计划写完的概念集必须自洽。会与在用概念撞显示名的那几份不写、连同理由交给换代报出来，其余照常
@@ -65,6 +66,7 @@ def plan_sync(
     """``observed``：数据里出现过的日历（键, 取值），日历情境只给这些（裁定 59 第 7 条：取值从数据里攒出来）。"""
 
     write = tuple(item for item in (_reconcile(existing, word, now=now) for word in words.words) if item is not None)
+    write += _retire(existing, words)
     write += _calendar(existing, now=now, observed=observed)
     accepted, rejected = _consistent(existing, write)
     return SyncPlan(version=words.version, write=accepted, rejected=rejected)
@@ -128,6 +130,17 @@ def _reconcile(existing: ConceptSet, item: CatalogWord, *, now: datetime) -> Con
     if (current.title, current.definition, current.retired) == (item.name, item.definition, False):
         return None
     return replace(current, title=item.name, definition=item.definition, retired=False)
+
+
+def _retire(existing: ConceptSet, words: CatalogWords) -> tuple[ConceptDefinition, ...]:
+    """不在这一代在用集合里、还没停用的行为概念：标成停用（它的词退出了在用或被删了）。"""
+
+    in_use = {word.id for word in words.words}
+    return tuple(
+        replace(existing[identity], retired=True)
+        for identity in existing.behaviors()
+        if not existing[identity].retired and existing[identity].classes[0] not in in_use
+    )
 
 
 __all__ = ["SyncPlan", "base_concept", "plan_sync"]

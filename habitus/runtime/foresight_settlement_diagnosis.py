@@ -28,9 +28,8 @@ from habitus.foresight.units import UNIT
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
-from habitus.runtime.foresight_tree_rows import basis_row, rows_between
+from habitus.runtime.foresight_tree_rows import basis_row, day_cache, rows_between
 from habitus.scene.views import DayIndexCache
-from habitus.series.reader import admitted
 
 if TYPE_CHECKING:  # 只给类型检查看：结算模块在运行时导入本模块
     from habitus.runtime.foresight_settlement import BehaviorReadSide
@@ -61,12 +60,7 @@ class SettlementDiagnosis:
             raise ValueError("diagnosis needs the tolerance of each account's line")
         if days < 1:
             raise ValueError("days must be a positive integer")
-        cache = DayIndexCache(
-            self.read_side.behavior_tree,
-            subject=self.read_side.subject,
-            admits=admitted,
-            calendar=self.read_side.calendar,
-        )
+        cache = day_cache(self.read_side)
         table = self.opportunities.latest(self.lane) if self.opportunities is not None else None
         listed = {relation.key for relation in table.relations} if table is not None else None
         start = now.date() - timedelta(days=days)

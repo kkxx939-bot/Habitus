@@ -43,12 +43,11 @@ from habitus.behavior.fusion.lanes.session import (
     SessionTurnRecorder,
     TurnHandler,
 )
-from habitus.behavior.kinds.calls import KindModelCaller, KindModelOutputError
+from habitus.behavior.kinds.calls import KindModelOutputError
 from habitus.behavior.kinds.config import BehaviorKindConfig
 from habitus.behavior.kinds.ids import Lane
 from habitus.behavior.kinds.pick.picker import WordPicker
 from habitus.behavior.kinds.store import BehaviorKindStore
-from habitus.behavior.kinds.words import initial_words
 from habitus.behavior.observation import BehaviorObservationStore
 from habitus.behavior.observation.config import BehaviorObservationConfig
 from habitus.behavior.reduction import (
@@ -80,6 +79,7 @@ from habitus.foundation.observability import (
 from habitus.infrastructure.lifecycle import RetryLedger
 from habitus.infrastructure.store.contracts.lock import LockStore
 from habitus.model_client import MODEL_DETERMINISTIC, MODEL_UNUSABLE, ModelUnreachable, StructuredChatClient
+from habitus.runtime.behavior_kinds import vocabulary_parts
 from habitus.runtime.lifecycle_retry import retry_ledger
 from habitus.runtime.resident import ResidentWorker
 
@@ -389,9 +389,8 @@ def _build_branch(
     )
 
     tree = BehaviorTree(root / "tree", tree_config=domain.tree, document_config=domain.document)
-    # 词表的门槛从唯一的 Config 边界进来；模型只经 KindModelCaller 一个触点。
-    kind_store = BehaviorKindStore(tree.root, lane=lane, config=domain.kinds)
-    picker = _picker(structured_chat, lane, domain.kinds)
+    # 词表状态与选词器（``runtime.behavior_kinds``）：门槛从唯一的 Config 边界进来，模型只经 KindModelCaller 一个触点
+    kind_store, picker = vocabulary_parts(structured_chat, lane, tree.root, domain, lock_store)
     reduction_ledger = BehaviorReductionLedger(root / "reduction")
     # 重试的堆只在有换代时建（换代随语义树开）：没人来试的堆只会一直满着
     backlog = RetryBacklogStore(root, max_items=behavior_config.retry_backlog_max) if config.scene.enabled else None
@@ -566,17 +565,6 @@ def _span(controller: SpanController | None, operation: str) -> AbstractContextM
     if controller is None:
         return nullcontext()
     return controller.start_span("behavior", operation)
-
-
-def _picker(structured_chat: StructuredChatClient, lane: Lane, config: BehaviorKindConfig) -> WordPicker:
-    """这一支的选词器：答复结构不合格时带着错误重问 ``pick_retries`` 次（另起一个结构化客户端，只换重问次数）。"""
-
-    picking = StructuredChatClient(
-        structured_chat.client,
-        allow_json_repair=structured_chat.allow_json_repair,
-        validation_retries=config.pick_retries,
-    )
-    return WordPicker(KindModelCaller(picking, config=config), initial_words(lane))
 
 
 class _SessionPicks:
