@@ -62,6 +62,7 @@ class SessionTurn:
     人说的话就是这些中途的话。助手停下之后被后台任务叫醒又做的那一段自己算一轮，打头的是叫醒它的那条通知。
 
     ``instructed_at`` 是人开口的时刻，``completed_at`` 是这一轮最后一条消息的时刻（助手做完的时刻）。
+    ``woken``：这一轮打头的是叫醒通知（不是他说的话）——结构信息，由拆轮时标上，不靠匹配展示文本。
     """
 
     conversation_id: str
@@ -71,6 +72,7 @@ class SessionTurn:
     completed_at: datetime
     instruction: str
     messages: tuple[SessionMessage, ...]
+    woken: bool = False
 
     def __post_init__(self) -> None:
         if not self.conversation_id:
@@ -100,6 +102,13 @@ class SessionTurn:
         return max(item.occurred_at for item in self.messages if item.role is SessionMessageRole.PROMPT)
 
     @property
+    def notice_only(self) -> bool:
+        """后台通知轮：打头的是叫醒通知，整轮没有他说的话（他在这一轮里开了口——答了助手的提问、补了一句——就不是）。
+        后台任务回来不算一件事（用户 2026-11-14），由代码写一条「非事件」，不调模型。"""
+
+        return self.woken and not any(item.role is SessionMessageRole.PROMPT for item in self.messages[1:])
+
+    @property
     def answered(self) -> bool:
         """助手在这一轮里有没有答复或调用。都没有就是被打断或出错了，不出记录。"""
 
@@ -120,6 +129,7 @@ def encode_turn(turn: SessionTurn) -> dict[str, Any]:
         "instructed_at": turn.instructed_at.isoformat(timespec="microseconds"),
         "completed_at": turn.completed_at.isoformat(timespec="microseconds"),
         "instruction": turn.instruction,
+        "woken": turn.woken,
         "messages": [
             {
                 "sequence": item.sequence,
@@ -158,9 +168,16 @@ def decode_turn(raw: Mapping[str, Any]) -> SessionTurn:
                 )
                 for item in raw["messages"]
             ),
+            woken=_flag(raw["woken"]),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise BehaviorFusionError(f"encoded session turn is invalid: {exc}") from exc
+
+
+def _flag(raw: object) -> bool:
+    if not isinstance(raw, bool):
+        raise TypeError("woken must be a boolean")
+    return raw
 
 
 __all__ = ["SessionMessage", "SessionMessageRole", "SessionTurn", "decode_turn", "encode_turn"]

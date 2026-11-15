@@ -236,8 +236,6 @@ def test_an_already_done_reply_is_neutral_on_both_sides(  # noqa: PLR0913 - å››æ
         ledger,
         ForesightReadSide(site.behavior_tree, SUBJECT, LocalCalendar(), ZoneInfo("Asia/Shanghai")),
         closed_days=lambda: (DAY,),
-        current=lambda token: (token,),
-        migrating=lambda: False,
         evidence=Evidence(alpha=0.05, half_life=8.0),
         opportunities=OpportunityStore(tmp_path / "foresight"),
         lane="session",

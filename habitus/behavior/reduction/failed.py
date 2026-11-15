@@ -169,6 +169,8 @@ def error_record(chain_digest: str, records: Sequence[Mapping[str, Any]]) -> dic
         "status_basis": ERROR_BASIS,
         "fusion_version": head["fusion_version"],
         "prompt_version": head["prompt_version"],
+        # 「错误」不带选词结果（空判断不选词）
+        "kind_token": None,
     }
 
 

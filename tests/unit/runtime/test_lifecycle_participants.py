@@ -1,21 +1,15 @@
-"""行为侧、语义树、预测层的生命周期参与者（26 号清单 6.14）：词表日志能截到哪一版；账本哪些天能整天放、哪些只放索引；
-语义树还要读词表的哪些版本。"""
+"""语义树、预测层的生命周期参与者（26 号清单 6.14）：账本哪些天能整天放、哪些只放索引。"""
 
 from __future__ import annotations
 
 import asyncio
 from datetime import UTC, date, datetime, timedelta, timezone
 
-from habitus.behavior.kinds.changes import AddClass, ChangeReason, VersionRecord
-from habitus.behavior.kinds.config import BehaviorKindConfig
-from habitus.behavior.kinds.store import BehaviorKindStore
 from habitus.foresight.ledger import AccountFact, Expectation, UnitFeedback, UnitLevel
 from habitus.foresight.ledger.compaction import AccountCompaction
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
-from habitus.runtime.lifecycle_behavior import vocabulary_floor
 from habitus.runtime.lifecycle_foresight import ForesightParticipant
-from tests.unit.behavior.kinds_fixtures import named_classes
 
 CST = timezone(timedelta(hours=8))
 
@@ -29,20 +23,6 @@ class _Context:
 
     def fence_token(self):  # type: ignore[no-untyped-def]
         raise AssertionError("not used")
-
-
-def test_the_vocabulary_floor_is_the_oldest_version_anything_still_reads(tmp_path) -> None:
-    store = BehaviorKindStore(tmp_path, config=BehaviorKindConfig(cooldown_days=14))
-    classes = named_classes(("一", "二", "三", "四"))
-    now = datetime(2026, 10, 30, tzinfo=UTC)
-    for version, (item, days_ago) in enumerate(zip(classes, (60, 40, 10, 2), strict=True), start=1):
-        store.append(
-            VersionRecord(version, now - timedelta(days=days_ago), ChangeReason.NIGHTLY, (AddClass(item),)),
-            expected_version=version - 1,
-        )
-    assert vocabulary_floor(store, now=now, derived=()) == 2  # 冷却期里最老的是第 3 版：留第 3 版之后的
-    assert vocabulary_floor(store, now=now, derived=(1, 4)) == 1  # 语义树有一晚还记着第 1 版
-    assert vocabulary_floor(store, now=now + timedelta(days=30), derived=()) == 4  # 冷却期里没有：到当前
 
 
 def _expectation(day: date, identity: str) -> Expectation:
@@ -96,13 +76,11 @@ def test_a_day_is_released_only_when_final_out_of_reach_recorded_and_compacted(t
     assert ledger.expectations_on(recent)  # 还在诊断够得着的那一段里：整天留着
 
 
-def test_the_scene_reports_the_vocabulary_versions_it_still_reads(tmp_path) -> None:
-    from habitus.runtime.lifecycle_scene import SceneParticipant, scene_vocabulary_versions
-    from habitus.scene.concepts.store import ConceptStore
+def test_the_scene_participant_releases_nothing_on_an_empty_root(tmp_path) -> None:
+    from habitus.runtime.lifecycle_scene import SceneParticipant
     from habitus.scene.relations.store import RelationStore
 
-    relations, concepts = RelationStore(tmp_path / "scene"), ConceptStore(tmp_path / "scene")
-    assert scene_vocabulary_versions(relations, concepts)() == (0,)  # 从没同步过：第 0 版之后的都要
+    relations = RelationStore(tmp_path / "scene")
     report = asyncio.run(SceneParticipant(relations).maintain(_Context(datetime.now(UTC))))  # type: ignore[arg-type]
     assert report.released == 0
 
@@ -185,29 +163,6 @@ def test_reopen_killed_halfway_never_hides_the_day(tmp_path) -> None:  # type: i
 
     restarted = ForesightLedgerStore(tmp_path / "ledger")
     assert restarted.is_final(days[1]) or days[1] in restarted.open_days()
-
-
-def test_an_unreadable_relation_night_does_not_block_the_vocabulary_floor(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """一晚关系表读不了：词表下限跳过它（折叠本来就不接它），其余各晚照常给版本；原先整份解码抛错，行为侧参与者整轮
-    失败、物理一支的过期也跟着停（L10.7）。只读词表版本这一个字段。"""
-
-    from habitus.runtime.lifecycle_scene import scene_vocabulary_versions
-    from habitus.scene.concepts.store import ConceptStore
-    from habitus.scene.relations.store import RelationStore
-    from tests.unit.scene.test_relation_transitions_rotation import _nights, _with_a_transition
-
-    store = RelationStore(tmp_path / "scene")
-    nights = _nights(2)
-    for state, transitions in nights:
-        store.write(state, _with_a_transition(state, transitions))
-    older, newer = (state.night for state, _ in nights)
-    (tmp_path / "scene" / "relations" / "session" / f"{older.isoformat()}.json").write_text("{not json")
-
-    versions = scene_vocabulary_versions(store, ConceptStore(tmp_path / "scene"))()
-
-    assert store.vocabulary_of("session", older) is None
-    assert store.vocabulary_of("session", newer) == store.read("session", newer).vocabulary
-    assert store.vocabulary_of("session", newer) in versions
 
 
 def test_housekeeping_expires_what_was_given_up_long_ago_and_reports_the_backlogs(tmp_path) -> None:  # type: ignore[no-untyped-def]

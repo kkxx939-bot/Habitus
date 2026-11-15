@@ -1,0 +1,630 @@
+# Habitus 启动时只读取一次该结构；用户副本可在 credentials 中保存真实密钥。
+storage:
+  root: ~/.habitus
+  sqlite_lock:
+    timeout_seconds: 5.0
+
+# 真实凭据只写入 ~/.habitus/config.yaml；该文件及备份必须保持 0600。
+# 空值可用于生成模板，但 Doctor 和 Runtime 会拒绝被引用的空秘密。
+credentials:
+  chat:
+    api_key: ""
+  embedding:
+    api_key: ""
+  dashscope:
+    api_key: ""
+
+http:
+  host: 127.0.0.1
+  port: 8787
+  max_request_bytes: 16777216
+  remember_parts_max_bytes: 67108864
+  remember_parts_ttl_seconds: 600.0
+
+# 调模型服务（chat、embedding、rerank）时的出站网络。整组可省略，省略等于下面这组默认值。
+# 在公司网络里用得上：代理做 TLS 解密时，它的根证书通常已经装在系统证书库里，默认的 system 不用改就能通。
+network:
+  # system：读操作系统证书库（Windows 证书存储、macOS 钥匙串、Linux /etc/ssl）；
+  # bundled：只信 Python 自带的 certifi 那一份，留给没有系统证书库的极简容器。
+  trust_store: system
+  # 额外信任的 PEM 证书文件（例如 ~/corp-root.pem），在 trust_store 之上叠加。公司根证书不在系统证书库里、
+  # doctor 报 MODEL_TLS（证书不被信任）时配它。加载配置时就检查：文件不存在、不是普通文件、读不出 PEM 都直接报错。
+  ca_bundle: null
+  # 代理地址，只收 http:// 或 https://、主机与端口，例如 http://proxy.example.com:3128。配了就用它（覆盖 HTTPS_PROXY
+  # 等环境变量，NO_PROXY 也不再生效）；null 表示照旧读环境变量。本机地址（127.0.0.1、localhost、::1）的模型服务永远直连，它和环境变量里的代理都不走。
+  # 这里不能写账号密码：需要账号密码（Basic）的代理把带账号密码的 URL 写进环境变量 HTTPS_PROXY；要 Windows 域登录
+  # （NTLM / Kerberos）或 PAC 自动配置的代理不直接支持，请在本机运行 cntlm 或 px 这类转发代理，再把这里指向它
+  # （例如 http://127.0.0.1:3128）。
+  proxy: null
+
+observability:
+  metrics:
+    enabled: true
+    namespace: habitus
+    max_recent_events: 512
+    duration_buckets_seconds: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]
+  logging:
+    enabled: true
+    level: INFO
+  tracing:
+    enabled: true
+    endpoint: http://127.0.0.1:4318
+    protocol: http
+    service_name: habitus
+    insecure: true
+    credential_ref: ""
+    export_interval_seconds: 10.0
+  audit:
+    enabled: true
+    retention_days: 14
+    max_records: 10000
+  lock_warning_seconds: 300.0
+
+models:
+  # Chat 不预置任何厂商，两种协议任选其一（adapter）：
+  # - openai_compatible_chat：OpenAI Chat Completions 协议（POST {base_url}/chat/completions），DeepSeek、通义千问、
+  #   OpenAI 与自部署的 vLLM、Ollama 等都靠它；structured_output_mode 可选 json_object、json_schema、none。
+  # - anthropic_messages：Anthropic Messages 协议（POST {base_url}/v1/messages，base_url 已以 /v1 结尾时只补
+  #   /messages），Anthropic 官方 https://api.anthropic.com 以及说这套协议的网关都靠它；max_output_tokens 必填；
+  #   structured_output_mode 只能是 json_schema（走 output_config.format）或 none，没有 json_object。
+  # 下面 model、base_url 是占位值（带 example.），不填 doctor 与启动前检查会直接报"还是占位值"。
+  # 本机服务不要密钥时把 credential_ref 置空。
+  chat:
+    route:
+      provider: custom
+      adapter: openai_compatible_chat
+      model: example.chat-model
+      base_url: https://chat.example.com/v1
+      credential_ref: chat
+      # 单次结构化输出可能很长（词表分组一次最多 60 条、语义概览的材料最多 12 万字），等待按长输出给。
+      timeout_seconds: 300.0
+      max_retries: 2
+      retry_base_delay_seconds: 0.5
+      retry_max_delay_seconds: 30.0
+      max_concurrent: 16
+      max_response_bytes: 8388608
+      extra_headers: {}
+      extra_body: {}
+    context_window_tokens: 64000
+    # 单次输出上限，按所选模型填（anthropic_messages 必填）；openai_compatible_chat 留空走服务默认值，长的结构化
+    # 输出会更早被截断。
+    max_output_tokens: 8192
+    structured_output_mode: json_object
+    reasoning: false
+
+  # Embedding 不预置任何厂商：用 OpenAI 兼容协议（POST {base_url}/embeddings），OpenAI、阿里云百炼、硅基流动，
+  # 以及自己部署的 vLLM、TEI、Ollama 都靠这一段接入。下面 model、base_url 是占位值（带 example.），dimension 也要
+  # 改成所选模型的实际输出维度；不填 doctor 与启动前检查会直接报"还是占位值"。本机服务不要密钥时把 credential_ref 置空。
+  embedding:
+    route:
+      provider: custom
+      adapter: openai_compatible_embedding
+      model: example.embedding-model
+      base_url: https://embedding.example.com/v1
+      credential_ref: embedding
+      timeout_seconds: 30.0
+      max_retries: 2
+      retry_base_delay_seconds: 0.5
+      retry_max_delay_seconds: 30.0
+      max_concurrent: 16
+      max_response_bytes: 8388608
+      extra_headers: {}
+      extra_body: {}
+    # 服务返回的维度必须与它相同，不截取；服务支持 dimensions 参数时可在 extra_body 里写 dimensions
+    dimension: 1024
+    max_batch_size: 32
+    # 按拼上前缀之后的长度算
+    max_input_chars: 16000
+    query_parameters: {}
+    document_parameters: {}
+    # 拼在文本前面区分查询和文档，例如 E5 用 "query: " / "passage: "，BGE、Qwen3-Embedding 用一句指令；
+    # document_prefix 改了会让已有向量索引全量重建，query_prefix 不会。
+    # 注意：max_input_chars 按拼上前缀之后算，所以填了非空前缀，要把 memory.vector_index 与
+    # conversation.summary_vector_index 的 max_record_chars（以及查询类上限）各留出至少前缀的长度，或把
+    # max_input_chars 相应调大，否则配置加载会报 max_record_chars 超限。
+    query_prefix: ""
+    document_prefix: ""
+
+  rerank:
+    route:
+      provider: aliyun
+      adapter: openai_compatible_rerank
+      model: qwen3-rerank
+      # 替换为创建 API Key 时显示的 API Host；华北 2（北京）需填真实 WorkspaceId。
+      base_url: https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-api/v1
+      credential_ref: dashscope
+      timeout_seconds: 30.0
+      max_retries: 2
+      retry_base_delay_seconds: 0.5
+      retry_max_delay_seconds: 30.0
+      max_concurrent: 8
+      max_response_bytes: 8388608
+      extra_headers: {}
+      extra_body:
+        instruct: Given a web search query, retrieve relevant passages that answer the query.
+    max_documents: 100
+    max_query_chars: 8000
+    max_document_chars: 16000
+
+  structured_output:
+    allow_json_repair: true
+    validation_retries: 1
+
+conversation:
+  journal:
+    max_file_bytes: 67108864
+    max_history_files: 10000
+    max_conversation_tree_entries: 100000
+    max_ingress_receipts: 100000
+    max_ingress_receipt_bytes: 16384
+    lock_ttl_seconds: 30
+    lock_wait_timeout_seconds: 5.0
+    lock_retry_delay_seconds: 0.01
+
+  source:
+    # 一份会话源信封（一次送来、或分块拼回的一批）的上限；与 conversation.journal.max_file_bytes、http.remember_parts_max_bytes 对齐
+    max_envelope_bytes: 67108864
+    max_source_addresses: 100000
+    max_markers_per_address: 10000
+    max_pending_sources: 100000
+    max_output_files_per_consumer: 4
+    max_outcome_bytes: 65536
+    max_memory_output_bytes: 33554432
+    max_behavior_session_output_bytes: 1048576   # 行为侧会话 lane 的回执（只列各轮时刻，不存内容）
+    recovery_batch_size: 100
+    release_batch_addresses: 1000                # 释放每轮最多看多少个地址（按地址游标轮转）
+    orphan_grace_seconds: 86400                  # 标记打上后信封迟迟不在多久算孤儿（put 写到一半崩溃），周期恢复清掉
+    execution_lock_ttl_seconds: 300
+    execution_lock_heartbeat_seconds: 60.0
+    execution_lock_wait_seconds: 30.0
+    shutdown_timeout_seconds: 30.0
+
+  segmentation:
+    commit_token_threshold: 12000
+    keep_recent_turn_count: 3
+    retained_message_token_budget: 12000
+    max_live_messages: 200
+    max_live_bytes: 2097152
+    max_segment_messages: 500
+    max_segment_bytes: 1048576
+    max_segment_tokens: 12000
+    semantic_boundary_min_ratio: 0.6
+    max_inline_tool_result_bytes: 65536
+    max_tool_result_summary_chars: 4000
+
+  summary:
+    max_input_chars: 2000000
+    max_output_tokens: 4096
+    max_file_bytes: 2097152
+    max_files_per_conversation: 10000
+
+  # 默认是进程内的本地向量库：存储根下 vector/{collection}.sqlite3，标准库 SQLite 存记录、numpy 算余弦，不要账号。
+  # local_sqlite 不走网络：base_url、credential_ref、extra_headers 必须为空，timeout/retry/并发/回包上限这几项它不用；
+  # collection 就是文件名 vector/{collection}.sqlite3，只收小写（macOS / Windows 的文件系统不分大小写）。
+  # options.busy_timeout_seconds：另一连接正持有写锁时最多等几秒，等不到算"向量库忙"；磁盘满、IO 错误同样算忙，记忆 Job 按等依赖恢复处理。
+  summary_vector_store:
+    route:
+      provider: local
+      adapter: local_sqlite
+      base_url: ""
+      credential_ref: ""
+      timeout_seconds: 30.0
+      max_retries: 2
+      retry_base_delay_seconds: 0.5
+      retry_max_delay_seconds: 30.0
+      max_concurrent: 16
+      max_response_bytes: 8388608
+      extra_headers: {}
+    collection: conversation_summaries
+    options:
+      busy_timeout_seconds: 5.0
+
+  summary_vector_index:
+    max_records: 100000
+    max_records_per_conversation: 30000
+    max_search_hits: 10000
+    max_record_chars: 16000
+    embedding_batch_size: 128
+    stale_retries: 2
+    candidate_multiplier: 4
+    min_vector_candidates: 20
+    max_rerank_candidates: 50
+    max_rerank_document_chars: 12000
+    vector_score_threshold: -1.0
+    rerank_score_threshold: 0.0
+
+  lifecycle:
+    max_conversations_per_cycle: 100
+    summary_compaction:
+      enabled: true
+      segment_to_range:
+        min_age_days: 7
+        min_source_count: 20
+        max_wait_days: 180
+        max_source_count: 100
+        max_source_chars: 500000
+      range_to_archive:
+        min_age_days: 180
+        min_source_count: 2
+        max_source_count: 24
+        max_source_chars: 500000
+      recent_use_protection_days: 90
+      archive_retire_days: 1095
+      archive_retire_grace_days: 90
+      cleanup_batch_size: 100
+
+memory:
+  document:
+    max_markdown_body_chars: 6000
+    max_encoded_bytes: 128000
+    max_relations_per_document: 512
+
+  intention_review:
+    first_review_after_days: 30
+    second_review_after_days: 60
+    strong_review_after_days: 180
+
+  tree:
+    max_children_per_directory: 10000
+
+  snapshot:
+    max_items: 64
+    max_item_bytes: 256000
+    max_total_bytes: 4000000
+
+  search_service:
+    default_limit: 10
+    max_limit: 20
+    candidate_multiplier: 4
+    max_query_chars: 5000
+    max_planned_queries: 4
+    max_planned_query_chars: 2000
+    max_query_intent_chars: 500
+    max_summary_context_chars: 30000
+    max_recent_messages: 5
+    max_recent_message_chars: 4000
+    max_target_context_chars: 8000
+    max_planner_context_chars: 70000
+    planner_max_output_tokens: 2000
+    max_target_roots: 16
+    max_relation_neighbors_per_match: 5
+    max_relation_neighbors_total: 32
+    max_context_chars: 120000
+    retrieval_grader_max_context_chars: 120000
+    retrieval_grader_max_output_tokens: 1000
+    retrieval_grader_max_reason_chars: 1000
+    retrieval_grader_max_missing_items: 3
+    retrieval_grader_max_missing_item_chars: 1000
+    summary_fallback_enabled: true
+    summary_fallback_limit: 3
+    summary_fallback_max_query_chars: 2000
+    summary_fallback_max_context_chars: 24000
+
+  recall_lifecycle:
+    enabled: true
+    ranking_alpha: 0.2
+    cold2_threshold: 0.08
+    cold1_threshold: 0.2
+    hot_threshold: 0.6
+    profile_half_life_days: 180.0
+    preference_half_life_days: 90.0
+    entity_half_life_days: 60.0
+    tool_half_life_days: 30.0
+    event_half_life_days: 14.0
+    intention_half_life_days: 30.0
+    profile_retire_days: 720.0
+    preference_retire_days: 365.0
+    entity_retire_days: 270.0
+    tool_retire_days: 180.0
+    event_retire_days: 180.0
+    intention_retire_days: 540.0
+    retire_candidate_grace_days: 30.0
+    cold2_probe_interval_days: 30.0
+    cold2_probe_limit: 2
+    max_cold2_probes_per_search: 1
+    sqlite_timeout_seconds: 5.0
+    max_batch_size: 1000
+    max_useful_recall_count: 1000000000
+
+  field_compaction:
+    max_input_chars: 2000000
+    max_output_tokens: 4096
+    max_field_chars: 1000000
+
+  lifecycle_maintenance:
+    max_scan_items: 256
+    max_compactions_per_cycle: 4
+    max_retirements_per_cycle: 4
+
+  editor_retrieval:
+    max_query_chars: 5000
+    max_prompt_chars: 1000
+    max_completion_chars: 500
+    max_tool_message_chars: 500
+    search_limit: 5
+    max_tool_uris: 32
+
+  # 与 conversation.summary_vector_store 同一个本地后端，Collection 不同（各一个 SQLite 文件）。
+  vector_store:
+    route:
+      provider: local
+      adapter: local_sqlite
+      base_url: ""
+      credential_ref: ""
+      timeout_seconds: 30.0
+      max_retries: 2
+      retry_base_delay_seconds: 0.5
+      retry_max_delay_seconds: 30.0
+      max_concurrent: 16
+      max_response_bytes: 8388608
+      extra_headers: {}
+    collection: memory
+    options:
+      busy_timeout_seconds: 5.0
+
+  vector_index:
+    max_records: 10000
+    max_direct_entries: 1000
+    max_directories: 2000
+    max_search_hits: 10000
+    max_record_chars: 16000
+    embedding_batch_size: 128
+    stale_retries: 2
+    lock_ttl_seconds: 30
+    lock_wait_timeout_seconds: 30.0
+    lock_retry_delay_seconds: 0.02
+
+  semantic_search:
+    mode: hierarchical
+    candidate_multiplier: 4
+    min_vector_candidates: 20
+    directory_candidates: 20
+    child_candidates: 32
+    max_directory_expansions: 128
+    max_rerank_candidates: 50
+    max_rerank_document_chars: 12000
+    vector_score_threshold: 0.0
+    rerank_score_threshold: 0.2
+    score_propagation_alpha: 0.8
+    rerank_hierarchy: false
+
+  extraction:
+    max_retrieval_iterations: 3
+    additional_search_limit: 5
+    max_query_chars: 5000
+    max_old_memory_items: 64
+    max_old_memory_bytes: 4000000
+    max_old_memory_tokens: 28000
+    max_context_chars: 1000000
+    max_input_tokens: 56000
+    max_observation_chars: 12000
+    max_relation_neighbors_per_seed: 8
+    max_relation_neighbors_total: 32
+    grader_max_output_tokens: 1000
+    candidate_max_output_tokens: 8000
+
+  commit:
+    lock_ttl_seconds: 30
+
+  transaction_journal:
+    max_record_bytes: 33554432
+    max_records: 1000
+
+  semantic:
+    max_direct_entries: 256
+    max_rebuild_directories: 10000
+    max_prompt_chars: 120000
+    max_entry_summary_chars: 1000
+    max_directory_summary_chars: 2000
+    max_overview_chars: 64000
+    max_abstract_chars: 800
+    lock_ttl_seconds: 120
+    stale_retries: 1
+
+workflow:
+  jobs:
+    max_attempts: 5
+    max_file_bytes: 65536
+    max_files: 100000
+    lease_ttl_seconds: 120
+    retry_base_delay_seconds: 1.0
+    retry_max_delay_seconds: 60.0
+    # 模型此刻用不了（额度 / 余额、鉴权、断网、限流）时不计入 max_attempts，按这组长退避排回队列等它恢复
+    model_wait_base_delay_seconds: 60.0
+    model_wait_max_delay_seconds: 86400.0
+    lock_ttl_seconds: 30
+    lock_wait_timeout_seconds: 5.0
+    lock_retry_delay_seconds: 0.01
+  receipts:
+    max_file_bytes: 4194304
+    max_files: 100000
+  lifecycle:
+    committed_job_retention_days: 30
+    committed_receipt_retention_days: 365
+    cleanup_batch_size: 100
+  worker:
+    poll_interval_seconds: 0.2
+    heartbeat_interval_seconds: 10.0
+    shutdown_timeout_seconds: 30.0
+
+# 行为管线（两条 lane 的融合 → 归约 → 行为树）。缺省未启用；填入被跟踪主体的稳定标识即启用。
+# 会话、物理两条 lane 各是一整套（存储、归约、行为树、词表各一支，在 <根>/behavior/<lane>/ 等目录下），
+# 互不相通；下面的设置两支共用同一份数值。窗口数值留空时取代码内唯一出处。
+# behavior:
+#   primary_subject: "家庭成员A"
+#   context_lookback_seconds: 3600     # 归约的封口视界：证据齐备之后过这么久才封口落树
+#   reduction_sweep_interval_seconds: 300
+#   reduction_sweep_lock_ttl_seconds: 600   # 归约 sweep 的租约时长；周尺度回填可调大（默认 600）
+#   worker_shutdown_timeout_seconds: 30
+#   coverage_window_days: 7            # 重做去重的判据；覆盖记录/回执/账本的过期期限（覆盖记录在其凭据释放前不过期）
+#   retry_backlog_max: 500             # 每晚重试的堆每一支最多几项（保护闸）；满了新来的只落「没读懂」
+#   # 会话 lane 的保护上限；留空取 behavior/fusion/lanes/session/config.py 的默认值
+#   session_max_turn_chars: 8000       # 一轮对话给模型的材料总字数上限（超出先削工具调用中段，人的指令最后才削）
+#   session_max_instruction_chars: 4000  # 人的那条指令最多留多少字
+#   session_tool_argument_chars: 120   # 每次工具调用留参数开头多少字
+#   session_tool_error_chars: 240      # 工具调用失败时留报错多少字
+#   session_kept_tool_lines: 12        # 超出总上限时工具调用留头尾共几行（至少 2）
+#   session_kept_reply_lines: 6        # 超出总上限时助手中途说的话留头尾共几条（至少 2）
+#   session_max_steps: 3               # 每轮写出来的步骤最多几条
+#   session_max_summary_chars: 200     # 每轮写出来的概要最多多少字
+#   session_max_step_chars: 120        # 每条步骤最多多少字
+#   # 物理 lane 的保护上限；留空取 behavior/fusion/lanes/physical/config.py 的默认值
+#   physical_max_segments: 2000        # 一份交付最多几个行为段
+#   physical_max_coverage_spans: 2000  # 一份交付最多几个覆盖时段
+#   physical_max_facts: 5              # 一段最多带几条补充事实
+#   physical_max_fact_chars: 80        # 每条补充事实最多多少字
+#   physical_max_summary_chars: 200    # 拼出来的概要最多多少字
+#   physical_max_device_chars: 120     # 设备名最多多少字
+#   physical_max_segment_id_chars: 200  # 段编号最多多少字
+#   physical_max_future_seconds: 300   # 段的结束最多比交付的送出时刻晚多少秒（留给时钟不齐）
+#   # 基础词表（裁定 6：门槛全部是配置）；留空取 behavior/kinds/config.py 的默认值。标"待定档"的要等真实数据重定
+#   kinds_batch_size: 10               # 白天归类一次调用判几条
+#   kinds_validation_rounds: 2         # 没答好的条目重问几轮（每轮只问没答好的），用尽当「待定」
+#   kinds_transient_retries: 5         # 模型调用对超时/断连的有界重试
+#   kinds_transient_retry_delay_seconds: 5
+#   kinds_max_encoded_bytes: 16777216  # 词表各文件（清单、变更日志、待定池……）的字节上限
+#   kinds_max_examples: 3              # 每类最多几条代表例子
+#   kinds_recurrence_min_count: 2      # 每晚新增：一组待定至少几条才建类；拆分两边也按它（裁定 59）
+#   kinds_recurrence_min_days: 2       # 每晚新增：且至少跨几天（同一天追问几轮不算复现）；拆分同上
+#   kinds_max_pending: 5000            # 待定池上限（保护闸）
+#   kinds_nightly_max_new: 200         # 每晚新增一晚最多交几条新条目（保护闸，多的留到下一晚；旧条目不进，按相似召回）
+#   kinds_recall_per_entry: 3          # 每条新条目按字符二元组相似召回几条旧条目一起聚组
+#   kinds_revision_weekday: 2          # 定期拆改的周期从每周几那一晚起（0=周一，2=周三；在换代里做，不挂钟点）
+#   kinds_merge_evidence_runs: 2       # 合并要在连续几个拆改周期里都被提出才算有证据（裁定 17）
+#   kinds_cooldown_days: 14            # 改过的类冷却几天（待定档）
+#   kinds_max_changes_per_revision: 3  # 一次拆改最多改几处（待定档）
+#   kinds_lane_candidate_cap: 80       # 同 lane 在用类超过这个数就报警（保护闸；以后接回向量召回）
+#   kinds_anchors_per_class: 8         # 定期拆改锚点自检：每个没动过的类取几个锚点（裁定 17）
+#   kinds_max_anchor_pull: 0.02        # 锚点自检：新清单下被拉走的锚点最多占几成（裁定 17）
+#   kinds_revision_samples_per_class: 8  # 拆改提合并 / 改判据时每类给模型看几条原话
+#   kinds_revision_window_days: 120    # 拆改分组定拆：只看每个类最近多少天的成员（按月做的事要攒够 3 次）
+#   kinds_grouping_min_members: 6      # 成员少于这个数的类不分组（实际门槛至少是两边各 recurrence_min_count 条）
+#   kinds_grouping_batch_size: 60      # 一次分组最多给模型看几条，多了分批、后一批看得见前几批的组
+#   kinds_checkpoint_every: 200        # 扫树、重打树时每处理多少条续一次 sweep 租约
+#   kinds_prompt_max_steps: 12         # 归类与待定池给模型看的每条最多列几步
+#   kinds_sample_max_steps: 4          # 定期拆改抽样原话每条最多列几步
+#   observation_max_files: 100000      # 观测存储最多多少份交付（保护闸；观测在发布后即释放，常态远低于它）
+#   fusion_max_receipt_files: 100000   # 回执最多多少份（保护闸；按覆盖窗口过期）
+#   fusion_max_judgement_files: 1000000  # 判断最多多少份（保护闸；发布即释放）
+#   tree_max_children_per_directory: 10000  # 行为树单个目录最多多少个子项（保护闸）
+#   document_max_markdown_body_chars: 24000  # 行为树一篇文档的正文最多多少字（保护闸）
+#   document_max_encoded_bytes: 512000  # 行为树一篇文档编码后最多多少字节（保护闸；归约发布前的干跑同样查）
+#   write_lock_ttl_seconds: 30         # 行为树文档写锁的租约（秒，1–3600）
+#   # 每天的语义概览（L0/L1）的保护上限；留空取 behavior/semantic/config.py 的默认值
+#   semantic_max_direct_entries: 512   # 一个目录最多读几个直接子项
+#   semantic_max_prompt_chars: 120000  # 给模型的材料最多多少字
+#   semantic_max_narrative_chars: 4000  # 生成的叙述最多多少字
+#   semantic_max_entry_summary_chars: 500  # 每个子项的摘要最多多少字
+#   semantic_max_overview_chars: 64000  # 渲染出的概览最多多少字
+#   semantic_max_abstract_chars: 800   # 简介最多多少字（不超过概览）
+
+# 语义关联层。缺省未启用；置 enabled: true 即启用（行为侧必须也启用）。
+# relations 是关系检验的统计门槛（裁定 26）：每一项都可以不写，不写就是下面注释里的默认值（用户 10-07 定的起点，
+# 跑真实数据后再校）。和时间有关的数（槽宽、转移窗口）只认 temporal 那一组，这里不另配。
+# scene:
+#   enabled: true
+#   generation_kept_days: 366            # 完成标记、每代报告、trace 文件留几天（scene/generation/{<日>.json,reports,traces}）
+#   generation_lease_ttl_seconds: 120    # 预测根租约、语义树写锁、模型队列租约多久过期（换代由预测 worker 每个槽边界看一眼，在预测根租约之内做；两个进程挂同一个 storage root 时同一天只换代一次）
+#   generation_heartbeat_seconds: 30     # 多久续一次租约（必须小于 generation_lease_ttl_seconds）
+#   generation_stuck_ticks: 3            # 连续几槽看到定稿日不连续（较早一天没定稿、较晚一天已定稿）就在健康面报出卡住的那一天
+#   generation_retry_base_seconds: 300   # 必须成的那一步没成（改树、读序列、机会表、日子预期、完成标记）：同一天按退避一直重试，首次等多久
+#   generation_retry_max_seconds: 3600   #   ……逐次加倍，最多等这么久（锁被占不算失败、不退避，下一槽从头做）
+#   model_queue_poll_seconds: 60             # 模型队列没活时隔多久从盘上看一眼有没有新欠账（原来换代里调模型的活都在它那里做）
+#   model_queue_backoff_base_seconds: 60     # 模型整个调不通时队列整体退避：首次等多久（单项失败也按它各自等；到点接着做，不另探模型）
+#   model_queue_backoff_max_seconds: 3600    #   ……逐次加倍，最多等这么久（退避只在进程里）
+#   model_queue_unreachable_after_failures: 3 # 连着几项（不同的项）都是模型失败、中间没有一项做成，就整体退避（不分失败原因）
+#   model_queue_shutdown_timeout_seconds: 30 # 停机时等模型队列当前这一项多久，超时取消（下次从盘上重新认出来）
+#   model_queue_backlog_warning_items: 50    # 欠账到这么多项，健康面报降级（non-critical；清完自动消掉）
+#   model_queue_backlog_warning_seconds: 21600 # ……或最老一项等了这么久（秒）
+#   relations:
+#     fdr: 0.10                        # 第 1 道：当晚检验族的假发现率
+#     forward_alpha: 0.05              # 前向验证的单侧显著性
+#     forward_power: 0.80              # 前向验证与维持检验要攒几次按功效定（没有固定下限；前向按发现时效应区间离 0 近的一端算）
+#     forward_max_antecedents: 40      #   ……至多攒这么多次
+#     min_absolute_lift: 0.05          # 第 3 道"影响够大"：差值区间下限的绝对差
+#     min_relative_lift: 0.20          #   ……与相对差（两样都要够）
+#     heterogeneity_alpha: 0.05        # 第 2 道：各块效应异质性的显著性
+#     interval_level: 0.95             # 差值区间的置信度
+#     bootstrap_rounds: 400            #   ……按块重抽样的次数
+#     exact_strata_limit: 400          # 有信息的层不超过这么多时 p 值精确算，超过用正态近似
+#     first_seen_min_days: 14          # 长跨度"新类第一次出现"：记录开始后至少过这么多天
+#     first_seen_min_blocks: 3         #   ……并且至少这么多个这一类自己的块长
+#     condition_ask_min_antecedents: 40  # 前因攒到这么多次才问模型要调节条件（机械列举的条件按最小可达 p 开检验，不看它）
+#     max_combined_conditions: 3       # 一条关系最多挂几个条件（第二个起只长在已成立的带条件关系上；保护闸）
+
+# 读行为记录时间用的尺子（裁定 59）：语义树与预测层都经 habitus.temporal 用它们，全系统只此一处。
+# temporal:
+#   slot_minutes: 15                 # 槽宽，须整除一天（待定档：min(提醒精度目标, 链内相邻间隔低分位)）
+#   merge_window_minutes: 45         # 同一类相邻两条开始时刻相隔不超过这么多分钟算同一次（按秒判断）；须是槽宽的整数倍，
+#                                    #   关系检验"同一条链"那一段的槽数由它换算
+#   pool_half_width: 3               # 日内分布收缩的邻域：本槽 ← 前后各这么多槽 ← 全天（待定档）
+#   shrink_slot_to_pool: 5           # 本槽向邻域收缩的先验分量（待定档）
+#   shrink_pool_to_all_day: 5        # 邻域向全天收缩的先验分量（待定档）
+
+# 主体所在地。时区与当地日历**两层共用**：语义树与预测层用它取每一天的日历条件（周几、几号、日型），预测层用它
+# 造"此刻"的时钟与本地日界。分别配两份迟早对不上，所以单独一组，由组合根分发。
+# 这一组没有 enabled：不启用任何上层时它也无害，启用了就必须是对的。记忆抽取也按这里的时区定 Event 落在哪一天。
+# habitus-server init 新建（或 --force 重建）配置时检测系统时区：交互时请你确认或改填，检测不到才用 Asia/Singapore；
+# 写进生成的配置里。已有配置重跑 init 不碰这一组。下面注释里是不写这一组时的默认值。
+# locale:
+#   timezone: Asia/Singapore         # IANA 名字；决定"今天是哪一天""此刻在哪个槽"
+#   region: SG                       # 这个人所在地的地区码（ISO 3166：CN、SG，州一级如 US-CA）；日历跟着人走，不跟着服务部署在哪
+#   calendar_path: null              # 放假安排目录（外接组件，<年>.json，格式见 conditions/calendar_data.py）；配了只读它。
+#                                    #   null 时读随包附带的（目前有 CN 2025、2026，照国务院办公厅通知原文；
+#                                    #   SG 2025、2026，照新加坡人力部公布的公共假期原文）；
+#                                    #   哪年没有数据，那年日型是未知（不当普通工作日），周几、几号照常答。
+#   nominal_weekend: [5, 6]          # 没有放假数据时建预期的兜底周末（0=周一 … 6=周日）；统计里不用它
+
+# 预测层。缺省未启用；置 enabled: true 即启用（语义树必须已启用——机会表、复现与关系全从语义树的换代来，
+# 结算是换代里的一步；预测树删了，裁定 59）。
+#
+# 这一组没有算法参数：时窗来自历史那几次的实际时刻，转移窗就是 temporal 的 merge_window_minutes / slot_minutes。
+# 这里只有开关、递法的升降节奏（产品决定，不是统计量）、保护闸；没定的几项先给默认值（裁定 46）。
+# foresight:
+#   enabled: true
+#   false_alarm_rate: 0.33           # 可接受的误提醒率；线 = 1 − 它（0.33 → 0.67），这一版所有账同一条线
+#   shadow_uses_unestablished: true  # 影子预期也用还没成立的候选关系（账早攒；开口仍只用成立的）
+#   unseen_day_types: skip           # 没见过的日型怎么建预期：skip 不外推（只在见过他做的日型上建）/ official 按放假数据的官方含义归组（待定，裁定 59）
+#   daily_reminder_cap: 10           # 每天最多提醒几次（保护闸，常触发说明线该重看）
+#   open_reminders_judged: 5         # 每段会话进融合时最多带几条开着的提醒给模型判回应（按截止由近到远）
+#   unit_prior_share: 0.333          # 行为单元分层读数里先验的分量占有效样本上限的比例（没见过的组合贴着更粗那一层；回放后定）
+#   judge_transient_retries: 1       # 模型对传输层瞬态错的有界重试
+#   judge_transient_retry_delay_seconds: 5.0
+#   tick_interval_seconds: 900       # 多久一拍（建预期、到时窗的决定说不说）；一拍一槽、对齐槽边界，必须等于 temporal.slot_minutes × 60
+#   worker_shutdown_timeout_seconds: 30
+#   unwatched_tolerance_slots: 2     # 两拍之间隔了超过这么多槽，那一段记成会话一支的「未观测」空白（关机、合盖、进程没跑）
+#   generation_margin_slots: 3       # 换代要等预测拍水位过了 max(昨天日终, 最后一段「未观测」结尾) 再这么多槽（给归约留时间把空白落树）
+#   half_life_opportunities: 8       # 证据遗忘的半衰期：几次机会（账、行为单元、时段读数共用；裁定 57，回放后定）；账的久别也要空白 ≥ H 个典型间隔（裁定 88）
+#   outlet_liveness_hours: 48        # 提醒出口：最近几小时有宿主来取过才算活着（活着才问模型写话、记「待取」；否则记「不可达」）
+#   outlet_lease_minutes: 30         # 一条请求被一个会话取走后多久内别的会话取不到（不超过最晚时限）
+#   outlet_max_attempts: 3           # 一条请求最多放回几次（取走没问出口、租约过期），到了不再给
+#   outlet_claim_limit: 3            # 宿主一次最多取几条
+#   outlet_match_similarity: 0.6     # 认提问：题目与那句话的相似度下限（含类名或一取一问的直接配上）
+#   store:                           # 落盘的容量闸（运维边界；撞上了是该看压实、退出、释放有没有在推进）
+#     record_max_bytes: 1000000          # 账本与出口的一份记录最多多少字节（写入就查，超限的不落盘）
+#     directory_max_entries: 100000      # 账本一个目录最多列多少条
+#     unreadable_max_paths: 1000         # 两次取走之间最多记多少条坏文件路径
+#     outlet_max_entries: 10000          # 出口一个目录（取走记录、问过的提问、宿主活性）最多列多少条
+#     unit_moment_max_records: 200000    # 单元历史的每刻记录一条 lane 最多多少份
+#     unit_moment_max_record_bytes: 65536
+#     unit_history_max_bytes: 33554432   # 一晚的单元历史快照最多多少字节
+#     opportunity_table_max_bytes: 16777216  # 一晚的机会表最多多少字节
+#     nightly_max_entries: 10000         # 每晚派生物一条 lane 的目录最多列多少条
+
+# 统一生命周期（裁定 15、60）。缺省即可运行；这几个数是运维边界，不是统计量。
+# lifecycle:
+#   worker:                          # LifecycleWorker：各层参与者（memory 会话链与 L2、行为侧、语义树、预测层、会话源）共用一个
+#     maintenance_interval_seconds: 3600   # 每隔多久一轮（首轮也要等满一个周期）
+#     lease_ttl_seconds: 300               # 全局维护 lease 的租期
+#     heartbeat_interval_seconds: 60.0     # 多久续一次 lease（不超过租期的三分之一）
+#     shutdown_timeout_seconds: 30.0       # 停机时最多等当前一轮多久
+#   retry:                           # 重试账：可重试失败按 base × 2^(n−1) 退避（封顶 cap），第 max_attempts 次转为放弃
+#     max_attempts: 5
+#     backoff_base_seconds: 60.0
+#     backoff_cap_seconds: 86400.0
+#     given_up_days: 30              # 放弃了超过这么多天的条目回收
+#   fallback_generations: 2          # 派生物（关系表、机会表、单元历史）当前一代之外留几代备用
+#   transitions_rotate_files: 4      # 关系迁移日志按大小轮转时留几份
+#   capacity_warning_share: 0.8      # 有上限的量到这个占比报告警（non-critical）
+#   physical_max_backfill_days: 7    # 物理 lane 上游最多补发多少天前的单位
+#   feedback_kept: 100               # 单元提醒反馈每个行为留最近几条；更早且那天已释放的删（不小于读数窗口 M）

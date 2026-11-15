@@ -1,10 +1,10 @@
 """B4 关系：每条 lane 全部两两检验 → 接上盘上之前最近的一晚折叠 → 这一晚的关系表与迁移日志落盘（``run``：纯算法、零模型，
 模型建议只读缓存，换代调）；候选调节条件与先验的补问是另一段（``ask_conditions`` 与 ``RelationAdvice.ask_priors``：按输入摘要缓存，模型队列调）。
 
-两段用的那条 lane 的检验对象取法相同（``_examine``：接的那一晚、词表变更牵到的退回、已成立的带条件关系）——补问问出去的
+两段用的那条 lane 的检验对象取法相同（``_examine``：接的那一晚、已成立的带条件关系）——补问问出去的
 清单才与折叠时要读的缓存对得上。
 
-B4 读的是盘上**全部**已映射的命中（不只今天）：关系每晚全量重算，不做增量统计。模型建议（``RelationAdvice``）每次从
+B4 读的是盘上**全部**已封好的命中（不只今天）：关系每晚全量重算，不做增量统计。模型建议（``RelationAdvice``）每次从
 夜批现读——组合根与运维可以在构造后换掉它。
 """
 
@@ -16,13 +16,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 
-from habitus.behavior.kinds.ids import lane_of_token, pending_token
 from habitus.conditions import DayTypeCalendar
 from habitus.foundation.tracing import annotate, span
 from habitus.runtime.scene_advice import RelationAdvice
 from habitus.scene.advice.store import AdviceStoreError
 from habitus.scene.concepts.calendar_situations import value_sets_to_add
-from habitus.scene.concepts.catalog import CatalogChanges, ClassCatalog
 from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.concepts.store import ConceptStore
 from habitus.scene.occurrences.model import ConceptHits
@@ -38,7 +36,7 @@ from habitus.scene.relations import (
 from habitus.scene.relations.diff import diff_states
 from habitus.scene.relations.engine import LaneNight
 from habitus.scene.relations.retirement import Watching
-from habitus.scene.relations.state import LaneState, Status, Transition, fold, revert_touched
+from habitus.scene.relations.state import LaneState, Status, Transition, fold
 from habitus.scene.relations.store import RelationStore, RelationStoreError
 from habitus.series import EventSeries
 from habitus.temporal.coverage import coverage_of
@@ -46,11 +44,9 @@ from habitus.temporal.coverage import coverage_of
 
 @dataclass(frozen=True)
 class _Examined:
-    """一条 lane 这一晚折叠前备好的：盘上接的那一晚（原样）、退回词表变更牵到的之后的那一份与退回的迁移、检验对象。"""
+    """一条 lane 这一晚折叠前备好的：盘上接的那一晚、已成立的带条件关系、检验对象。"""
 
-    stored: LaneState | None
     previous: LaneState | None
-    reverted: tuple[Transition, ...]
     established: tuple[RelationKey, ...]
     tests: LaneTests
 
@@ -59,7 +55,6 @@ class RelationStage:
     def __init__(
         self,
         *,
-        catalog: ClassCatalog,
         concepts: ConceptStore,
         hits: ConceptHitStore,
         calendar: DayTypeCalendar,
@@ -67,7 +62,6 @@ class RelationStage:
         relation_config: RelationConfig,
         advice: Callable[[], RelationAdvice | None],
     ) -> None:
-        self.catalog = catalog
         self.concepts = concepts
         self.hits = hits
         self.calendar = calendar
@@ -88,8 +82,8 @@ class RelationStage:
         """第 ``series.cutoff`` 晚：每条 lane 检验、接上盘上之前最近的一晚折叠、落盘。返回各 lane 的计数、迁移条数与时间线。
         模型建议只读缓存（补问在模型队列）；``lines`` 是已经算好的时间线（不给就现算）。
 
-        ``vocabulary`` 是这一晚同步到的词表版本，记在关系状态上。接的那一晚的状态记着它当时的词表版本，这之间拆分 / 合并改了
-        成员的类，涉及它们的关系先退回候选（裁定 59）；按状态上记的版本算，同一晚重跑也退回得一样。折叠之后，同一件事有两个以上
+        ``vocabulary`` 是这一晚同步到的词表版本（在用状态的修订号），记在关系状态上。词表没有拆分、合并（词表方案
+        2026-11-14），在用的词只增不减，版本变了不牵动已有的关系。折叠之后，同一件事有两个以上
         单个取值（周几、几号、日型）的日历关系处在候选或成立的，补一个取值集合的日历情境，下一晚起一起检验。"""
 
         if lines is None:
@@ -115,7 +109,7 @@ class RelationStage:
         return counts, moved, lines
 
     async def timelines(self, series: EventSeries, concepts: ConceptSet) -> dict[str, LaneTimeline]:
-        """各 lane 的时间线（盘上全部已映射的命中 + 这一份序列；纯计算、零模型）。关系判定没做成时，换代用它照样算机会表。"""
+        """各 lane 的时间线（盘上全部已封好的命中 + 这一份序列；纯计算、零模型）。关系判定没做成时，换代用它照样算机会表。"""
 
         hits = await asyncio.to_thread(self._all_hits)
         return await asyncio.to_thread(
@@ -159,19 +153,13 @@ class RelationStage:
     def _examine(
         self, lane: str, line: LaneTimeline, series: EventSeries, concepts: ConceptSet, signals: list[str]
     ) -> _Examined:
-        """这条 lane 的检验对象（还没带提议）：接盘上之前最近的一晚、退回词表变更牵到的；纯计算，补问与折叠共用。"""
+        """这条 lane 的检验对象（还没带提议）：接盘上之前最近的一晚；纯计算，补问与折叠共用。"""
 
         previous = self._previous(lane, series.cutoff, signals)
-        stored = previous
-        reverted: tuple[Transition, ...] = ()
-        if previous is not None:
-            touched = _touched(concepts, _changed_classes(self.catalog.changes_since(previous.vocabulary)))
-            if touched:
-                previous, reverted = revert_touched(previous, touched, series.cutoff)
-        # 第二个条件起只长在接的那一晚已成立的带条件关系上（裁定 62 第 1 条）：退回之后再数哪些成立
+        # 第二个条件起只长在接的那一晚已成立的带条件关系上（裁定 62 第 1 条）
         established = tuple(item.key for item in previous.of(Status.ESTABLISHED)) if previous is not None else ()
         tests = LaneTests(line, concepts, self.relation_config, series.cutoff, established=established)
-        return _Examined(stored, previous, reverted, established, tests)
+        return _Examined(previous, established, tests)
 
     async def _fold_lane(
         self,
@@ -183,11 +171,11 @@ class RelationStage:
         *,
         vocabulary: int,
     ) -> tuple[LaneState, tuple[Transition, ...]] | None:
-        """一条 lane 这一晚：退回词表变更牵到的、检验、折叠、落盘；这一晚不写（沿用上一晚的）时返回 None。模型建议只读
+        """一条 lane 这一晚：检验、折叠、落盘；这一晚不写（沿用上一晚的）时返回 None。模型建议只读
         缓存：缓存里没有的按没有先验 / 没有新提议处理（没补问完的是"不知道"）。"""
 
         examined = self._examine(lane, line, series, concepts, signals)
-        stored, previous, reverted, tests = examined.stored, examined.previous, examined.reverted, examined.tests
+        previous, tests = examined.previous, examined.tests
         weights: dict[RelationKey, float] = {}
         advice = self._advice()
         if advice is not None:
@@ -215,7 +203,6 @@ class RelationStage:
         )
         state, transitions = await asyncio.to_thread(fold, previous, tests, weights or None, watching=watching)
         state = replace(state, vocabulary=vocabulary)
-        transitions = (*reverted, *transitions)
         try:
             self.relations.write(state, transitions)
         except RelationStoreError as exc:
@@ -223,7 +210,7 @@ class RelationStage:
             # 不让整晚停、别的 lane 照常（26 号清单 2.5.2）
             signals.append(f"relations: {lane} 这一晚的关系表写不出（{exc}），沿用上一晚的")
             return None
-        annotate(lane_attributes(tests.last_night, stored, state, transitions, weights))
+        annotate(lane_attributes(tests.last_night, previous, state, transitions, weights))
         return state, transitions
 
     def _day_type(self, day: date) -> str | None:
@@ -303,27 +290,6 @@ def lane_attributes(
             moved[f"removed.{change.before.value}"] += 1
     found.update(moved)
     return found
-
-
-def _changed_classes(changes: CatalogChanges) -> frozenset[str]:
-    """这一段词表变更里成员变了的类：拆出与交出的、并掉与并入的、在两个类之间搬过的条目的两头（改判据的搬动这次照旧算）。
-    从「待定」搬出来的（待定归入已有类、长新类）不算成员变化（缺陷 2，用户 11-12）：类只是多了以前没归上的记录，
-    不该把它上面的候选、成立打回、重置发现日。"""
-
-    found = {*changes.split_from, *changes.split_from.values(), *changes.merged_into, *changes.merged_into.values()}
-    for moved in changes.moved:
-        if moved.source == pending_token(lane_of_token(moved.source)):
-            continue
-        found.update((moved.source, moved.target))
-    return frozenset(found)
-
-
-def _touched(concepts: ConceptSet, changed: frozenset[str]) -> frozenset[str]:
-    """成员变了的类牵到的行为概念：基础、细分、包含它的汇总。"""
-
-    if not changed:
-        return frozenset()
-    return frozenset(identity for identity in concepts.behaviors() if set(concepts.classes_of(identity)) & changed)
 
 
 __all__ = ["RelationStage"]

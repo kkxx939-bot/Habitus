@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from habitus.behavior.reduction import VocabularyJobReport
 from habitus.config import HabitusConfig
 from habitus.conversation import (
     ConversationSourceConsumer,
@@ -58,7 +57,6 @@ from habitus.pre.conversation import (
 )
 from habitus.runtime.behavior import BehaviorBranches, UnitOutcome
 from habitus.runtime.behavior import deliver_physical as _deliver_physical
-from habitus.runtime.behavior import run_vocabulary_job as _run_vocabulary_job
 from habitus.runtime.components import RuntimeComponents
 from habitus.runtime.consistency import MemoryConsistencyService, MemoryConsistencySnapshot
 from habitus.runtime.foresight_outlet import ClaimedReminder
@@ -388,13 +386,6 @@ class Runtime:
         if foresight is None:
             return ReminderDay(resolved, ())
         return await asyncio.to_thread(reminder_day, foresight.ledger, foresight.outlet, resolved)
-
-    async def run_vocabulary_job(self, job: str, *, lane: str) -> VocabularyJobReport:
-        """词表整理活正门：``grow`` 立刻每晚新增、``revise`` 立刻定期拆改。两条 lane 的词表各是各的，``lane`` 说整理哪一支。"""
-
-        self._require_initialized("behavior vocabulary job")
-        branch = self._require_behavior().of(lane)
-        return await _run_vocabulary_job(branch, job, observer=self.components.infrastructure.observer)
 
     def _require_behavior(self) -> BehaviorBranches:
         behavior = self.components.behavior

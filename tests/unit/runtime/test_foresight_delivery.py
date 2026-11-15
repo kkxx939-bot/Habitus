@@ -676,18 +676,14 @@ def test_a_closing_window_with_an_unreadable_stretch_is_reread_before_deciding(t
 _Q4_CASES = {
     "对照": ("讨论方案", (9, 0), "修改代码"),
     "前因开始被更正 09:00→08:57": ("讨论方案", (8, 57), "修改代码"),
-    "前因拆改": ("讨论方案-拆A", (9, 0), "修改代码"),
-    "后果拆改、他已经做了": ("讨论方案", (9, 0), "修改代码-拆"),
     "前因开始被更正、没做": ("讨论方案", (8, 57), None),
-    "前因拆改、没做": ("讨论方案-拆A", (9, 0), None),
 }
 
 
 @pytest.mark.parametrize("case", list(_Q4_CASES))
 def test_delivery_and_settlement_read_the_same_rows_the_same_way(tmp_path, case) -> None:
     """段 6 Q4：同一棵树、同一张表，递送（这一拍读到的行 → 开口前核前因、判做没做）与结算（树上的行 → 前因成立吗、第一次
-    发生）结论相同。原来前因开始被更正 / 拆改后递送说不成立（不说）、结算说成立（他没做就记过期待决，账上一笔坏）；后果拆改后
-    递送说没做（他做完了还被问）、结算说准时。"""
+    发生）结论相同。原来前因开始被更正后递送说不成立（不说）、结算说成立（他没做就记过期待决，账上一笔坏）。"""
 
     from datetime import date
 
@@ -706,11 +702,6 @@ def test_delivery_and_settlement_read_the_same_rows_the_same_way(tmp_path, case)
 
     day = date(2026, 12, 10)
     discuss, code = kind_id("讨论方案"), kind_id("修改代码")
-    split = {discuss: (kind_id("讨论方案-拆A"),), code: (kind_id("修改代码-拆"),)}
-
-    def current(token: str) -> tuple[str, ...]:
-        return split.get(token, (token,))
-
     relation = RelationOpportunities(
         key="session|A|C|chain",
         antecedent="A",
@@ -748,7 +739,7 @@ def test_delivery_and_settlement_read_the_same_rows_the_same_way(tmp_path, case)
     cache = DayIndexCache(site.behavior_tree, subject=SUBJECT, admits=admitted, calendar=LocalCalendar())
     now = at(day, 9, 51)
     seen = seen_rows(TickMoment(at=now, slot=0), cache, ())
-    run, _ledger = stage(tmp_path / "stage", current=current)
+    run, _ledger = stage(tmp_path / "stage")
     materials = JudgeMaterials(table, lambda uris: ForesightTick._rows_for(uris, cache, (), seen, now), seen=seen)
     settling = antecedent_holds_when_settling(
         item,
@@ -756,11 +747,10 @@ def test_delivery_and_settlement_read_the_same_rows_the_same_way(tmp_path, case)
         official=False,
         calendar_on=lambda _day: (),
         rows_on=lambda found: [AntecedentRow(r.at, r.last_observed_at, r.kind_token) for r in cache.day(found).rows],
-        current=current,
     )
     assert run._antecedent_holds(item, materials) is settling is True
-    done = first_occurrence(item, cache.day(day).rows, current=current) is not None
-    assert done_since(item, seen, now=now, current=current) is done is (consequent is not None)
+    done = first_occurrence(item, cache.day(day).rows) is not None
+    assert done_since(item, seen, now=now) is done is (consequent is not None)
 
 
 @pytest.mark.parametrize(
@@ -836,7 +826,7 @@ def test_an_awaiting_request_done_only_after_its_deadline_ends_as_never_claimed(
     def materials(now: datetime) -> JudgeMaterials:
         seen = tuple(row for row in rows if row.started_at <= now)
         return JudgeMaterials(
-            None, lambda uris: {}, happened=lambda item: done_since(item, seen, now=now, current=run.current)
+            None, lambda uris: {}, happened=lambda item: done_since(item, seen, now=now)
         )
 
     for minutes in (11, 41, 56, 71, 86, 101, 116, 131, 146):

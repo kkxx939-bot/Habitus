@@ -1,55 +1,28 @@
-"""词表的值对象：行为类与某一版的词表。
+"""词表的值对象：词、一条 lane 的词表（只读的初始词 + 在用状态）。
 
-只做自洽校验（编号与 lane 一致、同 lane 在用类不重名、「不含」与去向指向同 lane 的已知类），
-不规定现实里的行为该长什么样。词表怎么一版版变过来见 ``changes.py``。
-
-TODO（生命周期）：``ClassStatus.RETIRED`` 现在只由定期拆改的合并产生，一个类长出来之后不会因为"再也没出现过"而退
-（例：一个做了三周的项目长成的类，项目结束后永远在用、每天进归类提示词）。与待定池出池、语义树概念退休一起设计，
-见 ``pending.py`` 的 TODO 与 ``待办.md``。
+只做自洽校验（编号与 lane 一致、编号与名字不重复、上级在表里且层数 = 上级层数 + 1、在用的词在表里），
+不规定现实里的行为该长什么样（词表方案 2026-11-14 第 2 节）。
 """
 
 from __future__ import annotations
 
-import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from enum import Enum
+from datetime import date
 from types import MappingProxyType
 
 from habitus.behavior.kinds.ids import ClassId, Lane
+
+#: 词表最多几层（词表方案第 6 节：ATUS、ICATUS、Anthropic Economic Index 都是 3 层）。
+MAX_LEVEL = 3
 
 
 class BehaviorKindError(ValueError):
     pass
 
 
-_SENTENCE_NOISE = re.compile(r"[\s，。、,.!！？?「」\"'“”]+")
-
-
-def sentence_key(text: str) -> str:
-    """两句提醒去掉空白与标点后逐字相同就当同一句（类 = 提醒句相同的一件事，裁定 16）。拆改分组合组、拆分证据都按它。"""
-
-    return _SENTENCE_NOISE.sub("", text).casefold()
-
-
-class ClassStatus(str, Enum):
-    ACTIVE = "active"
-    RETIRED = "retired"
-
-
-class ClassOrigin(str, Enum):
-    """这一类从哪来：待定池转正、拆分出来。词表从空开始，类只从用户自己的数据里长出来（裁定 29：没有预置清单）。"""
-
-    PROMOTED = "promoted"
-    SPLIT = "split"
-
-
 def _text(value: object, field_name: str) -> str:
-    """词表条目里的一段文字：非空、首尾无空白、单行可打印。
-
-    类名、判据、例子多半是模型写的；混进 U+2028 / U+2029 / U+0085 这类"换行"字符时，变更日志按行读会把一条记录切断，
-    整份词表从此读不出来（第二轮评审 C5）。所以在条目上就拒。
-    """
+    """词表条目里的一段文字：非空、首尾无空白、单行可打印。"""
 
     if not isinstance(value, str) or not value.strip() or value != value.strip():
         raise BehaviorKindError(f"{field_name} must be non-empty text without surrounding whitespace")
@@ -59,147 +32,108 @@ def _text(value: object, field_name: str) -> str:
 
 
 @dataclass(frozen=True)
-class Exclusion:
-    """「不含」的一条：这类事不算本类，应该去 ``goes_to`` 那一类（没有对应类时为空）。"""
-
-    text: str
-    goes_to: ClassId | None = None
-
-    def __post_init__(self) -> None:
-        _text(self.text, "exclusion text")
-        if self.goes_to is not None and not isinstance(self.goes_to, ClassId):
-            raise BehaviorKindError("exclusion target must be a ClassId or None")
-
-
-@dataclass(frozen=True)
-class BehaviorClass:
-    """词表里的一条。"""
+class Word:
+    """词表里的一个词。``domain`` 只是提示词里分组的标题，不是词。"""
 
     id: ClassId
+    level: int
     name: str
-    criterion: str
-    reminder: str
-    excludes: tuple[Exclusion, ...] = ()
-    examples: tuple[str, ...] = ()
-    status: ClassStatus = ClassStatus.ACTIVE
-    origin: ClassOrigin = field(kw_only=True)
+    parent: ClassId | None
+    definition: str
+    domain: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.id, ClassId):
-            raise BehaviorKindError("class id must be a ClassId")
-        _text(self.name, "class name")
-        _text(self.criterion, "class criterion")
-        _text(self.reminder, "class reminder")
-        if not isinstance(self.excludes, tuple) or not all(isinstance(item, Exclusion) for item in self.excludes):
-            raise BehaviorKindError("class excludes must be a tuple of Exclusion")
-        if not isinstance(self.examples, tuple):
-            raise BehaviorKindError("class examples must be a tuple of text")
-        for example in self.examples:
-            _text(example, "class example")
-        if len(set(self.examples)) != len(self.examples):
-            raise BehaviorKindError(f"class examples repeat: {self.id}")
-        if any(item.goes_to == self.id for item in self.excludes):
-            raise BehaviorKindError(f"class excludes point back to itself: {self.id}")
-        object.__setattr__(self, "status", ClassStatus(self.status))
-        object.__setattr__(self, "origin", ClassOrigin(self.origin))
+        # 字段类型在边界（``words.py`` 读数据文件）已经核过，这里只核自洽
+        if not 1 <= self.level <= MAX_LEVEL:
+            raise BehaviorKindError(f"word {self.id} level must be between 1 and {MAX_LEVEL}")
+        if (self.parent is None) != (self.level == 1):
+            raise BehaviorKindError(f"word {self.id}: only level-1 words have no parent")
+        if self.parent is not None and self.parent.lane is not self.id.lane:
+            raise BehaviorKindError(f"word {self.id} parent must be a word of the same lane")
+        _text(self.name, "word name")
+        _text(self.definition, "word definition")
+        _text(self.domain, "word domain")
 
     @property
     def lane(self) -> Lane:
         return self.id.lane
 
-    @property
-    def active(self) -> bool:
-        return self.status is ClassStatus.ACTIVE
+
+def reminder_sentence(word: Word) -> str:
+    """给人看的提醒句：词表里没有提醒句字段，代码拿词的名字套句式（词表方案第 2 节）。"""
+
+    return f"该{word.name}了"
 
 
 @dataclass(frozen=True)
 class Vocabulary:
-    """某一版的词表：全部行为类（含停用的）+ 去向（合并、拆分时条目交给了谁）。
+    """一条 lane 的词表：按源文件顺序的全部词，加在用状态（哪些词在用、从哪天起）与它的修订号。
 
-    ``branches[a]`` = a 把条目交出去的那些类：合并 a→b 记 ``a: (b,)``，从 a 拆出 c 记 ``a: (c,)``。
-    "编号 → 现在对应哪些编号"顺着它往下找（``descendants``）。
+    修订号是在用状态的版本：在用集合每变一次加一；下游记的"词表版本"就是它。
     """
 
-    version: int = 0
-    classes: Mapping[ClassId, BehaviorClass] = field(default_factory=dict)
-    branches: Mapping[ClassId, tuple[ClassId, ...]] = field(default_factory=dict)
+    lane: Lane
+    words: Sequence[Word]
+    active: Mapping[ClassId, date] = field(default_factory=dict)
+    revision: int = 0
+    _by_id: Mapping[ClassId, Word] = field(init=False, repr=False, compare=False, default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.version < 0:
-            raise BehaviorKindError("vocabulary version must be a non-negative integer")
-        classes = dict(self.classes)
-        for key, item in classes.items():
-            if item.id != key:
-                raise BehaviorKindError("vocabulary classes must be keyed by their own id")
-        names: dict[tuple[Lane, str], ClassId] = {}
-        for item in classes.values():
-            if not item.active:
+        object.__setattr__(self, "lane", Lane(self.lane))
+        if self.revision < 0:
+            raise BehaviorKindError("vocabulary revision must be a non-negative integer")
+        by_id: dict[ClassId, Word] = {}
+        names: set[str] = set()
+        for word in self.words:
+            if word.lane is not self.lane:
+                raise BehaviorKindError(f"word {word.id} does not belong to lane {self.lane.value}")
+            if word.id in by_id:
+                raise BehaviorKindError(f"word id repeats: {word.id}")
+            if word.name in names:
+                raise BehaviorKindError(f"word name repeats: {word.name}")
+            by_id[word.id] = word
+            names.add(word.name)
+        for word in self.words:
+            if word.parent is None:
                 continue
-            name_key = (item.lane, item.name.casefold())
-            if name_key in names:
-                raise BehaviorKindError(f"active class name repeats in lane {item.lane.value}: {item.name}")
-            names[name_key] = item.id
-            for exclusion in item.excludes:
-                self._require_same_lane(classes, item.id, exclusion.goes_to)
-        branches: dict[ClassId, tuple[ClassId, ...]] = {}
-        for source, targets in self.branches.items():
-            if source not in classes or not targets or len(set(targets)) != len(targets):
-                raise BehaviorKindError(f"vocabulary branch is malformed: {source}")
-            for target in targets:
-                if target == source:
-                    raise BehaviorKindError(f"vocabulary branch points back to itself: {source}")
-                self._require_same_lane(classes, source, target)
-            branches[source] = tuple(targets)
-        object.__setattr__(self, "classes", MappingProxyType(dict(sorted(classes.items()))))
-        object.__setattr__(self, "branches", MappingProxyType(dict(sorted(branches.items()))))
+            parent = by_id.get(word.parent)
+            if parent is None:
+                raise BehaviorKindError(f"word {word.id} points to an unknown parent {word.parent}")
+            if word.level != parent.level + 1:
+                raise BehaviorKindError(f"word {word.id} level {word.level} does not follow its parent {parent.id}")
+        for word_id in self.active:
+            if word_id not in by_id:
+                raise BehaviorKindError(f"active word is not in the vocabulary: {word_id}")
+        object.__setattr__(self, "words", tuple(self.words))
+        object.__setattr__(self, "active", MappingProxyType(dict(sorted(self.active.items()))))
+        object.__setattr__(self, "_by_id", MappingProxyType(by_id))
 
-    @staticmethod
-    def _require_same_lane(classes: Mapping[ClassId, BehaviorClass], source: ClassId, target: ClassId | None) -> None:
-        if target is None:
-            return
-        if target not in classes:
-            raise BehaviorKindError(f"{source} points to an unknown class {target}")
-        if target.lane is not source.lane:
-            raise BehaviorKindError(f"{source} points across lanes to {target}")
-
-    def get(self, class_id: ClassId) -> BehaviorClass:
+    def get(self, word_id: ClassId) -> Word:
         try:
-            return self.classes[class_id]
+            return self._by_id[word_id]
         except KeyError:
-            raise BehaviorKindError(f"unknown behavior class: {class_id}") from None
+            raise BehaviorKindError(f"unknown word: {word_id}") from None
 
-    def active(self, lane: Lane) -> tuple[BehaviorClass, ...]:
-        resolved = Lane(lane)
-        return tuple(item for item in self.classes.values() if item.active and item.lane is resolved)
+    def __contains__(self, word_id: object) -> bool:
+        return word_id in self._by_id
 
-    def next_id(self, lane: Lane) -> ClassId:
-        resolved = Lane(lane)
-        used = [item.number for item in self.classes if item.lane is resolved]
-        return ClassId(resolved, max(used, default=0) + 1)
+    def in_use(self) -> tuple[Word, ...]:
+        """在用的词（按编号）。"""
 
-    def descendants(self, class_id: ClassId) -> tuple[ClassId, ...]:
-        """这个编号的条目现在落在哪些在用类上（自己仍在用就含自己）。"""
+        return tuple(self._by_id[word_id] for word_id in self.active)
 
-        found: list[ClassId] = []
-        seen: set[ClassId] = set()
-        stack = [class_id]
-        while stack:
-            current = stack.pop()
-            if current in seen or current not in self.classes:
-                continue
-            seen.add(current)
-            if self.classes[current].active:
-                found.append(current)
-            stack.extend(reversed(self.branches.get(current, ())))
-        return tuple(sorted(found))
+    def with_active(self, active: Mapping[ClassId, date]) -> Vocabulary:
+        """换一份在用集合；集合变了修订号加一，没变原样返回。"""
+
+        if dict(active) == dict(self.active):
+            return self
+        return Vocabulary(self.lane, self.words, active, self.revision + 1)
 
 
 __all__ = [
-    "BehaviorClass",
+    "MAX_LEVEL",
     "BehaviorKindError",
-    "ClassOrigin",
-    "ClassStatus",
-    "Exclusion",
     "Vocabulary",
-    "sentence_key",
+    "Word",
+    "reminder_sentence",
 ]

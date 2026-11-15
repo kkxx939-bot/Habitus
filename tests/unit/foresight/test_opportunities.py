@@ -22,17 +22,16 @@ from habitus.foresight.opportunities import (
 )
 from habitus.scene.concepts import ConceptSet
 from habitus.scene.concepts.calendar_situations import calendar_concepts, value_set
-from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.scene.recurrence import coverage_by_lane, recurrences_of
 from habitus.scene.relations import Relation, RelationKey, Segment, Status, build_timelines, chains_of, merge_for
-from habitus.temporal import DayInterval, OccurrenceDay
+from habitus.temporal import DayInterval, OccurrenceDay, Rulers
 from tests.unit.kind_ids import kind_id
-from tests.unit.scene.concept_fixtures import CREATED, base, group
+from tests.unit.scene.concept_fixtures import CREATED, base
 from tests.unit.scene.relation_fixtures import CODE, CONCEPTS, CONFIG, DISCUSS, DOCS, RESEARCH, TITLES, key, planted
 
 CST = timezone(timedelta(hours=8))
 NIGHT = date(2026, 7, 27)
-RULERS = RhythmRulers(15, 2700, 3, 5.0, 5.0, 0.10, 35)
+RULERS = Rulers(15, 2700, 3, 5.0, 5.0, 35)
 
 
 def established(
@@ -133,16 +132,14 @@ def test_each_segment_has_its_own_window() -> None:
     assert week.items[-1].came is None and by_segment["next_day"].items[-1].came is None
 
 
-def test_only_short_relations_between_base_or_group_concepts_enter_and_conditioned_ones_only_when_established() -> None:
-    """长跨度、后果是汇总概念的不进；前因是汇总概念的进，类编号列全；候选的进但标状态；失效的不进；
+def test_only_short_relations_between_behaviour_concepts_enter_and_conditioned_ones_only_when_established() -> None:
+    """长跨度的不进；前因、后果都是行为概念，类编号就是它自己那一个；候选的进但标状态；失效的不进；
     带条件的只收成立的（裁定 61 第 6 条），候选的带条件关系不进。"""
 
-    concepts = ConceptSet([base(title) for title in TITLES] + [group("沟通", "讨论与调研", "讨论方案", "调研")])
+    concepts = ConceptSet([base(title) for title in TITLES])
     primed = f"timeline:{RESEARCH}"
     relations = (
         established(DISCUSS, CODE),
-        established("沟通", CODE),
-        established(CODE, "沟通"),
         Relation(key=RelationKey("session", DISCUSS, CODE, Segment.SITUATION), status=Status.ESTABLISHED, upward=True),
         Relation(
             key=RelationKey("session", DISCUSS, CODE, Segment.CHAIN, primed), status=Status.ESTABLISHED, upward=True
@@ -156,11 +153,10 @@ def test_only_short_relations_between_base_or_group_concepts_enter_and_condition
     assert {(item.antecedent, item.consequent, item.status, item.condition_text) for item in found.relations} == {
         (DISCUSS, CODE, "established", ""),
         (DISCUSS, CODE, "established", primed),
-        ("沟通", CODE, "established", ""),
         (RESEARCH, CODE, "candidate", ""),
     }
-    merged = next(item for item in found.relations if item.antecedent == "沟通")
-    assert merged.antecedent_classes == (DISCUSS, RESEARCH) and merged.antecedent_label == "沟通"
+    plain = next(item for item in found.relations if item.antecedent == DISCUSS and not item.condition_text)
+    assert plain.antecedent_classes == (DISCUSS,) and plain.consequent_classes == (CODE,)
 
 
 def test_a_conditioned_relation_lists_only_the_chains_where_its_conditions_held() -> None:
@@ -331,7 +327,7 @@ def test_the_table_round_trips_through_canonical_json() -> None:
     with pytest.raises(ForesightError, match="canonical"):
         decode_table(text.replace("}", "} "))
     with pytest.raises(ForesightError, match="schema"):
-        decode_table(text.replace("opportunities/v8", "opportunities/v7"))
+        decode_table(text.replace("opportunities/v9", "opportunities/v8"))
 
 
 def test_the_shapes_refuse_contradictions() -> None:

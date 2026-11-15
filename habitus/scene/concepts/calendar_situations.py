@@ -26,7 +26,7 @@ from habitus.conditions import (
     DayType,
 )
 from habitus.scene.concepts.model import ConceptDefinition, ConceptOrigin, ConceptRole, ConceptSet, ConceptSource
-from habitus.scene.concepts.situation import SituationBasis, SituationRule
+from habitus.scene.concepts.situation import SituationRule
 
 _SOURCE = ConceptSource(ConceptOrigin.CALENDAR)
 #: 每个维度取值的先后（名字按这个顺序排，集合的名字才唯一）。月末只有"是"一个取值，不合集合。
@@ -85,9 +85,7 @@ def calendar_key(concepts: ConceptSet, identity: str) -> tuple[str, tuple[str, .
     if not is_calendar(concepts, identity):
         return None
     rule = concepts[identity].situation
-    if rule is None or rule.value is None:
-        return None
-    return rule.value, rule.values
+    return None if rule is None else (rule.value, rule.values)
 
 
 def most_specific(concepts: ConceptSet, antecedents: Sequence[str]) -> tuple[str, ...]:
@@ -140,7 +138,7 @@ def _concept(name: str, key: str, values: tuple[str, ...], *, now: datetime) -> 
         role=ConceptRole.DAY_TYPE,
         source=_SOURCE,
         created_at=now,
-        situation=SituationRule(SituationBasis.CALENDAR, value=key, values=values),
+        situation=SituationRule(value=key, values=values),
     )
 
 

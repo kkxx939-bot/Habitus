@@ -3,12 +3,12 @@
 行为侧是可选启用的：``config.behavior.primary_subject`` 留空时组合根完全跳过本模块，Runtime 与既有
 行为零差异。启用后按 lane 各接一整条、互不相通的链（两条 lane 是行为树的两个分支，各在 ``behavior/<lane>/`` 下）：
 
-    会话那一支：会话源的交付 → ``runtime/session_lane.py`` 的桥 → 一轮一条判断（LLM 描述）
+    会话那一支：会话源的交付 → ``runtime/session_lane.py`` 的桥 → 一轮一条判断（LLM 描述 + 选词）
     物理那一支：上游的一份交付（Runtime 正门）→ 一段一条判断（不调模型）
-    每一支各自：判断 / 回执存储 → 归约 sweep（封口 → 词表归类 → 行为树 + L0/L1 → 定稿日记账）
+    每一支各自：判断 / 回执存储 → 归约 sweep（封口 → 落 kind_token（物理一支在这里选词）→ 行为树 + L0/L1 → 定稿日记账）
     → 换代（会话那一支；见 runtime/generation.py）
 
-两支不共用任何存储、词表、归约或 Worker：一支上的记录、空白、词表的类，另一支看不到（裁定 35）。
+两支不共用任何存储、词表、归约或 Worker：一支上的记录、空白、词表的词，另一支看不到（裁定 35）。
 
 模型路由与 memory 共用同一个 structured chat client（用户裁定）。锁沿组合根现状共享
 （SQLite 锁库；取舍与观测盲区记录在 ``behavior/reduction/runner.py`` 的 sweep 锁 docstring）。
@@ -21,12 +21,13 @@ import time
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, datetime
 
 from habitus.behavior.document import BehaviorDocumentConfig
 from habitus.behavior.fusion import BehaviorFusionReceiptStore, BehaviorJudgementStore
 from habitus.behavior.fusion.config import FUSION_CONTEXT_LOOKBACK_SECONDS, BehaviorFusionConfig
 from habitus.behavior.fusion.coverage import BehaviorCoverageIndex
+from habitus.behavior.fusion.errors import BehaviorFusionRefusedError
 from habitus.behavior.fusion.lanes.physical import (
     PhysicalLane,
     PhysicalLaneConfig,
@@ -42,13 +43,12 @@ from habitus.behavior.fusion.lanes.session import (
     SessionTurnRecorder,
     TurnHandler,
 )
-from habitus.behavior.kinds.calls import KindModelCaller
-from habitus.behavior.kinds.classify import DaytimeClassifier
+from habitus.behavior.kinds.calls import KindModelCaller, KindModelOutputError
 from habitus.behavior.kinds.config import BehaviorKindConfig
 from habitus.behavior.kinds.ids import Lane
-from habitus.behavior.kinds.nightly import NightlyGrower, PendingRecheck
-from habitus.behavior.kinds.revision import AnchorGate, Reviser
+from habitus.behavior.kinds.pick.picker import WordPicker
 from habitus.behavior.kinds.store import BehaviorKindStore
+from habitus.behavior.kinds.words import initial_words
 from habitus.behavior.observation import BehaviorObservationStore
 from habitus.behavior.observation.config import BehaviorObservationConfig
 from habitus.behavior.reduction import (
@@ -56,11 +56,8 @@ from habitus.behavior.reduction import (
     BehaviorReductionBusyError,
     BehaviorReductionLedger,
     BehaviorReductionRunner,
-    VocabularyJobReport,
 )
 from habitus.behavior.reduction.failed import ChainHandler, FailedChains
-from habitus.behavior.reduction.kinds_jobs import VocabularyJobs
-from habitus.behavior.reduction.kinds_migration import KindMigrator
 from habitus.behavior.reduction.kinds_step import KindStamping
 from habitus.behavior.reduction.refresh import RefreshRetries
 from habitus.behavior.retry import Reduction, RetryBacklogStore, RetryBranch, RetryHandler, RetryKind, RetryStage
@@ -104,6 +101,8 @@ class BehaviorRuntimeComponents:
     coverage: BehaviorCoverageIndex
     tree: BehaviorTree
     kind_store: BehaviorKindStore
+    #: 这一支的选词器（会话一支注入会话 lane；物理一支给归约与未封口那座桥）。
+    picker: WordPicker
     reduction_runner: BehaviorReductionRunner
     fusion: SessionLane | PhysicalLane
     reduction_worker: BehaviorReductionWorker
@@ -121,7 +120,6 @@ class BehaviorRuntimeComponents:
             (self.reduction_runner.observations, self.observations, "reduction observations"),
             (self.reduction_runner.receipts, self.receipts, "reduction receipts"),
             (self.reduction_runner.tree, self.tree, "reduction tree"),
-            (self.reduction_runner.kinds.store, self.kind_store, "reduction kind store"),
             (self.reduction_runner.coverage, self.coverage, "coverage index (reduction)"),
             # 融合写、归约读的是同一套判断、回执、覆盖索引。
             (self.fusion.recorder.observations, self.observations, "fusion observations"),
@@ -137,8 +135,10 @@ class BehaviorRuntimeComponents:
                 raise ValueError(f"behavior components must share one {label} instance")
         if self.kind_store.root != self.tree.root:
             raise ValueError("behavior vocabulary files must live at the tree root")
-        if self.reduction_runner.kinds.lane is not self.lane:
-            raise ValueError("a branch classifies into its own lane's vocabulary")
+        if self.reduction_runner.kinds.lane is not self.lane or self.picker.vocabulary.lane is not self.lane:
+            raise ValueError("a branch picks words from its own lane's vocabulary")
+        if self.kind_store.lane is not self.lane:
+            raise ValueError("a branch keeps its own lane's vocabulary state")
         # 一支的全部存储在同一个根下（树在它的 ``tree/`` 里）：哪一样指到别处，都是接到了另一支上。
         root = self.observations.root
         homes = (
@@ -297,7 +297,7 @@ class BehaviorDomainConfigs:
 
 
 def behavior_domain_configs(behavior: BehaviorConfig) -> BehaviorDomainConfigs:
-    """值域只由领域配置校验（配置层只查类型）；拒了报的是配置键（``config.behavior.kinds_batch_size``）。
+    """值域只由领域配置校验（配置层只查类型）；拒了报的是配置键（``config.behavior.kinds_active_cap``）。
 
     ``build_runtime`` 不论行为侧开没开都先调一次：写错的值在启动时拒，不因为这一侧没开就被静默收下。
     """
@@ -390,10 +390,8 @@ def _build_branch(
 
     tree = BehaviorTree(root / "tree", tree_config=domain.tree, document_config=domain.document)
     # 词表的门槛从唯一的 Config 边界进来；模型只经 KindModelCaller 一个触点。
-    kind_store = BehaviorKindStore(tree.root, config=domain.kinds)
-    kinds, vocabulary_jobs = _vocabulary(
-        tree, lock_store, kind_store, structured_chat, config.locale.zone(), lane, write_config=domain.write
-    )
+    kind_store = BehaviorKindStore(tree.root, lane=lane, config=domain.kinds)
+    picker = _picker(structured_chat, lane, domain.kinds)
     reduction_ledger = BehaviorReductionLedger(root / "reduction")
     # 重试的堆只在有换代时建（换代随语义树开）：没人来试的堆只会一直满着
     backlog = RetryBacklogStore(root, max_items=behavior_config.retry_backlog_max) if config.scene.enabled else None
@@ -403,8 +401,8 @@ def _build_branch(
         receipts=receipts,
         tree=tree,
         lock_store=lock_store,
-        kinds=kinds,
-        vocabulary_jobs=vocabulary_jobs,
+        # 会话一支的判断都带着选词结果（在 lane 里选好），归约对它不调模型；物理一支在这里选
+        kinds=KindStamping(picker if lane is Lane.PHYSICAL else None, lane=lane),
         ledger=reduction_ledger,
         semantic_refresher=BehaviorSemanticRefresher(
             tree, LLMBehaviorOverviewGenerator(structured_chat, config=domain.semantic), config=domain.semantic
@@ -450,6 +448,7 @@ def _build_branch(
                 zone=zone,
                 clock=lane_clock,
             ),
+            picker=_SessionPicks(picker),
             backlog=backlog,
             tree=tree,
         )
@@ -475,6 +474,7 @@ def _build_branch(
         coverage=coverage,
         tree=tree,
         kind_store=kind_store,
+        picker=picker,
         reduction_runner=reduction_runner,
         fusion=fusion,
         retry_backlog=backlog,
@@ -568,83 +568,29 @@ def _span(controller: SpanController | None, operation: str) -> AbstractContextM
     return controller.start_span("behavior", operation)
 
 
-def _vocabulary(
-    tree: BehaviorTree,
-    lock_store: LockStore,
-    store: BehaviorKindStore,
-    structured_chat: StructuredChatClient,
-    zone: tzinfo,
-    lane: Lane,
-    *,
-    write_config: BehaviorWriteConfig,
-) -> tuple[KindStamping, VocabularyJobs]:
-    """词表的两块：归约里的白天归类，与三件整理活（定期拆改的放行只靠用户自己的数据，裁定 17）。"""
+def _picker(structured_chat: StructuredChatClient, lane: Lane, config: BehaviorKindConfig) -> WordPicker:
+    """这一支的选词器：答复结构不合格时带着错误重问 ``pick_retries`` 次（另起一个结构化客户端，只换重问次数）。"""
 
-    caller = KindModelCaller(structured_chat, config=store.config)
-    classifier = DaytimeClassifier(caller)
-    stamping = KindStamping(store, classifier, lane=lane)
-    jobs = VocabularyJobs(
-        tree=tree,
-        stamping=stamping,
-        migrator=KindMigrator(tree, lock_store, store, write_config=write_config),
-        grower=NightlyGrower(caller, PendingRecheck(classifier)),
-        reviser=Reviser(caller, AnchorGate(classifier)),
-        zone=zone,
+    picking = StructuredChatClient(
+        structured_chat.client,
+        allow_json_repair=structured_chat.allow_json_repair,
+        validation_retries=config.pick_retries,
     )
-    return stamping, jobs
+    return WordPicker(KindModelCaller(picking, config=config), initial_words(lane))
 
 
-async def run_vocabulary_job(
-    components: BehaviorRuntimeComponents,
-    job: str,
-    *,
-    observer: Observer | None = None,
-) -> VocabularyJobReport:
-    """词表整理活的运维正门：``grow``（立刻每晚新增）、``revise``（立刻定期拆改）。
+class _SessionPicks:
+    """会话 lane 的选词口（``TurnPicker``）：选词失败与描述失败走同一条路——这一份被拦、输入超长按确定性失败
+    （``BehaviorFusionRefusedError``，起因是模型那一侧的异常，lane 据它分"内容被拦"），模型用不了原样抛出。"""
 
-    持 sweep 锁，归约 Worker 在此期间让路（lock_busy 跳拍）。
-    """
+    def __init__(self, picker: WordPicker) -> None:
+        self.picker = picker
 
-    runner = components.reduction_runner
-    jobs = {
-        "grow": runner.grow_vocabulary,
-        "revise": runner.revise_vocabulary,
-    }
-    if job not in jobs:
-        raise ValueError(f"unknown vocabulary job: {job!r}")
-    started = time.monotonic()
-    report = await jobs[job]()
-    _record(
-        observer,
-        f"behavior_vocabulary_{job}",
-        {"days": len(report.days), "model_calls": report.model_calls, "signals": len(report.signals)},
-        started,
-    )
-    return report
-
-
-def _record(
-    observer: Observer | None,
-    operation: str,
-    attributes: dict[str, str | int | float | bool],
-    started: float,
-) -> None:
-    """可观测事件与 Worker 同一形态（``ResidentWorker._observe``）；观测失败不影响业务。"""
-
-    if observer is None:
-        return
-    try:
-        observer.record(
-            ObservationEvent(
-                category="behavior",
-                operation=operation,
-                status=ObservationStatus.SUCCESS,
-                duration_seconds=max(0.0, time.monotonic() - started),
-                attributes=attributes,
-            )
-        )
-    except Exception:  # noqa: BLE001 - 观测失败不许影响运维动作
-        pass
+    async def pick_turn(self, *, conversation: str, at: datetime, material: str) -> str:
+        try:
+            return await self.picker.pick_turn(conversation=conversation, at=at, material=material)
+        except KindModelOutputError as exc:
+            raise BehaviorFusionRefusedError(str(exc)) from exc.__cause__
 
 
 def _utc_now() -> datetime:
@@ -660,5 +606,4 @@ __all__ = [
     "behavior_domain_configs",
     "build_behavior_components",
     "deliver_physical",
-    "run_vocabulary_job",
 ]

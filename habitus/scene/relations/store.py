@@ -134,19 +134,6 @@ class RelationStore(SceneStore):
         except (UnicodeDecodeError, RelationRecordError) as exc:
             raise RelationStoreError(f"relation night {night} of lane {lane!r} is corrupt: {exc}") from exc
 
-    def vocabulary_of(self, lane: str, night: date) -> int | None:
-        """那一晚关系状态记的词表版本，只取这一个字段、不解码整份状态；读不了（不在、坏了、没这个字段）为 None——
-        折叠时读不了的那一晚本来就跳过，词表截断的下限也不该被它卡住（L10.7）。"""
-
-        try:
-            payload = self._read_bytes(self._lane_directory(lane) / f"{night.isoformat()}.json", MAX_NIGHT_BYTES)
-            if payload is None:
-                return None
-            version = json.loads(payload).get("vocabulary")
-        except (RelationStoreError, UnicodeDecodeError, ValueError, AttributeError):
-            return None
-        return version if isinstance(version, int) and not isinstance(version, bool) else None
-
     def previous(self, lane: str, night: date) -> LaneState | None:
         """第 ``night`` 晚折叠时要接的那一晚：盘上早于它的最近一晚（重跑最晚那一晚时，接的是它之前那一晚）。"""
 

@@ -1,6 +1,6 @@
 """换代的结果与口径（``runtime.generation``）：各步与它们的先后、哪几步必须成、一步的结局、各个退路的计数名、做一代的结果。
 
-换代里没有模型调用（实时化阶段 2）：词表的每晚新增与定期拆改、语义树里调模型的那几段都归模型队列
+换代里没有模型调用（实时化阶段 2）：语义树里调模型的那几段都归模型队列
 （``runtime.model_queue``），步骤表里没有它们；换代只记下"换代时模型队列各类还欠着几项"（``GenerationResult.queue_owed``）
 与"换代那一刻模型队列是不是在整体退避"（是就不判关系、沿用上一代）。"""
 
@@ -13,19 +13,19 @@ from datetime import date, datetime
 from habitus.model_client import MODEL_UNUSABLE, ModelUnreachable
 from habitus.runtime.generation_summary import UNREACHABLE, reason_code
 
-MIGRATE, CALENDAR, RETRY, SETTLE = "migrate", "calendar", "retry", "settle"
-SERIES, SCENE, OPPORTUNITIES, DAYS, MARK = "series", "scene", "opportunities", "days", "mark"
-#: 换代的各步，按先后（实时化方案第 3 节：续做没做完的词表迁移排在最前）。单元历史与压实在机会表那一步里、跟在表后面
-#: （各自一个 ``foresight.*`` 子 span）。
-STEPS = (MIGRATE, CALENDAR, RETRY, SETTLE, SERIES, SCENE, OPPORTUNITIES, DAYS, MARK)
-#: 必须成的几步：失败 = 今天没有这一代（改树是否做完由读序列那一步看词表状态挡下）。
+CALENDAR, RETRY, SETTLE = "calendar", "retry", "settle"
+SERIES, ACTIVE, SCENE, OPPORTUNITIES, DAYS, MARK = "series", "active", "scene", "opportunities", "days", "mark"
+#: 换代的各步，按先后。"数在用的词"在读序列之后、语义树之前（词表方案 2026-11-14 第 7 节：要按日子数就得先有序列；
+#: 数出来的集合显式交给这一代的语义树）。单元历史与压实在机会表那一步里、跟在表后面（各自一个 ``foresight.*`` 子 span）。
+STEPS = (CALENDAR, RETRY, SETTLE, SERIES, ACTIVE, SCENE, OPPORTUNITIES, DAYS, MARK)
+#: 必须成的几步：失败 = 今天没有这一代。
 MUST = frozenset({SERIES, OPPORTUNITIES, DAYS, MARK})
 LABELS = {
-    MIGRATE: "续做词表迁移",
     CALENDAR: "重读放假数据",
     RETRY: "重试收尾",
     SETTLE: "结算",
     SERIES: "读序列",
+    ACTIVE: "数在用的词",
     SCENE: "语义树",
     OPPORTUNITIES: "机会表",
     DAYS: "日子预期",
@@ -38,8 +38,6 @@ DONE, DEGRADED, SKIPPED, FAILED, HELD = "done", "degraded", "skipped", "failed",
 #: 健康面与报告上的原因（与 ``generation_summary.UNREACHABLE`` 同一句）。
 MODEL_UNREACHABLE = UNREACHABLE
 LOCK_BUSY = "锁被另一进程拿着"
-MIGRATING = "词表迁移还没做完"
-VOCABULARY_MOVED = "读序列时词表变了"
 NO_RECORDS = "序列里还没有记录"
 RETRY_UNFINISHED = "重试收尾没完成"
 RETRY_REDUCING = "就近重试写回的判断还在等归约"
@@ -54,17 +52,19 @@ FALLBACK_RELATIONS = "relations_previous"  # 关系判定退到上一代：机�
 FALLBACK_SETTLEMENT = "settlement_deferred"  # 结算留到下次
 FALLBACK_HISTORY = "unit_history_skipped"  # 单元历史没做成（压实因此跳过）的 lane 数
 FALLBACK_COMPACTION = "compaction_failed"  # 账本压实没做成的条数
-FALLBACK_UNMAPPED = "unmapped_records"  # 换代时序列里还没映射的记录数
+FALLBACK_UNSTAMPED = "unstamped_records"  # 换代时序列里还没封好（那一天没有日完成章）的记录数
 FALLBACK_CALENDAR = "calendar_stale"  # 放假数据重读失败，照用上一次的
 FALLBACK_SCENE = "scene_step_failed"  # 语义树那一步里没做成的段数（同步词表、关系判定）
+FALLBACK_ACTIVE = "active_count_failed"  # 数在用的词没做成：语义树按盘上已有的在用状态
 FALLBACKS = (
     FALLBACK_RELATIONS,
     FALLBACK_SETTLEMENT,
     FALLBACK_HISTORY,
     FALLBACK_COMPACTION,
-    FALLBACK_UNMAPPED,
+    FALLBACK_UNSTAMPED,
     FALLBACK_CALENDAR,
     FALLBACK_SCENE,
+    FALLBACK_ACTIVE,
 )
 
 #: 线上任何一处调模型碰到它就是模型整个调不通：触点抛的 ``ModelUnreachable``，以及模型客户端原样抛出的"整个用不了"。
@@ -109,7 +109,10 @@ class GenerationResult:
     #: 没东西可算（序列里还没有记录）：照样写完成标记。
     nothing: str | None = None
     series_cutoff: date | None = None
+    #: 这一代语义树用的词表版本（在用状态的修订号）、在用的词数、够条件却因满额等着的词数。
     vocabulary_version: int | None = None
+    active_words: int | None = None
+    waiting_words: int | None = None
     relation_nights: dict[str, date | None] = field(default_factory=dict)
     stamped_days: int | None = None
     #: 截止日之前还没归约的空判断条数（按槽留余量的读数：正常为 0）。
@@ -181,6 +184,8 @@ def generation_attributes(result: GenerationResult) -> dict[str, object]:
         "reason": reason_code(result.reason),
         "series_cutoff": "" if result.series_cutoff is None else result.series_cutoff.isoformat(),
         "vocabulary_version": -1 if result.vocabulary_version is None else result.vocabulary_version,
+        "active_words": -1 if result.active_words is None else result.active_words,
+        "waiting_words": -1 if result.waiting_words is None else result.waiting_words,
         "stamped_days": -1 if result.stamped_days is None else result.stamped_days,
         "unreduced_gaps": -1 if result.unreduced_gaps is None else result.unreduced_gaps,
         "unwatched_spans": len(result.unwatched),
@@ -206,12 +211,11 @@ __all__ = [
     "DONE",
     "FAILED",
     "FALLBACKS",
+    "ACTIVE",
     "HELD",
-    "MIGRATE",
     "LABELS",
     "LOCK_BUSY",
     "MARK",
-    "MIGRATING",
     "MODEL_UNREACHABLE",
     "MUST",
     "NO_RECORDS",

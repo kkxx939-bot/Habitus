@@ -82,6 +82,8 @@ class SkipReason(str, Enum):
     DUPLICATE = "duplicate"
     #: 词表的「非事件」：不是一件事，连先后顺序里也当它不存在。
     NOT_EVENT = "not_event"
+    #: 词表的「续话」：接着之前某一条（追问、叫停、改口、补一句），与「非事件」同一种待遇；单列是为了看续话判得准不准。
+    CONTINUED = "continued"
 
 
 @dataclass(frozen=True)
@@ -97,8 +99,8 @@ class SkippedRecord:
 class SeriesRecord:
     """行为树上的一条 occurrence，读成序列里的一项。
 
-    ``classified`` 为真 = ``kind_token`` 是类编号；为假 = 「待定」（叫不出名：不是候选，只在先后顺序里占位）。
-    「非事件」不进序列，撞车消歧的重复也不进。``reminded`` 原样带着：要不要数进自然率是消费方的事。
+    ``classified`` 为真 = ``kind_token`` 是词编号；为假 = 「表外」或「待定」（一件没有归类的事：算人在场，没有概念，
+    只在先后顺序里占位）。「非事件」「续话」不进序列，撞车消歧的重复也不进。``reminded`` 原样带着：要不要数进自然率是消费方的事。
     """
 
     uri: str

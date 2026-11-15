@@ -1,7 +1,7 @@
-"""词表的全部门槛与运维参数（裁定 6：门槛做成配置，不写死）。
+"""词表的全部可调参数（裁定 6：门槛做成配置，不写死）。
 
-数值由 ``Config.behavior`` 的 ``kinds_*`` 字段经组合根注入（``runtime/behavior.py``）；这里的默认值是代码内
-唯一出处，YAML 留空即取之。下面标"待定档"的数值是起步值，要等真实数据（待定池的复现分布、锚点被拉走的实测比例）重定。
+数值由 ``Config.behavior`` 的 ``kinds_*`` 字段经组合根注入（``runtime/behavior.py``）；这里的默认值是代码内唯一出处，
+YAML 留空即取之。数值来自词表方案 2026-11-14 第 6 节与选词实验（``2026-11-14-词表第二步/scripts/run.py``），不从造的数据里调。
 """
 
 from __future__ import annotations
@@ -9,99 +9,51 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 _INTEGER_BOUNDS: tuple[tuple[str, int, int], ...] = (
-    ("batch_size", 1, 100),
-    ("validation_rounds", 0, 10),
+    ("pick_retries", 0, 5),
     ("transient_retries", 0, 20),
     ("max_encoded_bytes", 1, 256 * 1024 * 1024),
-    ("max_examples", 1, 10),
-    ("recurrence_min_count", 1, 1_000),
-    ("recurrence_min_days", 1, 365),
-    ("max_pending", 1, 1_000_000),
-    ("nightly_max_new", 1, 10_000),
-    ("recall_per_entry", 0, 50),
-    ("revision_weekday", 0, 6),
-    ("merge_evidence_runs", 1, 20),
-    ("cooldown_days", 0, 365),
-    ("max_changes_per_revision", 1, 100),
-    ("lane_candidate_cap", 1, 10_000),
-    ("anchors_per_class", 1, 100),
-    ("revision_samples_per_class", 1, 100),
-    ("revision_window_days", 7, 730),
-    ("grouping_min_members", 2, 10_000),
-    ("grouping_batch_size", 2, 500),
-    ("checkpoint_every", 1, 100_000),
+    ("active_min_days", 1, 365),
+    ("active_cap", 1, 10_000),
+    ("recent_records", 0, 100),
+    ("recent_same_conversation", 0, 100),
+    ("earlier_turns", 0, 20),
+    ("earlier_chars", 1, 100_000),
     ("prompt_max_steps", 0, 200),
-    ("sample_max_steps", 0, 200),
 )
 
 
 @dataclass(frozen=True)
 class BehaviorKindConfig:
-    """词表的门槛与运维边界（标"待定档"的是起步值，等真实数据重定）。
+    """词表的门槛与运维边界。
 
-    - 归类调用：一次判几条、结构不对重问几轮、瞬态错误重试几次。
-    - 每晚新增（在换代里、读序列之前跑，不挂钟点，裁定 94 第 8、9 条）：待定池里一组至少几条、跨几天才建类（2 条跨 2 天，裁定 59：跨天守的是"换一天又来了"，
-      同一天追问几轮不算）；待定池上限是保护闸。拆分沿用同一对门槛（"反复做"只有一个定义）。
-    - 定期拆改（裁定 17；在换代里、读序列之前，每周 ``revision_weekday`` 那一天起的周期里换代第一次跑到它就拆改，
-      不挂钟点，裁定 94 第 9 条）：放行 = 证据规则（拆分两边各至少 ``recurrence_min_count`` 条、跨
-      ``recurrence_min_days`` 天，提醒句不同；合并要在 ``merge_evidence_runs`` 个不同周期里都被提出）+ 锚点自检
-      （每个没动过的类取 ``anchors_per_class`` 个站得稳的锚点，新清单下被拉走的比例不超过 ``max_anchor_pull``）；
-      改过的类冷却几天；一次最多改几处；每类给模型看几条原话（只给合并 / 改判据的提案用）。
-    - 拆分（2026-10-12 起由分组 + 复现定，`18` 第四节）：只看最近 ``revision_window_days`` 天的成员——按月做的事要攒够
-      ``recurrence_min_count`` 次才切得出来，窗口不能短于它的几个周期；成员不足 ``grouping_min_members`` 的类不分组
-      （实际门槛 ``grouping_floor`` 至少是两边各 ``recurrence_min_count`` 条）；一次分组最多给模型 ``grouping_batch_size`` 条，多了分批、同名的组合并。
-    - 候选：同 lane 在用类超过上限时报警（保护闸，见 ``classify``）。
-    - 续约间隔：扫树、重打树时每处理多少条续一次 sweep 租约。
-    - 给模型看的步骤：归类与待定池每条最多列几步；拆改时每条抽样原话最多列几步（抽样多，列得短）。
+    - 选词调用：答复结构不合格时带着错误重问几次（``pick_retries``，用尽记「待定」）、瞬态错误重试几次、隔多久。
+    - 在用：一个词在 ``active_min_days`` 个不同的本地日被直接选中，下一次换代起在用；每条 lane 在用的词最多 ``active_cap`` 个，
+      满了够条件的词等着、不挤别人（词表方案第 5、6 节）。
+    - 会话 lane 选词给模型看的上文（实验原数）：最近 ``recent_records`` 条成了记录的轮，加同一会话最近
+      ``recent_same_conversation`` 条；这场对话里之前最多 ``earlier_turns`` 轮，每轮材料截 ``earlier_chars`` 字。
+    - 物理 lane 选词时每条最多列几步（``prompt_max_steps``）。
+    - ``max_encoded_bytes``：在用状态文件与清单视图的字节上限（保护闸）。
     """
 
-    batch_size: int = 10
-    validation_rounds: int = 2
+    pick_retries: int = 2
     transient_retries: int = 5
     transient_retry_delay_seconds: float = 5.0
     max_encoded_bytes: int = 16 * 1024 * 1024
-    max_examples: int = 3
-    recurrence_min_count: int = 2
-    recurrence_min_days: int = 2
-    max_pending: int = 5_000
-    # 每晚新增一晚最多交几条新条目给模型（保护闸；多的留到下一晚，裁定 60 第 2 条）、每条新条目按相似召回几条旧条目。
-    nightly_max_new: int = 200
-    recall_per_entry: int = 3
-    revision_weekday: int = 2
-    max_anchor_pull: float = 0.02
-    merge_evidence_runs: int = 2
-    cooldown_days: int = 14
-    max_changes_per_revision: int = 3
-    lane_candidate_cap: int = 80
-    anchors_per_class: int = 8
-    revision_samples_per_class: int = 8
-    revision_window_days: int = 120
-    grouping_min_members: int = 6
-    grouping_batch_size: int = 60
-    checkpoint_every: int = 200
+    active_min_days: int = 2
+    active_cap: int = 100
+    recent_records: int = 8
+    recent_same_conversation: int = 3
+    earlier_turns: int = 3
+    earlier_chars: int = 600
     prompt_max_steps: int = 12
-    sample_max_steps: int = 4
 
     def __post_init__(self) -> None:
         for name, lower, upper in _INTEGER_BOUNDS:
             value = getattr(self, name)
             if not lower <= value <= upper:
                 raise ValueError(f"{name} must be an integer between {lower} and {upper}")
-        _require_number("transient_retry_delay_seconds", self.transient_retry_delay_seconds, 0.0, 600.0)
-        _require_number("max_anchor_pull", self.max_anchor_pull, 0.0, 1.0)
-        if self.recurrence_min_days > self.recurrence_min_count:
-            raise ValueError("recurrence_min_days cannot exceed recurrence_min_count")
-
-    @property
-    def grouping_floor(self) -> int:
-        """分组至少要装得下两边各 ``recurrence_min_count`` 条，否则怎么分都切不出两个够格的组——取两者里大的那个。"""
-
-        return max(self.grouping_min_members, 2 * self.recurrence_min_count)
-
-
-def _require_number(name: str, value: float, lower: float, upper: float) -> None:
-    if not lower <= float(value) <= upper:
-        raise ValueError(f"{name} must be between {lower} and {upper}")
+        if not 0.0 <= float(self.transient_retry_delay_seconds) <= 600.0:
+            raise ValueError("transient_retry_delay_seconds must be between 0.0 and 600.0")
 
 
 __all__ = ["BehaviorKindConfig"]

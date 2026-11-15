@@ -1,33 +1,27 @@
-"""同步词表（夜批 B1，裁定 20）：让基础概念跟上词表，并说出词表这一段时间里发生了什么。
+"""同步词表（换代的语义树一步，裁定 20）：让行为概念跟上在用的词。
 
-纯规划，不落盘：输入是现有概念集、词表的全部类、上次同步之后的变更；输出是要写的概念（基础概念与改写了成员的汇总概念）
-与迁移改了编号的 occurrence。落盘与重映射由夜批按这份计划做。
+纯规划，不落盘：输入是现有概念集与这一代在用的词（词表方案 2026-11-14）；输出是要写的概念（行为概念与新出现的日历情境）。
+落盘由换代按这份计划做。
 
-- **每个类恰好一个基础概念**：身份 = 类编号，显示名 = 类名，判据 = 类判据。没有的生成；类改名、改判据的跟着改
-  （身份是编号，引用它的命中不动）；类停用的标成停用（不再命中）。这一条按全部类核对，
-  不只看变更——所以第一次同步就是给全部类生成基础概念，中途丢了一次同步也会被补上。
-- **日历情境一次给齐**：周几、几号、月末、日型由外部条件的日历机械生成（裁定 59），概念集里没有的就补上。
-- 拆分与合并只从变更里来：它们说的是"历史上的条目去了哪"，现状里看不出来；这里只拿它们改写汇总概念的成员。
-- **汇总概念的成员跟着改写成现编号**：成员里有类拆出了新类，新类加进来；成员被并掉，换成并入的那个类。这样曲线（桥）
-  与命中聚合、重言判断读的是同一份成员（第二轮评审 C2）。改写之后不足两个成员的，保持原样（并掉的那个类已经没有记录，
-  不影响读数）。
-- **写盘前整体核对**：计划写完的概念集必须自洽。会与在用概念撞显示名的那几份不写、连同理由交给夜批报出来，其余照常
+- **每个在用的词恰好一个行为概念**：身份 = 词编号，显示名 = 词名，定义 = 词的定义。没有的生成；名字、定义变了的跟着改
+  （身份是编号，引用它的命中不动）。不在用的词没有概念（它的记录在关系时间线上不留记号）。这一条按全部在用的词核对，
+  所以中途丢了一次同步也会被补上。
+- **日历情境按数据补**：周几、几号、月末、日型由外部条件的日历机械生成（裁定 59），数据里出现过、概念集里没有的就补上。
+- **写盘前整体核对**：计划写完的概念集必须自洽。会与在用概念撞显示名的那几份不写、连同理由交给换代报出来，其余照常
   （撞名时怎么改名方案没定，这里不替词表改名）。
 """
 
 from __future__ import annotations
 
-from collections import deque
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime
 
 from habitus.scene.concepts.calendar_situations import calendar_concepts
-from habitus.scene.concepts.catalog import CatalogChanges, CatalogClass, MovedOccurrence
+from habitus.scene.concepts.catalog import CatalogWord, CatalogWords
 from habitus.scene.concepts.model import (
     ConceptDefinition,
     ConceptError,
-    ConceptKind,
     ConceptOrigin,
     ConceptRole,
     ConceptSet,
@@ -40,75 +34,40 @@ class SyncPlan:
     """一次同步要做的事。"""
 
     version: int
-    #: 新生成或要更新的概念（基础概念，以及成员改写了的汇总概念）。
+    #: 新生成或要更新的概念（行为概念，以及新出现的日历情境）。
     write: tuple[ConceptDefinition, ...] = ()
-    #: 迁移改了编号的 occurrence：它们所在的日子要重映射。
-    moved: tuple[MovedOccurrence, ...] = ()
-    #: 写进去会让概念集不自洽（与在用的概念撞了显示名）而没写的，连同理由；夜批报出来，盘上不留这份。
+    #: 写进去会让概念集不自洽（与在用的概念撞了显示名）而没写的，连同理由；换代报出来，盘上不留这份。
     rejected: tuple[tuple[ConceptDefinition, str], ...] = ()
 
 
-def base_concept(item: CatalogClass, *, now: datetime) -> ConceptDefinition:
-    """一个类的基础概念。"""
+def base_concept(item: CatalogWord, *, now: datetime) -> ConceptDefinition:
+    """一个在用的词的行为概念。"""
 
     return ConceptDefinition(
         name=item.id,
-        definition=item.criterion,
+        definition=item.definition,
         role=ConceptRole.BEHAVIOR,
         source=ConceptSource(ConceptOrigin.VOCABULARY),
         created_at=now,
-        kind=ConceptKind.BASE,
         classes=(item.id,),
         lane=item.lane,
         title=item.name,
-        retired=not item.active,
     )
 
 
 def plan_sync(
     existing: ConceptSet,
-    classes: Sequence[CatalogClass],
-    changes: CatalogChanges,
+    words: CatalogWords,
     *,
     now: datetime,
     observed: Iterable[tuple[str, str]] = (),
 ) -> SyncPlan:
     """``observed``：数据里出现过的日历（键, 取值），日历情境只给这些（裁定 59 第 7 条：取值从数据里攒出来）。"""
 
-    write = tuple(item for item in (_reconcile(existing, cls, now=now) for cls in classes) if item is not None)
-    write += tuple(
-        item
-        for item in (_regroup(existing[identity], changes) for identity in existing.behaviors())
-        if item is not None
-    )
+    write = tuple(item for item in (_reconcile(existing, word, now=now) for word in words.words) if item is not None)
     write += _calendar(existing, now=now, observed=observed)
     accepted, rejected = _consistent(existing, write)
-    return SyncPlan(version=changes.version, write=accepted, moved=changes.moved, rejected=rejected)
-
-
-def prospective(
-    existing: ConceptSet, written: Iterable[ConceptDefinition], pending: Iterable[ConceptDefinition]
-) -> tuple[ConceptSet, tuple[tuple[ConceptDefinition, str], ...]]:
-    """下一次换代之后概念集会是什么样（实时化阶段 2「生效时点」）：现在的概念集 + 同步词表将要写的（``SyncPlan.write``：新类的
-    基础概念、改名改判据、停用）+ 待生效的概念。写概念与补问先验对着它做——概念进概念集的那一代，先验已经备好。
-
-    待生效的概念按身份的先后一份一份加：与同步之后的概念集撞了身份、或加进去不自洽的那份不加，连同理由返回（换代并入时
-    同一个核法，``SceneNightlyRun.merge_pending``）。概念按身份排好，与整支读出来的先后相同。"""
-
-    merged = dict(existing.items())
-    merged.update((item.identity, item) for item in written)
-    refused: list[tuple[ConceptDefinition, str]] = []
-    for item in sorted(pending, key=lambda definition: definition.identity):
-        if item.identity in merged:
-            refused.append((item, "a concept of this name is already in the set"))
-            continue
-        try:
-            ConceptSet((*merged.values(), item))
-        except ConceptError as exc:
-            refused.append((item, str(exc)))
-        else:
-            merged[item.identity] = item
-    return ConceptSet(merged[identity] for identity in sorted(merged)), tuple(refused)
+    return SyncPlan(version=words.version, write=accepted, rejected=rejected)
 
 
 def _consistent(
@@ -116,8 +75,7 @@ def _consistent(
 ) -> tuple[tuple[ConceptDefinition, ...], tuple[tuple[ConceptDefinition, str], ...]]:
     """写盘之前整体核一遍：计划写完的概念集要自洽。不自洽时按计划顺序一份一份加，加进去不自洽的那份不写。
 
-    撞名（类改成或长成与在用概念同一个显示名）在词表那边是合法的，这里不替它改名，只是不写、报出来：
-    已有的概念照旧，其余照常同步；词表把名字改开之后，下一次同步按全部类核对时自然补上。
+    撞名（词与在用概念同一个显示名）不替它改名，只是不写、报出来：已有的概念照旧，其余照常同步。
     """
 
     def compose(items: Iterable[ConceptDefinition]) -> ConceptSet:
@@ -158,46 +116,18 @@ def _calendar(
     return tuple(found)
 
 
-def _reconcile(existing: ConceptSet, item: CatalogClass, *, now: datetime) -> ConceptDefinition | None:
-    """这个类的基础概念要不要写：没有就生成；名字、判据、停用与否变了就更新（保留出处与生成时刻）。"""
+def _reconcile(existing: ConceptSet, item: CatalogWord, *, now: datetime) -> ConceptDefinition | None:
+    """这个词的行为概念要不要写：没有就生成；名字、定义变了、或盘上标着停用就更新（保留出处与生成时刻）。"""
 
     identity = existing.base_for(item.id)
     if identity is None:
         if item.id in existing:
-            raise ValueError(f"concept {item.id!r} is not the base concept of class {item.id!r}")
+            raise ValueError(f"concept {item.id!r} is not the behaviour concept of word {item.id!r}")
         return base_concept(item, now=now)
     current = existing[identity]
-    if (current.title, current.definition, current.retired) == (item.name, item.criterion, not item.active):
+    if (current.title, current.definition, current.retired) == (item.name, item.definition, False):
         return None
-    return replace(current, title=item.name, definition=item.criterion, retired=not item.active)
+    return replace(current, title=item.name, definition=item.definition, retired=False)
 
 
-def _regroup(item: ConceptDefinition, changes: CatalogChanges) -> ConceptDefinition | None:
-    """汇总概念的成员改写成现编号：拆出来的新类加进来，被并掉的换成并入的类；没变或改写后不足两个就不写。
-
-    按"走到过的类"推进，每个类只走一次：一个类拆出的类加在末尾，被并掉的类原位换成并入的类（再走它）。
-    这样"先拆出、新类又并进别的类"或并链首尾相接，都在有限步里停下。
-    """
-
-    if item.kind is not ConceptKind.GROUP:
-        return None
-    members: list[str] = []
-    seen: set[str] = set()
-    pending = deque(item.classes)
-    while pending:
-        current = pending.popleft()
-        if current in seen:
-            continue
-        seen.add(current)
-        pending.extend(new for new, source in changes.split_from.items() if source == current)
-        target = changes.merged_into.get(current)
-        if target is None:
-            members.append(current)
-        else:
-            pending.appendleft(target)
-    if tuple(members) == item.classes or len(members) < 2:
-        return None
-    return replace(item, classes=tuple(members))
-
-
-__all__ = ["SyncPlan", "base_concept", "plan_sync", "prospective"]
+__all__ = ["SyncPlan", "base_concept", "plan_sync"]

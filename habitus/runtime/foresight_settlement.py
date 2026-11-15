@@ -12,7 +12,7 @@
 是坏、回了中又没做的不写、回了「已做」又没看到做的不写且账上那一笔记中性（裁定 91 第 3 条②；``foresight.feedback``）；同一单元一并决定的几条按依据的说出时刻结算（「单元已选」引它）。
 账本里读不出来的文件跳过、条数进观测，不让一个坏文件停掉整代。
 
-词表迁移做到一半时整拍不做（树上的行一半新编号一半旧编号），下一拍再来。结算是换代里尽力而为的一步：失败自己留观测，下一代补结
+结算是换代里尽力而为的一步：失败自己留观测，下一代补结
 （幂等），不挡今天这一代。
 """
 
@@ -148,8 +148,6 @@ class SettlementStage:
         read_side: BehaviorReadSide,
         *,
         closed_days: Callable[[], Iterable[date]],
-        current: Callable[[str], Sequence[str]],
-        migrating: Callable[[], bool],
         evidence: Evidence,
         opportunities: OpportunityStore | None = None,
         lane: str = "session",
@@ -162,9 +160,6 @@ class SettlementStage:
         self.ledger = ledger
         self.read_side = read_side
         self.closed_days = closed_days
-        # 编号 → 现在对应哪些在用编号（词表的 ``current_ids``）：预期记的是形成时的编号，结算时词表可能已拆改
-        self.current = current
-        self.migrating = migrating
         self.evidence = evidence
         # 机会表的日历给补做强度用（这一类历史上相邻两次隔几天）；没有就只有方向
         self.opportunities = opportunities
@@ -184,7 +179,6 @@ class SettlementStage:
             ledger,
             read_side,
             evidence=evidence,
-            current=current,
             opportunities=opportunities,
             lane=lane,
             history=history,
@@ -216,9 +210,6 @@ class SettlementStage:
 
     def _run(self) -> SettlementReport:
         days = self.ledger.open_days()
-        if self.migrating():
-            waiting = tuple(day for day in days if self.ledger.unsettled_expectations(day))
-            return SettlementReport(settled=0, outcomes={}, rulings=0, omissions=0, pending_days=waiting)
         closed = frozenset(self.closed_days())
         cache = DayIndexCache(
             self.read_side.behavior_tree,
@@ -246,7 +237,6 @@ class SettlementStage:
                     rows_between(cache, item.observed_from.date(), item.deadline.date()),
                     spoken_at=asked.spoken_at,
                     settled_at=now,
-                    current=self.current,
                 )
                 # 先写事实再写结算：中间断了，重来时这条还没结、照结一遍，事实的身份由预期与形成时刻定、重写幂等；
                 # 反过来的顺序会让结过的这条再也不被看到，事实永远补不上。前因不成立的这次机会不存在：只记作废（权重 0）
@@ -328,7 +318,6 @@ class SettlementStage:
                 rows_between(cache, item.deadline.date(), last_closed),
                 before=before,
                 ruled_at=now,
-                current=self.current,
             )
             if ruling is not None:
                 self._append(catch_up_fact(item, ruling, table))
@@ -430,7 +419,6 @@ class SettlementStage:
                     rows_between(cache, item.observed_from.date(), item.deadline.date()),
                     spoken_at=asked.spoken_at,
                     settled_at=now,
-                    current=self.current,
                 )
                 fresh = self._fact_for(item, result, asked=asked, cache=cache, table=table, known_by=now)
                 old = self._current_fact(item)
@@ -485,7 +473,6 @@ class SettlementStage:
             rows_on=lambda day: tuple(
                 AntecedentRow(row.at, row.last_observed_at, row.kind_token) for row in cache.day(day).rows
             ),
-            current=self.current,
         )
 
     def _current_fact(self, item: Expectation) -> AccountFact | None:
@@ -540,7 +527,7 @@ class SettlementStage:
                 for item in self.ledger.expectations_on(earlier)
                 if item.deadline.date() >= day
             ]
-            items = omissions(rows, covering, noticed_at=now, current=self.current)
+            items = omissions(rows, covering, noticed_at=now)
             for omission in items:
                 self.ledger.record_omission(omission)
             watermark = self.ledger.mark_scanned(day, start=start)

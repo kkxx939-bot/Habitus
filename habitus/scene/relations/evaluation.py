@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING
 
 from habitus.foundation.integrity import canonical_digest
 from habitus.scene.concepts.calendar_situations import calendar_key
-from habitus.scene.concepts.model import ConceptKind
 from habitus.scene.relations import longspan, stats
 from habitus.scene.relations.calendar import calendar_measure
 from habitus.scene.relations.candidates import RelationCandidates
@@ -70,8 +69,8 @@ class RelationEvaluator:
         weights = weights or {}
         keys = self.tests.keys()
         since = {**self.candidates.proposed, **(since or {})}
-        readings, blinded, skipped = self._readings(keys, since, keep | outside)
-        inside = [key for key in readings if key not in outside and key not in blinded]
+        readings, skipped = self._readings(keys, since, keep | outside)
+        inside = [key for key in readings if key not in outside]
         # 带条件的权重恒为 1 时（先验只给不带条件的），带条件那一族的归一系数就是 1，跳过的键既不改归一、也进不了族
         weighted = any(key.condition for key in weights)
         try:
@@ -79,11 +78,10 @@ class RelationEvaluator:
                 readings, inside, weights, q=q, outside=outside, skipped=skipped if weighted else ()
             )
         except _SkippedMayEnter:
-            more, more_blinded, _none = self._readings(skipped, since, frozenset(skipped))
+            more, _none = self._readings(skipped, since, frozenset(skipped))
             readings.update(more)
-            blinded |= more_blinded
             skipped = ()
-            inside = [key for key in readings if key not in outside and key not in blinded]
+            inside = [key for key in readings if key not in outside]
             family, passed, limits, parts = _families(readings, inside, weights, q=q, outside=outside)
         texts = {key.text: key for key in readings}
         plain = passed if not weights else _families(readings, inside, {}, q=q, outside=outside)[1]
@@ -101,7 +99,7 @@ class RelationEvaluator:
             family=len(family),
             skipped=dict(Counter(key.segment.value for key in skipped)),
             plain_significant=frozenset(texts[text] for text in plain),
-            breakdown={**parts, "measured": len(readings), "outside": len(outside), "blinded": len(blinded)},
+            breakdown={**parts, "measured": len(readings), "outside": len(outside)},
         )
 
     def _test(
@@ -131,13 +129,11 @@ class RelationEvaluator:
 
     def _readings(
         self, keys: Sequence[RelationKey], since: Mapping[RelationKey, date], keep: frozenset[RelationKey]
-    ) -> tuple[dict[RelationKey, _Reading], set[RelationKey], tuple[RelationKey, ...]]:
-        """每条关系当晚的读数；判不了的太多、不进检验族的另列（``blinded``）；开测门第 1 道整组到不了、不逐条量的另列
-        （``skipped``，``keep`` 里的不跳）。"""
+    ) -> tuple[dict[RelationKey, _Reading], tuple[RelationKey, ...]]:
+        """每条关系当晚的读数；开测门第 1 道整组到不了、不逐条量的另列（``skipped``，``keep`` 里的不跳）。"""
 
         config = self.tests.config
         readings: dict[RelationKey, _Reading] = {}
-        blinded: set[RelationKey] = set()
         skipped: list[RelationKey] = []
         for key in keys:
             if key.condition and key not in keep and not self.tests.sides_reachable(key):
@@ -145,15 +141,7 @@ class RelationEvaluator:
                 continue
             measure = self.tests.measure(key, since=since.get(key))
             upper, lower = measure.tails(exact_limit=config.thresholds.exact_strata_limit)
-            if self.tests.refined_consequent(key):
-                bounded = self._bounded_reading(key, since.get(key), measure)
-                if bounded is None:
-                    # 判不了的太多：留一条读数、不进检验族（该回去改触点①的区别句）
-                    readings[key] = (measure, 1.0, 1.0, upper <= lower)
-                    blinded.add(key)
-                else:
-                    readings[key] = bounded
-            elif (
+            if (
                 key.condition
                 and isinstance(measure, ModeratedMeasure | PairedMeasure)
                 and not ready_to_test(measure, alpha=config.thresholds.forward_alpha)
@@ -167,45 +155,16 @@ class RelationEvaluator:
                 readings[key] = (measure, upper, measure.minimum_toward(upward=True), True)
             else:
                 readings[key] = (measure, stats.two_sided(upper, lower), measure.minimum_p(), upper <= lower)
-        return readings, blinded, tuple(skipped)
+        return readings, tuple(skipped)
 
-    def _chain_measure(self, key: RelationKey, *, since: date | None = None, blind_as: int | None = None) -> Measure:
+    def _chain_measure(self, key: RelationKey) -> Measure:
         """不带条件的短跨度关系怎么量：同一条链两道对照成对（``PairedMeasure``），别的段一道。"""
 
-        first = ChainMeasure(self.tests.strata(key, since=since, blind_as=blind_as))
+        first = ChainMeasure(self.tests.strata(key))
         if key.segment is not Segment.CHAIN:
             return first
-        second = ChainMeasure(self.tests.strata(key, since=since, blind_as=blind_as, pairing=Pairing.SAME_SLOT))
+        second = ChainMeasure(self.tests.strata(key, pairing=Pairing.SAME_SLOT))
         return PairedMeasure(first=first, second=second)
-
-    def _bounded_reading(self, key: RelationKey, since: date | None, measure: Measure) -> _Reading | None:
-        """细分概念当后果的第 1 道：后果"判不了"当 0、当 1 各算一遍，两遍都显著、方向一致才算过（p 取两遍里大的）。
-        判不了的窗口占比超过 ``max_blind_share`` 的返回 None（不进检验族）。窗口里"有一条命中就记 1、判不了就丢"会把
-        「A → 返工」读成「A → 修改代码」又量一遍（第四轮评审人工智能 3：窗口里两条修改代码时读出 97% "返工"）。"""
-
-        thresholds = self.tests.config.thresholds
-        low = self._chain_measure(key, since=since, blind_as=0)
-        high = self._chain_measure(key, since=since, blind_as=1)
-        if low.units and 1.0 - measure.units / low.units > thresholds.max_blind_share:
-            return None
-        found = []
-        for bound in (low, high):
-            upper, lower = bound.tails(exact_limit=thresholds.exact_strata_limit)
-            if key.segment is Segment.CHAIN:
-                # 同一条链只检"更多"（裁定 27 第 1 条），细分概念当后果也一样
-                found.append((upper, bound.minimum_toward(upward=True), True))
-            else:
-                found.append((stats.two_sided(upper, lower), bound.minimum_p(), upper <= lower))
-        (p_low, min_low, up_low), (p_high, min_high, up_high) = found
-        if up_low != up_high:
-            return measure, 1.0, max(min_low, min_high), up_low  # 两头方向都不一致：说不了
-        return measure, max(p_low, p_high), max(min_low, min_high), up_low
-
-    def refined_consequent(self, key: RelationKey) -> bool:
-        """后果是细分概念的短跨度、不带条件的关系：它的"判不了"来自映射器，要做上下界检验。"""
-
-        item = self.tests.concepts.get(key.consequent)
-        return item is not None and item.kind is ConceptKind.REFINEMENT and not key.condition and not key.segment.long
 
     def evaluate(
         self, key: RelationKey, *, upward: bool, since: date | None = None, last_blocks: int | None = None, purpose: str

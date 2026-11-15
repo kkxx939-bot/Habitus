@@ -1,5 +1,5 @@
-"""``SceneNightlyRun.generate`` 的那一段串法（从 ``runtime.scene_night`` 拆出来的）：同步词表 → 封口（按并入之前的概念集核）
-→ 并入待生效的概念 → 这一代的节律落盘 → 按缓存折叠 → 材料。没有模型调用（调模型的那几段归模型队列）。
+"""``SceneNightlyRun.generate`` 的那一段串法（从 ``runtime.scene_night`` 拆出来的）：同步词表 → 封口 → 按缓存折叠 → 材料。
+没有模型调用（调模型的那几段归模型队列）。
 
 ``failures`` 给了的时候一步抛了就记下、走退路接着做。
 """
@@ -15,12 +15,12 @@ from habitus.foundation.tracing import set_attributes, span
 from habitus.runtime.scene_night import NightReport, SceneNightlyRun
 from habitus.runtime.scene_night_seal import SealReport
 from habitus.runtime.scene_night_sync import Synced
+from habitus.scene.concepts.catalog import CatalogWords
 from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.concepts.sync import SyncPlan
 from habitus.scene.recurrence import coverage_by_lane
 from habitus.scene.relations import LaneTimeline
 from habitus.series import EventSeries
-from habitus.temporal import Coverage
 
 
 def _sync_attributes(plan: SyncPlan, concepts: ConceptSet) -> dict[str, object]:
@@ -28,25 +28,27 @@ def _sync_attributes(plan: SyncPlan, concepts: ConceptSet) -> dict[str, object]:
         "version": plan.version,
         "written": len(plan.write),
         "rejected": len(plan.rejected),
-        "moved": len(plan.moved),
         "concepts": len(concepts),
     }
 
 
 class NightRun:
-    """``SceneNightlyRun.generate`` 的那一段串法：B1 → 封口 → 并入待生效的概念 → 这一代的节律落盘 → 折叠 → 材料。``failures``
-    给了的时候一步抛了就记下、走退路接着做。"""
+    """``SceneNightlyRun.generate`` 的那一段串法：B1 → 封口 → 折叠 → 材料。``failures`` 给了的时候一步抛了就记下、走退路
+    接着做。"""
 
     def __init__(
         self,
         scene: SceneNightlyRun,
         series: EventSeries,
+        words: CatalogWords,
         now: datetime,
         failures: list[tuple[str, BaseException]] | None,
         relations_held: str | None = None,
     ) -> None:
         self.scene = scene
         self.series = series
+        #: 这一代在用的词（换代数出来、显式交进来的；一代之内不变）。
+        self.words = words
         self.now = now
         self.failures = failures
         self.relations_held = relations_held
@@ -56,10 +58,7 @@ class NightRun:
         scene, series = self.scene, self.series
         synced = await self._b1()
         concepts = synced.concepts
-        # 封口按并入之前的概念集核（命中记录是对着它映射的）；再把待生效的概念并进来——它们的映射与关系从下一代起有
         sealed = await self._seal(concepts)
-        concepts, merged = await self._merge(concepts)
-        await self._freeze(concepts, synced.coverage)
         relations, transitions, lines = await self._b4(concepts, synced.version)
         return NightReport(
             night=series.cutoff,
@@ -70,79 +69,25 @@ class NightRun:
             relations_held=self.relations_held,
             sealed_days=len(sealed.sealed),
             seal_rewritten=sealed.rewritten,
-            unsealed_days=sealed.unready_days,
-            unsealed_records=sealed.unready_records,
-            reader_days=sealed.readers,
+            unsealed_days=sealed.failed_days,
             seal_seconds=sealed.seconds,
-            merged_concepts=merged,
             materials=await asyncio.to_thread(scene._materials, series, concepts, lines, synced.coverage),
         )
 
     async def _seal(self, concepts: ConceptSet) -> SealReport:
-        """封口（换代）：已封口的日子里每条记录都作数的，重算情境、写回、核条数、盖章。没做成就这一代不盖新章——那几天
-        对细分概念算看不到，下一代再封。
+        """封口（换代）：已封口的日子里还没封好、或记录变了的，生成命中记录、核条数、盖章。没做成就这一代不盖新章，下一代
+        再封（重封是幂等的：盘上相同的命中记录不重写）。"""
 
-        这一代已经封过口（``runtime.scene_seal_files`` 有这一天的记录：上一次做到并入之后被杀了）就不再封、直接用记下的
-        结果——再封就是按并入之后的概念集封口，违背裁定 97 第 3 条的先后。"""
-
-        day = self.series.cutoff
-        files = self.scene.seal_files
-        try:
-            done = None if files is None else await asyncio.to_thread(files.read, day)
-        except Exception as exc:
-            self._tolerate("seal", exc)
-            return SealReport()
-        if done is not None:
-            report, failed = done
-            self.signals.append(f"mapping: {day} 这一代已经封过口{'（没做成）' if failed else ''}，接着做不再封")
-            return report
-        report, failed = await self._seal_once(concepts)
-        if files is not None:
-            try:
-                await asyncio.to_thread(files.write, day, report, failed=failed)
-            except Exception as exc:
-                self._tolerate("seal", exc)
-        return report
-
-    async def _seal_once(self, concepts: ConceptSet) -> tuple[SealReport, bool]:
-        """封一次口：结果与"没做成"。"""
-
-        scene = self.scene
         started = time.monotonic()
         try:
             with span("scene.seal") as attributes:
-                report = await asyncio.to_thread(
-                    scene.sealing.seal, self.series, concepts, scene.mapper_for(concepts), self.now, self.signals
-                )
+                report = await asyncio.to_thread(self.scene.sealing.seal, self.series, concepts, self.now, self.signals)
                 seconds = max(0.0, time.monotonic() - started)
                 set_attributes(attributes, {"seal_seconds": round(seconds, 3)})
-            return SealReport(
-                report.sealed, report.rewritten, report.unready_days, report.unready_records, report.readers, seconds
-            ), False
+            return SealReport(report.sealed, report.rewritten, report.failed_days, seconds)
         except Exception as exc:
             self._tolerate("seal", exc)
-        return SealReport(seconds=max(0.0, time.monotonic() - started)), True
-
-    async def _merge(self, concepts: ConceptSet) -> tuple[ConceptSet, int]:
-        """把待生效的概念并进概念集（换代）。没做成就这一代不并——它们留着，下一代再并。"""
-
-        scene = self.scene
-        try:
-            merged = await asyncio.to_thread(scene.merge_pending, self.now, self.signals)
-            if merged:
-                concepts = await asyncio.to_thread(scene.concepts.read_all)
-            return concepts, merged
-        except Exception as exc:
-            self._tolerate("merge", exc)
-        return concepts, 0
-
-    async def _freeze(self, concepts: ConceptSet, coverage: Mapping[str, Coverage]) -> None:
-        """这一代的节律落盘一份（映射这一天的记录读它）。写不出只报出：读的那边会按截止到那一天的序列现算。"""
-
-        try:
-            await asyncio.to_thread(self.scene.freeze_rhythms, self.series, concepts, coverage)
-        except Exception as exc:
-            self._tolerate("rhythms", exc)
+        return SealReport(seconds=max(0.0, time.monotonic() - started))
 
     def _tolerate(self, step: str, exc: Exception) -> None:
         """一步抛了：严格跑法（没给 ``failures``）原样抛，尽力而为的记下这一步、走退路。"""
@@ -155,8 +100,8 @@ class NightRun:
         scene = self.scene
         try:
             with span("scene.b1") as attributes:
-                plan = await scene.syncing.plan(self.series, self.now)
-                synced = await scene.syncing.run(self.series, self.now, self.signals, remap=False, plan=plan)
+                plan = await scene.syncing.plan(self.series, self.now, self.words)
+                synced = await scene.syncing.run(self.series, self.now, self.signals, plan=plan)
                 set_attributes(attributes, _sync_attributes(plan, synced.concepts))
             return synced
         except Exception as exc:
@@ -171,7 +116,7 @@ class NightRun:
     ) -> tuple[Mapping[str, Mapping[str, int]], int, Mapping[str, LaneTimeline]]:
         stage = self.scene.relation_stage
         if self.relations_held is not None:
-            # 模型整个调不通：不拿这一代没长成的词表、概念与映射判出一张新表（同一代不重写，判出来就一直留着）
+            # 模型整个调不通：不拿这一代没长成的词表与先验判出一张新表（同一代不重写，判出来就一直留着）
             self.signals.append(f"relations: 这一代不判关系（{self.relations_held}），机会表沿用上一代的关系表")
             return {}, 0, await stage.timelines(self.series, concepts)
         try:

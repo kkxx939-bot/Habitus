@@ -14,10 +14,10 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 
-from habitus.behavior.reduction import BehaviorReductionBusyError
 from habitus.behavior.retry import RetryReport
 from habitus.runtime.foresight_days import DayReport
 from habitus.runtime.foresight_forming import Formed
+from habitus.runtime.generation_lease import LeaseBusyError
 from habitus.runtime.health import RuntimeHealthCheck, RuntimeHealthStatus, _generation_state_checks
 from tests.unit.runtime.test_generation import NOW, TODAY, StubRetry, wired
 from tests.unit.runtime.test_generation_runner import worker_for
@@ -59,12 +59,12 @@ def test_a_failed_must_step_is_reported_with_the_day_the_step_and_the_next_retry
 
 
 def test_a_generation_held_by_a_busy_lock_is_not_reported_as_a_failure(tmp_path) -> None:
-    run = wired(tmp_path, [], vocabulary=lambda: (1, True))  # 修复轮 G1：有没做完的迁移时才去拿 sweep 锁
+    run = wired(tmp_path, [])
 
-    async def locked() -> None:
-        raise BehaviorReductionBusyError("sweep lock held")
+    async def locked(**_kwargs):  # type: ignore[no-untyped-def]
+        raise LeaseBusyError("scene write lock held")
 
-    run.migration_jobs = (locked,)  # A1：换代里会碰 sweep 锁的只剩续做迁移（每晚新增归模型队列）
+    run.scene.generate = locked  # type: ignore[method-assign]  # 语义树写锁被另一进程拿着：还没准备好
     worker = worker_for(run, tmp_path)
     held = asyncio.run(worker.look())
     assert held is not None and held.held is not None

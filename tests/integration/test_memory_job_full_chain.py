@@ -44,6 +44,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 def runtime_config(tmp_path: Path, *, max_attempts: int = 3, local_vectors: bool = False) -> HabitusConfig:
     payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
+    # 单测不往 127.0.0.1:4318 真导出：没关掉的 Runtime 会留下每 10 秒导出一次的线程，串进后面设了代理环境变量的测试
+    payload["observability"]["tracing"]["enabled"] = False
     payload["models"]["chat"]["route"].update(
         provider="fake",
         adapter="fake_chat",

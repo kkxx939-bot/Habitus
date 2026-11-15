@@ -1,4 +1,4 @@
-"""读行为记录的时间（裁定 59）：合并、间隔、观测覆盖、密度、日内分布与峰。纯算法、不调模型。
+"""读行为记录的时间（裁定 59）：合并、间隔、观测覆盖、密度、日内分布。纯算法、不调模型。
 
 只依赖 ``series.model``（行为记录的纯值）与标准库；语义树与预测层都从这里取，日历等外部条件在 ``habitus.conditions``。
 """
@@ -18,7 +18,7 @@ from habitus.temporal.intervals import (
     overdue_at,
 )
 from habitus.temporal.merge import merge_starts
-from habitus.temporal.profile import MIN_PEAK_DAYS, DayProfile, Peak, day_profile, peaks_of
+from habitus.temporal.profile import DayProfile, day_profile
 from habitus.temporal.reading import KindReading, Rulers, kind_reading
 from habitus.temporal.slots import (
     MINUTES_PER_DAY,
@@ -36,7 +36,6 @@ __all__ = [
     "kind_reading",
     "MINUTES_PER_DAY",
     "MIN_AT_RISK",
-    "MIN_PEAK_DAYS",
     "ClusterReading",
     "Coverage",
     "DayInterval",
@@ -44,7 +43,6 @@ __all__ = [
     "Density",
     "Episode",
     "OccurrenceDay",
-    "Peak",
     "absolute_slot",
     "blind_days",
     "cluster_at",
@@ -60,7 +58,6 @@ __all__ = [
     "merge_starts",
     "occurrence_days",
     "overdue_at",
-    "peaks_of",
     "require_aware",
     "require_slot_minutes",
     "slot_floor",

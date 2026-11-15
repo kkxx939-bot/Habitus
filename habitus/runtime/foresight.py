@@ -125,8 +125,6 @@ def build_foresight_components(
     config: HabitusConfig,
     *,
     behavior_tree: BehaviorTree,
-    current_classes: Callable[[str], Sequence[str]],
-    vocabulary_migrating: Callable[[], bool],
     closed_days: Callable[[], Iterable[date]],
     evidence: Evidence,
     observer: Observer | None = None,
@@ -157,10 +155,8 @@ def build_foresight_components(
     settlement = SettlementStage(
         ledger,
         read_side,
-        # 定稿日只有归约说了算；承诺记的是形成时的类编号，结算按"这个编号现在对应哪些编号"认
+        # 定稿日只有归约说了算；承诺记的是形成时的词编号，结算按编号完全相等认（词表没有迁移）
         closed_days=closed_days,
-        current=current_classes,
-        migrating=vocabulary_migrating,
         evidence=evidence,
         opportunities=opportunities,
         lane=branch,
@@ -235,7 +231,6 @@ def build_foresight_tick(
     evidence: Evidence,
     structured_chat: StructuredChatClient | None = None,
     vocabulary_version: Callable[[], int] | None = None,
-    vocabulary_migrating: Callable[[], bool] | None = None,
     observer: Observer | None = None,
     clock: Callable[[], datetime] | None = None,
     lane: str = "session",
@@ -246,7 +241,7 @@ def build_foresight_tick(
 ) -> ForesightTick:
     """预测拍：读这一支的机会表、今天的日历条件、行为树今天与前 7 天、还没封口的判断（``unsealed``），把此刻对得上历史的预期写进
     这一支的账本；再把到了时窗的按账的级决定说不说（``structured_chat`` 给了就带模型四问，不给就按算法与模板）。``shadow_uses_unestablished``
-    开着时候选关系也进影子账；词表迁移中整拍不做；``trace`` 给了每拍一个 ``foresight.tick`` span。送达走提醒出口（方案 32）：最近一段有宿主
+    开着时候选关系也进影子账；``trace`` 给了每拍一个 ``foresight.tick`` span。送达走提醒出口（方案 32）：最近一段有宿主
     来取过才写话、记「待取」，否则记「不可达」；每拍末尾把可取的请求清单交给出口（装了插件的自动"接通"，没装的一分钱不多花）。
     往回看读落盘的水位，没在看的那一段交 ``unwatched`` 写成「未观测」，整拍持预测根租约（``lease``）。"""
 
@@ -262,8 +257,6 @@ def build_foresight_tick(
         tick_seconds=foresight.tick_interval_seconds,
         outlet=components.outlet,
         claimed=components.outlet.store.claimed if components.outlet is not None else lambda request_id: False,
-        # 与结算同一个"编号现在对应哪些编号"：开口前核前因、判做没做两边认的是同一件事
-        current=components.settlement.current,
         lane=lane,
     )
     return ForesightTick(
@@ -274,7 +267,6 @@ def build_foresight_tick(
         lane=lane,
         shadow_unestablished=config.foresight.shadow_uses_unestablished,
         vocabulary_version=vocabulary_version,
-        migrating=vocabulary_migrating,
         observer=observer,
         clock=clock,
         delivery=delivery,
@@ -296,7 +288,6 @@ def build_foresight_days(
     unsealed: UnsealedReader,
     evidence: Evidence,
     vocabulary_version: Callable[[], int] | None = None,
-    vocabulary_migrating: Callable[[], bool] | None = None,
     observer: Observer | None = None,
     clock: Callable[[], datetime] | None = None,
     lane: str = "session",
@@ -314,7 +305,6 @@ def build_foresight_days(
         tolerance=_tolerance(config),
         shadow_unestablished=config.foresight.shadow_uses_unestablished,
         vocabulary_version=vocabulary_version,
-        migrating=vocabulary_migrating,
         observer=observer,
         clock=clock,
     )
@@ -350,7 +340,7 @@ def foresight_ledger_lease(config: HabitusConfig, lock_store: LockStore, branch:
 def build_reminded_lookup(components: ForesightRuntimeComponents) -> RemindedLookup:
     """归约封口时盖 ``reminded`` 的查法（第 0 步）：交给 ``BehaviorReductionRunner.attach_reminder_lookup``。"""
 
-    return RemindedLookup(components.ledger, current=components.settlement.current)
+    return RemindedLookup(components.ledger)
 
 
 def build_outlet_consumer(
@@ -403,7 +393,7 @@ def _tolerance(config: HabitusConfig) -> Tolerance:
 
 
 def unsealed_bridge(branch: BehaviorRuntimeComponents) -> UnsealedFromJudgements:
-    """预测层那座未封口的桥，取自这一支：判断存储 + 消费账本 + 归约的白天归类。"""
+    """预测层那座未封口的桥，取自这一支：判断存储 + 消费账本 + 归约的选词器。"""
 
     runner = branch.reduction_runner
     return UnsealedFromJudgements(branch.judgements, runner.ledger, runner.kinds)

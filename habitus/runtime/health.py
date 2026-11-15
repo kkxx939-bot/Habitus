@@ -539,7 +539,7 @@ def _slot_loops(components: RuntimeComponents) -> tuple[tuple[str, ResidentWorke
 
 
 def _queue_workers(components: RuntimeComponents) -> tuple[tuple[str, ResidentWorker], ...]:
-    """模型队列的循环（随换代一起有）：它停住不会让任何请求出错——只是新记录一直没映射、新概念一直没有先验，换代照做、
+    """模型队列的循环（随换代一起有）：它停住不会让任何请求出错——只是新概念一直没有先验，换代照做、
     关系越来越旧。所以循环存活要上健康面。"""
 
     return () if components.model_queue is None else (("model_queue_worker", components.model_queue),)
@@ -556,7 +556,7 @@ def _model_queue_checks(worker: ModelQueueWorker | None) -> list[RuntimeHealthCh
     ]
     pending = queue_pending(worker.queue.state)
     if pending:
-        # 待生效的拆改与概念、先验要问的题：等下一次换代 / 队列做完自己消掉，不算故障
+        # 先验要问的题：等队列做完自己消掉，不算故障
         checks.append(RuntimeHealthCheck("model_queue_pending", RuntimeHealthStatus.HEALTHY, pending, critical=False))
     return checks
 

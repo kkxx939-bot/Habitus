@@ -1,282 +1,158 @@
-"""词表的文件存储（插件交付：全是文件，不建表）。树根下四个文件：
+"""词表的文件存储（插件交付：全是文件，不建表）。树根下两个文件：
 
-- ``kinds.md``            当前清单：给人看的列表 + 版本号元数据；由变更日志推出来，是视图不是真相；
-- ``kinds.changes.jsonl`` 变更日志：一行一版，只追加；当前词表 = 快照 + 依次应用之后的每一版（真相）；
-- ``kinds.snapshot.json`` 截断那一版的整份词表（``journal``，26 号清单 6.5）；
-- ``kinds.pending.json``  待定池；
-- ``kinds.migration.json`` 迁移计划：只在"重打树"期间存在，内容就是将要追加的那一版；崩溃后按它续做；
-- ``kinds.jobs.json``    定期拆改的跨次状态：上次拆改的时刻（它的本地日是线的哪一晚），最近几次提过的合并（合并证据）。
+- ``kinds.state.json``  在用状态：哪些词在用、从哪一天起，和修订号（在用集合每变一次加一）——真相；
+- ``kinds.md``          给人看的清单：由初始词表 + 在用状态渲染出来，是视图不是真相。
 
-写入都带期望版本（CAS）：变更日志按"当前最后一版"比对，待定池按自己的修订号比对。
+初始词随代码发布、只读（``words.py``），不在这里。没有变更日志、版本回放、快照截断：没有拆分合并以后，日志只剩"谁转了在用"，
+一个状态文件就够（词表方案 2026-11-14）。写入带期望修订号（CAS）。
+
+旧词表（变更日志、快照、待定池、迁移计划、拆改状态）不迁移、不兼容：盘上还有这些文件时读就明确报错并点出文件。
 """
 
 from __future__ import annotations
 
 import json
 import threading
-from dataclasses import dataclass
+from collections.abc import Mapping
+from datetime import date
 from pathlib import Path
 
-from habitus.behavior.kinds.changes import VersionRecord, apply
-from habitus.behavior.kinds.codec import (
-    BehaviorKindCodecError,
-    job_state_from,
-    job_state_payload,
-    pending_from,
-    pending_payload,
-    record_from,
-    record_payload,
-)
 from habitus.behavior.kinds.config import BehaviorKindConfig
-from habitus.behavior.kinds.journal import SNAPSHOT_FILENAME, VocabularyJournal, VocabularyJournalError
+from habitus.behavior.kinds.ids import ClassId, KindIdError, Lane
 from habitus.behavior.kinds.model import BehaviorKindError, Vocabulary
-from habitus.behavior.kinds.pending import PendingPool
 from habitus.behavior.kinds.render import render_catalog
-from habitus.behavior.kinds.schedule import JobState
+from habitus.behavior.kinds.words import initial_words
 from habitus.behavior.model import KINDS_REGISTRY_FILENAME
-from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import (
     DurablePathIntegrityError,
     atomic_replace_bytes,
-    durable_unlink,
     read_regular_bytes,
 )
 
-KINDS_SCHEMA_VERSION = "behavior_kinds_v6"
-CHANGES_FILENAME = "kinds.changes.jsonl"
-PENDING_FILENAME = "kinds.pending.json"
-MIGRATION_FILENAME = "kinds.migration.json"
-JOBS_FILENAME = "kinds.jobs.json"
-#: 待生效的拆改：计划连同拆改状态（实时化阶段 2「生效时点」）。它不是迁移计划——``read_migration`` 不认它，预测拍与结算
-#: 不会因为它当成"迁移中"；下一次换代最前那一步才把它交给迁移器。
-REVISION_FILENAME = "kinds.revision.json"
+STATE_SCHEMA_VERSION = "behavior_kinds_state_v1"
+STATE_FILENAME = "kinds.state.json"
+#: 旧词表留在盘上的文件：在就报错，不悄悄忽略（不迁移）。
+LEGACY_FILENAMES = (
+    "kinds.changes.jsonl",
+    "kinds.snapshot.json",
+    "kinds.pending.json",
+    "kinds.migration.json",
+    "kinds.jobs.json",
+    "kinds.revision.json",
+)
+_STATE_KEYS = frozenset({"schema_version", "lane", "revision", "active"})
+_ACTIVE_KEYS = frozenset({"id", "since"})
+
+# 同一份状态的"读、改、写回"可能分在不同线程里（换代、运维入口）：按路径共用一把锁串起来。
+_LOCKS: dict[Path, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
 
 
-# 变更日志的追加（归约 sweep）、截断（生命周期）、写迁移计划都是"读整份、改、整份写回"，分在不同线程里：同一份日志
-# 的这几种改写必须串起来，否则截断会把刚追加的一版抹掉，清单视图已是新版、日志却没有（L10.3）。按路径共用一把。
-_JOURNAL_LOCKS: dict[Path, threading.Lock] = {}
-_JOURNAL_LOCKS_GUARD = threading.Lock()
-
-
-def _journal_lock(path: Path) -> threading.Lock:
-    with _JOURNAL_LOCKS_GUARD:
-        return _JOURNAL_LOCKS.setdefault(path, threading.Lock())
+def _lock(path: Path) -> threading.Lock:
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(path, threading.Lock())
 
 
 class BehaviorKindStoreError(ValueError):
     pass
 
 
-class BehaviorKindJournalFullError(BehaviorKindStoreError):
-    """变更日志放不下下一版：计划不落盘、树不动（写得进读不回的日志会让词表永久停在迁移一半）。"""
-
-
 class BehaviorKindConflictError(RuntimeError):
     pass
 
 
-@dataclass(frozen=True)
-class PendingSnapshot:
-    pool: PendingPool
-    revision: int
-
-
 class BehaviorKindStore:
-    def __init__(self, behavior_root: str | Path, *, config: BehaviorKindConfig | None = None) -> None:
-        resolved = config or BehaviorKindConfig()
+    def __init__(self, behavior_root: str | Path, *, lane: Lane, config: BehaviorKindConfig | None = None) -> None:
         self.root = Path(behavior_root).expanduser().resolve(strict=False)
-        self.config = resolved
+        self.lane = Lane(lane)
+        self.config = config or BehaviorKindConfig()
+        self.state_path = self.root / STATE_FILENAME
         self.catalog_path = self.root / KINDS_REGISTRY_FILENAME
-        self.changes_path = self.root / CHANGES_FILENAME
-        self.pending_path = self.root / PENDING_FILENAME
-        self.migration_path = self.root / MIGRATION_FILENAME
-        self.jobs_path = self.root / JOBS_FILENAME
-        self.revision_path = self.root / REVISION_FILENAME
-        self._journal_lock = _journal_lock(self.changes_path)
-        self.journal = VocabularyJournal(
-            self.changes_path, self.root / SNAPSHOT_FILENAME, read_text=self._read_text, write_text=self._write
-        )
+        self._lock = _lock(self.state_path)
 
-    # ── 变更日志与当前词表 ─────────────────────────────────────────────────────────
+    def check(self) -> None:
+        """盘上有旧词表的文件就报错（启动时与每次读时都查）。"""
 
-    def records(self) -> tuple[VersionRecord, ...]:
-        """快照之后的每一版。"""
-
-        try:
-            return self.journal.records()
-        except VocabularyJournalError as exc:
-            raise BehaviorKindStoreError(str(exc)) from exc
+        found = [name for name in LEGACY_FILENAMES if (self.root / name).exists()]
+        if found:
+            raise BehaviorKindStoreError(
+                f"old vocabulary files are not supported (no migration); remove them: "
+                f"{', '.join(str(self.root / name) for name in found)}"
+            )
 
     def read(self) -> Vocabulary:
-        try:
-            return self.journal.current()
-        except VocabularyJournalError as exc:
-            raise BehaviorKindStoreError(str(exc)) from exc
+        """初始词表 + 盘上的在用状态。没有状态文件就是全新的盘面：在用的词 0 个，修订号 0。"""
 
-    def changes_since(self, version: int) -> tuple[VersionRecord, ...]:
-        """``version`` 之后的每一版；早于快照的请求报错（截断了，不返回不完整的结果）。"""
-
-        try:
-            return self.journal.changes_since(version)
-        except VocabularyJournalError as exc:
-            raise BehaviorKindStoreError(str(exc)) from exc
-
-    def truncate_before(self, version: int) -> bool:
-        """把 ``version`` 及以前折进快照（下限由组合根算好，见 ``journal``）。迁移做到一半时不截。"""
-
-        with self._journal_lock:
-            if self.read_migration() is not None:
-                return False
-            try:
-                return self.journal.truncate_before(version)
-            except VocabularyJournalError as exc:
-                raise BehaviorKindStoreError(str(exc)) from exc
-
-    def append(self, record: VersionRecord, *, expected_version: int) -> Vocabulary:
-        """追加一版；当前最后一版不是 ``expected_version`` 就拒绝。随后重写清单视图。"""
-
-        with self._journal_lock:
-            current = self.read()
-            if current.version != expected_version:
-                raise BehaviorKindConflictError(
-                    f"vocabulary version changed: expected {expected_version}, found {current.version}"
-                )
-            try:
-                updated = apply(current, record)
-            except BehaviorKindError as exc:
-                raise BehaviorKindStoreError(f"version {record.version} does not apply: {exc}") from exc
-            self.journal.append(record)
-            self._write(self.catalog_path, render_catalog(updated, schema_version=KINDS_SCHEMA_VERSION))
-            return updated
-
-    # ── 待定池 ───────────────────────────────────────────────────────────────────
-
-    def read_pending(self) -> PendingSnapshot:
-        text = self._read_text(self.pending_path)
+        self.check()
+        words = initial_words(self.lane)
+        text = self._read_text(self.state_path)
         if text is None:
-            return PendingSnapshot(PendingPool(), 0)
+            return words
+        revision, active = self._decode(text)
         try:
-            payload = json.loads(text)
-            if not isinstance(payload, dict) or set(payload) != {"revision", "entries"}:
-                raise BehaviorKindStoreError("pending pool shape is invalid")
-            entries = [pending_from(item) for item in payload["entries"]]
-            revision = payload["revision"]
-        except (json.JSONDecodeError, BehaviorKindCodecError, TypeError) as exc:
-            raise BehaviorKindStoreError(f"pending pool is invalid: {exc}") from exc
-        if not is_int(revision) or revision <= 0:
-            raise BehaviorKindStoreError("pending pool revision must be positive")
-        return PendingSnapshot(PendingPool({entry.occurrence: entry for entry in entries}), revision)
-
-    def replace_pending(self, pool: PendingPool, *, expected_revision: int) -> PendingSnapshot:
-        if len(pool.entries) > self.config.max_pending:
-            raise BehaviorKindStoreError(f"pending pool exceeds its bound of {self.config.max_pending} entries")
-        current = self.read_pending()
-        if current.revision != expected_revision:
-            raise BehaviorKindConflictError(
-                f"pending pool revision changed: expected {expected_revision}, found {current.revision}"
-            )
-        snapshot = PendingSnapshot(pool, expected_revision + 1)
-        payload = {
-            "revision": snapshot.revision,
-            "entries": [pending_payload(entry) for entry in pool.entries.values()],
-        }
-        self._write(self.pending_path, json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=1) + "\n")
-        return snapshot
-
-    # ── 迁移计划 ─────────────────────────────────────────────────────────────────
-
-    def read_migration(self) -> VersionRecord | None:
-        text = self._read_text(self.migration_path)
-        if text is None:
-            return None
-        try:
-            return record_from(json.loads(text))
-        except (json.JSONDecodeError, BehaviorKindCodecError) as exc:
-            raise BehaviorKindStoreError(f"migration plan is invalid: {exc}") from exc
-
-    def write_migration(self, record: VersionRecord) -> None:
-        """写下将要追加的那一版；已有一份没做完的计划时拒绝（先续做完它）。"""
-
-        with self._journal_lock:  # 与截断串起来：截断先看"有没有迁移"再动手，两步之间不能插进一份计划
-            if self.read_migration() is not None:
-                raise BehaviorKindConflictError("an unfinished migration plan exists; resume it first")
-            current = self.read()
-            if record.version != current.version + 1:
-                raise BehaviorKindConflictError("migration plan must be the next version")
-            try:
-                apply(current, record)  # 先试应用：不可应用的计划不许落盘（否则先改树、后在追加日志时永久失败）
-            except BehaviorKindError as exc:
-                raise BehaviorKindStoreError(f"migration plan does not apply: {exc}") from exc
-            if not self.has_room_for(record):  # 同一个道理：日志放不下这一版，也不许先改树
-                raise BehaviorKindJournalFullError(
-                    f"{CHANGES_FILENAME} has no room for version {record.version} within its encoded byte bound"
-                )
-            payload = json.dumps(record_payload(record), ensure_ascii=False, sort_keys=True, indent=1)
-            self._write(self.migration_path, payload + "\n")
-
-    def has_room_for(self, record: VersionRecord) -> bool:
-        """把这一版追加进变更日志之后，日志仍在字节上限之内。"""
-
-        return len(self.journal.with_record(record).encode("utf-8")) <= self.config.max_encoded_bytes
-
-    def clear_migration(self) -> None:
-        try:
-            durable_unlink(self.migration_path, artifact_root=self.root)
-        except DurablePathIntegrityError as exc:
-            raise BehaviorKindStoreError("migration plan cannot be removed safely") from exc
-
-    # ── 待生效的拆改 ─────────────────────────────────────────────────────────────
-
-    def read_revision(self) -> tuple[VersionRecord, JobState] | None:
-        """待生效的拆改（计划, 拆改之后的状态）；没有是 None。"""
-
-        text = self._read_text(self.revision_path)
-        if text is None:
-            return None
-        try:
-            payload = json.loads(text)
-            return record_from(payload["record"]), job_state_from(payload["state"])
-        except (json.JSONDecodeError, KeyError, TypeError, BehaviorKindCodecError) as exc:
-            raise BehaviorKindStoreError(f"pending revision is invalid: {exc}") from exc
-
-    def write_revision(self, record: VersionRecord, state: JobState) -> None:
-        """拆改出了计划：连同拆改状态存成待生效。计划必须是对着现在这一版词表出的下一版、应用得上。"""
-
-        current = self.read()
-        if record.version != current.version + 1:
-            raise BehaviorKindConflictError("a pending revision must be the next version")
-        try:
-            apply(current, record)
+            return Vocabulary(self.lane, words.words, active, revision)
         except BehaviorKindError as exc:
-            raise BehaviorKindStoreError(f"pending revision does not apply: {exc}") from exc
-        payload = json.dumps(
-            {"record": record_payload(record), "state": job_state_payload(state)},
-            ensure_ascii=False,
-            sort_keys=True,
-            indent=1,
-        )
-        self._write(self.revision_path, payload + "\n")
+            raise BehaviorKindStoreError(f"{self.state_path}: {exc}") from exc
 
-    def clear_revision(self) -> None:
+    def replace(self, vocabulary: Vocabulary, *, expected_revision: int) -> Vocabulary:
+        """把在用状态换成 ``vocabulary`` 的；盘上的修订号不是 ``expected_revision`` 就是别人先改了（CAS）。"""
+
+        if vocabulary.lane is not self.lane:
+            raise BehaviorKindStoreError("vocabulary belongs to another lane")
+        with self._lock:
+            current = self.read()
+            if current.revision != expected_revision:
+                raise BehaviorKindConflictError(
+                    f"vocabulary state revision changed: expected {expected_revision}, found {current.revision}"
+                )
+            if vocabulary.revision == current.revision:
+                return current
+            self._write(self.state_path, self._encode(vocabulary))
+            # 清单视图跟着状态写：视图写失败不影响真相，下一次写状态时再写
+            self._write(self.catalog_path, render_catalog(vocabulary, schema_version=STATE_SCHEMA_VERSION))
+            return vocabulary
+
+    def _encode(self, vocabulary: Vocabulary) -> str:
+        record = {
+            "schema_version": STATE_SCHEMA_VERSION,
+            "lane": vocabulary.lane.value,
+            "revision": vocabulary.revision,
+            "active": [
+                {"id": str(word_id), "since": since.isoformat()} for word_id, since in vocabulary.active.items()
+            ],
+        }
+        return json.dumps(record, ensure_ascii=False, sort_keys=True, indent=1) + "\n"
+
+    def _decode(self, text: str) -> tuple[int, dict[ClassId, date]]:
+        """严格读：截断、未知字段、错的 lane、坏编号、重复都明确报错并点出文件。"""
+
         try:
-            durable_unlink(self.revision_path, artifact_root=self.root)
-        except DurablePathIntegrityError as exc:
-            raise BehaviorKindStoreError("pending revision cannot be removed safely") from exc
-
-    # ── 拆改状态 ─────────────────────────────────────────────────────────────────
-
-    def read_jobs(self) -> JobState:
-        text = self._read_text(self.jobs_path)
-        if text is None:
-            return JobState()
-        try:
-            return job_state_from(json.loads(text))
-        except (json.JSONDecodeError, BehaviorKindCodecError) as exc:
-            raise BehaviorKindStoreError(f"job state is invalid: {exc}") from exc
-
-    def replace_jobs(self, state: JobState) -> None:
-        payload = json.dumps(job_state_payload(state), ensure_ascii=False, sort_keys=True, indent=1)
-        self._write(self.jobs_path, payload + "\n")
+            raw = json.loads(text)
+            if not isinstance(raw, Mapping) or set(raw) != _STATE_KEYS:
+                raise BehaviorKindStoreError(f"keys must be {sorted(_STATE_KEYS)}")
+            if raw["schema_version"] != STATE_SCHEMA_VERSION:
+                raise BehaviorKindStoreError(f"schema_version must be {STATE_SCHEMA_VERSION}")
+            if raw["lane"] != self.lane.value:
+                raise BehaviorKindStoreError(f"lane must be {self.lane.value}")
+            revision = raw["revision"]
+            if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+                raise BehaviorKindStoreError("revision must be a non-negative integer")
+            if not isinstance(raw["active"], list):
+                raise BehaviorKindStoreError("active must be a list")
+            active: dict[ClassId, date] = {}
+            for item in raw["active"]:
+                if not isinstance(item, Mapping) or set(item) != _ACTIVE_KEYS:
+                    raise BehaviorKindStoreError(f"active entries must have keys {sorted(_ACTIVE_KEYS)}")
+                word_id = ClassId.parse(item["id"])
+                if word_id in active:
+                    raise BehaviorKindStoreError(f"active word repeats: {word_id}")
+                since = item["since"]
+                if not isinstance(since, str):
+                    raise BehaviorKindStoreError(f"active word {word_id} since must be an ISO date text")
+                active[word_id] = date.fromisoformat(since)
+        except (json.JSONDecodeError, KindIdError, ValueError) as exc:
+            raise BehaviorKindStoreError(f"{self.state_path}: vocabulary state is invalid: {exc}") from exc
+        return revision, active
 
     # ── 文件 ─────────────────────────────────────────────────────────────────────
 
@@ -286,11 +162,11 @@ class BehaviorKindStore:
         except FileNotFoundError:
             return None
         except DurablePathIntegrityError as exc:
-            raise BehaviorKindStoreError(f"{path.name} cannot be read safely") from exc
+            raise BehaviorKindStoreError(f"{path} cannot be read safely") from exc
         try:
             return encoded.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise BehaviorKindStoreError(f"{path.name} is not valid UTF-8") from exc
+            raise BehaviorKindStoreError(f"{path} is not valid UTF-8") from exc
 
     def _write(self, path: Path, text: str) -> None:
         encoded = text.encode("utf-8")
@@ -303,15 +179,10 @@ class BehaviorKindStore:
 
 
 __all__ = [
-    "CHANGES_FILENAME",
-    "KINDS_SCHEMA_VERSION",
-    "MIGRATION_FILENAME",
-    "JOBS_FILENAME",
-    "PENDING_FILENAME",
-    "REVISION_FILENAME",
+    "LEGACY_FILENAMES",
+    "STATE_FILENAME",
+    "STATE_SCHEMA_VERSION",
     "BehaviorKindConflictError",
-    "BehaviorKindJournalFullError",
     "BehaviorKindStore",
     "BehaviorKindStoreError",
-    "PendingSnapshot",
 ]

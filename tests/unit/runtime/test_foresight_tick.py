@@ -20,10 +20,10 @@ from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_tick import ForesightTick
 from habitus.scene.concepts import ConceptSet
-from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.scene.recurrence import recurrences_of
 from habitus.scene.relations import Relation, RelationConfig, RelationKey, Segment, Status, build_timelines
 from habitus.series.reader import read_series
+from habitus.temporal import Rulers
 from tests.unit.kind_ids import kind_id
 from tests.unit.scene.concept_fixtures import base
 from tests.unit.scene.fixtures import DAY1, SUBJECT, Site, at, publish
@@ -34,7 +34,7 @@ CONCEPTS = ConceptSet([base("讨论方案"), base("修改代码")])
 CONFIG = RelationConfig(
     slot_minutes=15, transition_window_slots=3, absence_typical_multiple=8.0, absence_min_gaps=2
 )
-RULERS = RhythmRulers(15, 2700, 3, 5.0, 5.0, 0.10, 35)
+RULERS = Rulers(15, 2700, 3, 5.0, 5.0, 35)
 TOLERANCE = Tolerance(line=1.0 - ForesightConfig().false_alarm_rate)  # 产品默认的线
 
 
@@ -165,9 +165,6 @@ def test_the_day_expectations_wait_for_tonights_table(tmp_path) -> None:
     root = tmp_path / "empty"
     none = days(site, ForesightLedgerStore(root), OpportunityStore(root), at(TODAY, 1, 15))
     assert asyncio.run(none.run_once()).skipped == "还没有机会表"
-    migrating = days(site, ledger, opportunities, at(TODAY, 1, 15))
-    migrating.migrating = lambda: True
-    assert asyncio.run(migrating.run_once()).skipped == "词表迁移还没做完" and ledger.expectations_on(TODAY) == ()
 
 
 def test_the_daytime_gate_only_asks_whether_the_table_is_todays_generation(tmp_path) -> None:
@@ -241,25 +238,6 @@ def test_the_tick_reads_todays_calendar_conditions_for_situation_expectations(tm
     assert report.by_source == {"情境": 1}
     (stored,) = ledger.expectations_on(TODAY)
     assert stored.source == "情境" and stored.trigger == relation.key and stored.trigger_instance == TODAY.isoformat()
-
-
-def test_a_vocabulary_migration_in_progress_skips_the_whole_tick(tmp_path) -> None:
-    site, _codes = site_with_three_mornings(tmp_path)
-    ledger, opportunities = stores(tmp_path, site)
-    publish(site.behavior_tree, TODAY, "讨论方案", 10, 0)
-    read_side = ForesightReadSide(site.behavior_tree, SUBJECT, LocalCalendar(), ZoneInfo("Asia/Shanghai"))
-    run = ForesightTick(
-        ledger,
-        opportunities,
-        read_side,
-        NoUnsealed(),
-        migrating=lambda: True,
-        clock=lambda: at(TODAY, 10, 15),
-        recent=35,
-        tolerance=TOLERANCE,
-    )
-    report = asyncio.run(run.run_once())
-    assert report.skipped == "词表迁移还没做完" and report.formed == 0 and ledger.expectations_on(TODAY) == ()
 
 
 def test_the_tick_checks_its_collaborators(tmp_path) -> None:

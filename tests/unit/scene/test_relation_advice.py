@@ -17,6 +17,7 @@ from habitus.scene.advice.conditions import (
     ConditionProposer,
     assemble_proposals,
     build_condition_request,
+    condition_json_schema,
 )
 from habitus.scene.advice.conditions import question_for as condition_question
 from habitus.scene.advice.prior import PriorAdvisor, PriorConfig, assemble_ratings, build_prior_request
@@ -26,7 +27,7 @@ from habitus.scene.concepts import ConceptSet
 from habitus.scene.relations import LaneTests, Status, build_timelines, fold
 from tests.unit.foresight.scripted_model import recording_client
 from tests.unit.scene.advice_fixtures import answering_client, ratings
-from tests.unit.scene.concept_fixtures import base, situation
+from tests.unit.scene.concept_fixtures import CREATED, base
 from tests.unit.scene.relation_fixtures import (
     CODE,
     CONCEPTS,
@@ -41,7 +42,6 @@ from tests.unit.scene.relation_fixtures import (
     watching,
 )
 
-TRAVEL = situation("出差中", "人在常住地之外过夜")
 NIGHT = date(2026, 7, 1)
 
 
@@ -118,15 +118,19 @@ def test_the_condition_question_shows_the_antecedent_and_what_came_before_never_
     # 日历情境系统已经机械检验：不进名单，模型的名额留给地点、同在的人、时间线（2026-10-18 四方评审）
     from habitus.scene.concepts.calendar_situations import calendar_concepts
 
-    with_calendar = ConceptSet((*CONCEPTS.values(), TRAVEL, *calendar_concepts(now=TRAVEL.created_at)))
+    with_calendar = ConceptSet((*CONCEPTS.values(), *calendar_concepts(now=CREATED)))
     asked = condition_question(with_calendar, "session", DISCUSS, picked)
-    assert asked.situations == (TRAVEL.name,) and "- 周三：" not in (
-        build_condition_request(asked).messages[-1].content or ""
-    )
+    content = build_condition_request(asked).messages[-1].content or ""
+    assert "- 周三：" not in content and "可以用的情境" not in content
+    # 模型只能提结构字段与时间线：情境概念模板不在 Schema 里
+    assert condition_json_schema(["讨论方案"])["properties"]["conditions"]["items"]["properties"]["template"]["enum"] == [
+        "field",
+        "timeline",
+    ]
 
 
 def test_proposals_compile_or_land_on_the_refused_list() -> None:
-    concepts = ConceptSet([*CONCEPTS.values(), TRAVEL])
+    concepts = CONCEPTS
     question = condition_question(concepts, "session", DISCUSS, ())
     parsed = {
         "conditions": [
@@ -140,8 +144,10 @@ def test_proposals_compile_or_land_on_the_refused_list() -> None:
     found = assemble_proposals(parsed, question, concepts, night=NIGHT)
     accepted = [item.condition for item in found if item.condition]
     refused = [item.refused for item in found if item.refused]
-    assert accepted == [f"timeline:{RESEARCH}", "field:with=老王", "concept:出差中"]
-    assert len(refused) == 2 and any("antecedent itself" in reason for reason in refused)
+    # 情境概念模板模型提不了（日历条件由系统机械列举），提了进已拒清单
+    assert accepted == [f"timeline:{RESEARCH}", "field:with=老王"]
+    assert len(refused) == 3 and any("antecedent itself" in reason for reason in refused)
+    assert any("not proposable" in reason for reason in refused)
     with pytest.raises(ValueError, match=f"at most {MAX_PROPOSALS}"):
         assemble_proposals({"conditions": parsed["conditions"] * 2}, question, concepts, night=NIGHT)
 
@@ -210,7 +216,7 @@ def test_conditions_are_asked_once_per_concept_set_and_used_only_from_the_night_
     from habitus.conditions import WEEKDAY_KEY
     from habitus.scene.concepts.calendar_situations import value_set
 
-    grown = ConceptSet((*CONCEPTS.values(), value_set(WEEKDAY_KEY, ["周一", "周三"], now=TRAVEL.created_at)))
+    grown = ConceptSet((*CONCEPTS.values(), value_set(WEEKDAY_KEY, ["周一", "周三"], now=CREATED)))
     regrown = LaneTests(build_timelines(series, grown, {}, CONFIG)["session"], grown, CONFIG, series.cutoff)
     asyncio.run(advice.proposals(regrown, night + timedelta(days=1), []))
     assert provider.calls == len(eligible)
@@ -298,8 +304,10 @@ def test_a_relation_that_passes_only_with_its_prior_is_tagged() -> None:
     assert all(item.key != key(DISCUSS, CODE) or item.status is not Status.CANDIDATE for item in plain.relations)
 
 
-def test_a_stored_condition_that_no_longer_parses_is_skipped_and_reported(tmp_path) -> None:
-    """旧提议簿里的 ``field:weekend=…``（v2 起日历字段拿掉了）：不让整晚抛，并从提议簿里清掉（2026-10-18 四方评审；2.5.5）。"""
+@pytest.mark.parametrize("stale_text", ["field:weekend=周末", "concept:出差中", "concept:周末"])
+def test_a_stored_condition_that_no_longer_parses_is_skipped_and_reported(tmp_path, stale_text: str) -> None:
+    """旧提议簿里落不成模型现在能提的模板的条件——``field:weekend=…``（v2 起日历字段拿掉了）、情境概念模板（2026-11-14 起
+    只由系统机械列举，模型写的情境与日历情境都一样）：不让整晚抛，并从提议簿里清掉（2026-10-18 四方评审；2.5.5）。"""
 
     from dataclasses import replace as swap
 
@@ -310,18 +318,18 @@ def test_a_stored_condition_that_no_longer_parses_is_skipped_and_reported(tmp_pa
     advice = RelationAdvice(store=store, prior=None, conditions=ConditionProposer(client))
     asyncio.run(advice.proposals(tests, series.cutoff, []))
     book = store.book("session")
-    stale = swap(book.proposals[0], condition="field:weekend=周末")
+    stale = swap(book.proposals[0], condition=stale_text)
     store.write_book(swap(book, proposals=(stale, *book.proposals[1:])))
     signals: list[str] = []
     replayed = RelationAdvice(store=store, prior=None, conditions=None)
     found = asyncio.run(replayed.proposals(tests, series.cutoff, signals))
     # 读不了的条件从提议簿里清掉（26 号清单 2.5.5），报一次，不再每晚跳过、每晚报
     assert any("提议簿清掉" in item for item in signals)
-    assert all(item.condition != "field:weekend=周末" for item in store.book("session").proposals)
-    assert all(condition.text != "field:weekend=周末" for items in found.values() for condition, _night in items)
+    assert all(item.condition != stale_text for item in store.book("session").proposals)
+    assert all(condition.text != stale_text for items in found.values() for condition, _night in items)
     again: list[str] = []
     asyncio.run(replayed.proposals(tests, series.cutoff, again))
-    assert not any("field:weekend" in item or "提议簿清掉" in item for item in again)
+    assert not any(stale_text in item or "提议簿清掉" in item for item in again)
 
 
 def test_tidying_drops_dead_antecedents_and_caps_duplicate_refusals() -> None:

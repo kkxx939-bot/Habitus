@@ -13,7 +13,6 @@ def test_defaults_and_derived_rulers() -> None:
     assert (config.slot_minutes, config.merge_window_minutes, config.pool_half_width) == (15, 45, 3)
     assert config.merge_window_seconds == 2700
     assert config.transition_window_slots == 3
-    assert config.min_peak_mass == 0.10
 
 
 @pytest.mark.parametrize(
@@ -23,7 +22,6 @@ def test_defaults_and_derived_rulers() -> None:
         {"merge_window_minutes": 40},  # 不是槽的整数倍
         {"pool_half_width": 0},
         {"shrink_slot_to_pool": -1.0},
-        {"min_peak_mass": 1.0},
     ],
 )
 def test_bad_rulers_are_rejected(overrides: dict[str, object]) -> None:
@@ -46,4 +44,12 @@ def test_example_yaml_carries_the_temporal_section(tmp_path) -> None:
     config = HabitusConfig.from_mapping(valid_mapping(tmp_path))
     assert config.temporal == TemporalConfig()
     assert config.foresight.half_life_opportunities == 8.0
-    assert config.scene.baseline_slack_slots == 3
+
+
+def test_the_peak_floor_is_gone_and_naming_it_is_rejected(tmp_path) -> None:
+    """日内分布的峰没有读者了（2026-11-14 收口修补）：``temporal.min_peak_mass`` 不再是配置项，写了就是未知字段，硬拒。"""
+
+    payload = valid_mapping(tmp_path)
+    payload["temporal"] = {"min_peak_mass": 0.10}
+    with pytest.raises(ConfigError, match="min_peak_mass"):
+        HabitusConfig.from_mapping(payload)

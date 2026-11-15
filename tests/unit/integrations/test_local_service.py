@@ -194,14 +194,14 @@ def test_doctor_reports_an_out_of_range_override_as_a_config_failure_naming_the_
     """kinds_* 的值域归领域配置（配置层只查类型）：非 deep 的 doctor 照旧在 config 那一项报失败，点得出配置键。"""
 
     payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
-    payload["behavior"] = {"kinds_revision_weekday": 7}
+    payload["behavior"] = {"kinds_active_min_days": 0}
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
     restrict_file_to_owner(path)
 
     report = run_doctor_from_env(environ={"HABITUS_CONFIG_FILE": str(path)}, check_port=False)
     assert [(check.name, check.status) for check in report.checks] == [("config", DoctorStatus.FAIL)]
-    assert "invalid 'config.behavior.kinds_revision_weekday'" in report.checks[0].detail
+    assert "invalid 'config.behavior.kinds_active_min_days'" in report.checks[0].detail
 
 
 def test_doctor_requires_private_permissions_for_the_secret_bearing_yaml(tmp_path: Path) -> None:

@@ -52,7 +52,8 @@ import dataclasses
 from collections.abc import Callable, Mapping
 from datetime import timedelta
 
-from habitus.behavior.kinds.reader import VocabularyReader
+from habitus.behavior.kinds.ids import ClassId, KindIdError
+from habitus.behavior.kinds.store import BehaviorKindStore
 from habitus.config import HabitusConfig
 from habitus.conversation import (
     AddressWatermarks,
@@ -170,7 +171,7 @@ from habitus.runtime.lifecycle_foresight import ForesightParticipant
 from habitus.runtime.lifecycle_housekeeping import LifecycleHousekeepingParticipant
 from habitus.runtime.lifecycle_memory import ConversationChainParticipant, MemoryL2Participant, conversation_lease_key
 from habitus.runtime.lifecycle_retry import retry_ledger
-from habitus.runtime.lifecycle_scene import SceneParticipant, scene_vocabulary_versions
+from habitus.runtime.lifecycle_scene import SceneParticipant
 from habitus.runtime.lifecycle_sources import ConversationSourceParticipant, ConversationSourceRecoveryParticipant
 from habitus.runtime.runtime import Runtime
 from habitus.runtime.scene import assemble_generation, generation_marks, generation_traces, model_tracer
@@ -597,22 +598,18 @@ def build_runtime(
             config,
             behavior_tree=session_behavior.tree,
             calendar=calendar,
-            # 预期上的类编号到结算时可能已被拆改：按"现在对应哪些编号"结算（同一份词表）
-            current_classes=VocabularyReader(session_behavior.kind_store).current_ids,
-            # 词表迁移做到一半时不结算（有未完成的迁移计划就是在迁移）
-            vocabulary_migrating=lambda: session_behavior.kind_store.read_migration() is not None,
             # "那天定稿了"只有归约说了算（链都落树、封口视界已过那天的本地结束），结算按它来。
             closed_days=session_behavior.reduction_runner.closed_days,
             evidence=evidence,
             observer=operation_observer,
-            # 出口认提问时拿类名配题目（词表给人看的名字；编号仍是身份）
-            kind_label=_kind_label(VocabularyReader(session_behavior.kind_store)),
+            # 出口认提问时拿词名配题目（词表给人看的名字；编号仍是身份）
+            kind_label=_kind_label(session_behavior.kind_store),
             question_tools=adapters.question_tools(),
             finished=None if marks is None else marks.finished,
         )
     )
-    # 未封口的判断经那座桥（判断存储 + 消费账本 + 归约的白天归类）读：预测拍用它；换代里的日子预期读只读缓存的那一份
-    # （换代里没有模型调用；换代之前由模型队列把还没归的归好）
+    # 未封口的判断经那座桥（判断存储 + 消费账本 + 归约的选词器）读：预测拍用它；换代里的日子预期读只读缓存的那一份
+    # （换代里没有模型调用；会话一支的判断都带着选词结果）
     unsealed = None if session_behavior is None or evidence is None else unsealed_bridge(session_behavior)
     if foresight_components is not None and session_behavior is not None and evidence is not None and unsealed:
         # 预测拍（常驻 worker 在语义树那一段装：每槽先看一眼换代、再做这一拍）：词表版本记在预期上。
@@ -623,8 +620,7 @@ def build_runtime(
             unsealed=unsealed,
             evidence=evidence,
             structured_chat=structured_chat,
-            vocabulary_version=lambda: kind_store.read().version,
-            vocabulary_migrating=lambda: kind_store.read_migration() is not None,
+            vocabulary_version=lambda: kind_store.read().revision,
             observer=operation_observer,
             reread=rereader_of(session_behavior),
             trace=None if traces is None else traces.sink,
@@ -640,8 +636,7 @@ def build_runtime(
                 config=config,
                 unsealed=unsealed.cache_only(),
                 evidence=evidence,
-                vocabulary_version=lambda: kind_store.read().version,
-                vocabulary_migrating=lambda: kind_store.read_migration() is not None,
+                vocabulary_version=lambda: kind_store.read().revision,
                 observer=operation_observer,
             ),
         )
@@ -760,16 +755,13 @@ def build_runtime(
         )
         foresight_components = with_slot_worker(foresight_components, slots)
     # 行为侧、语义树、预测层的释放各一个参与者（26 号清单 6.14），挂进同一个生命周期 Worker
-    scene_versions = None
     if scene is not None:
-        scene_versions = scene_vocabulary_versions(scene.relations, scene.concepts)
         participants.append(SceneParticipant(scene.relations))
     if behavior_components is not None:
         participants.append(
             BehaviorParticipant(
                 behavior_components,
                 backfill_days=config.lifecycle.physical_max_backfill_days,
-                derived_versions=scene_versions,
             )
         )
     if foresight_components is not None:
@@ -868,15 +860,16 @@ def build_runtime(
     return Runtime(config, components, conversation_adapters=adapters)
 
 
-def _kind_label(reader: VocabularyReader) -> Callable[[str], str | None]:
-    """类编号 → 词表里给人看的类名（没有这个编号、不是编号的给 None）。"""
+def _kind_label(store: BehaviorKindStore) -> Callable[[str], str | None]:
+    """词编号 → 词表里给人看的词名（没有这个编号、不是编号的给 None）。"""
 
     def label(token: str) -> str | None:
         try:
-            found = reader.describe(token)
-        except Exception:  # noqa: BLE001 - 类名只是出口配题目的辅助，词表读不出来不拦取
+            word_id = ClassId.parse(token)
+            vocabulary = store.read()
+        except (KindIdError, ValueError):  # 词名只是出口配题目的辅助：不是编号、词表读不出来都不拦取
             return None
-        return found.name if found is not None else None
+        return vocabulary.get(word_id).name if word_id in vocabulary else None
 
     return label
 

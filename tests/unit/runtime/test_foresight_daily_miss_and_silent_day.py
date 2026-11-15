@@ -31,10 +31,10 @@ from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement import SettlementStage
 from habitus.runtime.foresight_tick import ForesightTick
 from habitus.scene.concepts import ConceptSet
-from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.scene.recurrence import recurrences_of
 from habitus.scene.relations import RelationConfig, build_timelines
 from habitus.series.reader import read_series
+from habitus.temporal import Rulers
 from habitus.temporal.coverage import coverage_of
 from tests.unit.kind_ids import kind_id
 from tests.unit.runtime.test_foresight_delivery import EVIDENCE, LOSS, Outlet, Seeded
@@ -45,7 +45,7 @@ ZONE = ZoneInfo("Asia/Shanghai")
 CONFIG = RelationConfig(
     slot_minutes=15, transition_window_slots=3, absence_typical_multiple=8.0, absence_min_gaps=2
 )
-RULERS = RhythmRulers(15, 2700, 3, 5.0, 5.0, 0.10, 35)
+RULERS = Rulers(15, 2700, 3, 5.0, 5.0, 35)
 TICK = timedelta(minutes=15)
 START = date(2026, 10, 2)
 HABIT = "吃维生素"
@@ -115,8 +115,6 @@ def settle(w: World, through: date, *, lane: str = "session") -> None:
         w.ledger,
         read_side(w),
         closed_days=lambda: closed,
-        current=lambda token: (token,),
-        migrating=lambda: False,
         evidence=EVIDENCE,
         opportunities=w.opportunities,
         lane=lane,

@@ -23,6 +23,8 @@ from habitus.scene.advice.model import PriorLevel, Proposal, ProposalBook
 from habitus.scene.storage import SceneStore
 
 ADVICE_SEGMENT = "advice"
+#: 先验缓存的格式版本：语义树只剩词表类与日历之后（2026-11-14）升了一版，旧版本的缓存读到明确报错、不迁移。
+PRIOR_SCHEMA = "habitus.scene.advice.prior/v2"
 #: 新问法的先验缓存目录（按前因存）。
 BY_ANTECEDENT = "priors-by-antecedent"
 MAX_RECORD_BYTES = 4 * 1024 * 1024
@@ -45,6 +47,7 @@ class AdviceStore(SceneStore):
         payload = self._read(self._prior_path(key))
         if payload is None:
             return None
+        _require_schema(payload, key)
         try:
             return {str(name): PriorLevel(level) for name, level in payload["levels"].items()}
         except (KeyError, AttributeError, ValueError) as exc:
@@ -63,6 +66,7 @@ class AdviceStore(SceneStore):
         self._write(
             self._prior_path(key),
             {
+                "schema": PRIOR_SCHEMA,
                 "lane": lane,
                 "consequent": consequent,
                 "levels": {name: level.value for name, level in levels.items()},
@@ -93,6 +97,7 @@ class AdviceStore(SceneStore):
         payload = self._read(self._prior_path(key, BY_ANTECEDENT))
         if payload is None:
             return None
+        _require_schema(payload, key)
         try:
             return {str(name): PriorLevel(level) for name, level in payload["levels"].items()}
         except (KeyError, AttributeError, ValueError) as exc:
@@ -111,6 +116,7 @@ class AdviceStore(SceneStore):
         self._write(
             self._prior_path(key, BY_ANTECEDENT),
             {
+                "schema": PRIOR_SCHEMA,
                 "lane": lane,
                 "antecedent": antecedent,
                 "levels": {name: level.value for name, level in levels.items()},
@@ -207,6 +213,13 @@ class AdviceStore(SceneStore):
         if not isinstance(parsed, dict) or canonical_json(parsed) != text:
             raise AdviceStoreError(f"advice record {path.name!r} is not in canonical form")
         return parsed
+
+
+def _require_schema(payload: Mapping[str, Any], key: str) -> None:
+    if payload.get("schema") != PRIOR_SCHEMA:
+        raise AdviceStoreError(
+            f"prior cache {key!r} has schema {payload.get('schema')!r}, this build reads {PRIOR_SCHEMA!r}"
+        )
 
 
 def _proposal(body: Mapping[str, Any]) -> Proposal:

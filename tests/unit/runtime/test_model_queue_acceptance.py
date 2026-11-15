@@ -1,8 +1,11 @@
 """模型队列的验收（实时化阶段 2 · A1；测试工程师写，独立于实现者的 ``test_model_queue.py``）。
 
 对着 ``立项-第二部分.md`` 第 4 节的预期表，一行至少一条（A1-5 … A1-12），用确定性替身模型；另加三处回放证明不了、要单元测试
-守着"换代不调它们"的：探模型、迁移牵到的重映射、重试收尾；以及对抗（坏的重试项、口径不对的命中、不规范的先验缓存、两个队列
+守着"换代不调它们"的：探模型、迁移改了编号的日子、重试收尾；以及对抗（坏的重试项、口径不对的命中、不规范的先验缓存、两个队列
 挂同一个根、一项做到一半被取消）。
+
+2026-11-14 概念层只留词表节点与日历之后，队列里没有映射、写概念这两类：原来拿"映射"当会调模型的那一项的几条，改拿先验补问
+（``advice``）当那一项；命中记录由换代封口时直接生成。
 
 每条的文档串写：预期出处、这条测试撤掉哪一处会变红。
 """
@@ -46,7 +49,7 @@ from habitus.runtime.generation_result import (
     DAYS,
     DEGRADED,
     FALLBACK_RELATIONS,
-    FALLBACK_UNMAPPED,
+    FALLBACK_UNSTAMPED,
     MARK,
     OPPORTUNITIES,
     SCENE,
@@ -62,7 +65,6 @@ from habitus.runtime.generation_trace import TraceFiles
 from habitus.runtime.model_queue import (
     ADVICE,
     DONE,
-    MAPPING,
     RETRY,
     SYNC,
     UNFINISHED,
@@ -78,6 +80,7 @@ from habitus.scene.advice.store import AdviceStore
 from habitus.scene.occurrences import ConceptHitStore
 from habitus.series.reader import SeriesReader, read_series
 from tests.lock_store import ProcessLocalLockStore
+from tests.unit.kind_ids import kind_id
 from tests.unit.runtime.test_foresight_nightly import components as foresight_components
 from tests.unit.runtime.test_generation import StubSettlement, assembled_with, generate, sealed_through
 from tests.unit.runtime.test_scene_night import (
@@ -94,16 +97,15 @@ from tests.unit.scene.advice_fixtures import answering_client
 from tests.unit.scene.fixtures import CST
 
 TODAY = NOW.date()
-YES = frozenset({"吃了碗面/一起床就吃"})
 
 
 # ── 现场 ────────────────────────────────────────────────────────────────
 
 
-def scene_on(root: Path, site, *, yes=YES, catalog=None, advice: bool = False):  # type: ignore[no-untyped-def]
-    """在 ``root`` 这份盘上重新开一套语义树对象（存储、映射器、替身模型都是新的）：相当于进程重起后看到的那一份。"""
+def scene_on(root: Path, site, *, catalog=None, advice: bool = False):  # type: ignore[no-untyped-def]
+    """在 ``root`` 这份盘上重新开一套语义树对象（存储、替身模型都是新的）：相当于进程重起后看到的那一份。"""
 
-    scene, provider = nightly(root, ConceptHitStore(root / "scene"), site, yes=yes, catalog=catalog)
+    scene, provider = nightly(root, ConceptHitStore(root / "scene"), site, catalog=catalog)
     advisor = None
     if advice:
         client, advisor = answering_client()
@@ -116,7 +118,7 @@ def scene_on(root: Path, site, *, yes=YES, catalog=None, advice: bool = False): 
 
 
 def fresh(root: Path, **options):  # type: ignore[no-untyped-def]
-    """三天就寝的历史 + 今晚封口的两条记录；返回（树的现场, 语义树, 映射的替身模型, 先验的替身模型）。"""
+    """三天就寝的历史 + 今晚封口的两条记录；返回（树的现场, 语义树, 语义树那一支的替身模型, 先验的替身模型）。"""
 
     site, _hits = site_with_three_bedtimes(root)
     publish_tonight(site)
@@ -132,7 +134,7 @@ def queue_on(root: Path, scene, site, *, clock=lambda: NOW, sealed=lambda: TODAY
         series=SeriesReader(site.behavior_tree, name="model_queue"),
         today=lambda: clock().astimezone(CST).date(),
         sealed_day=sealed,
-        vocabulary=lambda: (1, False),
+        vocabulary=lambda: 1,
         retries=RetryLedger(
             root / "scene",
             owner="model-queue",
@@ -166,32 +168,17 @@ def done(report) -> list[tuple[str, str]]:  # type: ignore[no-untyped-def]
     return [(item.category, item.outcome) for item in report.done]
 
 
-def mapped(scene, day) -> bool:  # type: ignore[no-untyped-def]
-    """这一天序列里的每条记录都映射好了、没有模型没答成的。映射按槽（阶段 2 第三小步）之后队列只映射、不盖日完成章——章由
-    换代封口时盖——所以原来这份文件里"队列做完 = 那一天盖了章"的断言都改成读这个。"""
+def sealed_day(scene, day) -> bool:  # type: ignore[no-untyped-def]
+    """这一天盖了日完成章（封口时序列里的每条记录都生成了命中记录）。"""
 
-    from habitus.scene.occurrences.model import UnresolvedReason
-
-    series = read_series(scene.behavior_tree, cutoff=day + timedelta(days=1))
-    found = scene.hits.read_day(day)
-    failed = [
-        reason for item in found for reason in item.unresolved.values() if reason is UnresolvedReason.MODEL_FAILED
-    ]
-    return len(found) == len(series.on(day)) and not failed
+    return day in scene.hits.days_done()
 
 
 def seal(scene) -> None:  # type: ignore[no-untyped-def]
-    """换代的语义树一步里封口的那一段：重算情境、核条数、盖日完成章（映射按槽之后章只在这里盖）。"""
+    """换代的语义树一步里封口的那一段：生成命中记录、核条数、盖日完成章。"""
 
     series = read_series(scene.behavior_tree, cutoff=TODAY)
-    concepts = scene.concepts.read_all()
-    scene.sealing.seal(series, concepts, scene.mapper_for(concepts), NOW, [])
-
-
-def others(report) -> list[tuple[str, str]]:  # type: ignore[no-untyped-def]
-    """这一趟里映射之外的项。映射按槽之后映射不等封口：原来"封口之前队列只做出错重试"的断言里，映射那几项另算。"""
-
-    return [item for item in done(report) if item[0] != MAPPING]
+    scene.sealing.seal(series, scene.concepts.read_all(), NOW, [])
 
 
 def straight(root: Path, **options) -> dict[str, bytes]:  # type: ignore[no-untyped-def]
@@ -243,9 +230,9 @@ def explode(provider) -> list[str]:  # type: ignore[no-untyped-def]
 
 def test_a1_5_a_generation_writes_the_table_the_day_expectations_and_the_mark_while_the_model_throws(tmp_path) -> None:
     """A1-5（共享说明第 3 节"换代那一刻模型客户端一调就抛：这一代照样写出完成标记"）：队列一项都没做、模型一调就抛，这一代
-    仍 complete——机会表、日子预期、完成标记都写出，模型一次都没被调到；没映射的记录计进 ``unmapped_records``。
+    仍 complete——机会表、日子预期、完成标记都写出，模型一次都没被调到；今晚那一天封口时直接生成了命中记录，没有"没封好"的。
 
-    撤回即失败：把语义树那一步里任一处模型调用放回去（映射、写概念、补问），``attempts`` 不再是空。"""
+    撤回即失败：把语义树那一步里任一处模型调用放回去（例如补问），``attempts`` 不再是空。"""
 
     site, scene, provider, advisor = fresh(tmp_path, advice=True)
     attempts = explode(provider)
@@ -261,8 +248,8 @@ def test_a1_5_a_generation_writes_the_table_the_day_expectations_and_the_mark_wh
     table = built.opportunities.read("session", TODAY)  # type: ignore[attr-defined]
     assert table.night == TODAY
     assert attempts == [] and advisor_attempts == []
-    assert result.fallbacks[FALLBACK_UNMAPPED] == 2  # 今晚封口的两条没映射：按"不知道"算、数出来
-    assert not mapped(scene, TONIGHT)
+    assert result.fallbacks[FALLBACK_UNSTAMPED] == 0  # 封口时命中记录由代码直接生成：没有封不好的
+    assert sealed_day(scene, TONIGHT)
     assert [item.step for item in result.steps] == list(STEPS) and "probe" not in STEPS and "vocabulary" not in STEPS
 
 
@@ -287,62 +274,23 @@ def test_neither_the_generation_nor_the_queue_probes_the_model(tmp_path) -> None
 
 
 def moved_breakfast(root: Path):  # type: ignore[no-untyped-def]
-    """TONIGHT 那碗面已经映射过；之后迁移把它从「早餐」改到「吃饭」（树上的编号改了、变更流里有这一条）。
-
-    C+D 改过：概念只由换代的同步词表写，映射之前先做一次今天这一代的语义树一步（同步概念），映射之后再做一次（封口、
-    盖章）——原来队列自己同步概念、封口由别处做。"""
+    """今天这一代做完（TONIGHT 封好）；之后迁移把那碗面从「早餐」改到「吃饭」（树上的编号改了、变更流里有这一条）。"""
 
     site, _hits = site_with_three_bedtimes(root)
     _bed, meal = publish_tonight(site)
     catalog = FakeCatalog()
     scene, provider, _advisor = scene_on(root, site, catalog=catalog)
-    series = read_series(site.behavior_tree, cutoff=TODAY)
-    asyncio.run(scene.generate(series=series, now=NOW))
-    assert asyncio.run(queue_on(root, scene, site).drain()).clear
-    asyncio.run(scene.generate(series=series, now=NOW))
+    asyncio.run(
+        scene.generate(
+            series=read_series(site.behavior_tree, cutoff=TODAY), words=scene.syncing.catalog.current(), now=NOW
+        )
+    )
     address = BehaviorURI.parse(meal).to_address()
     BehaviorDocumentWriter(site.behavior_tree, ProcessLocalLockStore(), clock=lambda: NOW).restamp_kind_token(
         address, MEAL
     )
     catalog.move(meal, BREAKFAST, MEAL)
     return site, scene, provider, address
-
-
-def test_the_generation_leaves_the_remap_of_moved_days_to_the_queue(tmp_path) -> None:
-    """迁移牵到的重映射（回放数据上 0 次调用）：换代的语义树一步碰到迁移改了编号的已映射日子，不调映射器、不记"同步到的
-    版本"（记了队列就读不到那份迁移清单）；队列随后把那一天重映射，结果与"队列先做"的相同。
-
-    撤回即失败：换代的同步词表那一段带上 ``remap``，``calls`` 不再是 0。"""
-
-    later = NOW + timedelta(days=1)
-
-    def clock() -> datetime:
-        return later
-
-    # 队列先做（换代之前就重映射完）
-    site, scene, provider, address = moved_breakfast(tmp_path / "queue_first")
-    assert asyncio.run(
-        queue_on(tmp_path / "queue_first", scene, site, clock=clock, sealed=lambda: later.date()).drain()
-    )
-    first = disk(tmp_path / "queue_first")
-    assert scene.hits.read(address).kind_token == MEAL
-
-    # 换代先到
-    site, scene, provider, address = moved_breakfast(tmp_path / "generation_first")
-    before, synced = provider.calls, scene.concepts.synced_version()
-    series = read_series(site.behavior_tree, cutoff=later.date())
-    asyncio.run(scene.generate(series=series, now=later))
-    assert provider.calls == before  # 换代里没有模型调用
-    assert scene.hits.read(address).kind_token == BREAKFAST  # 还没重映射：留给队列
-    assert scene.concepts.synced_version() == synced  # 版本没记：迁移清单还读得到
-    queue = queue_on(tmp_path / "generation_first", scene, site, clock=clock, sealed=lambda: later.date())
-    report = asyncio.run(queue.drain())
-    assert (SYNC, DONE) in done(report) and report.clear
-    assert scene.hits.read(address).kind_token == MEAL
-    second = disk(tmp_path / "generation_first")
-    second = {name: body for name, body in second.items() if not name.startswith("relations/")}
-    first = {name: body for name, body in first.items() if not name.startswith("relations/")}
-    assert second == first
 
 
 class CountingChains:
@@ -412,24 +360,23 @@ def test_the_generations_retry_closing_never_tries_an_item(tmp_path) -> None:
 # ── A1-6：队列做到一半杀进程，重起 ──────────────────────────────────────
 
 
-@pytest.mark.parametrize("killed_in", [SYNC, MAPPING, ADVICE])
+@pytest.mark.parametrize("killed_in", [SYNC, ADVICE])
 def test_a1_6_a_queue_killed_in_the_middle_of_an_item_is_resumed_from_disk(tmp_path, killed_in: str) -> None:
     """A1-6（共享说明第 3 节"队列做到一半进程被杀：重起后不读任何做到哪了的账，从盘上重新认欠账，接着做，结果相同"）：
-    在一项做到一半时取消（同步词表写完概念之后、映射写了一条命中之后、先验问了一个后果之后），然后**整套对象重开**（新的存储、
+    在一项做到一半时取消（同步到的版本记下之前、先验问了一个后果之后），然后**整套对象重开**（新的存储、
     新的队列，没有任何内存状态），做到没有欠账——盘面与不中断的逐字节相同。
 
     撤回即失败：队列重起后只做内存里记的欠账，重开的那一个什么都不做，盘面不同。
 
-    C+D 改过 ``sync`` 那一格：概念只由换代的同步词表写，队列的同步词表一项只剩"迁移牵到的重判 → 记下同步到的版本"，原来
-    切在"写完概念之后"的那一刀落不到队列里了。改成现场"换代已把概念同步好、词表另记着一条迁移"
-    （``test_model_queue.site_and_scene``），切在"重判做完、同步到的版本还没记"那一刻。"""
+    ``sync`` 那一格：概念只由换代的同步词表写，队列的同步词表一项只剩"记下同步到的版本"。现场是"换代已把概念同步好、词表
+    另记着一条迁移"（``test_model_queue.site_and_scene``），切在"同步到的版本还没记"那一刻。"""
 
     if killed_in == SYNC:
         from tests.unit.runtime.test_model_queue import site_and_scene
 
         def sync_site(where: Path):  # type: ignore[no-untyped-def]
             where.mkdir(parents=True)
-            site, scene, _provider = site_and_scene(where, yes=YES)
+            site, scene, _provider = site_and_scene(where)
             return site, scene
 
         site, scene = sync_site(tmp_path / "straight")
@@ -446,7 +393,7 @@ def test_a1_6_a_queue_killed_in_the_middle_of_an_item_is_resumed_from_disk(tmp_p
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(queue.drain())
         assert disk(root) != expected  # 真的停在了半路
-        reopened, _provider = nightly(root, ConceptHitStore(root / "scene"), site, yes=YES, catalog=scene.catalog)
+        reopened, _provider = nightly(root, ConceptHitStore(root / "scene"), site, catalog=scene.syncing.catalog)
         report = asyncio.run(queue_on(root, reopened, site).drain())
         assert report.clear and (SYNC, DONE) in done(report)
         assert disk(root) == expected
@@ -457,23 +404,7 @@ def test_a1_6_a_queue_killed_in_the_middle_of_an_item_is_resumed_from_disk(tmp_p
     root = tmp_path / "killed"
     site, scene, provider, advisor = fresh(root, advice=True)
     queue = queue_on(root, scene, site)
-    if killed_in == MAPPING:
-        real_write = scene.hits.write
-
-        def cut_write(record):  # type: ignore[no-untyped-def]
-            real_write(record)
-            raise asyncio.CancelledError
-
-        scene.hits.write = cut_write  # type: ignore[method-assign]
-    else:
-        store = scene.advice.store  # type: ignore[union-attr]
-        real_prior = store.write_prior
-
-        def cut_prior(*args, **kwargs):  # type: ignore[no-untyped-def]
-            real_prior(*args, **kwargs)
-            raise asyncio.CancelledError
-
-        store.write_prior = cut_prior  # type: ignore[method-assign]
+    cut_store(scene)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(queue.drain())
     assert disk(root) != expected  # 真的停在了半路
@@ -487,47 +418,54 @@ def test_a1_6_a_queue_killed_in_the_middle_of_an_item_is_resumed_from_disk(tmp_p
 # ── A1-7：一次模型调用没答成 / 超时 ─────────────────────────────────────
 
 
+def cut_store(scene) -> None:  # type: ignore[no-untyped-def]
+    """先验写下一份缓存之后取消（两种问法都切）：一项做到一半的那一刻。"""
+
+    store = scene.advice.store  # type: ignore[union-attr]
+    for name in ("write_prior", "write_prior_by_antecedent"):
+        real = getattr(store, name)
+
+        def cut(*args, _real=real, **kwargs):  # type: ignore[no-untyped-def]
+            _real(*args, **kwargs)
+            raise asyncio.CancelledError
+
+        setattr(store, name, cut)
+
+
 def test_a1_7_an_item_whose_model_call_fails_backs_off_on_the_ledger_and_the_queue_moves_on(tmp_path) -> None:
-    """A1-7 的前半（"这一项按重试账退避；队列接着做下一项"）：映射里模型这一次没答成（答复不合格，不是整个调不通）——这一天
-    不盖章、记进队列的重试账，队列不停，后面的类照做；退避期内这一项不重排，项还在（欠账数不为 0）；退避过了、模型
-    好了，这一项补上，盘面与没出过事的相同（除完成章上的时刻）。
+    """A1-7 的前半（"这一项按重试账退避；队列接着做下一项"）：先验补问里模型这一次没答成（答复不合格，不是整个调不通）——
+    这一项记进队列的重试账、不整体退避；退避期内这一项不重排，项还在（欠账数不为 0）；退避过了、模型好了，这一项补上。
 
-    撤回即失败：一项没做成就把它当成"做完"放过，``owed[MAPPING]`` 归零、退避过后不补。
-
-    C+D 改过：补问排到了映射前面（今天这一代之后做，先后见 ``model_queue_state.CATEGORIES``），映射是一轮里最后一类，
-    "后面的类照做"在这里看不出来，改成"同一趟里别的项照做"；"一项没做成不挡后面的类"由 H3 与复验 A 两条守（出错重试是
-    第一类）。"""
+    撤回即失败：一项没做成就把它当成"做完"放过，``owed[ADVICE]`` 归零、退避过后不补。"""
 
     clock = [NOW]
-    site, scene, provider, advisor = fresh(tmp_path, advice=True)
-    good = provider.complete_async
+    site, scene, _provider, advisor = fresh(tmp_path, advice=True)
+    good = advisor.complete_async
     broken = [True]
 
     async def answer(request):  # type: ignore[no-untyped-def]
         if broken[0]:
-            provider.calls += 1
-            return ModelResponse(content="not json", model=provider.model, provider="fake", finish_reason="stop")
+            advisor.calls += 1
+            return ModelResponse(content="not json", model=advisor.model, provider="fake", finish_reason="stop")
         return await good(request)
 
-    provider.complete_async = answer
-    # 收口删了离线一次做完那条路与它的按天映射重试账（``scene-mapper``）：退避走队列自己那本（``queue_on`` 的钟跟着这条测试走）
+    advisor.complete_async = answer
     queue = queue_on(tmp_path, scene, site, clock=lambda: clock[0])
     report = asyncio.run(queue.drain())
-    assert (MAPPING, UNFINISHED) in done(report)
-    assert (ADVICE, DONE) in done(report) and (MAPPING, DONE) in done(report)  # 同一趟里别的项照做
-    assert not mapped(scene, TONIGHT) and report.owed[MAPPING] == 1 and not report.clear
+    assert (ADVICE, UNFINISHED) in done(report)
+    assert report.owed[ADVICE] >= 1 and not report.clear
     assert not queue.state.down()  # 一次没答成不是整个调不通：不整体退避
-    asked = provider.calls
+    asked = advisor.calls
     broken[0] = False
     again = asyncio.run(queue.drain())
-    assert provider.calls == asked and again.owed[MAPPING] == 1  # 退避期内不重问，项还在
+    assert advisor.calls == asked and again.owed[ADVICE] >= 1  # 退避期内不重问，项还在
     clock[0] = NOW + timedelta(hours=2)
     final = asyncio.run(queue.drain())
-    assert (MAPPING, DONE) in done(final) and final.clear and mapped(scene, TONIGHT)
+    assert (ADVICE, DONE) in done(final) and final.clear
 
 
-def timing_out_mapper(tmp_path):  # type: ignore[no-untyped-def]
-    """映射的模型调用一律超时（``TimeoutError``），走真的 ``ChatClient`` 与真的 ``ModelCallTracer``；别的触点照答。"""
+def timing_out_advisor(tmp_path):  # type: ignore[no-untyped-def]
+    """先验的模型调用一律超时（``TimeoutError``），走真的 ``ChatClient`` 与真的 ``ModelCallTracer``。"""
 
     from habitus.model_client import ChatClient
     from habitus.model_client.structured import StructuredChatClient
@@ -537,62 +475,45 @@ def timing_out_mapper(tmp_path):  # type: ignore[no-untyped-def]
     site, scene, provider, advisor = fresh(tmp_path, advice=True)
 
     async def timing_out(request):  # type: ignore[no-untyped-def]
-        provider.calls += 1
+        advisor.calls += 1
         raise TimeoutError("read timed out")
 
-    provider.complete_async = timing_out
-    client = StructuredChatClient(
-        ChatClient(model_config(), provider, observer=ModelCallTracer()), validation_retries=1
-    )
-    mapper_for = scene.mapper_for
-
-    def traced(concepts):  # type: ignore[no-untyped-def]
-        mapper = mapper_for(concepts)
-        mapper.client = client
-        return mapper
-
-    scene.mapper_for = traced  # type: ignore[method-assign]
+    advisor.complete_async = timing_out
+    client = StructuredChatClient(ChatClient(model_config(), advisor, observer=ModelCallTracer()), validation_retries=1)
+    scene.advice.prior.client = client  # type: ignore[union-attr]
     traces = TraceFiles(tmp_path / "scene" / "generation" / "traces", artifact_root=tmp_path / "scene")
     return site, scene, provider, advisor, traces
 
 
 def test_a1_7_a_timed_out_model_call_backs_off_only_its_item_and_the_queue_moves_on(tmp_path) -> None:
-    """A1-7 / G2（"一次模型调用超时：这一项退避；队列接着做下一项"；方案第 4 节"一条卡住不挡后面的"）：映射的调用一直
-    超时——这一项在进程里退避（模型调用失败不记落盘的重试账、不会被放弃），队列不进整体退避，后面的先验补问照做；退避期内
-    再 ``drain`` 不重问。没有探针（通用规则：只看连着几项没成）。
+    """A1-7 / G2（"一次模型调用超时：这一项退避；队列接着做下一项"）：先验的调用一直超时——这一项在进程里退避（模型调用失败
+    不记落盘的重试账、不会被放弃），队列不进整体退避；退避期内再 ``drain`` 不重问。没有探针（通用规则：只看连着几项没成）。
 
-    撤回即失败：一项报调不通就整体退避，``state.down()`` 为真、``backing_off_until`` 不是 None。
+    撤回即失败：一项报调不通就整体退避，``state.down()`` 为真、``backing_off_until`` 不是 None。"""
 
-    C+D 改过：补问排到了映射前面，原来"映射之后的补问照做"的先后断言改成"同一趟里补问、另一条记录的映射照做"。"""
-
-    site, scene, provider, advisor, traces = timing_out_mapper(tmp_path)
+    site, scene, _provider, advisor, traces = timing_out_advisor(tmp_path)
     queue = queue_on(tmp_path, scene, site, traces=traces)
     report = asyncio.run(queue.drain())
-    assert provider.calls >= 1
+    assert advisor.calls >= 1
     assert not queue.state.down() and report.backing_off_until is None
-    assert (MAPPING, UNREACHABLE) in done(report)
-    assert (ADVICE, DONE) in done(report) and (MAPPING, DONE) in done(report) and advisor.calls > 0
-    assert report.owed[MAPPING] == 1 and not mapped(scene, TONIGHT)  # 项没丢
+    assert (ADVICE, UNREACHABLE) in done(report)
+    assert report.owed[ADVICE] >= 1  # 项没丢
     assert queue.retries.size() == 0  # 模型失败不进落盘的重试账
-    asked = provider.calls
+    asked = advisor.calls
     again = asyncio.run(queue.drain())
-    assert provider.calls == asked and again.owed[MAPPING] == 1 and not queue.state.down()  # 退避期内不重问
+    assert advisor.calls == asked and again.owed[ADVICE] >= 1 and not queue.state.down()  # 退避期内不重问
 
 
 def test_a1_7_a_timed_out_model_call_is_counted_on_the_trace(tmp_path) -> None:
     """A1-7 的后半 / G3：队列一项里模型调用超时，这一项的 ``model_queue.item`` span 上没成的调用数（``model_calls_failed``，
-    不分错误种类）至少是 1；没有失败调用的项上没有这个属性。"""
+    不分错误种类）至少是 1。"""
 
-    site, scene, provider, _advisor, traces = timing_out_mapper(tmp_path)
+    site, scene, _provider, advisor, traces = timing_out_advisor(tmp_path)
     asyncio.run(queue_on(tmp_path, scene, site, traces=traces).drain())
-    assert provider.calls >= 1
+    assert advisor.calls >= 1
     lines = [json.loads(line) for line in traces.path(TODAY).read_text(encoding="utf-8").splitlines()]
-    items = [line for line in lines if line["name"] == "model_queue.item" and line["attributes"]["category"] == MAPPING]
+    items = [line for line in lines if line["name"] == "model_queue.item" and line["attributes"]["category"] == ADVICE]
     assert items and sum(int(line["attributes"].get("model_calls_failed", 0)) for line in items) >= 1
-    others = [
-        line for line in lines if line["name"] == "model_queue.item" and line["attributes"]["category"] != MAPPING
-    ]
-    assert all("model_calls_failed" not in line["attributes"] for line in others)
 
 
 # ── A1-8：模型整个调不通 ────────────────────────────────────────────────
@@ -619,8 +540,7 @@ def test_a1_8_an_unreachable_model_backs_the_whole_queue_off_and_nothing_is_lost
 
     撤回即失败：模型整个调不通时不整体退避（当成普通的一项失败接着做），"退避期内不碰模型"与"这一趟后面的项不再试"变红。
 
-    C+D 改过：补问排到了映射前面，一轮里头一项是先验。断的是同一个模型：映射与先验的替身都断（原来只断映射的那一个，
-    头一项是映射）；"后面的项不再试"看映射一项都没试、映射的替身一次没被调。"""
+    一轮里头一项是先验（队列里会调模型的只有它）。"""
 
     expected = masked(straight(tmp_path / "straight", advice=True))
 
@@ -652,21 +572,20 @@ def test_a1_8_an_unreachable_model_backs_the_whole_queue_off_and_nothing_is_lost
     )
     first = asyncio.run(queue.drain())
     assert done(first) == [(ADVICE, UNREACHABLE)] and queue.state.down()
-    assert provider.calls == 0  # 后面的项（映射）不再试
     assert first.backing_off_until == NOW + timedelta(seconds=60)
-    assert first.owed[MAPPING] >= 1 and not first.clear and not mapped(scene, TONIGHT)
+    assert first.owed[ADVICE] >= 1 and not first.clear
     asked, asked_advice = provider.calls, advisor.calls
 
     clock[0] = NOW + timedelta(seconds=30)
     during = asyncio.run(queue.drain())
     assert during.done == () and provider.calls == asked and advisor.calls == asked_advice  # 退避期内一次都不碰模型
-    assert during.backing_off_until == NOW + timedelta(seconds=60) and during.owed[MAPPING] >= 1
+    assert during.backing_off_until == NOW + timedelta(seconds=60) and during.owed[ADVICE] >= 1
 
     clock[0] = NOW + timedelta(seconds=61)
     second = asyncio.run(queue.drain())
     assert done(second) == [(ADVICE, UNREACHABLE)] and advisor.calls > asked_advice  # 到点接着做：头一项又失败
     assert second.backing_off_until == clock[0] + timedelta(seconds=100)  # 加倍（120）被封顶压到 100
-    assert queue.state.failures == 2 and queue.state.backoffs == 2 and second.owed[MAPPING] >= 1
+    assert queue.state.failures == 2 and queue.state.backoffs == 2 and second.owed[ADVICE] >= 1
     names = [name for name, _detail in health_module.queue_problems(queue.state, queue.settings, clock[0])]
     assert "model_queue_backoff" in names
 
@@ -686,7 +605,7 @@ def test_a1_9_a_generation_during_the_backoff_writes_no_relation_table_and_uses_
     第二天这一代照样 complete，但不写这一代的关系表，机会表用上一代的那一晚，``relations_previous`` 计 1。退避状态是真的队列
     自己跑出来的（不是手填的布尔值）：靠"连着几项模型调用失败"进整体退避，这里配成 1 项（线上默认 3）。"""
 
-    site, scene, provider, _advisor = fresh(tmp_path)
+    site, scene, _provider, advisor = fresh(tmp_path, advice=True)
     clock = [NOW]
     queue = queue_on(
         tmp_path,
@@ -720,15 +639,16 @@ def test_a1_9_a_generation_during_the_backoff_writes_no_relation_table_and_uses_
     assert first.complete and scene.relations.nights("session") == (TODAY,)
     assert first.fallbacks[FALLBACK_RELATIONS] == 0
 
-    # 第二天：又封口一天的记录，模型整个调不通
+    # 第二天：又封口一天的记录、词表长出一个新类（先验有新题要问），模型整个调不通
     tomorrow = TODAY + timedelta(days=1)
     publish_tonight(site, day=TODAY)
+    scene.syncing.catalog.active[kind_id("午饭")] = ("午饭", "中午坐下吃一顿")
     clock[0] = NOW + timedelta(days=1)
 
     async def unreachable(request):  # type: ignore[no-untyped-def]
         raise ModelTransportError("connection refused")
 
-    provider.complete_async = unreachable
+    advisor.complete_async = unreachable
     report = asyncio.run(queue.drain())
     assert queue.state.down() and not report.clear
     second = generate(generation())
@@ -740,9 +660,9 @@ def test_a1_9_a_generation_during_the_backoff_writes_no_relation_table_and_uses_
     step = second.step(SCENE)
     assert step is not None and step.outcome == DEGRADED and "模型调不通" in str(step.report["relations_held"])
     assert second.step(OPPORTUNITIES).outcome == STEP_DONE and second.step(MARK).outcome == STEP_DONE  # type: ignore[union-attr]
-    assert second.fallbacks[FALLBACK_UNMAPPED] == 2  # 昨天那两条没映射：换代自己数得出来
-    # H2：整体退避让这一轮中途返回，排在后面的类也从盘上认过——换代报告记下的欠账是全的
-    assert second.queue_owed is not None and second.queue_owed[MAPPING] >= 1
+    assert second.fallbacks[FALLBACK_UNSTAMPED] == 0  # 昨天那两条封口时直接生成了命中记录
+    # 换代报告记下换代那一刻队列欠着的
+    assert second.queue_owed is not None and second.queue_owed[ADVICE] >= 1
 
 
 # ── A1-10：重试堆里有今天的可重试项 ─────────────────────────────────────
@@ -770,7 +690,7 @@ def test_a1_10_todays_retryable_item_is_tried_the_same_day_kept_while_the_model_
         tmp_path / "recovered", scene, site, retry=stage, sealed=lambda: None
     )  # 还没到能做已封口的活的时候
     report = asyncio.run(queue.drain())
-    assert others(report) == [(RETRY, DONE)] and chains.attempted == [item.item_id]
+    assert done(report) == [(RETRY, DONE)] and chains.attempted == [item.item_id]
     assert backlog.count() == 0 and backlog.through() is None  # 就近试不推"重试到哪一天"
 
     # 模型用不了的那一次：项还在
@@ -782,7 +702,7 @@ def test_a1_10_todays_retryable_item_is_tried_the_same_day_kept_while_the_model_
     clock = [NOW]
     queue = queue_on(tmp_path / "down", scene, site, retry=stage, clock=lambda: clock[0], sealed=lambda: None)
     report = asyncio.run(queue.drain())
-    assert others(report) == [(RETRY, UNREACHABLE)] and not queue.state.down()
+    assert done(report) == [(RETRY, UNREACHABLE)] and not queue.state.down()
     assert asyncio.run(queue.drain()).done == ()  # 这一项在等：不每一趟都重问
     assert backlog.count() == 1 and report.owed[RETRY] == 1 and chains.abandoned == []
     tried = len(chains.attempted)
@@ -920,7 +840,7 @@ def test_a_corrupt_retry_item_neither_stalls_the_queue_nor_vanishes_uncounted(tm
     backlog.put(bad)
     backlog._path(bad.item_id).write_bytes(b"{not json")
     report = asyncio.run(queue_on(tmp_path / "mixed", scene, site, retry=stage, sealed=lambda: None).drain())
-    assert others(report) == [(RETRY, DONE)] and chains.attempted == [good.item_id] and backlog.count() == 0
+    assert done(report) == [(RETRY, DONE)] and chains.attempted == [good.item_id] and backlog.count() == 0
     closed = stage.close(through=TODAY)
     assert (closed.recovered, closed.deterministic) == (1, 1)  # 坏的那一项计进了那天的报告
 
@@ -932,42 +852,38 @@ def test_a_corrupt_retry_item_neither_stalls_the_queue_nor_vanishes_uncounted(tm
     backlog._path(bad.item_id).write_bytes(b"{not json")
     queue = queue_on(tmp_path / "alone", scene, site, retry=stage)
     report = asyncio.run(queue.drain())
-    assert report.clear and RETRY not in [category for category, _outcome in done(report)]  # 不卡队列，后面的类照做
-    assert (MAPPING, DONE) in done(report) and chains.attempted == []
+    assert report.clear and RETRY not in [category for category, _outcome in done(report)]  # 不卡队列
+    assert chains.attempted == []
     closed = stage.close(through=TODAY)
     assert closed.deterministic == 1 and backlog.count() == 0
 
 
-def test_hits_stamped_under_another_mapper_version_are_recognised_and_mapped_again(tmp_path) -> None:
-    """命中文件的口径不是现在的口径（换过提示词 / 模型之后盘上留着的旧命中与旧完成章）：队列从盘上认出这一天还欠着、
-    重新映射，盘面回到与一直用现在的口径做出来的相同——不拿旧口径的命中当现成的。"""
+def test_hits_stamped_under_another_version_are_recognised_and_resealed(tmp_path) -> None:
+    """命中文件的口径不是现在的口径（换过生成规则之后盘上留着的旧命中与旧完成章）：封口从完成章的摘要认出这一天还欠着、
+    重新生成，盘面回到与一直用现在的口径做出来的相同（除完成章上的盖章时刻）——不拿旧口径的命中当现成的。"""
 
     from dataclasses import replace
 
     site, scene, _provider, _advisor = fresh(tmp_path / "straight")
-    assert asyncio.run(queue_on(tmp_path / "straight", scene, site).drain()).clear
-    seal(scene)  # 映射按槽之后章由换代封口时盖：两边都封口再比
-    expected = disk(tmp_path / "straight")
+    seal(scene)
+    expected = masked(disk(tmp_path / "straight"))
     root = tmp_path / "stale"
-    site, scene, provider, _advisor = fresh(root)
-    assert asyncio.run(queue_on(root, scene, site).drain()).clear
+    site, scene, _provider, _advisor = fresh(root)
     seal(scene)
     marker = scene.hits.read_marker(TONIGHT)
     assert marker is not None
-    old = "scene_concept_mapper_prompt_v0+old"
+    old = "scene_hits_v0"
     for record in scene.hits.read_day(TONIGHT):
-        scene.hits.write(replace(record, mapper=old))
-    scene.hits.complete_day(TONIGHT, records=marker.records, completed_at=marker.completed_at, mapper=old)
+        scene.hits.write(replace(record, hits_version=old))
+    scene.hits.complete_day(
+        TONIGHT, records=marker.records, completed_at=marker.completed_at, hits_version=old, digest="old"
+    )
     assert disk(root) != expected
 
-    reopened, provider, _advisor = scene_on(root, site)
-    queue = queue_on(root, reopened, site)
-    report = asyncio.run(queue.drain())
-    assert (MAPPING, DONE) in done(report) and report.clear and provider.calls > 0
-    assert reopened.hits.read_marker(TONIGHT) is None  # 重判过的那一天旧章撤了
+    reopened, _provider, _advisor = scene_on(root, site)
     seal(reopened)
-    assert reopened.hits.read_marker(TONIGHT).mapper == marker.mapper  # type: ignore[union-attr]
-    assert disk(root) == expected
+    assert reopened.hits.read_marker(TONIGHT).digest == marker.digest  # type: ignore[union-attr]
+    assert masked(disk(root)) == expected
 
 
 def test_a_prior_cache_that_is_not_canonical_json_fails_loudly_and_is_never_used(tmp_path) -> None:
@@ -980,7 +896,7 @@ def test_a_prior_cache_that_is_not_canonical_json_fails_loudly_and_is_never_used
     root = tmp_path
     site, scene, _provider, advisor = fresh(root, advice=True)
     assert asyncio.run(queue_on(root, scene, site).drain()).clear
-    victim = sorted((root / "scene" / "advice" / "priors").glob("*.json"))[0]
+    victim = sorted((root / "scene" / "advice").glob("priors*/*.json"))[0]
     canonical = victim.read_bytes()
     victim.write_text(json.dumps(json.loads(canonical), indent=2), encoding="utf-8")  # 合法 JSON，但不是规范形式
     tampered = victim.read_bytes()
@@ -1000,9 +916,9 @@ def test_a_prior_cache_that_is_not_canonical_json_fails_loudly_and_is_never_used
     assert asyncio.run(queue.drain()).clear
 
 
-def test_two_queues_on_one_root_draining_together_map_each_record_once(tmp_path) -> None:
+def test_two_queues_on_one_root_draining_together_ask_each_question_once(tmp_path) -> None:
     """两个 ``ModelQueue`` 挂同一个根、同时 ``drain``（各有各的存储对象与替身模型，共用一把队列租约）：只有一个在做，另一个
-    这一趟什么都不做、也不说"没有欠账"；同一条记录只被映射一次、同一个后果只被问一次，盘面与单个队列做出来的相同。"""
+    这一趟什么都不做、也不说"没有欠账"；同一道先验题只被问一次，盘面与单个队列做出来的相同。"""
 
     expected = straight(tmp_path / "straight", advice=True)
     root = tmp_path / "shared"
@@ -1043,80 +959,27 @@ def test_an_item_cancelled_halfway_is_picked_up_again_by_the_same_queue(tmp_path
     root = tmp_path / "cancelled"
     site, scene, _provider, _advisor = fresh(root, advice=True)
     queue = queue_on(root, scene, site)
-    real_write = scene.hits.write
+    store = scene.advice.store  # type: ignore[union-attr]
     armed = [True]
+    for name in ("write_prior", "write_prior_by_antecedent"):
+        real = getattr(store, name)
 
-    def cut(record):  # type: ignore[no-untyped-def]
-        real_write(record)
-        if armed[0]:
-            armed[0] = False
-            raise asyncio.CancelledError
+        def cut(*args, _real=real, **kwargs):  # type: ignore[no-untyped-def]
+            _real(*args, **kwargs)
+            if armed[0]:
+                armed[0] = False
+                raise asyncio.CancelledError
 
-    scene.hits.write = cut  # type: ignore[method-assign]
+        setattr(store, name, cut)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(queue.drain())
     report = asyncio.run(queue.drain())
     assert not report.held_elsewhere and report.clear
-    assert all(outcome == DONE for _category, outcome in done(report)) and (MAPPING, DONE) in done(report)
+    assert all(outcome == DONE for _category, outcome in done(report)) and (ADVICE, DONE) in done(report)
     assert disk(root) == expected
 
 
 # ── 修复轮（04-修复清单-A1）G1、G4、G5、G6、G7 ───────────────────────────
-
-
-def test_g1_a_vocabulary_job_stuck_on_the_model_does_not_hold_todays_generation(tmp_path) -> None:
-    """G1（方案"模型多慢都不影响今天这一代"）：队列的词表一项等模型时整段持着 sweep 锁（真的 ``BehaviorReductionRunner``、
-    真的锁）。这时换代看一眼：没有没做完的词表迁移，换代不去拿这把锁——这一代 complete，完成标记、日子预期都写出。有没做完
-    的迁移时照旧：续做迁移要这把锁，拿不到是还没准备好，这一眼到此为止。
-
-    撤回即失败：续做迁移那一步不管有没有迁移都去拿 sweep 锁，第一段的 ``held`` 是 ``migrate``、不 complete。"""
-
-    from habitus.behavior.reduction.kinds_jobs import JobsOutcome
-    from habitus.runtime.model_queue import VocabularyBranch
-    from tests.unit.behavior.test_reduction_runner import Harness
-
-    site, scene, _provider, _advisor = fresh(tmp_path / "scene_side")
-    harness = Harness(tmp_path / "behavior_side")
-    migrating = [False]
-
-    async def scenario():  # type: ignore[no-untyped-def]
-        entered, release = asyncio.Event(), asyncio.Event()
-        due = [True]
-
-        async def nightly(now, *, night, checkpoint):  # type: ignore[no-untyped-def]
-            entered.set()
-            await release.wait()  # 词表整理活里那一次模型调用：卡住
-            due[0] = False
-            return JobsOutcome(model_calls=1)
-
-        harness.vocabulary_jobs.nightly = nightly  # type: ignore[method-assign]
-        branch = VocabularyBranch("session", lambda _night: due[0], harness.runner.nightly_vocabulary)
-        queue = queue_on(tmp_path / "scene_side", scene, site, vocabulary_branches=(branch,))
-        draining = asyncio.create_task(queue.drain())
-        await entered.wait()
-        # 有没做完的迁移：照旧要锁
-        run, days, _built = generation_on(
-            tmp_path / "scene_side",
-            site,
-            scene,
-            migration_jobs=(harness.runner.vocabulary.resume,),
-            vocabulary=lambda: (1, migrating[0]),
-        )
-        migrating[0] = True
-        held = await run.run(TODAY)
-        migrating[0] = False
-        # 没有没做完的迁移：不拿锁，这一代写成
-        result = await run.run(TODAY)
-        stuck = not draining.done()
-        release.set()
-        report = await draining
-        return held, result, stuck, days, run, report
-
-    held, result, stuck, days, run, report = asyncio.run(scenario())
-    assert held.held == "migrate" and not held.complete
-    assert stuck  # 换代写成的时候那次模型调用还卡着
-    assert result.complete and result.held is None and run.marks.finished(TODAY) is True and days.ran == 1
-    assert done(report)[0] == ("vocabulary", DONE)
 
 
 def test_g4_what_is_owed_keeps_its_age_and_its_generations_across_midnight(tmp_path) -> None:
@@ -1182,33 +1045,22 @@ def test_g4_what_is_owed_keeps_its_age_and_its_generations_across_midnight(tmp_p
 
 
 def test_g5_a_category_whose_backlog_cannot_be_read_does_not_stop_the_ones_after_it(tmp_path) -> None:
-    """G5（"一条卡住不挡后面的"对读盘出错同样成立；出错不能静默）：词表一类认欠账时读盘抛了——这一类记失败，后面的同步词表、
-    映射、补问这一趟照做完；健康面报出哪一类、原因码；这一趟做完后 ``drain()`` 仍把那个读盘的错抛出来。坏的地方修好后，下一趟
+    """G5（"一条卡住不挡后面的"对读盘出错同样成立；出错不能静默）：未封口那一类认欠账时读盘抛了——这一类记失败，后面的补问
+    这一趟照做完；健康面报出哪一类、原因码；这一趟做完后 ``drain()`` 仍把那个读盘的错抛出来。坏的地方修好后，下一趟
     自己恢复、健康面那一项消掉。
 
-    撤回即失败：认欠账抛了就中断这一趟，后面的映射没做（今晚那天没盖章）。"""
-
-    from habitus.runtime.model_queue import VocabularyBranch
+    撤回即失败：认欠账抛了就中断这一趟，后面的补问没做。"""
 
     site, scene, _provider, advisor = fresh(tmp_path, advice=True)
     broken = [True]
-
-    def due(_night):  # type: ignore[no-untyped-def]
-        if broken[0]:
-            raise ValueError("pending pool is corrupt")
-        return False
-
-    async def never(_night):  # type: ignore[no-untyped-def]
-        raise AssertionError("not due")
-
-    queue = queue_on(tmp_path, scene, site, vocabulary_branches=(VocabularyBranch("session", due, never),))
+    queue = queue_on(tmp_path, scene, site, unsealed=FakeBridge(broken=broken))
     worker = ModelQueueWorker(queue, shutdown_timeout_seconds=1.0)
-    with pytest.raises(ValueError, match="pending pool is corrupt"):
+    with pytest.raises(ValueError, match="judgement store is corrupt"):
         asyncio.run(queue.drain())
-    assert mapped(scene, TONIGHT) and advisor.calls > 0  # 后面的类做完了
-    assert queue.state.errors == {"vocabulary": "ValueError"}
+    assert advisor.calls > 0  # 后面的类做完了
+    assert queue.state.errors == {"unsealed": "ValueError"}
     checks = {check.name: check for check in health_module._model_queue_checks(worker)}
-    assert "vocabulary: ValueError" in checks["model_queue_scan"].detail
+    assert "unsealed: ValueError" in checks["model_queue_scan"].detail
     assert checks["model_queue_scan"].status.value == "degraded" and checks["model_queue_scan"].critical is False
 
     broken[0] = False
@@ -1217,15 +1069,15 @@ def test_g5_a_category_whose_backlog_cannot_be_read_does_not_stop_the_ones_after
 
 
 def test_g5_a_corrupt_completion_marker_is_reported_per_category_and_the_earlier_ones_are_done(tmp_path) -> None:
-    """G5 用真的坏文件：一天的完成章坏了，映射与补问两类都读不了命中——各记各的失败（不是只报第一类），排在前面的同步词表
-    照做；``drain()`` 抛的是第一个读盘的错；不改写坏文件。"""
+    """G5 用真的坏文件：一天的完成章坏了，补问一类读不了命中——记下这一类的失败；``drain()`` 抛的是这个读盘的错；不改写
+    坏文件。"""
 
     from habitus.scene.occurrences.store import ConceptHitStoreError
 
     site, scene, _provider, _advisor = fresh(tmp_path, advice=True)
     marker = tmp_path / "scene" / "occurrences" / f"{TONIGHT:%Y/%m/%d}" / ".done.json"
     asyncio.run(queue_on(tmp_path, scene, site).drain())
-    seal(scene)  # 映射按槽之后章由换代封口时盖
+    seal(scene)  # 章由换代封口时盖
     good = marker.read_bytes()
     publish_tonight(site, day=TODAY)  # 第二天又封口一天，同步词表有活（新的日历取值）
     marker.write_bytes(b"{broken")
@@ -1234,7 +1086,7 @@ def test_g5_a_corrupt_completion_marker_is_reported_per_category_and_the_earlier
     queue = queue_on(tmp_path, reopened, site, clock=lambda: later, sealed=lambda: later.date())
     with pytest.raises(ConceptHitStoreError):
         asyncio.run(queue.drain())
-    assert queue.state.errors == {MAPPING: "ConceptHitStoreError", ADVICE: "ConceptHitStoreError"}
+    assert queue.state.errors == {ADVICE: "ConceptHitStoreError"}
     assert marker.read_bytes() == b"{broken"
     marker.write_bytes(good)
     assert asyncio.run(queue.drain()).clear and queue.state.errors == {}
@@ -1283,7 +1135,6 @@ def test_g6_a_written_back_item_still_waiting_for_its_reduction_defers_the_settl
     reduce = SlowReduce(first, settled, landed)
     backlog = RetryBacklogStore(tmp_path / "backlog", max_items=10)
     stage = RetryStage([RetryBranch("session", backlog, {RetryKind.CHAIN: chains}, reduce)])  # type: ignore[dict-item]
-    # 映射按槽之后映射不等封口：先让它做完，下面这一趟里就只有出错重试这一类有活（场景不变：项留着的时候换代来了）
     asyncio.run(queue_on(tmp_path, scene, site, sealed=lambda: None).drain())
     item = chain_item("昨天写回了的链", yesterday)
     backlog.put(item)
@@ -1362,7 +1213,7 @@ def test_g7_items_left_by_a_kill_are_tried_again_after_a_restart_not_dropped_as_
     chains = CountingChains()
     restarted = retry_stage(backlog_root, chains)
     report = asyncio.run(queue_on(tmp_path, scene, site, retry=restarted, sealed=lambda: None).drain())
-    assert others(report) == [(RETRY, DONE)] and chains.attempted == [item.item_id] and chains.abandoned == []
+    assert done(report) == [(RETRY, DONE)] and chains.attempted == [item.item_id] and chains.abandoned == []
     closed = restarted.close(through=TODAY)
     assert (closed.recovered, closed.leftover, closed.unavailable) == (1, 0, 0)
 
@@ -1372,28 +1223,39 @@ def test_g7_items_left_by_a_kill_are_tried_again_after_a_restart_not_dropped_as_
 
 def test_h2_a_round_cut_short_by_the_backoff_still_records_what_every_category_owes(tmp_path) -> None:
     """H2：整体退避让一轮中途到此为止（这里第一项模型调用失败、配成 1 项就整体退避）——排在后面的各类"还欠几项"仍从盘上认
-    一遍再记：健康面与换代报告读到映射欠着，不是上一次的旧数。（原来的触发方式是这一轮开头探针不通；探针已去掉。）"""
-
-    from habitus.runtime.model_queue import VocabularyBranch
-
-    async def failing(_night):  # type: ignore[no-untyped-def]
-        raise ModelTransportError("connection refused")
+    一遍再记：健康面与换代报告读到的不是上一次的旧数。（原来的触发方式是这一轮开头探针不通；探针已去掉。）"""
 
     site, scene, _provider, _advisor = fresh(tmp_path, advice=True)
     queue = queue_on(
         tmp_path,
         scene,
         site,
-        vocabulary_branches=(VocabularyBranch("session", lambda _night: True, failing),),
+        unsealed=FakeBridge(failure=ModelTransportError("connection refused")),
         settings=QueueSettings(unreachable_after_failures=1),
     )
     report = asyncio.run(queue.drain())
-    assert done(report) == [("vocabulary", UNREACHABLE)] and queue.state.down()
-    assert report.owed[MAPPING] == 2  # 映射按条数：两条记录
-    # C+D 改过：补问排在词表之后（长新类 → 写概念 → 先验 → 候选条件），词表还欠着时它不看、不算欠（材料还没定）；同步词表的
-    # 概念只由换代写，这份现场换代之前队列不欠它。原来这里断言 sync == 1、advice >= 1
-    assert report.owed[SYNC] == 0 and report.owed[ADVICE] == 0
-    assert not mapped(scene, TONIGHT)  # 只认、不做
+    assert done(report) == [("unsealed", UNREACHABLE)] and queue.state.down()
+    # 排在后面的两类这一轮没做，"还欠几项"照样从盘上认过、记下了
+    assert SYNC in report.owed and ADVICE in report.owed
+
+
+class FakeBridge:
+    """未封口那座桥的替身：``broken`` 为真时认欠账读盘抛错；``failure`` 给了就一项欠着、做的时候模型调用失败。"""
+
+    unavailable = None
+
+    def __init__(self, *, broken: list[bool] | None = None, failure: BaseException | None = None) -> None:
+        self.broken = broken if broken is not None else [False]
+        self.failure = failure
+
+    def unclassified(self) -> int:
+        if self.broken[0]:
+            raise ValueError("judgement store is corrupt")
+        return 0 if self.failure is None else 1
+
+    async def prepare(self, *, until):  # type: ignore[no-untyped-def]
+        assert self.failure is not None
+        raise self.failure
 
 
 class PerItemChains(CountingChains):
@@ -1412,9 +1274,9 @@ def test_h3_a_retry_item_stuck_on_timeouts_is_kept_and_does_not_stop_the_others_
     tmp_path,
 ) -> None:
     """H3：出错重试里一项一直卡在"模型用不了"上（不分起因）——这一项留在堆里、不算试过、在进程里退避（不进落盘的重试账）；
-    同一趟里映射、补问照做，堆里别的项也照试；退避期内不重问那一项。
+    同一趟里补问照做，堆里别的项也照试；退避期内不重问那一项。
 
-    撤回即失败：出错重试一报"模型用不了"就整体退避，映射这一趟做不到。"""
+    撤回即失败：出错重试一报"模型用不了"就整体退避，补问这一趟做不到。"""
 
     site, scene, _provider, advisor = fresh(tmp_path / "timeout", advice=True)
     chains = PerItemChains({"一直超时的链": Attempt.UNAVAILABLE, "好的链": Attempt.RESTORED})
@@ -1427,8 +1289,8 @@ def test_h3_a_retry_item_stuck_on_timeouts_is_kept_and_does_not_stop_the_others_
     queue = queue_on(tmp_path / "timeout", scene, site, retry=stage, clock=lambda: clock[0])
     report = asyncio.run(queue.drain())
     assert not queue.state.down() and report.backing_off_until is None
-    assert (RETRY, UNREACHABLE) in done(report) and (MAPPING, DONE) in done(report) and (ADVICE, DONE) in done(report)
-    assert mapped(scene, TONIGHT) and advisor.calls > 0  # 后面的类这一趟照做
+    assert (RETRY, UNREACHABLE) in done(report) and (ADVICE, DONE) in done(report)
+    assert advisor.calls > 0  # 后面的类这一趟照做
     assert good.item_id in chains.attempted and not backlog._path(good.item_id).exists()  # 别的项照试、补回了
     names = [path.name for path in backlog.directory.iterdir() if path.name.startswith(stuck.item_id)]
     assert names and backlog.count() == 1 and chains.abandoned == []  # 卡住的那一项留在堆里
@@ -1448,10 +1310,10 @@ def test_h3_a_retry_item_stuck_on_timeouts_is_kept_and_does_not_stop_the_others_
 
 def test_a_classification_timeout_swallowed_by_the_reduction_does_not_back_the_whole_queue_off(tmp_path) -> None:
     """复验 A：出错重试里放回的链，归约给它归类时超时——归约不抛，只在报告里记"模型用不了"。按一次模型调用失败算：
-    只卡住的那一项在进程里退避，队列不进整体退避；140 分钟里一趟一趟来，映射与补问第一趟就做完，那一项一直留在堆里、
+    只卡住的那一项在进程里退避，队列不进整体退避；140 分钟里一趟一趟来，补问第一趟就做完，那一项一直留在堆里、
     没有被放弃。
 
-    撤回即失败：归约报出的"模型用不了"直接让队列整体退避，映射与补问一项都做不到。"""
+    撤回即失败：归约报出的"模型用不了"直接让队列整体退避，补问一项都做不到。"""
 
     from types import SimpleNamespace
 
@@ -1476,13 +1338,12 @@ def test_a_classification_timeout_swallowed_by_the_reduction_does_not_back_the_w
     queue = queue_on(tmp_path, scene, site, retry=stage, clock=lambda: clock[0])
     first = asyncio.run(queue.drain())
     assert (RETRY, UNREACHABLE) in done(first) and not queue.state.down() and first.backing_off_until is None
-    assert (MAPPING, DONE) in done(first) and (ADVICE, DONE) in done(first)  # 后面的类第一趟就做了
-    assert mapped(scene, TONIGHT) and advisor.calls > 0
+    assert (ADVICE, DONE) in done(first) and advisor.calls > 0  # 后面的类第一趟就做了
     for minutes in range(10, 141, 10):
         clock[0] = NOW + timedelta(minutes=minutes)
         report = asyncio.run(queue.drain())
         assert not queue.state.down() and report.backing_off_until is None, minutes
-        assert report.owed[RETRY] == 1 and report.owed[MAPPING] == 0 and report.owed[ADVICE] == 0, minutes
+        assert report.owed[RETRY] == 1 and report.owed[ADVICE] == 0, minutes
     assert backlog.count() == 1 and chains.abandoned == [] and queue.retries.size() == 0  # 留着，没有被放弃
     assert 1 < len(reductions) < 14  # 退避逐次加倍：不是每一趟都重问
 
@@ -1490,10 +1351,10 @@ def test_a_classification_timeout_swallowed_by_the_reduction_does_not_back_the_w
 @pytest.mark.parametrize("kind", ["transport", "quota"])
 def test_twenty_minutes_of_failing_calls_give_nothing_up_and_everything_is_done_afterwards(tmp_path, kind: str) -> None:
     """复验 B，按那一条通用规则：所有模型调用都失败（不分错误种类——429 / 503 那一类与额度那一类各跑一遍）持续二十分钟，
-    每分钟看一次——没有一项被记到放弃（两本重试账都是空的），连着几项没成之后队列整体退避（不逐条去撞），恢复后那一天的
-    映射与那一晚的补问都做完，盘面与没出过事的相同。
+    每分钟看一次——没有一项被记到放弃（重试账是空的），连着几项没成之后队列整体退避（不逐条去撞），恢复后那一晚的补问
+    做完，盘面与没出过事的相同。
 
-    撤回即失败：模型调用失败按重试账记这一项，次数用完后映射那一天与补问被放弃，恢复后不补。"""
+    撤回即失败：模型调用失败按重试账记这一项，次数用完后补问被放弃，恢复后不补。"""
 
     from habitus.model_client import ModelQuotaError
 
@@ -1503,15 +1364,9 @@ def test_twenty_minutes_of_failing_calls_give_nothing_up_and_everything_is_done_
     expected = masked(straight(tmp_path / "straight", advice=True))
     root = tmp_path / "failing"
     clock = [NOW]
-    site, scene, provider, advisor = fresh(root, advice=True)
-    good_map, good_advice = provider.complete_async, advisor.complete_async
+    site, scene, _provider, advisor = fresh(root, advice=True)
+    good_advice = advisor.complete_async
     out = [True]
-
-    async def map_answer(request):  # type: ignore[no-untyped-def]
-        if out[0]:
-            provider.calls += 1
-            raise failure()
-        return await good_map(request)
 
     async def advice_answer(request):  # type: ignore[no-untyped-def]
         if out[0]:
@@ -1519,8 +1374,8 @@ def test_twenty_minutes_of_failing_calls_give_nothing_up_and_everything_is_done_
             raise failure()
         return await good_advice(request)
 
-    provider.complete_async, advisor.complete_async = map_answer, advice_answer
-    queue = queue_on(root, scene, site, clock=lambda: clock[0], settings=QueueSettings(unreachable_after_failures=2))
+    advisor.complete_async = advice_answer
+    queue = queue_on(root, scene, site, clock=lambda: clock[0], settings=QueueSettings(unreachable_after_failures=1))
     backed_off = False
     tries = 0
     for minute in range(0, 21):
@@ -1528,16 +1383,15 @@ def test_twenty_minutes_of_failing_calls_give_nothing_up_and_everything_is_done_
         report = asyncio.run(queue.drain())
         tries += len(report.done)
         backed_off = backed_off or queue.state.down()
-        assert report.owed[MAPPING] == 1 and report.owed[ADVICE] >= 1 and not report.clear, minute  # 一直欠着、看得见
+        assert report.owed[ADVICE] >= 1 and not report.clear, minute  # 一直欠着、看得见
         assert queue.retries.size() == 0, minute  # 模型调用失败不进落盘的重试账
-    assert backed_off and not mapped(scene, TONIGHT)
-    # 整体退避 + 各项退避：不是每分钟每项都去撞一次。C+D 改过：原来数的是模型调用次数（< 42）；先验一项里一题要问三遍、
-    # 新旧两种问法各有题，补问又排到映射前面先撞，一次尝试的调用数变了——改数"试了几项"，这才是这条要守的
-    assert tries < 21 * 2
+    assert backed_off
+    # 整体退避 + 各项退避：不是每分钟都去撞一次（数"试了几项"）
+    assert tries < 21
 
     out[0] = False
     clock[0] = NOW + timedelta(hours=2)
     final = asyncio.run(queue.drain())
-    assert final.clear and not queue.state.down() and mapped(scene, TONIGHT)
+    assert final.clear and not queue.state.down()
     assert queue.retries.given_up() == ()
     assert masked(disk(root)) == expected

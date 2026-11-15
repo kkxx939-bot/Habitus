@@ -1,12 +1,14 @@
-"""行为类的编号与两个占位标记。
+"""词的编号与四个占位标记。
 
-编号是行为类的身份：写进树上 occurrence 的 ``kind_token``，一经分配永不改；名称、判据可以改，编号不跟着变。
+编号是词的身份：写进树上 occurrence 的 ``kind_token``，写死在初始词表的数据文件里，永不改。
 形状 ``<lane 前缀>-k<四位以上序号>``（``s-k0007`` 会话 lane、``p-k0003`` 物理 lane）——不用 ``:``，
 仓库的安全路径规则不允许它（``foundation/ids.py``）。
 
-两个占位标记不是行为类、不进清单：
-- ``<前缀>-待定``：同 lane 的在用类都归不进，进待定池，等每晚新增；
-- ``<前缀>-非事件``：不是一件事（小动作、单条命令）；它的比例是离线评价融合质量的指标（裁定 13）。
+四个占位标记不是词、不进词表（词表方案 2026-11-14）：
+- ``<前缀>-非事件``：不是一件事；落树，下游不算；
+- ``<前缀>-续话``：接着最近的某一条记录（追问、叫停、改口、补一句）；落树，下游不算，与「非事件」同一种待遇，原来那条不改；
+- ``<前缀>-表外``：是一件事，但词表里没有说它的词；下游当它是一件没有归类的事；
+- ``<前缀>-待定``：这次没问成（答复重问之后仍不合格）；待遇同「表外」，不硬归。
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from enum import Enum
 
 
 class Lane(str, Enum):
-    """数据从哪条入口进来；每个行为类只属于一条 lane（裁定 2）。"""
+    """数据从哪条入口进来；每个词只属于一条 lane（裁定 2）。"""
 
     SESSION = "session"
     PHYSICAL = "physical"
@@ -31,8 +33,10 @@ _PREFIXES = {Lane.SESSION: "s", Lane.PHYSICAL: "p"}
 _LANE_OF_PREFIX = {prefix: lane for lane, prefix in _PREFIXES.items()}
 _PENDING = "待定"
 _NOT_EVENT = "非事件"
+_CONTINUED = "续话"
+_MISSING = "表外"
 _CLASS_ID = re.compile(r"^(?P<prefix>[a-z])-k(?P<number>\d{4,})$")
-_MARKER = re.compile(rf"^(?P<prefix>[a-z])-(?P<marker>{_PENDING}|{_NOT_EVENT})$")
+_MARKER = re.compile(rf"^(?P<prefix>[a-z])-(?P<marker>{_PENDING}|{_NOT_EVENT}|{_CONTINUED}|{_MISSING})$")
 
 
 class KindIdError(ValueError):
@@ -41,7 +45,7 @@ class KindIdError(ValueError):
 
 @dataclass(frozen=True, order=True)
 class ClassId:
-    """一个行为类的编号。"""
+    """一个词的编号。"""
 
     lane: Lane
     number: int
@@ -57,7 +61,7 @@ class ClassId:
     @classmethod
     def parse(cls, text: object) -> ClassId:
         """只认规范写法：``s-k0000``（序号 0）与 ``s-k00007``（多补了 0）都不是编号——前者让下游解析时崩，
-        后者会和 ``s-k0007`` 被当成两个类（第二轮评审 P2-5）。"""
+        后者会和 ``s-k0007`` 被当成两个词（第二轮评审 P2-5）。"""
 
         match = _CLASS_ID.match(text) if isinstance(text, str) else None
         if match is None or match["prefix"] not in _LANE_OF_PREFIX:
@@ -79,14 +83,26 @@ def not_event_token(lane: Lane) -> str:
     return f"{Lane(lane).prefix}-{_NOT_EVENT}"
 
 
-def is_marker(token: object) -> bool:
-    """``kind_token`` 是不是两个占位标记之一（任一 lane）。"""
+def continued_token(lane: Lane) -> str:
+    return f"{Lane(lane).prefix}-{_CONTINUED}"
 
-    return isinstance(token, str) and _MARKER.match(token) is not None
+
+def missing_token(lane: Lane) -> str:
+    return f"{Lane(lane).prefix}-{_MISSING}"
+
+
+def is_word(token: object) -> bool:
+    """``kind_token`` 是不是一个词的编号（形状上；在不在词表里由词表判）：只有它才算归了类。"""
+
+    try:
+        ClassId.parse(token)
+    except KindIdError:
+        return False
+    return True
 
 
 def lane_of_token(token: object) -> Lane:
-    """任一合法 ``kind_token``（编号或占位标记）属于哪条 lane。"""
+    """任一合法 ``kind_token``（编号或占位标记）属于哪条 lane；别的字符串硬失败。"""
 
     if not isinstance(token, str):
         raise KindIdError(f"not a kind token: {token!r}")
@@ -100,8 +116,10 @@ __all__ = [
     "ClassId",
     "KindIdError",
     "Lane",
-    "is_marker",
+    "continued_token",
+    "is_word",
     "lane_of_token",
+    "missing_token",
     "not_event_token",
     "pending_token",
 ]

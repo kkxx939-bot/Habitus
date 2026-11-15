@@ -1,6 +1,6 @@
 """换代各步原有报告的落盘摘要：只有数、日期与固定文案，进完成标记（``runtime.generation_marks``）、每代报告文件与 span 属性。
 
-各段的报告对象（``RetryReport``、``SettlementReport``、``VocabularyJobReport``、``NightReport``、``OpportunityReport``、
+各段的报告对象（``RetryReport``、``SettlementReport``、``NightReport``、``OpportunityReport``、
 ``DayReport``）原样摊成 JSON 能存的字典，不另算什么；语义树与机会表的材料（概念集、时间线）不进摘要。
 """
 
@@ -10,7 +10,6 @@ import re
 from datetime import date
 from typing import cast
 
-from habitus.behavior.reduction import VocabularyJobReport
 from habitus.behavior.retry import RetryReport, RetryStage
 from habitus.runtime.foresight_days import DayReport
 from habitus.runtime.foresight_nightly import OpportunityReport
@@ -68,37 +67,15 @@ def settlement_summary(report: SettlementReport, *, due: int) -> dict[str, objec
     }
 
 
-def vocabulary_summary(report: object) -> dict[str, object]:
-    """一支的词表整理活；不是 ``VocabularyJobReport`` 的（测试替身）只记它是什么。"""
-
-    if not isinstance(report, VocabularyJobReport):
-        return {"report": type(report).__name__}
-    return {
-        "days": [day.isoformat() for day in report.days],
-        "model_calls": report.model_calls,
-        "pool": report.pool,
-        "created": list(report.created),
-        "revision_due": report.revision_due,
-        "split": report.split,
-        "merged": report.merged,
-        "moves": report.moves,
-        "lock_seconds": round(report.lock_seconds, 3),
-        "signals": list(report.signals[:_SIGNALS_KEPT]),
-    }
-
-
 def scene_summary(report: NightReport) -> dict[str, object]:
     return {
         "night": report.night.isoformat(),
         "concepts": report.concepts,
-        # 封口：盖了章的日子、写回了情境的记录、还不能盖章的日子与其中没映射好的记录、跟着重算情境的读者日、用时
+        # 封口：盖了章的日子、写了的命中记录、封不了的日子、用时
         "sealed_days": report.sealed_days,
         "seal_rewritten": report.seal_rewritten,
         "unsealed_days": report.unsealed_days,
-        "unsealed_records": report.unsealed_records,
-        "reader_days": report.reader_days,
         "seal_seconds": round(report.seal_seconds, 3),
-        "merged_concepts": report.merged_concepts,
         "relations": {lane: dict(sorted(counts.items())) for lane, counts in sorted(report.relations.items())},
         "transitions": report.transitions,
         "relations_held": report.relations_held or "",
@@ -183,5 +160,4 @@ __all__ = [
     "retry_summary",
     "scene_summary",
     "settlement_summary",
-    "vocabulary_summary",
 ]

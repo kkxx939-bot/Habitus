@@ -312,17 +312,16 @@ def test_behavior_kinds_fields_are_typed_and_derived_by_prefix() -> None:
     domain = {field.name for field in fields(BehaviorKindConfig)}
     exposed = {field.name.removeprefix("kinds_") for field in fields(BehaviorConfig) if field.name.startswith("kinds_")}
     assert exposed == domain  # 每个门槛都能从配置调（裁定 6），而且不多出领域里没有的字段
-    config = BehaviorConfig(kinds_batch_size=5, kinds_revision_weekday=4, kinds_max_anchor_pull=0.05)
+    config = BehaviorConfig(kinds_active_cap=5, kinds_active_min_days=3, kinds_transient_retry_delay_seconds=0.5)
     overrides = config.overrides_for("kinds_")
-    assert overrides == {"batch_size": 5, "revision_weekday": 4, "max_anchor_pull": 0.05}
-    assert BehaviorKindConfig(**overrides).batch_size == 5
+    assert overrides == {"active_cap": 5, "active_min_days": 3, "transient_retry_delay_seconds": 0.5}
+    assert BehaviorKindConfig(**overrides).active_cap == 5
     # 配置层只查类型；值域归 BehaviorKindConfig，越界的值在组装时拒（见 test_out_of_range_overrides_are_refused_at_startup）
-    assert BehaviorConfig(kinds_batch_size=0).overrides_for("kinds_") == {"batch_size": 0}
+    assert BehaviorConfig(kinds_active_cap=0).overrides_for("kinds_") == {"active_cap": 0}
     for kwargs, match in (
-        ({"kinds_batch_size": 1.5}, "kinds_batch_size must be an integer"),
-        ({"kinds_recurrence_min_count": True}, "kinds_recurrence_min_count must be an integer"),
+        ({"kinds_active_cap": 1.5}, "kinds_active_cap must be an integer"),
+        ({"kinds_pick_retries": True}, "kinds_pick_retries must be an integer"),
         ({"kinds_transient_retry_delay_seconds": "5"}, "kinds_transient_retry_delay_seconds must be a number"),
-        ({"kinds_max_anchor_pull": False}, "kinds_max_anchor_pull must be a number"),
     ):
         with pytest.raises(ValueError, match=match):
             BehaviorConfig(**kwargs)
@@ -378,7 +377,7 @@ def test_relation_thresholds_come_from_config_and_the_clock_from_temporal(tmp_pa
     assert SceneConfig.from_mapping({"relations": {"fdr": 1.0}}).relations.overrides() == {"fdr": 1.0}
     for bad, match in (
         ({"fdr": "0.1"}, "scene.relations.fdr must be a number"),
-        ({"max_blind_share": True}, "scene.relations.max_blind_share must be a number"),
+        ({"min_absolute_lift": True}, "scene.relations.min_absolute_lift must be a number"),
         ({"condition_ask_min_antecedents": 4.0}, "scene.relations.condition_ask_min_antecedents must be an integer"),
         ({"slot_minutes": 15}, "unknown"),  # 时间的数不在这一组
     ):
@@ -537,21 +536,6 @@ def test_the_generation_has_no_clock_time_only_operating_numbers() -> None:
             SceneConfig.from_mapping({retired: 1})
 
 
-def test_b_10_the_mapping_margin_is_in_the_example_and_bad_values_are_refused() -> None:
-    """映射按槽（实时化阶段 2 第三小步，B-10）：一条记录所在的槽过后再留几槽就映射是配置 ``scene.mapping_margin_slots``，
-    默认 2、可以是 0；示例 YAML 里列着；负数、越界、小数、文本、布尔都硬拒。"""
-
-    from habitus.config.scene import SceneConfig
-
-    assert SceneConfig().mapping_margin_slots == 2
-    assert SceneConfig.from_mapping({"mapping_margin_slots": 0}).mapping_margin_slots == 0
-    example = (Path(__file__).resolve().parents[3] / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8")
-    assert "#   mapping_margin_slots: 2 " in example
-    for bad in (-1, 97, 1.5, "2", True):
-        with pytest.raises(ConfigError, match="scene.mapping_margin_slots"):
-            SceneConfig.from_mapping({"mapping_margin_slots": bad})
-
-
 def test_the_model_queue_operating_numbers_are_validated_and_listed_in_the_example() -> None:
     """实时化阶段 2（A1）：模型队列的运维数（隔多久看一眼、整体退避的起点与封顶、停机等多久、欠账报出的两个阈值）住语义树
     那一段，越界、类型不对、未知字段都硬拒；示例 YAML 里逐项列出。"""
@@ -630,12 +614,16 @@ def startup_yaml(tmp_path: Path, *, behavior: dict[str, object], scene: dict[str
 @pytest.mark.parametrize(
     ("behavior", "scene", "key"),
     [
-        ({"primary_subject": "用户", "kinds_batch_size": 0}, {}, "config.behavior.kinds_batch_size"),
-        ({"primary_subject": "用户", "kinds_max_anchor_pull": 1.5}, {}, "config.behavior.kinds_max_anchor_pull"),
-        # 几项之间的约束（复现天数不超过复现条数）同样在组装时拒、点得出写了的那一项
-        ({"primary_subject": "用户", "kinds_recurrence_min_days": 5}, {}, "config.behavior.kinds_recurrence_min_days"),
+        ({"primary_subject": "用户", "kinds_active_cap": 0}, {}, "config.behavior.kinds_active_cap"),
+        (
+            {"primary_subject": "用户", "kinds_transient_retry_delay_seconds": 601.0},
+            {},
+            "config.behavior.kinds_transient_retry_delay_seconds",
+        ),
+        # 选词重问次数受结构化客户端的上限（0–5）约束：越界在组装时拒、点得出写了的那一项
+        ({"primary_subject": "用户", "kinds_pick_retries": 6}, {}, "config.behavior.kinds_pick_retries"),
         # 行为侧没开：写错的值照样在启动时拒，不被静默收下
-        ({"kinds_revision_weekday": 7}, {}, "config.behavior.kinds_revision_weekday"),
+        ({"kinds_active_min_days": 0}, {}, "config.behavior.kinds_active_min_days"),
         ({"primary_subject": "用户"}, {"enabled": True, "relations": {"fdr": 1.0}}, "config.scene.relations.fdr"),
         ({}, {"relations": {"min_relative_lift": -0.1}}, "config.scene.relations.min_relative_lift"),
         ({}, {"relations": {"max_combined_conditions": 0}}, "config.scene.relations.max_combined_conditions"),

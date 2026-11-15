@@ -1,0 +1,1790 @@
+{
+ "schema_version": "behavior_initial_words_v1",
+ "lane": "physical",
+ "words": [
+  {
+   "id": "p-k0001",
+   "level": 1,
+   "name": "睡觉",
+   "parent": null,
+   "definition": "睡眠",
+   "domain": "睡眠与起居"
+  },
+  {
+   "id": "p-k0002",
+   "level": 2,
+   "name": "小睡",
+   "parent": "p-k0001",
+   "definition": "白天短时间睡一会儿",
+   "domain": "睡眠与起居"
+  },
+  {
+   "id": "p-k0003",
+   "level": 1,
+   "name": "起床",
+   "parent": null,
+   "definition": "醒来离开床",
+   "domain": "睡眠与起居"
+  },
+  {
+   "id": "p-k0004",
+   "level": 1,
+   "name": "上床",
+   "parent": null,
+   "definition": "躺下准备入睡",
+   "domain": "睡眠与起居"
+  },
+  {
+   "id": "p-k0005",
+   "level": 1,
+   "name": "穿衣",
+   "parent": null,
+   "definition": "穿上或换一身衣服",
+   "domain": "睡眠与起居"
+  },
+  {
+   "id": "p-k0006",
+   "level": 1,
+   "name": "铺床",
+   "parent": null,
+   "definition": "整理床铺",
+   "domain": "睡眠与起居"
+  },
+  {
+   "id": "p-k0007",
+   "level": 1,
+   "name": "洗漱",
+   "parent": null,
+   "definition": "清洁口腔和脸",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0008",
+   "level": 2,
+   "name": "刷牙",
+   "parent": "p-k0007",
+   "definition": "刷牙。漱口、用牙线另算",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0009",
+   "level": 2,
+   "name": "用牙线",
+   "parent": "p-k0007",
+   "definition": "用牙线或冲牙器",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0010",
+   "level": 2,
+   "name": "漱口",
+   "parent": "p-k0007",
+   "definition": "用清水或漱口水漱口",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0011",
+   "level": 2,
+   "name": "洗脸",
+   "parent": "p-k0007",
+   "definition": "洗脸",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0012",
+   "level": 1,
+   "name": "打理头发",
+   "parent": null,
+   "definition": "洗后或出门前整理头发",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0013",
+   "level": 2,
+   "name": "吹头发",
+   "parent": "p-k0012",
+   "definition": "用吹风机吹干头发",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0014",
+   "level": 2,
+   "name": "梳头",
+   "parent": "p-k0012",
+   "definition": "梳理或扎头发",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0015",
+   "level": 1,
+   "name": "护肤",
+   "parent": null,
+   "definition": "涂护肤品、敷面膜",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0016",
+   "level": 2,
+   "name": "涂防晒",
+   "parent": "p-k0015",
+   "definition": "涂防晒霜",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0017",
+   "level": 1,
+   "name": "洗手",
+   "parent": null,
+   "definition": "洗手",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0018",
+   "level": 1,
+   "name": "洗澡",
+   "parent": null,
+   "definition": "淋浴或盆浴洗全身",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0019",
+   "level": 1,
+   "name": "洗头",
+   "parent": null,
+   "definition": "单独洗头",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0020",
+   "level": 1,
+   "name": "刮胡子",
+   "parent": null,
+   "definition": "剃须",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0021",
+   "level": 1,
+   "name": "化妆",
+   "parent": null,
+   "definition": "上妆",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0022",
+   "level": 1,
+   "name": "卸妆",
+   "parent": null,
+   "definition": "卸掉妆",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0023",
+   "level": 1,
+   "name": "剪指甲",
+   "parent": null,
+   "definition": "修剪手脚指甲",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0024",
+   "level": 1,
+   "name": "上厕所",
+   "parent": null,
+   "definition": "如厕",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0025",
+   "level": 1,
+   "name": "戴隐形",
+   "parent": null,
+   "definition": "戴上或取下隐形眼镜",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0026",
+   "level": 1,
+   "name": "泡脚",
+   "parent": null,
+   "definition": "用热水泡脚",
+   "domain": "清洁与仪容"
+  },
+  {
+   "id": "p-k0027",
+   "level": 1,
+   "name": "测体征",
+   "parent": null,
+   "definition": "用仪器量一个身体读数",
+   "domain": "健康照料"
+  },
+  {
+   "id": "p-k0028",
+   "level": 2,
+   "name": "量体温",
+   "parent": "p-k0027",
+   "definition": "测体温",
+   "domain": "健康照料"
+  },
+  {
+   "id": "p-k0029",
+   "level": 2,
+   "name": "量血压",
+   "parent": "p-k0027",
+   "definition": "测血压",
+   "domain": "健康照料"
+  },
+  {
+   "id": "p-k0030",
+   "level": 2,
+   "name": "测血糖",
+   "parent": "p-k0027",
+   "definition": "测血糖",
+   "domain": "健康照料"
+  },
+  {
+   "id": "p-k0031",
+   "level": 2,
+   "name": "称体重",
+   "parent": "p-k0027",
+   "definition": "上秤称重",
+   "domain": "健康照料"
+  },
+  {
+   "id": "p-k0032",
+   "level": 1,
+   "name": "吃药",
+   "parent": null,
+   "definition": "服用药物或保健品",
+   "domain": "健康照料"
+  },
+  {
+   "id": "p-k0033",
+   "level": 1,
+   "name": "涂药",
+   "parent": null,
+   "definition": "外用药、滴眼药、贴膏药",
+   "domain": "健康照料"
+  },
+  {
+   "id": "p-k0034",
+   "level": 1,
+   "name": "做康复",
+   "parent": null,
+   "definition": "按医嘱做的恢复性动作",
+   "domain": "健康照料"
+  },
+  {
+   "id": "p-k0035",
+   "level": 1,
+   "name": "冥想",
+   "parent": null,
+   "definition": "静坐冥想或做呼吸练习",
+   "domain": "健康照料"
+  },
+  {
+   "id": "p-k0036",
+   "level": 1,
+   "name": "喝东西",
+   "parent": null,
+   "definition": "喝任何饮品",
+   "domain": "吃喝"
+  },
+  {
+   "id": "p-k0037",
+   "level": 2,
+   "name": "喝水",
+   "parent": "p-k0036",
+   "definition": "喝白水",
+   "domain": "吃喝"
+  },
+  {
+   "id": "p-k0038",
+   "level": 2,
+   "name": "喝咖啡",
+   "parent": "p-k0036",
+   "definition": "喝咖啡",
+   "domain": "吃喝"
+  },
+  {
+   "id": "p-k0039",
+   "level": 2,
+   "name": "喝茶",
+   "parent": "p-k0036",
+   "definition": "喝茶",
+   "domain": "吃喝"
+  },
+  {
+   "id": "p-k0040",
+   "level": 2,
+   "name": "喝饮料",
+   "parent": "p-k0036",
+   "definition": "喝含糖饮料、果汁、奶",
+   "domain": "吃喝"
+  },
+  {
+   "id": "p-k0041",
+   "level": 2,
+   "name": "喝酒",
+   "parent": "p-k0036",
+   "definition": "喝含酒精的饮品",
+   "domain": "吃喝"
+  },
+  {
+   "id": "p-k0042",
+   "level": 1,
+   "name": "吃零食",
+   "parent": null,
+   "definition": "正餐以外吃小食",
+   "domain": "吃喝"
+  },
+  {
+   "id": "p-k0043",
+   "level": 2,
+   "name": "吃水果",
+   "parent": "p-k0042",
+   "definition": "吃水果",
+   "domain": "吃喝"
+  },
+  {
+   "id": "p-k0044",
+   "level": 1,
+   "name": "吃饭",
+   "parent": null,
+   "definition": "吃一顿正餐。不分早中晚",
+   "domain": "吃喝"
+  },
+  {
+   "id": "p-k0045",
+   "level": 1,
+   "name": "抽烟",
+   "parent": null,
+   "definition": "吸烟或电子烟",
+   "domain": "吃喝"
+  },
+  {
+   "id": "p-k0046",
+   "level": 1,
+   "name": "做饭",
+   "parent": null,
+   "definition": "在灶上或用电器把饭菜做熟",
+   "domain": "做饭与厨房"
+  },
+  {
+   "id": "p-k0047",
+   "level": 2,
+   "name": "备菜",
+   "parent": "p-k0046",
+   "definition": "洗、切、腌等下锅前的准备",
+   "domain": "做饭与厨房"
+  },
+  {
+   "id": "p-k0048",
+   "level": 2,
+   "name": "烘焙",
+   "parent": "p-k0046",
+   "definition": "烤面包、蛋糕、饼干",
+   "domain": "做饭与厨房"
+  },
+  {
+   "id": "p-k0049",
+   "level": 2,
+   "name": "热饭",
+   "parent": "p-k0046",
+   "definition": "加热现成的食物",
+   "domain": "做饭与厨房"
+  },
+  {
+   "id": "p-k0050",
+   "level": 1,
+   "name": "收拾厨房",
+   "parent": null,
+   "definition": "擦灶台、清理台面",
+   "domain": "做饭与厨房"
+  },
+  {
+   "id": "p-k0051",
+   "level": 2,
+   "name": "洗碗",
+   "parent": "p-k0050",
+   "definition": "洗餐具，含装卸洗碗机",
+   "domain": "做饭与厨房"
+  },
+  {
+   "id": "p-k0052",
+   "level": 2,
+   "name": "整理冰箱",
+   "parent": "p-k0050",
+   "definition": "收纳或清理冰箱里的东西",
+   "domain": "做饭与厨房"
+  },
+  {
+   "id": "p-k0053",
+   "level": 1,
+   "name": "泡茶",
+   "parent": null,
+   "definition": "泡茶、冲咖啡、做饮品",
+   "domain": "做饭与厨房"
+  },
+  {
+   "id": "p-k0054",
+   "level": 1,
+   "name": "摆桌",
+   "parent": null,
+   "definition": "摆碗筷、端菜上桌",
+   "domain": "做饭与厨房"
+  },
+  {
+   "id": "p-k0055",
+   "level": 1,
+   "name": "倒垃圾",
+   "parent": null,
+   "definition": "打包并扔垃圾",
+   "domain": "做饭与厨房"
+  },
+  {
+   "id": "p-k0056",
+   "level": 1,
+   "name": "打扫",
+   "parent": null,
+   "definition": "清洁屋子",
+   "domain": "打扫与整理"
+  },
+  {
+   "id": "p-k0057",
+   "level": 2,
+   "name": "扫地",
+   "parent": "p-k0056",
+   "definition": "扫地或吸尘",
+   "domain": "打扫与整理"
+  },
+  {
+   "id": "p-k0058",
+   "level": 2,
+   "name": "拖地",
+   "parent": "p-k0056",
+   "definition": "用拖把拖地",
+   "domain": "打扫与整理"
+  },
+  {
+   "id": "p-k0059",
+   "level": 2,
+   "name": "擦灰",
+   "parent": "p-k0056",
+   "definition": "擦桌面、柜面、家具",
+   "domain": "打扫与整理"
+  },
+  {
+   "id": "p-k0060",
+   "level": 2,
+   "name": "擦窗",
+   "parent": "p-k0056",
+   "definition": "擦玻璃和窗户",
+   "domain": "打扫与整理"
+  },
+  {
+   "id": "p-k0061",
+   "level": 2,
+   "name": "刷厕所",
+   "parent": "p-k0056",
+   "definition": "刷马桶、洗手池、浴室",
+   "domain": "打扫与整理"
+  },
+  {
+   "id": "p-k0062",
+   "level": 1,
+   "name": "整理房间",
+   "parent": null,
+   "definition": "把东西归位、收拾屋子",
+   "domain": "打扫与整理"
+  },
+  {
+   "id": "p-k0063",
+   "level": 2,
+   "name": "整理衣柜",
+   "parent": "p-k0062",
+   "definition": "收纳、换季整理衣物",
+   "domain": "打扫与整理"
+  },
+  {
+   "id": "p-k0064",
+   "level": 2,
+   "name": "换床单",
+   "parent": "p-k0062",
+   "definition": "更换床上用品",
+   "domain": "打扫与整理"
+  },
+  {
+   "id": "p-k0065",
+   "level": 1,
+   "name": "擦鞋",
+   "parent": null,
+   "definition": "清洁或擦亮鞋子",
+   "domain": "打扫与整理"
+  },
+  {
+   "id": "p-k0066",
+   "level": 1,
+   "name": "打理衣物",
+   "parent": null,
+   "definition": "洗、晾、收、熨衣物",
+   "domain": "衣物"
+  },
+  {
+   "id": "p-k0067",
+   "level": 2,
+   "name": "洗衣服",
+   "parent": "p-k0066",
+   "definition": "洗衣物，机洗或手洗都算",
+   "domain": "衣物"
+  },
+  {
+   "id": "p-k0068",
+   "level": 2,
+   "name": "晾衣服",
+   "parent": "p-k0066",
+   "definition": "把洗好的衣物晾起来",
+   "domain": "衣物"
+  },
+  {
+   "id": "p-k0069",
+   "level": 2,
+   "name": "收衣服",
+   "parent": "p-k0066",
+   "definition": "把晾干的衣物收下来",
+   "domain": "衣物"
+  },
+  {
+   "id": "p-k0070",
+   "level": 2,
+   "name": "叠衣服",
+   "parent": "p-k0066",
+   "definition": "折叠衣物",
+   "domain": "衣物"
+  },
+  {
+   "id": "p-k0071",
+   "level": 2,
+   "name": "熨衣服",
+   "parent": "p-k0066",
+   "definition": "熨烫衣物",
+   "domain": "衣物"
+  },
+  {
+   "id": "p-k0072",
+   "level": 2,
+   "name": "缝补",
+   "parent": "p-k0066",
+   "definition": "缝补或修改衣物",
+   "domain": "衣物"
+  },
+  {
+   "id": "p-k0073",
+   "level": 1,
+   "name": "修东西",
+   "parent": null,
+   "definition": "修理家里坏了的物件",
+   "domain": "家里的维护"
+  },
+  {
+   "id": "p-k0074",
+   "level": 2,
+   "name": "组装家具",
+   "parent": "p-k0073",
+   "definition": "安装或拼装家具、设备",
+   "domain": "家里的维护"
+  },
+  {
+   "id": "p-k0075",
+   "level": 2,
+   "name": "换耗材",
+   "parent": "p-k0073",
+   "definition": "换灯泡、电池、滤芯",
+   "domain": "家里的维护"
+  },
+  {
+   "id": "p-k0076",
+   "level": 1,
+   "name": "打理植物",
+   "parent": null,
+   "definition": "修剪、换盆、施肥",
+   "domain": "家里的维护"
+  },
+  {
+   "id": "p-k0077",
+   "level": 2,
+   "name": "浇花",
+   "parent": "p-k0076",
+   "definition": "给植物浇水",
+   "domain": "家里的维护"
+  },
+  {
+   "id": "p-k0078",
+   "level": 2,
+   "name": "打理院子",
+   "parent": "p-k0076",
+   "definition": "割草、扫落叶、铲雪",
+   "domain": "家里的维护"
+  },
+  {
+   "id": "p-k0079",
+   "level": 1,
+   "name": "保养车辆",
+   "parent": null,
+   "definition": "自己给车加液、换胎、检查",
+   "domain": "家里的维护"
+  },
+  {
+   "id": "p-k0080",
+   "level": 2,
+   "name": "洗车",
+   "parent": "p-k0079",
+   "definition": "清洗车辆",
+   "domain": "家里的维护"
+  },
+  {
+   "id": "p-k0081",
+   "level": 1,
+   "name": "拆快递",
+   "parent": null,
+   "definition": "开箱并处理包装",
+   "domain": "家里的维护"
+  },
+  {
+   "id": "p-k0082",
+   "level": 1,
+   "name": "装饰布置",
+   "parent": null,
+   "definition": "挂画、布置节日装饰",
+   "domain": "家里的维护"
+  },
+  {
+   "id": "p-k0083",
+   "level": 1,
+   "name": "照顾宠物",
+   "parent": null,
+   "definition": "喂、遛、清理、陪宠物",
+   "domain": "宠物"
+  },
+  {
+   "id": "p-k0084",
+   "level": 2,
+   "name": "喂宠物",
+   "parent": "p-k0083",
+   "definition": "给宠物喂食喂水",
+   "domain": "宠物"
+  },
+  {
+   "id": "p-k0085",
+   "level": 2,
+   "name": "遛狗",
+   "parent": "p-k0083",
+   "definition": "带狗出门走",
+   "domain": "宠物"
+  },
+  {
+   "id": "p-k0086",
+   "level": 2,
+   "name": "清理猫砂",
+   "parent": "p-k0083",
+   "definition": "铲猫砂、清理笼子",
+   "domain": "宠物"
+  },
+  {
+   "id": "p-k0087",
+   "level": 2,
+   "name": "宠物洗澡",
+   "parent": "p-k0083",
+   "definition": "清洁或梳理宠物",
+   "domain": "宠物"
+  },
+  {
+   "id": "p-k0088",
+   "level": 2,
+   "name": "陪宠物玩",
+   "parent": "p-k0083",
+   "definition": "和宠物玩耍",
+   "domain": "宠物"
+  },
+  {
+   "id": "p-k0089",
+   "level": 1,
+   "name": "照顾孩子",
+   "parent": null,
+   "definition": "喂、洗、哄、陪、接送孩子",
+   "domain": "照顾人"
+  },
+  {
+   "id": "p-k0090",
+   "level": 2,
+   "name": "喂孩子",
+   "parent": "p-k0089",
+   "definition": "给孩子喂奶或喂饭",
+   "domain": "照顾人"
+  },
+  {
+   "id": "p-k0091",
+   "level": 2,
+   "name": "换尿布",
+   "parent": "p-k0089",
+   "definition": "换尿布或帮孩子如厕",
+   "domain": "照顾人"
+  },
+  {
+   "id": "p-k0092",
+   "level": 2,
+   "name": "给娃洗澡",
+   "parent": "p-k0089",
+   "definition": "给孩子洗澡",
+   "domain": "照顾人"
+  },
+  {
+   "id": "p-k0093",
+   "level": 2,
+   "name": "给娃穿衣",
+   "parent": "p-k0089",
+   "definition": "帮孩子穿脱衣服",
+   "domain": "照顾人"
+  },
+  {
+   "id": "p-k0094",
+   "level": 2,
+   "name": "哄睡",
+   "parent": "p-k0089",
+   "definition": "哄孩子入睡",
+   "domain": "照顾人"
+  },
+  {
+   "id": "p-k0095",
+   "level": 2,
+   "name": "陪孩子玩",
+   "parent": "p-k0089",
+   "definition": "和孩子一起玩",
+   "domain": "照顾人"
+  },
+  {
+   "id": "p-k0096",
+   "level": 2,
+   "name": "陪读",
+   "parent": "p-k0089",
+   "definition": "给孩子读书或陪读",
+   "domain": "照顾人"
+  },
+  {
+   "id": "p-k0097",
+   "level": 2,
+   "name": "辅导作业",
+   "parent": "p-k0089",
+   "definition": "陪孩子做作业、讲题",
+   "domain": "照顾人"
+  },
+  {
+   "id": "p-k0098",
+   "level": 2,
+   "name": "接送孩子",
+   "parent": "p-k0089",
+   "definition": "送孩子去或接孩子回",
+   "domain": "照顾人"
+  },
+  {
+   "id": "p-k0099",
+   "level": 1,
+   "name": "照顾老人",
+   "parent": null,
+   "definition": "帮老人进食、洗漱、行动",
+   "domain": "照顾人"
+  },
+  {
+   "id": "p-k0100",
+   "level": 1,
+   "name": "照顾病人",
+   "parent": null,
+   "definition": "照看生病的家人",
+   "domain": "照顾人"
+  },
+  {
+   "id": "p-k0101",
+   "level": 1,
+   "name": "开会",
+   "parent": null,
+   "definition": "当面参加会议",
+   "domain": "工作与学习"
+  },
+  {
+   "id": "p-k0102",
+   "level": 2,
+   "name": "开视频会",
+   "parent": "p-k0101",
+   "definition": "在屏幕前参加线上会议",
+   "domain": "工作与学习"
+  },
+  {
+   "id": "p-k0103",
+   "level": 1,
+   "name": "学习",
+   "parent": null,
+   "definition": "听课或自己学",
+   "domain": "工作与学习"
+  },
+  {
+   "id": "p-k0104",
+   "level": 2,
+   "name": "上课",
+   "parent": "p-k0103",
+   "definition": "在课堂或线上听课",
+   "domain": "工作与学习"
+  },
+  {
+   "id": "p-k0105",
+   "level": 2,
+   "name": "自习",
+   "parent": "p-k0103",
+   "definition": "自己做题、复习",
+   "domain": "工作与学习"
+  },
+  {
+   "id": "p-k0106",
+   "level": 1,
+   "name": "用电脑",
+   "parent": null,
+   "definition": "在电脑前操作",
+   "domain": "工作与学习"
+  },
+  {
+   "id": "p-k0107",
+   "level": 1,
+   "name": "手写",
+   "parent": null,
+   "definition": "用笔写字或做笔记",
+   "domain": "工作与学习"
+  },
+  {
+   "id": "p-k0108",
+   "level": 1,
+   "name": "读材料",
+   "parent": null,
+   "definition": "读文件、打印稿",
+   "domain": "工作与学习"
+  },
+  {
+   "id": "p-k0109",
+   "level": 1,
+   "name": "打电话",
+   "parent": null,
+   "definition": "语音通话",
+   "domain": "工作与学习"
+  },
+  {
+   "id": "p-k0110",
+   "level": 1,
+   "name": "做演讲",
+   "parent": null,
+   "definition": "当众讲话或汇报",
+   "domain": "工作与学习"
+  },
+  {
+   "id": "p-k0111",
+   "level": 1,
+   "name": "做实验",
+   "parent": null,
+   "definition": "在实验台上操作",
+   "domain": "工作与学习"
+  },
+  {
+   "id": "p-k0112",
+   "level": 1,
+   "name": "整理桌面",
+   "parent": null,
+   "definition": "收拾工作台、文件",
+   "domain": "工作与学习"
+  },
+  {
+   "id": "p-k0113",
+   "level": 1,
+   "name": "看书",
+   "parent": null,
+   "definition": "读纸质书或电子书",
+   "domain": "屏幕与阅读"
+  },
+  {
+   "id": "p-k0114",
+   "level": 2,
+   "name": "看报刊",
+   "parent": "p-k0113",
+   "definition": "读报纸、杂志",
+   "domain": "屏幕与阅读"
+  },
+  {
+   "id": "p-k0115",
+   "level": 1,
+   "name": "用手机",
+   "parent": null,
+   "definition": "看或操作手机",
+   "domain": "屏幕与阅读"
+  },
+  {
+   "id": "p-k0116",
+   "level": 1,
+   "name": "用平板",
+   "parent": null,
+   "definition": "看或操作平板",
+   "domain": "屏幕与阅读"
+  },
+  {
+   "id": "p-k0117",
+   "level": 1,
+   "name": "看电视",
+   "parent": null,
+   "definition": "看电视或投屏",
+   "domain": "屏幕与阅读"
+  },
+  {
+   "id": "p-k0118",
+   "level": 1,
+   "name": "打游戏",
+   "parent": null,
+   "definition": "用主机、电脑或手机玩游戏",
+   "domain": "屏幕与阅读"
+  },
+  {
+   "id": "p-k0119",
+   "level": 1,
+   "name": "听音乐",
+   "parent": null,
+   "definition": "专门听音乐或播客",
+   "domain": "屏幕与阅读"
+  },
+  {
+   "id": "p-k0120",
+   "level": 1,
+   "name": "拍照",
+   "parent": null,
+   "definition": "用相机或手机拍摄",
+   "domain": "屏幕与阅读"
+  },
+  {
+   "id": "p-k0121",
+   "level": 1,
+   "name": "聚会",
+   "parent": null,
+   "definition": "参加或举办一次聚会",
+   "domain": "社交"
+  },
+  {
+   "id": "p-k0122",
+   "level": 2,
+   "name": "聚餐",
+   "parent": "p-k0121",
+   "definition": "和别人一起在外吃一顿",
+   "domain": "社交"
+  },
+  {
+   "id": "p-k0123",
+   "level": 2,
+   "name": "接待客人",
+   "parent": "p-k0121",
+   "definition": "在家招待来访的人",
+   "domain": "社交"
+  },
+  {
+   "id": "p-k0124",
+   "level": 1,
+   "name": "外出观看",
+   "parent": null,
+   "definition": "去现场看演出、电影、展览、比赛",
+   "domain": "社交"
+  },
+  {
+   "id": "p-k0125",
+   "level": 2,
+   "name": "看演出",
+   "parent": "p-k0124",
+   "definition": "看现场演出、音乐会",
+   "domain": "社交"
+  },
+  {
+   "id": "p-k0126",
+   "level": 2,
+   "name": "看电影",
+   "parent": "p-k0124",
+   "definition": "在影院看电影",
+   "domain": "社交"
+  },
+  {
+   "id": "p-k0127",
+   "level": 2,
+   "name": "看展",
+   "parent": "p-k0124",
+   "definition": "逛博物馆、展览",
+   "domain": "社交"
+  },
+  {
+   "id": "p-k0128",
+   "level": 2,
+   "name": "看比赛",
+   "parent": "p-k0124",
+   "definition": "在现场看体育比赛",
+   "domain": "社交"
+  },
+  {
+   "id": "p-k0129",
+   "level": 1,
+   "name": "交谈",
+   "parent": null,
+   "definition": "和人当面说话",
+   "domain": "社交"
+  },
+  {
+   "id": "p-k0130",
+   "level": 1,
+   "name": "走亲访友",
+   "parent": null,
+   "definition": "上门看望别人",
+   "domain": "社交"
+  },
+  {
+   "id": "p-k0131",
+   "level": 1,
+   "name": "唱歌",
+   "parent": null,
+   "definition": "唱歌、唱 K",
+   "domain": "社交"
+  },
+  {
+   "id": "p-k0132",
+   "level": 1,
+   "name": "做礼拜",
+   "parent": null,
+   "definition": "礼拜、祷告、上香",
+   "domain": "社交"
+  },
+  {
+   "id": "p-k0133",
+   "level": 1,
+   "name": "做义工",
+   "parent": null,
+   "definition": "参加义工或社区活动",
+   "domain": "社交"
+  },
+  {
+   "id": "p-k0134",
+   "level": 1,
+   "name": "运动",
+   "parent": null,
+   "definition": "为了锻炼或娱乐活动身体",
+   "domain": "走跑骑游"
+  },
+  {
+   "id": "p-k0135",
+   "level": 2,
+   "name": "快走",
+   "parent": "p-k0134",
+   "definition": "为锻炼而快步走",
+   "domain": "走跑骑游"
+  },
+  {
+   "id": "p-k0136",
+   "level": 2,
+   "name": "跑步",
+   "parent": "p-k0134",
+   "definition": "跑步，户外或跑步机都算",
+   "domain": "走跑骑游"
+  },
+  {
+   "id": "p-k0137",
+   "level": 2,
+   "name": "骑车",
+   "parent": "p-k0134",
+   "definition": "骑自行车，户外或室内单车都算",
+   "domain": "走跑骑游"
+  },
+  {
+   "id": "p-k0138",
+   "level": 2,
+   "name": "游泳",
+   "parent": "p-k0134",
+   "definition": "游泳",
+   "domain": "走跑骑游"
+  },
+  {
+   "id": "p-k0139",
+   "level": 2,
+   "name": "徒步",
+   "parent": "p-k0134",
+   "definition": "在野外长距离行走",
+   "domain": "走跑骑游"
+  },
+  {
+   "id": "p-k0140",
+   "level": 2,
+   "name": "登山",
+   "parent": "p-k0134",
+   "definition": "爬山",
+   "domain": "走跑骑游"
+  },
+  {
+   "id": "p-k0141",
+   "level": 2,
+   "name": "爬楼梯",
+   "parent": "p-k0134",
+   "definition": "为锻炼而爬楼",
+   "domain": "走跑骑游"
+  },
+  {
+   "id": "p-k0142",
+   "level": 2,
+   "name": "跳绳",
+   "parent": "p-k0134",
+   "definition": "跳绳",
+   "domain": "走跑骑游"
+  },
+  {
+   "id": "p-k0143",
+   "level": 1,
+   "name": "散步",
+   "parent": null,
+   "definition": "慢走，不为赶路",
+   "domain": "走跑骑游"
+  },
+  {
+   "id": "p-k0144",
+   "level": 2,
+   "name": "力量训练",
+   "parent": "p-k0134",
+   "definition": "用器械或自重做力量练习，不分部位",
+   "domain": "健身"
+  },
+  {
+   "id": "p-k0145",
+   "level": 3,
+   "name": "核心训练",
+   "parent": "p-k0144",
+   "definition": "卷腹、平板支撑这类",
+   "domain": "健身"
+  },
+  {
+   "id": "p-k0146",
+   "level": 2,
+   "name": "拉伸",
+   "parent": "p-k0134",
+   "definition": "做拉伸或泡沫轴放松",
+   "domain": "健身"
+  },
+  {
+   "id": "p-k0147",
+   "level": 2,
+   "name": "瑜伽",
+   "parent": "p-k0134",
+   "definition": "做瑜伽",
+   "domain": "健身"
+  },
+  {
+   "id": "p-k0148",
+   "level": 2,
+   "name": "普拉提",
+   "parent": "p-k0134",
+   "definition": "做普拉提",
+   "domain": "健身"
+  },
+  {
+   "id": "p-k0149",
+   "level": 2,
+   "name": "太极",
+   "parent": "p-k0134",
+   "definition": "打太极或练气功",
+   "domain": "健身"
+  },
+  {
+   "id": "p-k0150",
+   "level": 2,
+   "name": "健身操",
+   "parent": "p-k0134",
+   "definition": "跟着做有氧操、搏击操",
+   "domain": "健身"
+  },
+  {
+   "id": "p-k0151",
+   "level": 2,
+   "name": "跳舞",
+   "parent": "p-k0134",
+   "definition": "跳舞，不分舞种",
+   "domain": "健身"
+  },
+  {
+   "id": "p-k0152",
+   "level": 2,
+   "name": "练椭圆机",
+   "parent": "p-k0134",
+   "definition": "在椭圆机上练",
+   "domain": "健身"
+  },
+  {
+   "id": "p-k0153",
+   "level": 2,
+   "name": "练划船机",
+   "parent": "p-k0134",
+   "definition": "在划船机上练",
+   "domain": "健身"
+  },
+  {
+   "id": "p-k0154",
+   "level": 2,
+   "name": "间歇训练",
+   "parent": "p-k0134",
+   "definition": "短时高强度的循环练习",
+   "domain": "健身"
+  },
+  {
+   "id": "p-k0155",
+   "level": 2,
+   "name": "打球",
+   "parent": "p-k0134",
+   "definition": "打任何一种球",
+   "domain": "球类"
+  },
+  {
+   "id": "p-k0156",
+   "level": 3,
+   "name": "打篮球",
+   "parent": "p-k0155",
+   "definition": "打篮球",
+   "domain": "球类"
+  },
+  {
+   "id": "p-k0157",
+   "level": 3,
+   "name": "踢足球",
+   "parent": "p-k0155",
+   "definition": "踢足球",
+   "domain": "球类"
+  },
+  {
+   "id": "p-k0158",
+   "level": 3,
+   "name": "打羽毛球",
+   "parent": "p-k0155",
+   "definition": "打羽毛球",
+   "domain": "球类"
+  },
+  {
+   "id": "p-k0159",
+   "level": 3,
+   "name": "打网球",
+   "parent": "p-k0155",
+   "definition": "打网球",
+   "domain": "球类"
+  },
+  {
+   "id": "p-k0160",
+   "level": 3,
+   "name": "打乒乓球",
+   "parent": "p-k0155",
+   "definition": "打乒乓球",
+   "domain": "球类"
+  },
+  {
+   "id": "p-k0161",
+   "level": 3,
+   "name": "打排球",
+   "parent": "p-k0155",
+   "definition": "打排球",
+   "domain": "球类"
+  },
+  {
+   "id": "p-k0162",
+   "level": 3,
+   "name": "打高尔夫",
+   "parent": "p-k0155",
+   "definition": "打高尔夫，含练习场",
+   "domain": "球类"
+  },
+  {
+   "id": "p-k0163",
+   "level": 3,
+   "name": "打棒垒球",
+   "parent": "p-k0155",
+   "definition": "打棒球或垒球",
+   "domain": "球类"
+  },
+  {
+   "id": "p-k0164",
+   "level": 3,
+   "name": "打台球",
+   "parent": "p-k0155",
+   "definition": "打台球",
+   "domain": "球类"
+  },
+  {
+   "id": "p-k0165",
+   "level": 3,
+   "name": "打保龄球",
+   "parent": "p-k0155",
+   "definition": "打保龄球",
+   "domain": "球类"
+  },
+  {
+   "id": "p-k0166",
+   "level": 3,
+   "name": "打壁球",
+   "parent": "p-k0155",
+   "definition": "壁球、匹克球等其他拍类",
+   "domain": "球类"
+  },
+  {
+   "id": "p-k0167",
+   "level": 2,
+   "name": "滑雪",
+   "parent": "p-k0134",
+   "definition": "双板或单板滑雪",
+   "domain": "其他运动"
+  },
+  {
+   "id": "p-k0168",
+   "level": 2,
+   "name": "滑冰",
+   "parent": "p-k0134",
+   "definition": "冰上滑行",
+   "domain": "其他运动"
+  },
+  {
+   "id": "p-k0169",
+   "level": 2,
+   "name": "滑板",
+   "parent": "p-k0134",
+   "definition": "轮滑或滑板",
+   "domain": "其他运动"
+  },
+  {
+   "id": "p-k0170",
+   "level": 2,
+   "name": "划船",
+   "parent": "p-k0134",
+   "definition": "皮划艇、桨板、赛艇",
+   "domain": "其他运动"
+  },
+  {
+   "id": "p-k0171",
+   "level": 2,
+   "name": "冲浪",
+   "parent": "p-k0134",
+   "definition": "冲浪、帆板",
+   "domain": "其他运动"
+  },
+  {
+   "id": "p-k0172",
+   "level": 2,
+   "name": "潜水",
+   "parent": "p-k0134",
+   "definition": "浮潜或水肺潜水",
+   "domain": "其他运动"
+  },
+  {
+   "id": "p-k0173",
+   "level": 2,
+   "name": "攀岩",
+   "parent": "p-k0134",
+   "definition": "室内或户外攀岩",
+   "domain": "其他运动"
+  },
+  {
+   "id": "p-k0174",
+   "level": 2,
+   "name": "钓鱼",
+   "parent": "p-k0134",
+   "definition": "钓鱼",
+   "domain": "其他运动"
+  },
+  {
+   "id": "p-k0175",
+   "level": 2,
+   "name": "骑马",
+   "parent": "p-k0134",
+   "definition": "骑马",
+   "domain": "其他运动"
+  },
+  {
+   "id": "p-k0176",
+   "level": 2,
+   "name": "打拳",
+   "parent": "p-k0134",
+   "definition": "拳击、踢拳",
+   "domain": "其他运动"
+  },
+  {
+   "id": "p-k0177",
+   "level": 2,
+   "name": "练武术",
+   "parent": "p-k0134",
+   "definition": "武术、柔道、跆拳道等",
+   "domain": "其他运动"
+  },
+  {
+   "id": "p-k0178",
+   "level": 2,
+   "name": "射箭",
+   "parent": "p-k0134",
+   "definition": "射箭",
+   "domain": "其他运动"
+  },
+  {
+   "id": "p-k0179",
+   "level": 2,
+   "name": "玩飞盘",
+   "parent": "p-k0134",
+   "definition": "飞盘",
+   "domain": "其他运动"
+  },
+  {
+   "id": "p-k0180",
+   "level": 1,
+   "name": "搭乘出行",
+   "parent": null,
+   "definition": "当乘客坐车、船、飞机",
+   "domain": "出行"
+  },
+  {
+   "id": "p-k0181",
+   "level": 2,
+   "name": "坐车",
+   "parent": "p-k0180",
+   "definition": "在汽车里当乘客，含出租车",
+   "domain": "出行"
+  },
+  {
+   "id": "p-k0182",
+   "level": 2,
+   "name": "坐公交",
+   "parent": "p-k0180",
+   "definition": "乘公交车",
+   "domain": "出行"
+  },
+  {
+   "id": "p-k0183",
+   "level": 2,
+   "name": "坐地铁",
+   "parent": "p-k0180",
+   "definition": "乘地铁、轻轨",
+   "domain": "出行"
+  },
+  {
+   "id": "p-k0184",
+   "level": 2,
+   "name": "坐火车",
+   "parent": "p-k0180",
+   "definition": "乘火车、高铁",
+   "domain": "出行"
+  },
+  {
+   "id": "p-k0185",
+   "level": 2,
+   "name": "坐飞机",
+   "parent": "p-k0180",
+   "definition": "乘飞机",
+   "domain": "出行"
+  },
+  {
+   "id": "p-k0186",
+   "level": 2,
+   "name": "坐船",
+   "parent": "p-k0180",
+   "definition": "乘渡轮、游船",
+   "domain": "出行"
+  },
+  {
+   "id": "p-k0187",
+   "level": 1,
+   "name": "步行",
+   "parent": null,
+   "definition": "为了去某个地方而走路",
+   "domain": "出行"
+  },
+  {
+   "id": "p-k0188",
+   "level": 1,
+   "name": "开车",
+   "parent": null,
+   "definition": "自己驾驶汽车",
+   "domain": "出行"
+  },
+  {
+   "id": "p-k0189",
+   "level": 1,
+   "name": "骑电动车",
+   "parent": null,
+   "definition": "骑电动车或摩托车",
+   "domain": "出行"
+  },
+  {
+   "id": "p-k0190",
+   "level": 1,
+   "name": "加油充电",
+   "parent": null,
+   "definition": "给车加油或充电",
+   "domain": "出行"
+  },
+  {
+   "id": "p-k0191",
+   "level": 1,
+   "name": "收拾行李",
+   "parent": null,
+   "definition": "出门前打包或回来后拆包",
+   "domain": "出行"
+  },
+  {
+   "id": "p-k0192",
+   "level": 1,
+   "name": "购物",
+   "parent": null,
+   "definition": "去店里买东西",
+   "domain": "买东西与办事"
+  },
+  {
+   "id": "p-k0193",
+   "level": 2,
+   "name": "买菜",
+   "parent": "p-k0192",
+   "definition": "在超市或菜场买食材",
+   "domain": "买东西与办事"
+  },
+  {
+   "id": "p-k0194",
+   "level": 2,
+   "name": "逛商场",
+   "parent": "p-k0192",
+   "definition": "在商店里看或买东西",
+   "domain": "买东西与办事"
+  },
+  {
+   "id": "p-k0195",
+   "level": 1,
+   "name": "做护理",
+   "parent": null,
+   "definition": "去店里做头发、美容、按摩",
+   "domain": "买东西与办事"
+  },
+  {
+   "id": "p-k0196",
+   "level": 2,
+   "name": "理发",
+   "parent": "p-k0195",
+   "definition": "剪发、烫染",
+   "domain": "买东西与办事"
+  },
+  {
+   "id": "p-k0197",
+   "level": 2,
+   "name": "做美容",
+   "parent": "p-k0195",
+   "definition": "美容、美甲",
+   "domain": "买东西与办事"
+  },
+  {
+   "id": "p-k0198",
+   "level": 2,
+   "name": "按摩",
+   "parent": "p-k0195",
+   "definition": "按摩、推拿",
+   "domain": "买东西与办事"
+  },
+  {
+   "id": "p-k0199",
+   "level": 1,
+   "name": "看病",
+   "parent": null,
+   "definition": "在医院或诊所就诊",
+   "domain": "买东西与办事"
+  },
+  {
+   "id": "p-k0200",
+   "level": 2,
+   "name": "取药",
+   "parent": "p-k0199",
+   "definition": "在药房取药或买药",
+   "domain": "买东西与办事"
+  },
+  {
+   "id": "p-k0201",
+   "level": 1,
+   "name": "取快递",
+   "parent": null,
+   "definition": "去驿站或快递柜取件",
+   "domain": "买东西与办事"
+  },
+  {
+   "id": "p-k0202",
+   "level": 1,
+   "name": "去银行",
+   "parent": null,
+   "definition": "在银行柜台或机器上办业务",
+   "domain": "买东西与办事"
+  },
+  {
+   "id": "p-k0203",
+   "level": 1,
+   "name": "办政务",
+   "parent": null,
+   "definition": "在政府窗口办事",
+   "domain": "买东西与办事"
+  },
+  {
+   "id": "p-k0204",
+   "level": 1,
+   "name": "做手工",
+   "parent": null,
+   "definition": "手作、模型、木工",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0205",
+   "level": 2,
+   "name": "编织",
+   "parent": "p-k0204",
+   "definition": "织毛线、刺绣",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0206",
+   "level": 1,
+   "name": "玩棋牌",
+   "parent": null,
+   "definition": "下棋、打牌、玩桌游",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0207",
+   "level": 2,
+   "name": "下棋",
+   "parent": "p-k0206",
+   "definition": "象棋、围棋等",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0208",
+   "level": 2,
+   "name": "打牌",
+   "parent": "p-k0206",
+   "definition": "扑克、桥牌",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0209",
+   "level": 2,
+   "name": "打麻将",
+   "parent": "p-k0206",
+   "definition": "打麻将",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0210",
+   "level": 2,
+   "name": "玩桌游",
+   "parent": "p-k0206",
+   "definition": "玩桌面游戏、拼图",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0211",
+   "level": 1,
+   "name": "户外休闲",
+   "parent": null,
+   "definition": "在户外游玩、吃喝、过夜",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0212",
+   "level": 2,
+   "name": "逛公园",
+   "parent": "p-k0211",
+   "definition": "在公园里走、坐、看",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0213",
+   "level": 2,
+   "name": "野餐",
+   "parent": "p-k0211",
+   "definition": "在户外吃一顿",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0214",
+   "level": 2,
+   "name": "露营",
+   "parent": "p-k0211",
+   "definition": "搭帐篷过夜",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0215",
+   "level": 2,
+   "name": "烧烤",
+   "parent": "p-k0211",
+   "definition": "在户外烤东西吃",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0216",
+   "level": 2,
+   "name": "观光",
+   "parent": "p-k0211",
+   "definition": "在景点游览",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0217",
+   "level": 1,
+   "name": "弹乐器",
+   "parent": null,
+   "definition": "演奏乐器，不分哪种",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0218",
+   "level": 1,
+   "name": "画画",
+   "parent": null,
+   "definition": "绘画、素描",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0219",
+   "level": 1,
+   "name": "写书法",
+   "parent": null,
+   "definition": "练字、写毛笔字",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0220",
+   "level": 1,
+   "name": "做园艺",
+   "parent": null,
+   "definition": "种花种菜",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0221",
+   "level": 1,
+   "name": "泡澡",
+   "parent": null,
+   "definition": "泡浴缸、泡温泉、蒸桑拿",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0222",
+   "level": 1,
+   "name": "歇着",
+   "parent": null,
+   "definition": "坐着或躺着休息，不做别的",
+   "domain": "休闲爱好"
+  },
+  {
+   "id": "p-k0223",
+   "level": 1,
+   "name": "搬东西",
+   "parent": null,
+   "definition": "搬运重物、搬家",
+   "domain": "杂项"
+  }
+ ]
+}

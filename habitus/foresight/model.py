@@ -48,8 +48,8 @@ class Moment:
 class UnsealedRow:
     """还没归约到行为树上的一条判断：最近一段的链在判断存储里，此刻要把它们补上。
 
-    ``name`` 为 None 是融合"没读懂"的那种判断——它在树上会成为一段观测空白；读得懂的行为名经白天归类落到类，
-    落不到就 ``kind_token`` 为 None。没有 URI——它还不是树上的 occurrence。
+    ``name`` 为 None 是融合"没读懂"的那种判断——它在树上会成为一段观测空白；读得懂的行为带着选的词，
+    没选成词（「表外」「待定」、还没选）``kind_token`` 为 None。没有 URI——它还不是树上的 occurrence。
     """
 
     name: str | None

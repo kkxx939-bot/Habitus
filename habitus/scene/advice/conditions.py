@@ -2,7 +2,8 @@
 
 - **读 A 那一条与它之前的事，不看 B 有没有发生**：每个够样本的前因挑几条（按时间均匀取），每条给它自己的时刻、概要、目标、
   地点、同在的人，以及当天它之前的几条（时刻、类名、概要）。后果一个字都不给——条件必须在 A 发生那一刻就判得出来。
-- **必须编译成三种可算的模板之一**（``relations.conditions.compile_proposal``），落不成的进已拒清单、带原因；
+- **必须编译成两种可算的模板之一**（结构字段、时间线；``relations.conditions.compile_proposal``），落不成的进已拒清单、带原因。
+  日历条件（情境概念模板）由系统机械列举，不由模型提；
   已收下的与已拒的都写进提示词，不每晚换个说法反复试。
 - 第 N 晚提出的条件只在 N 之后的数据上检验（关系检验里做）。
 - 只在概念集变了（或前因刚够样本）时问；按输入摘要缓存，回放只读缓存。
@@ -20,27 +21,27 @@ from habitus.foundation.text import clean_line
 from habitus.model_client import ChatMessage, ChatRequest, StructuredChatClient
 from habitus.model_client.asking import Answered, Failed, ask
 from habitus.scene.advice.model import Proposal
-from habitus.scene.concepts.calendar_situations import is_calendar
 from habitus.scene.concepts.model import ConceptSet
-from habitus.scene.relations.conditions import ConditionError, Field, Template, compile_proposal
+from habitus.scene.relations.conditions import PROPOSABLE, ConditionError, Field, Template, compile_proposal
 
 # v1 → v2（2026-10-18，裁定 59）：结构字段里的 weekend / calendar 拿掉，周几、工作日、节假日这类改成名单里的日历情境（concept 提）；
 # 每次记录的时刻后面标上那天的日型。**未对着真实模型调过**，合入前待用户用真实模型做新旧对照。
 # v2 → v3（2026-10-18 四方评审）：日历情境不进名单，提示词说清它们系统已经机械检验、不要提——名单里列着 40 多个日历情境时，
 # 模型的 5 个名额多半提"周末""周三"，必然与机械列举撞车、不算新条件，挤掉地点、同在的人、时间线这些它真正能补上的。
-CONDITION_PROMPT_VERSION = "scene_relation_conditions_prompt_v3"
+# v3 → v4（2026-11-14，概念层只留词表节点与日历）：情境概念只剩日历情境，名单恒为空，concept 模板与情境名单一节拿掉。
+CONDITION_PROMPT_VERSION = "scene_relation_conditions_prompt_v4"
 #: 一次最多收几条提议（多了说明模型在凑数）。
 MAX_PROPOSALS = 5
 
 CONDITION_SYSTEM_PROMPT = """你在为一个人的某一类行为找"它可能受什么情境左右"，供后面的统计检验去验证。
 
 给你这类行为的几次记录：每次的时刻、概要、目标、地点、同在的人，以及当天在它之前的几件事。请提出最多 5 个
-"这一类行为在某种情境下，之后的走向可能不一样"的情境条件。条件必须能写成下面三种之一，否则不要提：
+"这一类行为在某种情境下，之后的走向可能不一样"的情境条件。条件必须能写成下面两种之一，否则不要提：
 
 1. field（结构字段）：place（地点，value 写地点原文）、with（同在的某个人，value 写名字原文）；
-2. timeline（时间线）：这件事之前不久（同一段连续的工作里）出现过某一类行为，concept 写那一类的名字；
-3. concept（情境概念）：这次记录被标为某个情境，concept 写情境的名字（只能从情境名单里选）。周几、几号、工作日 / 周末 / 节假日
-   这些日历上的日子系统已经自动检验过，不在名单里，不要提。
+2. timeline（时间线）：这件事之前不久（同一段连续的工作里）出现过某一类行为，concept 写那一类的名字（只能从行为类名单里选）。
+
+周几、几号、工作日 / 周末 / 节假日这些日历上的日子系统已经自动检验过，不要提。
 
 规则：
 - 只根据给你的记录与名单提，不要编名单之外的名字、地点或人；
@@ -78,7 +79,6 @@ class ConditionQuestion:
     antecedent: str
     occasions: tuple[Occasion, ...]
     behaviours: tuple[str, ...]
-    situations: tuple[str, ...]
     accepted: tuple[str, ...]
     refused: tuple[str, ...]
     labels: Mapping[str, str]
@@ -93,7 +93,6 @@ class ConditionQuestion:
                 "antecedent": [self.labels[self.antecedent], self.definitions[self.antecedent]],
                 "occasions": [occasion.render(index) for index, occasion in enumerate(self.occasions, start=1)],
                 "behaviours": sorted(self.labels[name] for name in self.behaviours),
-                "situations": sorted([self.labels[name], self.definitions[name]] for name in self.situations),
                 "accepted": sorted(self.accepted),
                 "refused": sorted(self.refused),
             }
@@ -110,18 +109,12 @@ def question_for(
     refused: Sequence[str] = (),
 ) -> ConditionQuestion:
     behaviours = tuple(name for name in concepts.behaviors() if name != antecedent and concepts.lane_of(name) == lane)
-    situations = tuple(
-        name
-        for name in concepts.situations()
-        if concepts.lane_of(name) in (lane, None) and not is_calendar(concepts, name)
-    )
-    names = (antecedent, *behaviours, *situations)
+    names = (antecedent, *behaviours)
     return ConditionQuestion(
         lane=lane,
         antecedent=antecedent,
         occasions=tuple(occasions),
         behaviours=behaviours,
-        situations=situations,
         accepted=tuple(accepted),
         refused=tuple(refused),
         labels={name: concepts.label_of(name) for name in names},
@@ -130,7 +123,7 @@ def question_for(
 
 
 def condition_json_schema(names: Sequence[str]) -> dict[str, Any]:
-    """名字钉进 enum（行为类与情境概念的名字）；字段与模板也是 enum。可空的用 ``[类型, "null"]``。"""
+    """名字钉进 enum（行为类的名字）；字段与模板也是 enum（模型只能提结构字段与时间线）。可空的用 ``[类型, "null"]``。"""
 
     return {
         "type": "object",
@@ -144,7 +137,7 @@ def condition_json_schema(names: Sequence[str]) -> dict[str, Any]:
                     "additionalProperties": False,
                     "required": ["template", "field", "value", "concept", "why"],
                     "properties": {
-                        "template": {"type": "string", "enum": [item.value for item in Template]},
+                        "template": {"type": "string", "enum": [item.value for item in PROPOSABLE]},
                         "field": {"type": ["string", "null"], "enum": [*(item.value for item in Field), None]},
                         "value": {"type": ["string", "null"]},
                         "concept": {"type": ["string", "null"], "enum": [*names, None]},
@@ -172,9 +165,6 @@ def build_condition_request(question: ConditionQuestion) -> ChatRequest:
         "",
         "## 可以用的行为类（timeline 模板的 concept 只能从这里选）",
         "、".join(labels[name] for name in question.behaviours) or "（无）",
-        "",
-        "## 可以用的情境（concept 模板的 concept 只能从这里选）",
-        *([f"- {labels[name]}：{definitions[name]}" for name in question.situations] or ["（无）"]),
     ]
     if question.accepted:
         lines += ["", "## 已经收下的条件（不要再提）", *(f"- {item}" for item in question.accepted)]
@@ -246,7 +236,7 @@ class ConditionProposer:
         return f"{CONDITION_VERSION}+llm:{self.client.client.model}"
 
     async def propose(self, question: ConditionQuestion, concepts: ConceptSet, *, night: date) -> ConditionAnswer:
-        names = [question.labels[name] for name in (*question.behaviours, *question.situations)]
+        names = [question.labels[name] for name in question.behaviours]
         answer = await ask(
             self.client,
             build_condition_request(question),

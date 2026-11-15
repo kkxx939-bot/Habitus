@@ -2,11 +2,11 @@
 列出历史每次前因之后后果来没来，再把每个行为类的复现（语义树登记的）抄进来。零模型、零统计：这里不排序、不给读数，只摆事实；
 读数怎么出、门怎么设是白天那一拍的事（第九节第 3 步）。
 
-哪些关系进表：后果是基础概念，并且是
-- 短跨度四段、前因是基础或汇总概念的；带条件的只收**成立的**（裁定 61 第 6 条：成立的组合当单元的一条边，没成立的照旧由
+哪些关系进表：后果是行为概念，并且是
+- 短跨度四段、前因是行为概念的；带条件的只收**成立的**（裁定 61 第 6 条：成立的组合当单元的一条边，没成立的照旧由
   "同一组"计数），它的机会只列条件全成立的链；
 - 日历情境段（日历条件 → 后果，裁定 59）：一个后果的几条日历关系只留最具体的那一族（周几集合在就不留被它包住的单个周几）。
-长跨度的其余几段、细分概念当前因的还不进预测层（要重算标志、要对着此刻那条记录判、今天的记录还没映射）。
+长跨度的其余几段还不进预测层（要重算标志）。
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from habitus.foresight.opportunities.model import (
     TreeReading,
 )
 from habitus.scene.concepts.calendar_situations import calendar_key, most_specific
-from habitus.scene.concepts.model import ConceptKind, ConceptSet
+from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.recurrence import Recurrence
 from habitus.scene.relations import (
     Chain,
@@ -153,16 +153,14 @@ def _admitted(relation: Relation, line: LaneTimeline, concepts: ConceptSet) -> b
     if key.condition and (relation.status is not Status.ESTABLISHED or key.segment is Segment.SITUATION):
         return False  # 带条件的只收成立的；日历情境关系不挂条件
     consequent = concepts.get(key.consequent)
-    if consequent is None or consequent.kind is not ConceptKind.BASE:
+    if consequent is None or not consequent.role.is_behavior:
         return False
     if key.segment is Segment.SITUATION:
         # 只收抬高的日历关系：一个取值高了，同一维的其余取值就显得低（"周一 → 例会材料 ↓"只是"周三 ↑"的反面），
         # 进单元会当压低的输入把历史切碎；语义树照样记着它们（2026-10-18，S8）
         return relation.upward and calendar_key(concepts, key.antecedent) is not None
     antecedent = concepts.get(key.antecedent)
-    return (
-        key.segment in _SEGMENTS and antecedent is not None and antecedent.kind in (ConceptKind.BASE, ConceptKind.GROUP)
-    )
+    return key.segment in _SEGMENTS and antecedent is not None and antecedent.role.is_behavior
 
 
 def _most_specific_calendar(relations: Iterable[Relation], concepts: ConceptSet) -> frozenset[str]:
@@ -270,8 +268,7 @@ def _condition_spec(concepts: ConceptSet, condition: Condition) -> ConditionSpec
 
     if condition.template is Template.TIMELINE:
         item = concepts.get(condition.value)
-        classes = () if item is None or item.kind is ConceptKind.REFINEMENT else tuple(item.classes)
-        return ConditionSpec(condition.text, classes=classes)
+        return ConditionSpec(condition.text, classes=() if item is None else tuple(item.classes))
     if condition.template is Template.CONCEPT:
         rule = calendar_key(concepts, condition.value)
         if rule is not None:

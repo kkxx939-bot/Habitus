@@ -5,8 +5,8 @@
 ``TODO(BHV-TREE-REBUILD-001)`` 取消追加通道一并退役：封口窗口使晚到引用在机械上不可能，
 可变性没有生产者。
 
-调用方只有归约：``reduction.runner`` 发布新文档，``reduction.kinds_migration`` 用 ``restamp_kind_token``
-给已有 occurrence 重打词表编号。语义树只读 ``behavior.tree``，不许触达本模块（架构测试钉死）。
+调用方只有归约：``reduction.runner`` 发布新文档；已落树的文档不改（词表没有迁移，词表方案 2026-11-14）。
+语义树只读 ``behavior.tree``，不许触达本模块（架构测试钉死）。
 """
 
 from __future__ import annotations
@@ -14,13 +14,13 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from habitus.behavior.document import BehaviorDocument, BehaviorDocumentMetadata
-from habitus.behavior.model import BehaviorAddress, BehaviorDirectory, BehaviorKind
+from habitus.behavior.model import BehaviorDirectory, BehaviorKind
 from habitus.behavior.tree.store import BehaviorTree, BehaviorTreeConflictError
 from habitus.behavior.uri import BehaviorURI
 from habitus.infrastructure.store.contracts.lock import LockStore
@@ -104,35 +104,6 @@ class BehaviorDocumentWriter:
                 raise BehaviorPublishConflictError(
                     f"behavior address is already bound to different content: {uri}"
                 ) from exc
-            self._require_read_back(document)
-        return document
-
-    def restamp_kind_token(self, address: BehaviorAddress, token: str) -> BehaviorDocument:
-        """把一条 occurrence 的 ``kind_token`` 改成 ``token``：与发布同一条通道（同一 codec、同一把
-        文档锁、同样的读回校验），只是走 ``tree.replace`` 而不是 ``create``。
-
-        用途只有一个：词表迁移（每晚新增、拆分、合并）把树上 occurrence 重打为新编号（原始名、
-        地址、语义面全部不动）。正文不含编号（裁定 19），所以这一天的概览 digest 不变、不触发摘要重写。
-        """
-
-        uri = BehaviorURI.from_address(address)
-        with self._fenced_uris(uri):
-            current = self.tree.read(address)
-            if current.kind is not BehaviorKind.OCCURRENCE:
-                raise BehaviorPublishConflictError(f"only occurrences carry a kind_token: {uri}")
-            if current.fields.get("kind_token") == token:
-                return current
-            payload = {**current.fields, "kind_token": token}
-            metadata = replace(
-                current.metadata,
-                revision=current.metadata.revision + 1,
-                updated_at=max(self._timestamp(), current.metadata.updated_at),
-            )
-            document = self.tree.document_codec.build(current.kind, payload, metadata=metadata)
-            try:
-                self.tree.replace(document)
-            except BehaviorTreeConflictError as exc:
-                raise BehaviorPublishConflictError(f"behavior kind_token restamp rejected: {uri}") from exc
             self._require_read_back(document)
         return document
 

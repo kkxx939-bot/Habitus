@@ -120,9 +120,21 @@ def client(
     return StructuredChatClient(ChatClient(config, provider), validation_retries=validation_retries), provider
 
 
+class FixedPicker:
+    """会话 lane 的选词口替身：每轮都选同一个词，记下调了几次（这些测试管的是"描述这一轮"，选词另有测试）。"""
+
+    def __init__(self, token: str = "s-k0001") -> None:
+        self.token = token
+        self.calls = 0
+
+    async def pick_turn(self, *, conversation: str, at: datetime, material: str) -> str:
+        self.calls += 1
+        return self.token
+
+
 def lane(
     stores: Stores, bodies: list[dict[str, Any]], *, config: SessionLaneConfig | None = None
 ) -> tuple[SessionLane, ScriptedProvider]:
     chat, provider = client(bodies)
     describer = SessionTurnDescriber(chat, zone=ZONE, config=config)
-    return SessionLane(describer, stores.recorder(), backlog=stores.backlog), provider
+    return SessionLane(describer, stores.recorder(), picker=FixedPicker(), backlog=stores.backlog), provider

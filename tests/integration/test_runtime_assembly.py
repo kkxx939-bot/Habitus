@@ -198,6 +198,8 @@ def runtime_dependencies() -> tuple[ProviderFactory, VectorStoreFactory]:
 def runtime_config(tmp_path: Path, *, with_credentials: bool = False) -> HabitusConfig:
     payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
+    # 单测不往 127.0.0.1:4318 真导出：没关掉的 Runtime 会留下每 10 秒导出一次的线程，串进后面设了代理环境变量的测试
+    payload["observability"]["tracing"]["enabled"] = False
     payload["models"]["chat"]["route"].update(
         provider="fake",
         adapter="fake_chat",
@@ -714,6 +716,8 @@ def _fully_enabled_runtime(tmp_path: Path, *, lifecycle: dict | None = None, for
     if lifecycle:
         payload["lifecycle"] = {**payload.get("lifecycle", {}), **lifecycle}
     payload["storage"]["root"] = str(tmp_path / "data")
+    # 单测不往 127.0.0.1:4318 真导出（同 ``runtime_config``）
+    payload["observability"]["tracing"]["enabled"] = False
     for route, adapter in (
         (payload["models"]["chat"]["route"], "fake_chat"),
         (payload["models"]["embedding"]["route"], "fake_embedding"),
@@ -848,19 +852,15 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert nightly.models_down == queue.state.down and nightly.queue_owed == queue.state.owed_now
     assert queue.daily.retry is nightly.retry and queue.daily.bridge is tick.forming.unsealed
     assert queue.marks is nightly.marks
-    assert [branch.name for branch in queue.daily.vocabulary_branches] == ["session", "physical"]
     assert queue.lease.key.startswith("scene:model-queue:") and queue.lease.key != scene_lock.lease.key
     assert queue.settings.poll_seconds == runtime.config.scene.model_queue_poll_seconds
     assert queue_worker.shutdown_timeout_seconds == runtime.config.scene.model_queue_shutdown_timeout_seconds
     assert queue.sealed.reader.tree is behavior.tree and queue.sealed.reader.name == "model_queue"
     # 完成标记只有一份：换代写，结算读同一个"这一天的换代做完了没有"（裁定 94 第 9 条）
     assert foresight.settlement.finished == generation.marks.finished
-    # 白天那道闸读同一份完成标记（F5）；续做迁移接着两支、排在最前（F1）
+    # 白天那道闸读同一份完成标记（F5）；换代数的是会话一支的在用状态（词表方案 2026-11-14）
     assert tick.finished == generation.marks.finished
-    assert [job.__self__ for job in generation.migration_jobs] == [  # type: ignore[attr-defined]
-        branches.session.reduction_runner.vocabulary,
-        branches.physical.reduction_runner.vocabulary,
-    ]
+    assert generation.vocabulary.store is branches.session.kind_store
     assert worker.settings.retry_base_seconds == runtime.config.scene.generation_retry_base_seconds
     # 预测拍的水位落在这一支的预测根下；触发换代也读它；没在看的时段写进会话一支
     assert tick.track is not None and tick.track.store is foresight.watermark
@@ -1045,12 +1045,6 @@ def test_every_derived_store_keeps_the_configured_number_of_fallback_generations
     assert scene.relations.fallback_generations == 4
     assert foresight.opportunities._files.retained_nights == 5
     assert foresight.history.store._files.retained_nights == 5
-    # 6.5：语义树还要读的词表版本经组合根交给行为侧参与者，截断不会越过它们
-    (behavior,) = [
-        item for item in runtime.components.workflow.lifecycle_worker._participants if item.name == "behavior"
-    ]
-    assert behavior.derived_versions is not None
-    assert scene.concepts.synced_version() in behavior.derived_versions()
 
 
 def test_a_host_transcript_with_parallel_tools_whose_times_go_backwards_is_remembered_over_http(tmp_path: Path) -> None:
@@ -1242,6 +1236,8 @@ def _extreme_base(tmp_path: Path, shape: str) -> Path:
 def _real_storage_config(base: Path) -> HabitusConfig:
     payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(base / "data")
+    # 单测不往 127.0.0.1:4318 真导出（同 ``runtime_config``）
+    payload["observability"]["tracing"]["enabled"] = False
     for capability in ("chat", "embedding", "rerank"):
         payload["models"][capability]["route"].update(provider="fake", adapter=f"fake_{capability}", credential_ref="")
     return HabitusConfig.from_mapping(payload)

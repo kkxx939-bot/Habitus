@@ -16,11 +16,11 @@ from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_nightly import ForesightNightlyRun
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement import SettlementStage
-from habitus.runtime.generation_result import DEGRADED, DONE, FAILED, MIGRATING, OPPORTUNITIES, SCENE, SERIES, SETTLE
-from habitus.scene.concepts.rhythm import RhythmRulers
+from habitus.runtime.generation_result import DEGRADED, DONE, OPPORTUNITIES, SCENE, SETTLE
 from habitus.scene.recurrence import recurrences_of
 from habitus.scene.relations import build_timelines
 from habitus.scene.relations.store import RelationStore
+from habitus.temporal import Rulers
 from tests.unit.runtime.test_generation import assembled_with, generate
 from tests.unit.runtime.test_scene_night import NOW, SLEEP, TONIGHT, nightly, publish_tonight, site_with_three_bedtimes
 from tests.unit.scene.fixtures import SUBJECT
@@ -42,8 +42,6 @@ def components(tmp_path, site) -> ForesightRuntimeComponents:  # type: ignore[no
         ledger,
         read_side,
         closed_days=tuple,
-        current=lambda token: (token,),
-        migrating=lambda: False,
         evidence=Evidence(alpha=0.05, half_life=8.0),
     )
     history = HistoryStage(
@@ -108,7 +106,7 @@ def test_a_night_without_a_relation_table_falls_back_and_says_so(tmp_path) -> No
     run = ForesightNightlyRun(store, relations, CONFIG)
     series = planted(days=5)
     lines = build_timelines(series, CONCEPTS, {}, CONFIG)
-    recurrences = recurrences_of(series, RhythmRulers(15, 2700, 3, 5.0, 5.0, 0.10, 35))
+    recurrences = recurrences_of(series, Rulers(15, 2700, 3, 5.0, 5.0, 35))
     report = run.run(night=series.cutoff, concepts=CONCEPTS, timelines=lines, recurrences=recurrences)
     assert report.lanes["session"].relation_night is None and report.lanes["session"].kinds == 5
     assert any("还没有关系表" in signal for signal in report.signals)
@@ -174,26 +172,6 @@ def test_the_settlement_runs_first_so_the_relabelled_history_sees_tonights_resul
     assert settle is not None and "settled" in settle.report and opportunities is not None
     # 结算读到的机会表那一晚早于这一代写的那一晚（必须边"结算 → 写新机会表"，E17）：这里是还一张都没有
     assert settle.report["opportunity_night"] is None and opportunities.report["night"] == str(result.series_cutoff)
-
-
-def test_a_migration_left_half_done_defers_the_settlement_loudly_and_stops_the_series(tmp_path, monkeypatch) -> None:
-    """词表迁移做到一半、续做迁移那一步也没做完（F1）：结算不跑（树上一半新编号一半旧编号），计入"结算留到下次"并报出
-    （``degraded``，原来结算自己整拍静默跳过）；读序列那一步不成，这一代不成。"""
-
-    built, foresight, scene, site = _night_with_settlement(tmp_path)
-    calls: list[str] = []
-    settle = built.settlement.run_once
-    monkeypatch.setattr(built.settlement, "run_once", lambda: (calls.append("结算"), settle())[1])
-    run = assembled_with(
-        tmp_path, site, scene, foresight=foresight, settlement=built.settlement, vocabulary=lambda: (2, True)
-    )
-    result = generate(run)
-    series = result.step(SERIES)
-    assert series is not None and series.outcome == FAILED and series.reason == MIGRATING
-    assert result.step(SCENE) is None and calls == []
-    settled = result.step(SETTLE)
-    assert settled is not None and settled.outcome == DEGRADED and settled.reason == MIGRATING
-    assert result.fallbacks["settlement_deferred"] == 1
 
 
 def test_a_failing_settlement_is_left_for_the_next_generation(tmp_path, monkeypatch) -> None:

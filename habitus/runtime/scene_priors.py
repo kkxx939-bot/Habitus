@@ -23,8 +23,8 @@ from habitus.scene.relations import comparable
 
 
 class LanePriors:
-    """``concepts`` 是这次认的概念集（换代折叠时是盘上的概念集；模型队列补问时是"概念集 + 同步词表将要生成的基础概念 +
-    待生效的概念"）。``settled`` 是其中已经进了概念集的那些身份（不给就是全部）。"""
+    """``concepts`` 是这次认的概念集（换代折叠时是盘上的概念集；模型队列补问时是"概念集 + 同步词表将要写的概念"）。
+    ``settled`` 是其中已经进了概念集的那些身份（不给就是全部）。"""
 
     def __init__(
         self,
@@ -91,7 +91,7 @@ class LanePriors:
 
         return assign(
             self.names,
-            comparable=lambda antecedent, consequent: comparable(self.concepts, antecedent, consequent),
+            comparable=comparable,
             seen=self.seen,
             answered=lambda antecedent, consequent: self.level(antecedent, consequent) is not None,
         )
@@ -103,7 +103,7 @@ class LanePriors:
             1
             for consequent in self.names
             if any(
-                comparable(self.concepts, antecedent, consequent) and self.level(antecedent, consequent) is None
+                comparable(antecedent, consequent) and self.level(antecedent, consequent) is None
                 for antecedent in self.names
             )
         )
@@ -112,7 +112,7 @@ class LanePriors:
         found: dict[tuple[str, str], PriorLevel] = {}
         for consequent in self.names:
             for antecedent in self.names:
-                if comparable(self.concepts, antecedent, consequent):
+                if comparable(antecedent, consequent):
                     level = self.level(antecedent, consequent)
                     if level is not None:
                         found[(antecedent, consequent)] = level

@@ -3,11 +3,11 @@
 **单位是 ``temporal`` 的槽**（用户 10-07：「设计成我们预测树的事件槽位吧，包括时间的设计」；预测树删后槽运算收在 ``temporal.slots``，裁定 59）。一条记录落在
 "它自己的本地日期 × 当天第几槽"；为了跨天比较，槽号写成绝对槽号 ``日序号 × 每天槽数 + 当天第几槽``。
 
-每个概念在时间线上有两种记号：
+每个行为概念在时间线上有两种记号：
 
-- **命中**：基础概念看记录的类编号（汇总概念看成员类，``with_ancestors``）；细分概念看映射器的命中；
-- **看不到**：映射器对这条记录判过、但答"看不到"（未决），或这条记录还没映射过（它的类上挂着的细分概念全都不知道）。
-  窗口里有"看不到"、又没有命中的，这一次的结果算未知，两边都不计（用户 09-27"没看到就不算"）。
+- **命中**：记录的类编号就是那个行为概念（一条记录只算它那个类，不往别的概念上算）；
+- **看不到**：被提醒过的那一次当后果（见下）。窗口里有"看不到"、又没有命中的，这一次的结果算未知，两边都不计
+  （用户 09-27"没看到就不算"）。
 
 **被提醒过的记录**（行为树的 ``reminded``，裁定 54）：语义树量的是"他自然有多规律"，被系统提醒之后才做的不算。这条记录照样
 在时间线上（``marks``：当前因、合链、算人在场都照常），当**后果**时按"看不到"——不进 ``outcomes``、记进 ``unknown``，窗口里
@@ -31,7 +31,7 @@ from datetime import date, datetime, timedelta
 
 from habitus.conditions import DayTypeCalendar
 from habitus.scene.concepts.calendar_situations import calendar_key
-from habitus.scene.concepts.model import ConceptKind, ConceptSet
+from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.occurrences.model import ConceptHits
 from habitus.scene.relations.config import RelationConfig
 from habitus.series import EventSeries, SeriesRecord
@@ -75,9 +75,8 @@ class LaneTimeline:
     #: 同一条链的对照时刻。实验组的前因是合并后的一条链、做完之后同类不会马上再来；对照也要同一个条件，
     #: 不然"同类不再来、只能是别的事"会把一切别的后果读成"更多"（合成数据：只调时长，「修改代码 → 开会 ↑」）。
     ends: dict[date, list[tuple[int, str]]] = field(default_factory=dict)
-    #: uri → 记录与它的概念命中（调节条件要看前因那一条的结构字段与情境）。
+    #: uri → 记录（调节条件要看前因那一条的结构字段）。
     records: dict[str, SeriesRecord] = field(default_factory=dict)
-    hits: Mapping[str, ConceptHits] = field(default_factory=dict)
     #: 情境概念 → 日子 → 那天成立没有（那天有记录判过它才有值；没判过的日子不在里面，算不知道）。
     situations: dict[str, dict[date, bool]] = field(default_factory=dict)
     #: 哪些情境是日历机械填的（``calendar_days`` 读它们）。
@@ -123,7 +122,7 @@ def build_timelines(
     *,
     calendar: DayTypeCalendar | None = None,
 ) -> dict[str, LaneTimeline]:
-    """每条 lane 一条时间线。``hits`` 是 uri → 这条记录的概念命中（映射器的产物，没映射过的不在里面）。
+    """每条 lane 一条时间线。``hits`` 是 uri → 这条记录的命中记录（封口生成的，还没封口的不在里面）。
     ``calendar`` 给了，日历情境按天机械填上（人在场的每一天；那天日历答不出的不填，不知道 ≠ 否；裁定 59）。"""
 
     per_day = config.slots_per_day
@@ -152,7 +151,9 @@ def build_timelines(
         if not record.classified:
             # 「待定」：已记进人在场与做完时刻；没有概念，不留记号
             continue
-        found, blind = _concepts_of(record, concepts, hits.get(record.uri))
+        identity = concepts.base_for(record.kind_token)
+        if identity is None:
+            continue
         mark = Mark(
             slot=absolute,
             started_at=record.started_at,
@@ -161,11 +162,8 @@ def build_timelines(
             last_slot=ended,
             reminded=record.reminded,
         )
-        for identity in found:
-            line.marks.setdefault(identity, []).append(mark)
-            if record.reminded:
-                line.unknown.setdefault(identity, []).append(absolute)
-        for identity in blind:
+        line.marks.setdefault(identity, []).append(mark)
+        if record.reminded:
             line.unknown.setdefault(identity, []).append(absolute)
     covered = _gap_slots(series, config.slot_minutes, per_day)
     # 同一类之后合并窗口内又开始了的，不是它那条链的最后一件：每一次（``temporal.merge_starts``，与 ``chains_of`` 同一把尺）里
@@ -177,7 +175,6 @@ def build_timelines(
         for group in merge_starts([moment for moment, _uri in ordered], window_seconds=window_seconds):
             followed.update(ordered[index][1] for index in group[:-1])
     for line in lines.values():
-        line.hits = hits
         for day, finished in line.ends.items():
             line.ends[day] = sorted(item for item in finished if item[1] not in followed)
         for items in line.marks.values():
@@ -206,52 +203,18 @@ def _calendar_situations(lines: Mapping[str, LaneTimeline], concepts: ConceptSet
         fill_calendar(line, keyed, line.days(), calendar.of_day)
 
 
-def _situations(line: LaneTimeline, record: SeriesRecord, concepts: ConceptSet, mapped: ConceptHits | None) -> None:
+def _situations(line: LaneTimeline, record: SeriesRecord, concepts: ConceptSet, sealed: ConceptHits | None) -> None:
     """这条记录判过的情境概念（同 lane 的，或不属于任何 lane 的）记到它那一天：命中过一次那天就算成立。"""
 
-    if mapped is None:
+    if sealed is None:
         return
-    held = {hit.identity for hit in mapped.situation_hits}
-    for name in mapped.situations_checked:
+    held = {hit.identity for hit in sealed.situation_hits}
+    for name in sealed.situations_checked:
         if name not in concepts or concepts.lane_of(name) not in (record.lane, None):
             continue
         identity = concepts[name].identity
         days = line.situations.setdefault(identity, {})
         days[record.day] = days.get(record.day, False) or identity in held
-
-
-def _concepts_of(
-    record: SeriesRecord, concepts: ConceptSet, mapped: ConceptHits | None
-) -> tuple[frozenset[str], frozenset[str]]:
-    """这条记录命中哪些概念、哪些判不了。
-
-    基础概念由类编号定（不经映射）；没映射过的记录，它的类上挂着的细分概念全都"看不到"。
-    """
-
-    base = concepts.base_for(record.kind_token)
-    if base is None:
-        return frozenset(), frozenset()
-    refinements = concepts.refinements_on(record.kind_token)
-    if mapped is not None and mapped.kind_token != record.kind_token:
-        mapped = None  # 映射时这条还是另一个类（之后词表拆改重打了编号）：那份命中不是现在这个类的，当没映射过（E3）
-    if mapped is None:
-        return concepts.with_ancestors((base,)), frozenset(refinements)
-    found = {base} | {hit.identity for hit in mapped.hits if hit.identity in concepts}
-    blind = frozenset(identity for identity in mapped.unresolved_identities if identity in refinements)
-    # 后来才加的细分概念：这条记录映射时还没有它，没判过
-    blind |= frozenset(
-        identity
-        for identity in refinements
-        if identity not in found
-        and identity not in mapped.unresolved_identities
-        and _added_after(concepts, identity, mapped)
-    )
-    return concepts.with_ancestors(found), blind
-
-
-def _added_after(concepts: ConceptSet, identity: str, mapped: ConceptHits) -> bool:
-    item = concepts[identity]
-    return item.kind is ConceptKind.REFINEMENT and item.created_at > mapped.mapped_at
 
 
 def _last_slot(record: SeriesRecord, slot_minutes: int, per_day: int) -> int:

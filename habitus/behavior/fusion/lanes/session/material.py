@@ -56,16 +56,11 @@ def split_turns(
 
     asking = frozenset(question_tools)
 
-    # 只数人说的话：宿主在同一秒里写下的叫醒通知不算数，否则人真说的那一句会被它们连累丢掉。
-    burst: dict[int, int] = {}
-    for message in messages:
-        if message.role is SessionMessageRole.PROMPT and _spoken(message.content):
-            second = int(message.occurred_at.timestamp())
-            burst[second] = burst.get(second, 0) + 1
-    replayed = {second for second, count in burst.items() if count >= REPLAY_BURST}
+    replayed = _replayed(messages)
 
     turns: list[SessionTurn] = []
     current: list[SessionMessage] = []
+    woken = [False]  # 当前这一轮是不是叫醒通知打头
 
     def close() -> None:
         if not current:
@@ -80,6 +75,7 @@ def split_turns(
                 completed_at=max(item.occurred_at for item in current),
                 instruction=head.content.strip(),
                 messages=tuple(current),
+                woken=woken[0],
             )
         )
 
@@ -93,6 +89,7 @@ def split_turns(
             if _wakes(text) and (not current or current[-1].role is SessionMessageRole.COMPLETION):
                 close()
                 current = [_wake_as_prompt(message)]  # 上一轮到助手停下为止；被叫醒的这一段自己算一轮
+                woken[0] = True
                 continue
             if _wakes(text):
                 continue  # 助手还在干活时到的通知：不是他说的话，也不结束这一轮
@@ -104,6 +101,7 @@ def split_turns(
                 continue
             close()
             current = list(spoken)
+            woken[0] = False
         elif _is_answer(message, asking):
             if (
                 current
@@ -113,6 +111,18 @@ def split_turns(
             current.append(message)
     close()
     return tuple(turns)
+
+
+def _replayed(messages: Sequence[SessionMessage]) -> set[int]:
+    """同一秒里成批出现的"人说的话"那几秒（重放）。只数人说的话：宿主在同一秒里写下的叫醒通知不算数，否则人真说的那一句
+    会被它们连累丢掉。"""
+
+    burst: dict[int, int] = {}
+    for message in messages:
+        if message.role is SessionMessageRole.PROMPT and _spoken(message.content):
+            second = int(message.occurred_at.timestamp())
+            burst[second] = burst.get(second, 0) + 1
+    return {second for second, count in burst.items() if count >= REPLAY_BURST}
 
 
 def _spoken(text: str) -> bool:
@@ -197,6 +207,7 @@ def without_answered(turn: SessionTurn, answered: frozenset[str]) -> SessionTurn
         completed_at=turn.completed_at,
         instruction=head.content.strip(),
         messages=(head, *kept),
+        woken=turn.woken,
     )
 
 

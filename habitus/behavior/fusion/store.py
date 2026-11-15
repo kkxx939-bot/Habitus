@@ -32,6 +32,7 @@ from typing import Any
 from habitus.behavior.fusion.config import BehaviorFusionConfig
 from habitus.behavior.fusion.derivation import DurableJudgement, judgement_payload
 from habitus.behavior.fusion.errors import BehaviorFusionError, BehaviorFusionLimitError
+from habitus.behavior.kinds.ids import KindIdError, lane_of_token
 from habitus.infrastructure.store.filesystem import (
     DurablePathIntegrityError,
     ImmutableArtifactConflictError,
@@ -42,7 +43,7 @@ from habitus.infrastructure.store.filesystem import (
     read_regular_bytes,
 )
 
-JUDGEMENT_SCHEMA_VERSION = "behavior_judgement_v2"
+JUDGEMENT_SCHEMA_VERSION = "behavior_judgement_v3"
 
 # 读路径按名字取这些键，所以写路径必须逐个要求它们存在——否则一条缺键的记录写得进、读不回，
 # 而它会让 ``list()`` 抛裸 KeyError（连错误谱系都不在），且本层没有删除接口，枚举就此永久报废。
@@ -65,6 +66,7 @@ _JUDGEMENT_KEYS = frozenset(
         "status_basis",
         "fusion_version",
         "prompt_version",
+        "kind_token",
     }
 )
 _JUDGEMENT_FILE = re.compile(r"^(?P<judgement_id>[0-9a-f]{64})\.json$")
@@ -174,6 +176,14 @@ class BehaviorJudgementStore:
             raise BehaviorFusionError(f"judgement record shape is invalid: missing={missing} unknown={unknown}")
         if self._encode_record(record) != encoded:
             raise BehaviorFusionError("judgement record is not canonically encoded")
+        token = record["kind_token"]
+        if token is not None:
+            try:
+                lane_of_token(token)
+            except KindIdError as exc:
+                raise BehaviorFusionError(
+                    f"judgement file {record['judgement_id']}.json: kind_token is neither a word id nor a marker: {token!r}"
+                ) from exc
         return record
 
     def _require_decodable(self, encoded: bytes, judgement_id: str) -> None:

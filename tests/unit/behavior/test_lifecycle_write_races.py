@@ -1,4 +1,4 @@
-"""生命周期线程与归约线程改写同一份文件（26 号清单 L10.3）：两份"读整份、改、整份写回"的日志，截断与追加交错时
+"""生命周期线程与归约线程改写同一份文件（26 号清单 L10.3）："读整份、改、整份写回"的日志，截断与追加交错时
 不许丢掉另一边刚写下的那一笔。
 
 每条用例让截断停在"读完、写回之前"，另一个线程这时去追加；有锁时追加等截断写完再进来，没锁时追加的那一笔被截断写回的
@@ -11,10 +11,7 @@ import threading
 from datetime import date
 from pathlib import Path
 
-from habitus.behavior.kinds.changes import AddClass, ChangeReason, VersionRecord
 from habitus.behavior.tree.dirty_days import DirtyDayLog
-from tests.unit.behavior.kinds_fixtures import NOW, catalog_in_sync, named_classes
-from tests.unit.behavior.test_reduction_kinds import setup
 
 _PAUSE_SECONDS = 0.3
 
@@ -41,45 +38,6 @@ def _race(pause_inside, writer) -> None:  # type: ignore[no-untyped-def]
     first.join(2.0)
     second.join(2.0)
     assert not errors, errors
-
-
-def test_truncating_the_vocabulary_journal_never_loses_a_concurrent_append(tmp_path: Path) -> None:
-    _tree, _stamping, _jobs, store = setup(tmp_path, names=("a", "b"))
-    base = store.read().version
-    extra = named_classes(("a", "b", "c", "d"))
-    store.append(VersionRecord(base + 1, NOW, ChangeReason.NIGHTLY, (AddClass(extra[2]),), ()), expected_version=base)
-    journal = store.journal
-    original = journal._after
-
-    def truncate(inside: threading.Event, go: threading.Event) -> None:
-        truncating = threading.current_thread()
-        reads = 0
-
-        def paused(version: int):  # type: ignore[no-untyped-def]
-            nonlocal reads
-            found = original(version)
-            if threading.current_thread() is truncating:
-                reads += 1
-                if reads == 2:  # 截断第二次读日志（算"留下哪几版"）之后、写回之前
-                    inside.set()
-                    go.wait(2.0)
-            return found
-
-        journal._after = paused  # type: ignore[method-assign]
-        try:
-            store.truncate_before(base + 1)
-        finally:
-            journal._after = original  # type: ignore[method-assign]
-
-    def append() -> None:
-        store.append(
-            VersionRecord(base + 2, NOW, ChangeReason.NIGHTLY, (AddClass(extra[3]),), ()), expected_version=base + 1
-        )
-
-    _race(truncate, append)
-
-    assert store.read().version == base + 2
-    assert catalog_in_sync(store)
 
 
 def test_truncating_the_dirty_day_log_never_loses_a_concurrent_record(tmp_path: Path) -> None:

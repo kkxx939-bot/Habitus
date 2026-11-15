@@ -226,7 +226,7 @@ class HabitusConfig:
 
 
 def _require_layer_dependencies(config: HabitusConfig) -> None:
-    # 语义树从行为树派生（每封口日一次映射），行为侧没开就没有输入。这是**配置自相矛盾**（我们自己的两组配置
+    # 语义树从行为树派生（每封口日一次封口），行为侧没开就没有输入。这是**配置自相矛盾**（我们自己的两组配置
     # 互相打架），不是现实世界的形状，所以硬拒：放过去的下场是启动一切正常、什么都没发生、无处可查。
     if config.scene.enabled and not config.behavior.enabled:
         raise ConfigError(

@@ -7,6 +7,7 @@ from datetime import date, timedelta
 import pytest
 
 from habitus.temporal import (
+    DayProfile,
     Rulers,
     blind_days,
     coverage_of,
@@ -34,9 +35,12 @@ def _profile(records, cutoff, *, gaps=None, recent=35):
         pool_half_width=3,
         shrink_slot_to_pool=5.0,
         shrink_pool_to_all_day=5.0,
-        min_peak_mass=0.10,
         recent=recent,
     )
+
+
+def _busiest_slot(profile: DayProfile) -> int:
+    return max(range(len(profile.shares)), key=lambda slot: (profile.shares[slot], -slot))
 
 
 def test_coverage_counts_every_calendar_day_and_subtracts_gaps_by_share() -> None:
@@ -110,7 +114,7 @@ def test_density_counts_from_the_first_of_its_latest_occurrences() -> None:
 
 def test_density_and_profile_read_only_the_latest_occurrence_days() -> None:
     """26 号清单 4.7：一年前每周一次、19:00；后来改成每两天一次、07:00。只看最近 M 个自然发生日：频率是现在的两天一次，
-    峰在 07:00；看全历史时 19:00 那一段还在。"""
+    日内分布最高在 07:00，19:00 那一槽几乎不占；看全历史时 19:00 那一段还在。"""
 
     weekly = [record(at(START + timedelta(days=7 * week), 19)) for week in range(30)]
     switched = START + timedelta(days=7 * 30)
@@ -124,15 +128,15 @@ def test_density_and_profile_read_only_the_latest_occurrence_days() -> None:
     whole = density_of(days, coverage, recent=1000)
     assert whole is not None and whole.days_per_occurrence > 3.5
     latest = _profile(records, cutoff, recent=35)
-    assert latest is not None and [peak.centre_slot // 4 for peak in latest.peaks] == [7]
+    assert latest is not None and _busiest_slot(latest) // 4 == 7
     full = _profile(records, cutoff, recent=1000)
-    assert full is not None and sorted(peak.centre_slot // 4 for peak in full.peaks) == [7, 19]
+    assert full is not None and full.shares[19 * 4] > 5 * latest.shares[19 * 4]
     with pytest.raises(ValueError, match="recent"):
         density_of(days, coverage, recent=0)
     with pytest.raises(ValueError, match="recent"):
         _profile(records, cutoff, recent=0)
     with pytest.raises(ValueError, match="recent"):
-        Rulers(15, WINDOW, 3, 5.0, 5.0, 0.10, 0)
+        Rulers(15, WINDOW, 3, 5.0, 5.0, 0)
 
 
 def test_blind_days_leave_both_numerator_and_denominator() -> None:
@@ -147,34 +151,8 @@ def test_blind_days_leave_both_numerator_and_denominator() -> None:
 def test_profile_finds_the_time_on_the_days_it_happens() -> None:
     weeks = [record(at(START + timedelta(days=2 + 7 * week), 17, 0)) for week in range(10)]  # 每周三 17:00
     found = _profile(weeks, START + timedelta(days=80))
-    assert found is not None and len(found.peaks) == 1
-    peak = found.peaks[0]
-    assert peak.first_slot <= 68 <= peak.last_slot and peak.share > 0.5 and peak.days == 10
+    assert found is not None and _busiest_slot(found) == 68 and found.occurrence_days == 10
     assert sum(found.shares) == pytest.approx(1.0)
-
-
-def test_one_off_times_make_no_peak() -> None:
-    """三次各在不同时段：每段只有一天，不报峰（样本少就没有读数）。"""
-
-    scattered = [
-        record(at(START, 9)),
-        record(at(START + timedelta(days=40), 13)),
-        record(at(START + timedelta(days=90), 17)),
-    ]
-    found = _profile(scattered, START + timedelta(days=100))
-    assert found is not None and found.peaks == ()
-
-
-def test_a_peak_across_midnight_is_one_peak() -> None:
-    late = []
-    for offset in range(8):
-        day = START + timedelta(days=offset * 2)
-        late.append(record(at(day, 23, 45)))
-        late.append(record(at(day + timedelta(days=1), 0, 50), number=1))
-    found = _profile(late, START + timedelta(days=20))
-    assert found is not None and len(found.peaks) == 1
-    peak = found.peaks[0]
-    assert peak.last_slot >= 96  # 尾巴落在次日
 
 
 def test_a_lane_whose_only_record_is_on_the_last_sealed_day_has_that_day_covered() -> None:
@@ -183,14 +161,6 @@ def test_a_lane_whose_only_record_is_on_the_last_sealed_day_has_that_day_covered
     day = date(2026, 8, 17)
     found = coverage_of(series([record(at(day, 9))], cutoff=day + timedelta(days=1)), "session", slot_minutes=60)
     assert list(found.days) == [day]
-
-
-def test_a_flat_curve_has_no_peak() -> None:
-    """峰是"高于均值"的一段：每个槽都一样高时没有哪一段高于均值，没有峰。"""
-
-    from habitus.temporal import peaks_of
-
-    assert peaks_of([0.25, 0.25, 0.25, 0.25], floor=0.1) == ()
 
 
 def test_a_slot_next_to_the_usual_time_borrows_from_its_neighbourhood() -> None:

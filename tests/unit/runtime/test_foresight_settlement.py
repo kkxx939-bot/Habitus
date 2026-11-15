@@ -53,7 +53,7 @@ def expectation(
     )
 
 
-def stage(tmp_path, closed: tuple[date, ...], *, observer: Recorder | None = None, migrating: bool = False):  # type: ignore[no-untyped-def]
+def stage(tmp_path, closed: tuple[date, ...], *, observer: Recorder | None = None):  # type: ignore[no-untyped-def]
     site = Site(tmp_path, now=at(DAY, 23, 0))
     read_side = ForesightReadSide(site.behavior_tree, SUBJECT, LocalCalendar(), ZoneInfo("Asia/Shanghai"))
     ledger = ForesightLedgerStore(tmp_path / "ledger")
@@ -61,8 +61,6 @@ def stage(tmp_path, closed: tuple[date, ...], *, observer: Recorder | None = Non
         ledger,
         read_side,
         closed_days=lambda: closed,
-        current=lambda token: (token,),
-        migrating=lambda: migrating,
         evidence=Evidence(alpha=0.05, half_life=8.0),
         observer=observer,
         clock=lambda: at(DAY + timedelta(days=1), 4, 0).astimezone(UTC),
@@ -181,14 +179,6 @@ def test_another_accounts_next_chance_does_not_block_a_catch_up(tmp_path) -> Non
     assert report.rulings == 1 and ledger.rulings_on(DAY)[0].ruling == "后补"
 
 
-def test_migration_in_progress_settles_nothing_and_reports_pending_days(tmp_path) -> None:
-    _site, ledger, settlement = stage(tmp_path, closed=(DAY,), migrating=True)
-    ledger.record_expectation(expectation("hotel", HOTEL, at(DAY, 14, 7), window_minutes=(4, 51), deadline_hours=3))
-    report = settlement.run_once()
-    assert report.settled == 0 and report.pending_days == (DAY,)
-    assert ledger.settlements_on(DAY) == ()
-
-
 def test_a_corrupt_ledger_file_is_skipped_and_counted_not_fatal(tmp_path) -> None:
     recorder = Recorder()
     _site, ledger, settlement = stage(tmp_path, closed=(DAY,), observer=recorder)
@@ -211,8 +201,6 @@ def _two_days(tmp_path, closed: list[date]):  # type: ignore[no-untyped-def]
         ledger,
         read_side,
         closed_days=lambda: tuple(closed),
-        current=lambda token: (token,),
-        migrating=lambda: False,
         evidence=Evidence(alpha=0.05, half_life=8.0),
         observer=recorder,
         clock=lambda: at(DAY + timedelta(days=2), 4, 0).astimezone(UTC),
@@ -397,8 +385,6 @@ def test_an_event_expectation_whose_antecedent_is_now_another_class_is_voided_no
         ledger,
         read_side,
         closed_days=lambda: (DAY, DAY + timedelta(days=1)),
-        current=lambda token: (token,),
-        migrating=lambda: False,
         evidence=Evidence(alpha=0.05, half_life=8.0),
         opportunities=store,
         clock=lambda: at(DAY + timedelta(days=2), 4, 0).astimezone(UTC),
@@ -453,8 +439,6 @@ def test_a_situation_expectation_is_rechecked_against_the_latest_calendar(tmp_pa
         ledger,
         read_side,
         closed_days=lambda: (DAY, DAY + timedelta(days=1)),
-        current=lambda token: (token,),
-        migrating=lambda: False,
         evidence=Evidence(alpha=0.05, half_life=8.0),
         opportunities=store,
         tolerance=Tolerance(line=2 / 3),
@@ -568,8 +552,6 @@ def _resettle_stage(tmp_path, closed, *, now):  # type: ignore[no-untyped-def]
         ledger,
         read_side,
         closed_days=lambda: closed,
-        current=lambda token: (token,),
-        migrating=lambda: False,
         evidence=Evidence(alpha=0.05, half_life=8.0),
         clock=lambda: now,
         tolerance=Tolerance(line=2 / 3),
@@ -743,8 +725,6 @@ def test_an_antecedent_whose_start_was_corrected_still_holds(tmp_path) -> None:
         ledger,
         read_side,
         closed_days=lambda: (DAY,),
-        current=lambda token: (token,),
-        migrating=lambda: False,
         evidence=Evidence(alpha=0.05, half_life=8.0),
         opportunities=store,
         clock=lambda: at(DAY + timedelta(days=1), 4, 0).astimezone(UTC),
@@ -958,8 +938,6 @@ def test_a_spoken_expectation_whose_chance_is_void_writes_no_feedback(tmp_path) 
         ledger,
         read_side,
         closed_days=lambda: (DAY, DAY + timedelta(days=1)),
-        current=lambda token: (token,),
-        migrating=lambda: False,
         evidence=Evidence(alpha=0.05, half_life=8.0),
         opportunities=store,
         clock=lambda: at(DAY + timedelta(days=2), 4, 0).astimezone(UTC),
@@ -1120,8 +1098,6 @@ def test_an_expectation_formed_late_still_sees_what_happened_from_its_observed_f
         ledger,
         read_side,
         closed_days=lambda: closed,
-        current=lambda token: (token,),
-        migrating=lambda: False,
         evidence=Evidence(alpha=0.05, half_life=8.0),
         clock=lambda: at(monday + timedelta(days=9), 4, 0).astimezone(UTC),
     )

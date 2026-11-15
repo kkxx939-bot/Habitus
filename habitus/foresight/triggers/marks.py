@@ -1,9 +1,9 @@
 """把最近几天的行排成一条只有记号的时间线，好让链合并与语义树同一把尺（``scene.relations.chains_of`` / ``merge_for``）。
 
 填 ``marks``（概念 = 类编号）；人在场、对照时刻这些检验用的字段不填——这里不做检验，只问"此刻前因在不在它那一段里"。
-带条件的关系要在白天判"此刻条件成不成立"（裁定 61 第 6 条），所以按机会表上各关系挂的条件再补三样、让语义树的
-``evaluator`` 在这条时间线上也能判：每一行的记录（地点、同在的人）；时间线条件指向汇总概念时，成员类的记号也挂在那个
-概念身份下；日历情境条件按每一天的日历条件机械填。映射器打的情境标签白天没有，那种条件判不了（``conditions.judge_for``）。
+带条件的关系要在白天判"此刻条件成不成立"（裁定 61 第 6 条），所以按机会表上各关系挂的条件再补两样、让语义树的
+``evaluator`` 在这条时间线上也能判：每一行的记录（地点、同在的人）；日历情境条件按每一天的日历条件机械填。时间线条件
+指向的就是一个类（行为概念的身份 = 类编号），它的记号本来就按类挂着，不用另补。
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from datetime import date
 
 from habitus.foresight.model import Seen
 from habitus.foresight.opportunities.model import ConditionSpec
-from habitus.scene.relations import LaneTimeline, Mark, Template, fill_calendar, last_slot
+from habitus.scene.relations import LaneTimeline, Mark, fill_calendar, last_slot
 from habitus.scene.relations import parse_condition as parse
 from habitus.series import SeriesRecord
 from habitus.temporal.slots import MINUTES_PER_DAY, absolute_slot
@@ -34,12 +34,6 @@ def timeline_of(
     per_day = MINUTES_PER_DAY // slot_minutes
     line = LaneTimeline(lane=lane, slots_per_day=per_day, horizon=horizon.toordinal() * per_day)
     specs = tuple(conditions)
-    aliases: dict[str, set[str]] = {}
-    for spec in specs:
-        condition = parse(spec.text)
-        if condition.template is Template.TIMELINE:
-            for token in spec.classes:
-                aliases.setdefault(token, set()).add(condition.value)
     days: set[date] = set()
     for row in rows:
         start = absolute_slot(row.started_at, slot_minutes=slot_minutes)
@@ -47,8 +41,7 @@ def timeline_of(
             row.day, row.ended_at, slot_minutes=slot_minutes, per_day=per_day
         )
         mark = Mark(slot=start, started_at=row.started_at, uri=row.source, last_slot=max(start, end))
-        for identity in {row.kind_token, *aliases.get(row.kind_token, ())}:
-            line.marks.setdefault(identity, []).append(mark)
+        line.marks.setdefault(row.kind_token, []).append(mark)
         line.records[row.source] = _record(row, lane)
         days.add(row.day)
     for items in line.marks.values():

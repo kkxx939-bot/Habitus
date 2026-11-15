@@ -10,7 +10,6 @@ from dataclasses import replace
 from datetime import date
 from typing import TYPE_CHECKING
 
-from habitus.scene.concepts.model import ConceptSet, members_retired
 from habitus.scene.relations.conditions import (
     MIN_PER_SIDE,
     Condition,
@@ -37,16 +36,14 @@ class RelationCandidates:
 
         line, concepts = self.tests.line, self.tests.concepts
         lane = line.lane
-        # 停用的概念（类被拆改；细分 / 汇总概念成员类全停了）不再量：它不会再有新记录，量出来只会是"它没了"（裁定 27 第 9 条）
-        names = [
-            name for name in line.concepts() if concepts.lane_of(name) == lane and not members_retired(concepts, name)
-        ]
+        # 停用的概念不再量：它不会再有新记录，量出来只会是"它没了"（裁定 27 第 9 条）
+        names = [name for name in line.concepts() if concepts.lane_of(name) == lane and not concepts[name].retired]
         found = [
             RelationKey(lane, antecedent, consequent, segment)
             for antecedent in names
             if line.marks.get(antecedent)
             for consequent in names
-            if comparable(concepts, antecedent, consequent)
+            if comparable(antecedent, consequent)
             for segment in SEGMENTS
         ]
         for antecedent in names:
@@ -55,29 +52,13 @@ class RelationCandidates:
                     found.extend(
                         RelationKey(lane, antecedent, consequent, segment)
                         for consequent in names
-                        if comparable(concepts, antecedent, consequent)
+                        if comparable(antecedent, consequent)
                     )
         for situation in sorted(line.situations):
-            if self._derived_from_history(situation):
-                continue
             if self.tests.episodes(situation, Segment.SITUATION):
                 found.extend(RelationKey(lane, situation, consequent, Segment.SITUATION) for consequent in names)
         found.extend(self._moderated(names))
         return tuple(found)
-
-    def _derived_from_history(self, situation: str) -> bool:
-        """由行为历史派生的情境（「昨日有 X」「连续 X 中」）不当前因，只当调节条件（2026-10-12 用户裁定）。
-
-        它当前因问的问题别处已经在问：「昨日有 X 的日子 Y 多吗」= 次日段的 X → Y，「连续 X 中的日子 Y 多吗」= X 的集中期标志；
-        Y 换成 X 自己就成了同义反复（真实模型盘：昨日有交材料 → 交材料 58.8% 对 0%，候选）。日历来的情境（周末、调休、
-        月初）不从行为算，照旧进情境段。调节条件那条路（``conditions.mechanical`` 的概念模板）不受影响。
-        """
-
-        concepts = self.tests.concepts
-        if situation not in concepts:
-            return False
-        rule = concepts[situation].situation
-        return rule is not None and rule.basis.reads_history
 
     def _moderated(self, names: list[str]) -> list[RelationKey]:
         """带条件的关系：单个条件对每个够样本的前因都列（裁定 62 第 1 条；列出来进不进检验族按层级定，裁定 95 第 2 条、
@@ -108,7 +89,7 @@ class RelationCandidates:
             pools[antecedent] = conditions
             for condition, since in sorted(conditions.items(), key=lambda item: item[0].text):
                 for consequent in names:
-                    if not comparable(concepts, antecedent, consequent) or _circular(concepts, condition, consequent):
+                    if not comparable(antecedent, consequent) or _circular(condition, consequent):
                         continue
                     for segment in SEGMENTS:
                         key = RelationKey(line.lane, antecedent, consequent, segment, condition.text)
@@ -132,7 +113,7 @@ class RelationCandidates:
             if parent.consequent not in names or parent.segment not in SEGMENTS:
                 continue
             for condition, since in pool.items():
-                if condition in held or _circular(self.tests.concepts, condition, parent.consequent):
+                if condition in held or _circular(condition, parent.consequent):
                     continue
                 key = replace(parent, condition=join_conditions((*held, condition)))
                 grown.setdefault(key, []).append(since)
@@ -164,12 +145,10 @@ class RelationCandidates:
         return True
 
 
-def _circular(concepts: ConceptSet, condition: Condition, consequent: str) -> bool:
-    """ "B 刚出现过"不是调节：条件里的那一类就是（或读同一批记录于）后果时，它说的是 B 自己扎堆，不是 A 被什么左右。"""
+def _circular(condition: Condition, consequent: str) -> bool:
+    """ "B 刚出现过"不是调节：条件里的那一类就是后果时，它说的是 B 自己扎堆，不是 A 被什么左右。"""
 
-    if condition.template is not Template.TIMELINE:
-        return False
-    return condition.value == consequent or not comparable(concepts, condition.value, consequent)
+    return condition.template is Template.TIMELINE and condition.value == consequent
 
 
 __all__ = ["RelationCandidates"]

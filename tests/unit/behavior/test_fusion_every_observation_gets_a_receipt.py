@@ -31,5 +31,7 @@ def test_a_unit_that_cannot_be_derived_leaves_no_observation_behind(tmp_path: Pa
     recorder = stores.recorder()
     with pytest.raises(BehaviorFusionError):
         # 判定时刻没带时区：派生不过
-        recorder.record(_turn(), _description(), validation_attempts=1, judged_at=datetime(2026, 7, 26, 18, 0))
+        recorder.record(
+            _turn(), _description(), kind_token="s-k0001", validation_attempts=1, judged_at=datetime(2026, 7, 26, 18, 0)
+        )
     assert list(stores.observations.list()) == [] and list(stores.judgements.list()) == []

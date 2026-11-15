@@ -49,14 +49,9 @@ class LaneTests:
         self.proposals = dict(proposals or {})
         self.established = frozenset(established)
         self.controls = Controls(line, config.transition_window_slots)
-        # 上下界检验用的两份：后果"判不了"当 0 / 当 1（裁定 27 第 6 条）
-        self._bounds = {
-            0: Controls(line, config.transition_window_slots, blind_as=0),
-            1: Controls(line, config.transition_window_slots, blind_as=1),
-        }
         self._chains: dict[str, tuple[Chain, ...]] = {}
         self._blocks: dict[str, Blocks | None] = {}
-        self._strata: dict[tuple[RelationKey, int | None, Pairing], tuple[Stratum, ...]] = {}
+        self._strata: dict[tuple[RelationKey, Pairing], tuple[Stratum, ...]] = {}
         self._episodes: dict[tuple[str, Segment], tuple[Episode, ...]] = {}
         self._flags: dict[tuple[str, str], dict[int, bool | None]] = {}
         self._reachable: dict[tuple[str, str, Segment], bool] = {}
@@ -119,11 +114,6 @@ class LaneTests:
 
         return self.evaluator.assess(test, measure, previously_large=previously_large)
 
-    def refined_consequent(self, key: RelationKey) -> bool:
-        """后果是细分概念的短跨度、不带条件的关系（``RelationEvaluator.refined_consequent``）。"""
-
-        return self.evaluator.refined_consequent(key)
-
     # ── 一晚只算一次的材料 ────────────────────────────────────────────────────
 
     def episodes(self, antecedent: str, segment: Segment) -> tuple[Episode, ...]:
@@ -146,15 +136,14 @@ class LaneTests:
         key: RelationKey,
         *,
         since: date | None = None,
-        blind_as: int | None = None,
         pairing: Pairing = Pairing.SAME_DAY,
     ) -> tuple[Stratum, ...]:
         """短跨度关系的全部层（给了 ``since`` 就只要那天及以后的 A：前向验证只看发现之后的新数据）。条件不影响层，只影响分组。
-        ``blind_as`` 给了就把后果"判不了"当成它（上下界检验）；``pairing`` 是同一条链的哪一道对照（别的段只有一种）。"""
+        ``pairing`` 是同一条链的哪一道对照（别的段只有一种）。"""
 
-        slot = (replace(key, condition=""), blind_as, pairing)
+        slot = (replace(key, condition=""), pairing)
         if slot not in self._strata:
-            controls = self.controls if blind_as is None else self._bounds[blind_as]
+            controls = self.controls
             blocks = self.blocks(key.antecedent)
             found: list[Stratum] = []
             for chain in merge_for(key.segment, self.chains(key.antecedent)):

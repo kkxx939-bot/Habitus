@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date, timedelta
 
-from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.scene.recurrence import recurrences_of
+from habitus.temporal import Rulers
 from tests.unit.temporal.fixtures import at, record, series, with_sessions
 
-RULERS = RhythmRulers(15, 2700, 3, 5.0, 5.0, 0.10, 35)
+RULERS = Rulers(15, 2700, 3, 5.0, 5.0, 35)
 START = date(2026, 3, 4)  # 周三
 
 

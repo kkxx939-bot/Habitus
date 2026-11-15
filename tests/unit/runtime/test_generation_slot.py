@@ -31,7 +31,6 @@ from habitus.runtime.generation_watermark import TickTrack, TickWatermark, TickW
 from habitus.runtime.health import _generation_state_checks
 from habitus.runtime.model_queue import ModelQueueState
 from habitus.runtime.scene_lock import SceneWriteLock, unlocked
-from habitus.scene.occurrences.mapper import ConceptMapper, MapperConfig
 from tests.lock_store import ProcessLocalLockStore
 from tests.unit.foresight.scripted_model import model_config
 from tests.unit.runtime.test_foresight_tick import TODAY as TICK_DAY
@@ -261,11 +260,30 @@ def test_the_generation_raises_the_flag_while_it_runs_and_lowers_it_even_when_it
     assert seen == [True, True]
 
 
+def advised(tmp_path, client=None):  # type: ignore[no-untyped-def]
+    """``site_and_scene`` 的现场接上先验（队列里会调模型、会写语义树的那一项）；返回（现场, 语义树, 先验的替身模型）。"""
+
+    from habitus.runtime.scene_advice import RelationAdvice
+    from habitus.scene.advice.prior import PriorAdvisor, PriorConfig
+    from habitus.scene.advice.store import AdviceStore
+    from tests.unit.scene.advice_fixtures import Answering
+
+    site, scene, _provider = site_and_scene(tmp_path)
+    advisor = Answering()
+    chat = client(advisor) if client is not None else StructuredChatClient(ChatClient(model_config(), advisor))
+    scene.advice = RelationAdvice(
+        store=AdviceStore(tmp_path / "scene"),
+        prior=PriorAdvisor(chat, config=PriorConfig(transient_retry_delay_seconds=0.0)),
+        conditions=None,
+    )
+    return site, scene, advisor
+
+
 def test_a2_7_the_queue_takes_no_item_while_a_generation_runs_and_goes_on_afterwards(tmp_path) -> None:
     """同一进程的换代在做（标志立着）：队列认了欠账也不取第一项，一次模型都不调；标志撤掉后接着做完。队列不看标志时
     这里会变红。"""
 
-    site, scene, provider = site_and_scene(tmp_path)
+    site, scene, provider = advised(tmp_path)
     queue = queue_for(tmp_path, scene, site)
     queue.state.set_generating(True)
     before = scene_files(tmp_path)
@@ -301,10 +319,9 @@ def test_a_queue_told_to_stop_while_waiting_for_the_generation_returns(tmp_path)
 
 
 def locked_queue(tmp_path, *, gate: asyncio.Event | None = None):  # type: ignore[no-untyped-def]
-    """带语义树写锁的队列；映射器走 ``unlocked`` 包过的客户端。``asked`` 记每次模型调用那一刻队列是不是持着锁，
-    ``wrote`` 记每次写命中 / 盖完成章那一刻是不是持着锁。"""
+    """带语义树写锁的队列；先验走 ``unlocked`` 包过的客户端。``asked`` 记每次模型调用那一刻队列是不是持着锁，
+    ``wrote`` 记每次写先验缓存 / 同步到的版本那一刻是不是持着锁。"""
 
-    site, scene, provider = site_and_scene(tmp_path)
     lock = scene_lock()
     asked: list[bool] = []
     wrote: list[bool] = []
@@ -316,18 +333,22 @@ def locked_queue(tmp_path, *, gate: asyncio.Event | None = None):  # type: ignor
                 await gate.wait()
             return await super().complete_json_async(*args, **kwargs)
 
-    client = unlocked(Probed(ChatClient(model_config(), provider), validation_retries=1), lock)
-    scene.mapper_for = lambda concepts: ConceptMapper(
-        client, concepts, config=MapperConfig(transient_retry_delay_seconds=0.0), subject=SUBJECT, clock=lambda: NOW
+    site, scene, provider = advised(
+        tmp_path, lambda fake: unlocked(Probed(ChatClient(model_config(), fake), validation_retries=1), lock)
     )
-    for name in ("write", "complete_day"):
-        inner = getattr(scene.hits, name)
+    store = scene.advice.store
+    for owner, name in (
+        (store, "write_prior"),
+        (store, "write_prior_by_antecedent"),
+        (scene.concepts, "write_synced_version"),
+    ):
+        inner = getattr(owner, name)
 
         def probed(*args, _inner=inner, **kwargs):  # type: ignore[no-untyped-def]
             wrote.append(lock.writing_now)
             return _inner(*args, **kwargs)
 
-        setattr(scene.hits, name, probed)
+        setattr(owner, name, probed)
     return queue_for(tmp_path, scene, site, scene_lock=lock), lock, provider, asked, wrote
 
 

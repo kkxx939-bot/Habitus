@@ -8,8 +8,7 @@ from datetime import timedelta
 
 import pytest
 
-from habitus.scene.concepts import ConceptRole, ConceptSet
-from habitus.scene.concepts.situation import SituationBasis, SituationRule
+from habitus.scene.concepts import ConceptSet
 from habitus.scene.relations import LaneTests, RelationKey, Segment, Verdict, build_timelines, examine_night
 from habitus.scene.relations.conditions import (
     Condition,
@@ -25,7 +24,7 @@ from habitus.scene.relations.measures import PairedMeasure
 from habitus.scene.relations.spans import chains_of
 from habitus.series import EventSeries, GapKind, SeriesGap, SeriesRecord
 from habitus.temporal.absence import Visit
-from tests.unit.scene.concept_fixtures import calendar, situation
+from tests.unit.scene.concept_fixtures import calendar
 from tests.unit.scene.relation_fixtures import (
     CODE,
     CONCEPTS,
@@ -39,8 +38,6 @@ from tests.unit.scene.relation_fixtures import (
     planted,
     record,
 )
-
-WEEKEND = situation("出差中", "人在常住地之外过夜")
 
 
 def daily(counts: dict[int, int], *, filler: str = "调研", title: str = "提交推送") -> EventSeries:
@@ -368,21 +365,13 @@ def test_a_real_relation_without_a_condition_is_seldom_read_as_moderated() -> No
     assert flagged / rounds < 0.09
 
 
-def test_proposals_compile_into_one_of_three_templates_or_are_refused() -> None:
-    concepts = ConceptSet([*CONCEPTS.values(), WEEKEND, calendar("周末", "日历.周几", "周六", "周日")])
-    # 周末这类日历条件是日历情境概念，走 concept 模板（裁定 59）
-    assert compile_proposal({"template": "concept", "concept": "周末"}, concepts, lane="session") == Condition(
-        Template.CONCEPT, "周末"
-    )
+def test_proposals_compile_into_one_of_two_templates_or_are_refused() -> None:
+    concepts = ConceptSet([*CONCEPTS.values(), calendar("周末", "日历.周几", "周六", "周日")])
     assert compile_proposal(
         {"template": "field", "field": "place", "value": "公司"}, concepts, lane="session"
     ).text == ("field:place=公司")
     assert compile_proposal({"template": "timeline", "concept": "调研"}, concepts, lane="session") == Condition(
         Template.TIMELINE, RESEARCH
-    )
-    assert (
-        compile_proposal({"template": "concept", "concept": "出差中"}, concepts, lane="session").text
-        == "concept:出差中"
     )
     for bad, reason in (
         ({"template": "vibes"}, "unknown template"),
@@ -390,8 +379,10 @@ def test_proposals_compile_into_one_of_three_templates_or_are_refused() -> None:
         ({"template": "field", "field": "weekend"}, "unknown field"),
         ({"template": "field", "field": "place"}, "plain value"),
         ({"template": "timeline", "concept": "不存在"}, "no concept"),
-        ({"template": "timeline", "concept": "出差中"}, "behaviour concept"),
-        ({"template": "concept", "concept": "调研"}, "situation concept"),
+        ({"template": "timeline", "concept": "周末"}, "behaviour concept"),
+        # 日历条件由系统机械列举（情境概念模板），模型提不了
+        ({"template": "concept", "concept": "周末"}, "not proposable"),
+        ({"template": "concept", "concept": "调研"}, "not proposable"),
     ):
         with pytest.raises(ConditionError, match=reason):
             compile_proposal(bad, concepts, lane="session")
@@ -442,30 +433,17 @@ def test_a_new_proposed_condition_is_measured_only_after_it_was_proposed() -> No
         assert all(item.chain.day >= proposed_on for item in (*part.inside, *part.outsides[0]))
 
 
-def test_a_situation_derived_from_behaviour_history_moderates_but_is_not_an_antecedent() -> None:
-    """「昨日有 X」「连续 X 中」是从某个类自己的历史算出来的。当前因只会重复次日段 / 集中期，或对着源类同义反复
-    （真实模型盘 2026-02-09：昨日有交材料 → 交材料 58.8% 对 0%，候选）——2026-10-12 用户裁定它们不进情境段，
-    只留在调节条件那条路上；日历来的情境（调休日）照旧当前因。"""
+def test_a_calendar_situation_is_an_antecedent_of_the_situation_segment() -> None:
+    """日历来的情境（调休日）当情境段的前因（裁定 59 第 7 条）。"""
 
-    yesterday = situation(
-        "昨日有提交推送",
-        "这条行为之前 24 小时内提交推送过",
-        role=ConceptRole.DERIVED,
-        rule=SituationRule(SituationBasis.YESTERDAY, concept=PUSH),
-    )
     swap_day = calendar("调休日", "日历.日型", "调休上班")
-    concepts = ConceptSet((*CONCEPTS.values(), yesterday, swap_day))
+    concepts = ConceptSet((*CONCEPTS.values(), swap_day))
     series = planted(80, moderated=True)
     line = line_of(series, concepts)
     days = sorted({item.day for item in series.records})
-    for name in (yesterday.identity, swap_day.identity):
-        line.situations[name] = {day: index % 2 == 0 for index, day in enumerate(days)}
+    line.situations[swap_day.identity] = {day: index % 2 == 0 for index, day in enumerate(days)}
     tests = LaneTests(line, concepts, CONFIG, series.cutoff)
-
-    situation_antecedents = {key.antecedent for key in tests.keys() if key.segment is Segment.SITUATION}
-    assert swap_day.identity in situation_antecedents
-    assert yesterday.identity not in situation_antecedents
-    # 调节条件那条路不在这里考：conditions.mechanical 的概念模板仍把它列为候选条件，按记录上的情境命中判
+    assert swap_day.identity in {key.antecedent for key in tests.keys() if key.segment is Segment.SITUATION}
 
 
 def test_the_engine_measures_return_on_chain_days_not_on_marker_days() -> None:

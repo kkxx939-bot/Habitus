@@ -275,7 +275,7 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     ]
     assert behavior_dependency_violations == []
 
-    # 模型调用收敛在受控触点：会话 lane 的描述、词表（白天归类 / 每晚新增 / 定期拆改都经
+    # 模型调用收敛在受控触点：会话 lane 的描述、词表（选词经
     # ``kinds/calls.py`` 这一个文件）、行为树语义面生成。
     # 存储、派生与落盘路径仍不得渗入。
     model_callers = sorted(
@@ -365,7 +365,7 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
 
 
 def test_reduction_modules_reach_the_model_only_through_the_runner() -> None:
-    """归约层的 LLM 触点只有 runner 与词表的两步（白天归类 kinds_step、整理活 kinds_jobs）；纯函数模块连传递依赖都不许有。
+    """归约层的 LLM 触点只有 runner 与词表的选词一步（kinds_step，只给没带选词结果的判断）；纯函数模块连传递依赖都不许有。
 
     与融合层同一形状的传递闭包守卫：只查一跳会放过 ``payloads → runner → resolver →
     ModelClient`` 这类多跳链；闭包图必须跨到 kinds 与 fusion，否则经它们中转的泄漏不可见。
@@ -398,16 +398,14 @@ def test_reduction_modules_reach_the_model_only_through_the_runner() -> None:
             return True
         return any(reaches_model_client(name, seen) for name in imported if name in graph)
 
-    # 归约的模型触点：runner 编排，词表的白天归类（kinds_step）与整理活（kinds_jobs）；把版本落到树上的
-    # kinds_migration 是纯确定性的，不许碰模型。stager（物化，读 kinds_step 的归类结果与放一边的原因）与
-    # vocabulary（词表整理活的持锁编排，调 kinds_jobs）是从 runner 拆出的编排协作者（工程化 S3），自身不调模型。
+    # 归约的模型触点：runner 编排，词表的选词一步（kinds_step，物理 lane 的判断不带选词结果）。stager（物化，读 kinds_step
+    # 的选词结果与放一边的原因）是从 runner 拆出的编排协作者（工程化 S3），自身不调模型。词表方案 2026-11-14 删了整理活
+    # （kinds_jobs、vocabulary）与迁移（kinds_migration）。
     allowed = {
         "habitus.behavior.reduction",
         "habitus.behavior.reduction.runner",
         "habitus.behavior.reduction.stager",
-        "habitus.behavior.reduction.vocabulary",
         "habitus.behavior.reduction.kinds_step",
-        "habitus.behavior.reduction.kinds_jobs",
     }
     leaking = sorted(
         module
@@ -708,17 +706,12 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
     assert _scene_modules_reaching(graph, "habitus.foresight") == []
     # 语义树读事件序列的纯值（``habitus.series``），不读行为树的那一半（``series.reader`` 只给组合根）。
     assert _scene_modules_reaching(graph, "habitus.series.reader") == []
-    # 模型触点一个都不许多：写概念（①）、映射器、先验、候选调节条件，加上它们共用的调模型那一段。
-    # **都不从包根导出**——包根一 import 它们，任何 ``from habitus.scene.concepts import ConceptSet`` 都把
-    # model_client 拖进来，这条边界就只剩一句注释了。
-    # ``occurrences.daily`` 不是新触点：它是映射器的按条入口与一天的封口（实时化阶段 2「映射按槽」，从 ``mapper``
-    # 里搬过去的），经映射器调模型，自己不拼提示词、不碰模型客户端。
+    # 模型触点一个都不许多：先验、候选调节条件（概念层只留词表节点与日历之后没有写概念、映射这两个触点，2026-11-14）。
+    # **都不从包根导出**——包根一 import 它们，任何 ``from habitus.scene.advice import ...`` 都把 model_client 拖进来，
+    # 这条边界就只剩一句注释了。命中记录由封口直接生成（``occurrences.daily``），不碰模型客户端。
     assert _scene_modules_reaching(graph, "habitus.model_client") == [
         "habitus.scene.advice.conditions",
         "habitus.scene.advice.prior",
-        "habitus.scene.concepts.author",
-        "habitus.scene.occurrences.daily",
-        "habitus.scene.occurrences.mapper",
     ]
     # 建议（先验、候选条件）只引用概念与关系检验里纯的那几块：看不到命中、看不到关系表，也碰不到行为树
     assert scene_reach_of(graph, "advice") <= {
@@ -775,7 +768,7 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
             ("habitus.model_client", "habitus.infrastructure", "habitus.scene.storage")
         )
         or name
-        in {"habitus.scene.occurrences.store", "habitus.scene.concepts.store", "habitus.scene.occurrences.mapper"}
+        in {"habitus.scene.occurrences.store", "habitus.scene.concepts.store"}
     }
     assert impure == set(), impure
     assert not any(
@@ -949,7 +942,7 @@ def test_foresight_only_reads_the_derived_trees() -> None:
     ]
     assert upstream == []
     # 组合根伸进行为侧写侧内部（融合存储、归约）的只有三处：行为管线的组装、预测层的组装（拿三份存储的类型）、
-    # 未封口那座桥。桥只许拿"哪些判断还没归约"这一个事实（``reduction.pending``）与账本、归约的白天归类，不许自己
+    # 未封口那座桥。桥只许拿"哪些判断还没归约"这一个事实（``reduction.pending``）与账本、归约的选词器，不许自己
     # 并链、解析记录——那是在组合根里重抄归约的算法。
     runtime_root = SRC / "runtime"
     inside_behavior = sorted(
@@ -972,12 +965,15 @@ def test_foresight_only_reads_the_derived_trees() -> None:
     bridge_imports = {
         module for module in imported_modules(runtime_root / "unsealed.py") if module.startswith("habitus.behavior")
     }
-    # 归类用归约自己的白天归类（``KindStamping`` + 它的请求形状与判断内容），不另起一套口径。
+    # 选词用归约自己的选词器与材料（``KindStamping`` 的选词器 + ``record_material``），不另起一套口径；占位标记与选词失败的
+    # 错误类型取词表自己的（``kinds.ids``、``kinds.calls``），判断的形状取归约的只读视图（``reduction.record``）。
     assert bridge_imports <= {
         "habitus.behavior.fusion.store",
-        "habitus.behavior.kinds.classify",
+        "habitus.behavior.kinds.calls",
+        "habitus.behavior.kinds.ids",
         "habitus.behavior.reduction.kinds_step",
         "habitus.behavior.reduction.ledger",
+        "habitus.behavior.reduction.record",
         # 空判断落成哪种空白用归约自己的口径（``gap_kind_of``）：「未观测」不是看不到，不进未封口的空白行（实时化方案第 6 节）
         "habitus.behavior.reduction.payloads",
         "habitus.behavior.reduction.pending",
@@ -1139,6 +1135,7 @@ def test_the_session_lane_meets_the_conversation_source_only_in_the_composition_
         "lane.py",
         "material.py",
         "model.py",
+        "picking.py",  # 选词口：实现（词表包的选词器）由组合根注入，lane 不 import 词表的模型触点（词表方案 2026-11-14）
         "prompt.py",
         "protocol.py",
         "recorder.py",
@@ -1238,7 +1235,6 @@ def test_every_package_entry_exports_only_things_that_exist() -> None:
         "habitus.scene.views",
         "habitus.scene.concepts",
         "habitus.scene.occurrences",
-        "habitus.scene.occurrences.mapper",
         "habitus.foresight",
         "habitus.foresight.ledger",
         "habitus.foresight.opportunities",
@@ -1254,8 +1250,8 @@ def test_every_package_entry_exports_only_things_that_exist() -> None:
 
 
 def test_the_vocabulary_reaches_the_model_only_through_its_one_caller() -> None:
-    """基础词表包里只有 ``calls.py`` 直接 import 模型客户端；值对象、变更日志、存储、待定池、只读口、定时这些
-    确定性模块连传递依赖都不许碰模型（裁定 6 的"词表只管词表"落到依赖上）。"""
+    """基础词表包里只有 ``calls.py`` 直接 import 模型客户端；值对象、初始词表、在用状态的存储与计数、清单视图、规则与
+    选词提示词这些确定性模块连传递依赖都不许碰模型（裁定 6 的"词表只管词表"落到依赖上）。"""
 
     kinds_root = SRC / "behavior" / "kinds"
     graph = {
@@ -1287,17 +1283,14 @@ def test_the_vocabulary_reaches_the_model_only_through_its_one_caller() -> None:
     deterministic = (
         "ids",
         "model",
-        "changes",
-        "codec",
+        "words",
         "store",
-        "pending",
         "render",
-        "schedule",
-        "reader",
+        "active",
+        "counted",
+        "rules",
         "config",
-        "revision.facts",
-        "revision.proposals",
-        "revision.evidence",
+        "pick.prompt",
     )
     missing = [name for name in deterministic if f"habitus.behavior.kinds.{name}" not in graph]
     assert missing == [], f"清单里登记的模块不存在（删改模块后要同步这里）: {missing}"

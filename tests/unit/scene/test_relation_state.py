@@ -285,19 +285,17 @@ def test_a_retired_concept_takes_its_relations_down_with_a_clear_reason() -> Non
     assert not any(item.key.consequent == PLANTED.consequent for item in moved if item.after is Status.CANDIDATE)
 
 
-def test_a_refinement_whose_source_class_was_merged_away_is_no_longer_frozen_as_a_candidate() -> None:
-    """26 号清单 5.5：合并把源类停了，挂在它上面的细分概念不会再有新记录——它的关系按停用处理、不进检验族，也不再给作者看；
-    原来它永远冻在候选。"""
+def test_a_concept_whose_class_was_merged_away_is_no_longer_frozen_as_a_candidate() -> None:
+    """26 号清单 5.5：合并把类停了，它的行为概念不会再有新记录——它的关系按停用处理、不进检验族；原来它永远冻在候选。"""
 
-    from habitus.scene.concepts.model import members_retired
     from habitus.scene.relations import LaneState, Relation
-    from tests.unit.scene.concept_fixtures import REWORK
 
     series = planted(60)
-    retired = ConceptSet([*(base(title, retired=title == "修改代码") for title in TITLES), REWORK])
-    assert members_retired(retired, REWORK.identity) and not members_retired(retired, base("讨论方案").identity)
+    retired = ConceptSet([base(title, retired=title == "修改代码") for title in TITLES])
+    gone = base("修改代码").identity
+    assert retired[gone].retired and not retired[base("讨论方案").identity].retired
     frozen = Relation(
-        key=RelationKey("session", base("讨论方案").identity, REWORK.identity, Segment.CHAIN),
+        key=RelationKey("session", base("讨论方案").identity, gone, Segment.CHAIN),
         status=Status.CANDIDATE,
         upward=True,
         discovered_on=series.cutoff - timedelta(days=30),
@@ -305,7 +303,7 @@ def test_a_refinement_whose_source_class_was_merged_away_is_no_longer_frozen_as_
     previous = LaneState(lane="session", night=series.cutoff - timedelta(days=1), family=1, relations=(frozen,))
     line = build_timelines(series, retired, {}, CONFIG)["session"]
     tests = LaneTests(line, retired, CONFIG, series.cutoff)
-    assert not any(REWORK.identity in (key.antecedent, key.consequent) for key in tests.keys())
+    assert not any(gone in (key.antecedent, key.consequent) for key in tests.keys())
     state, moved = fold(previous, tests, watching=watching(series))
     assert status_of(state, frozen.key) is Status.EXPIRED
     assert any(item.key == frozen.key and "概念停用" in item.reason for item in moved)

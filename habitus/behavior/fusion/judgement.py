@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from habitus.behavior.fusion.errors import BehaviorFusionError
+from habitus.behavior.kinds.ids import KindIdError, lane_of_token
 from habitus.behavior.model import BehaviorNameTooLongError, behavior_name
 
 
@@ -94,19 +95,29 @@ class BehaviorFact:
 
 @dataclass(frozen=True)
 class BehaviorClaim:
-    """判断的内容。三层递减完全由 ``behavior`` / ``goal`` 的空与非空决定。"""
+    """判断的内容。三层递减完全由 ``behavior`` / ``goal`` 的空与非空决定。
+
+    ``kind_token`` 是选词结果（词编号或占位标记，词表方案 2026-11-14）：会话 lane 在 lane 里选好、随判断一起存，归约直接落；
+    物理 lane 不带（入口是同步的写盘流程，放不进模型调用），留到归约那一步选。它是判断内容的一部分：进内容身份与序列化。
+    """
 
     behavior: str | None
     goal: str | None
     summary: str | None
     basis: tuple[BehaviorFact, ...]
+    kind_token: str | None = None
 
     def __post_init__(self) -> None:
         if self.behavior is None:
             # 读不懂的那一层：不能同时又说得出目标或摘要。
-            if self.goal is not None or self.summary is not None or self.basis:
-                raise BehaviorFusionError("an unreadable claim must not carry goal, summary or basis")
+            if self.goal is not None or self.summary is not None or self.basis or self.kind_token is not None:
+                raise BehaviorFusionError("an unreadable claim must not carry goal, summary, basis or a kind token")
             return
+        if self.kind_token is not None:
+            try:
+                lane_of_token(self.kind_token)
+            except KindIdError as exc:
+                raise BehaviorFusionError(f"kind token is neither a word id nor a marker: {self.kind_token!r}") from exc
         # behavior 名将来就是行为树的地址身份；不合格的名字若放行落盘，会在归约封口后才炸、
         # 且无自愈路径（正确性不依赖模型：在这里打回，模型换个说法重试即可）。
         try:

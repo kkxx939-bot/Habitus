@@ -1,10 +1,6 @@
 {
   "habitus/behavior/fusion/derivation.py": 1,
-  "habitus/behavior/kinds/classify/classifier.py": 1,
-  "habitus/behavior/kinds/model.py": 5,
-  "habitus/behavior/kinds/nightly/grower.py": 5,
-  "habitus/behavior/kinds/revision/grouping.py": 5,
-  "habitus/behavior/kinds/revision/reviser.py": 2,
+  "habitus/behavior/kinds/model.py": 1,
   "habitus/behavior/reduction/failed.py": 1,
   "habitus/benchmark/boundary.py": 16,
   "habitus/benchmark/context.py": 2,

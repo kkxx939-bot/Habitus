@@ -1,0 +1,2238 @@
+{
+ "schema_version": "behavior_initial_words_v1",
+ "lane": "session",
+ "words": [
+  {
+   "id": "s-k0001",
+   "level": 1,
+   "name": "写文档",
+   "parent": null,
+   "definition": "新写一份文档",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0002",
+   "level": 2,
+   "name": "写周报",
+   "parent": "s-k0001",
+   "definition": "写周期性的工作汇报，含日报、月报",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0003",
+   "level": 2,
+   "name": "写总结",
+   "parent": "s-k0001",
+   "definition": "写一个阶段或一件事的总结",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0004",
+   "level": 2,
+   "name": "写方案",
+   "parent": "s-k0001",
+   "definition": "写计划书、提案",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0005",
+   "level": 2,
+   "name": "写报告",
+   "parent": "s-k0001",
+   "definition": "写调研、分析、测试的成文报告",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0006",
+   "level": 2,
+   "name": "写论文",
+   "parent": "s-k0001",
+   "definition": "写学术论文或投稿材料",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0007",
+   "level": 2,
+   "name": "写函件",
+   "parent": "s-k0001",
+   "definition": "写通知、公函、申请、证明",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0008",
+   "level": 2,
+   "name": "写制度",
+   "parent": "s-k0001",
+   "definition": "写规章、操作规程、说明手册",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0009",
+   "level": 2,
+   "name": "写讲稿",
+   "parent": "s-k0001",
+   "definition": "写一份要当众讲的稿子",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0010",
+   "level": 2,
+   "name": "写说明",
+   "parent": "s-k0001",
+   "definition": "写代码的说明、接口文档",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0011",
+   "level": 2,
+   "name": "写自评",
+   "parent": "s-k0001",
+   "definition": "写绩效自评或给别人的评价",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0012",
+   "level": 2,
+   "name": "写合同",
+   "parent": "s-k0001",
+   "definition": "新写一份合同或协议",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0013",
+   "level": 1,
+   "name": "改文档",
+   "parent": null,
+   "definition": "修改已有文档的内容",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0014",
+   "level": 2,
+   "name": "润色",
+   "parent": "s-k0013",
+   "definition": "只改措辞和错别字，不改意思",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0015",
+   "level": 2,
+   "name": "调格式",
+   "parent": "s-k0013",
+   "definition": "调排版、样式、目录",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0016",
+   "level": 1,
+   "name": "审文档",
+   "parent": null,
+   "definition": "看一份文档并提意见",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0017",
+   "level": 2,
+   "name": "比对文档",
+   "parent": "s-k0016",
+   "definition": "找出两份文档或两个版本的差别",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0018",
+   "level": 2,
+   "name": "审合同",
+   "parent": "s-k0016",
+   "definition": "看一份合同有没有问题",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0019",
+   "level": 1,
+   "name": "写摘要",
+   "parent": null,
+   "definition": "把一份材料缩成要点",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0020",
+   "level": 1,
+   "name": "翻译",
+   "parent": null,
+   "definition": "把一段话或一份文档译成另一种语言",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0021",
+   "level": 1,
+   "name": "写文章",
+   "parent": null,
+   "definition": "新写一篇对外发的文章",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0022",
+   "level": 2,
+   "name": "写文案",
+   "parent": "s-k0021",
+   "definition": "写宣传用的短文字",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0023",
+   "level": 2,
+   "name": "写台本",
+   "parent": "s-k0021",
+   "definition": "写视频、播客的脚本",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0024",
+   "level": 1,
+   "name": "写故事",
+   "parent": null,
+   "definition": "写或讲一个故事",
+   "domain": "文档"
+  },
+  {
+   "id": "s-k0025",
+   "level": 1,
+   "name": "做表格",
+   "parent": null,
+   "definition": "新建一张表或往表里加内容",
+   "domain": "表格"
+  },
+  {
+   "id": "s-k0026",
+   "level": 2,
+   "name": "写公式",
+   "parent": "s-k0025",
+   "definition": "写或修一条表格公式",
+   "domain": "表格"
+  },
+  {
+   "id": "s-k0027",
+   "level": 2,
+   "name": "做透视",
+   "parent": "s-k0025",
+   "definition": "做数据透视或交叉统计",
+   "domain": "表格"
+  },
+  {
+   "id": "s-k0028",
+   "level": 2,
+   "name": "做图表",
+   "parent": "s-k0025",
+   "definition": "把数据画成图",
+   "domain": "表格"
+  },
+  {
+   "id": "s-k0029",
+   "level": 1,
+   "name": "整理表格",
+   "parent": null,
+   "definition": "清理、合并、排序一张表",
+   "domain": "表格"
+  },
+  {
+   "id": "s-k0030",
+   "level": 2,
+   "name": "清洗表格",
+   "parent": "s-k0029",
+   "definition": "去重、补缺、统一格式",
+   "domain": "表格"
+  },
+  {
+   "id": "s-k0031",
+   "level": 2,
+   "name": "合并表格",
+   "parent": "s-k0029",
+   "definition": "把几张表对上并成一张",
+   "domain": "表格"
+  },
+  {
+   "id": "s-k0032",
+   "level": 1,
+   "name": "汇总数据",
+   "parent": null,
+   "definition": "把多行或多张表合计出总数",
+   "domain": "表格"
+  },
+  {
+   "id": "s-k0033",
+   "level": 1,
+   "name": "核对数据",
+   "parent": null,
+   "definition": "把两份数据逐项对一遍",
+   "domain": "表格"
+  },
+  {
+   "id": "s-k0034",
+   "level": 2,
+   "name": "对账",
+   "parent": "s-k0033",
+   "definition": "把账面和流水、账单对一遍",
+   "domain": "表格"
+  },
+  {
+   "id": "s-k0035",
+   "level": 1,
+   "name": "录入数据",
+   "parent": null,
+   "definition": "把数据填进表或系统",
+   "domain": "表格"
+  },
+  {
+   "id": "s-k0036",
+   "level": 1,
+   "name": "做演示",
+   "parent": null,
+   "definition": "新做一份幻灯片",
+   "domain": "演示"
+  },
+  {
+   "id": "s-k0037",
+   "level": 2,
+   "name": "列提纲",
+   "parent": "s-k0036",
+   "definition": "定一份演示讲什么、分几页",
+   "domain": "演示"
+  },
+  {
+   "id": "s-k0038",
+   "level": 2,
+   "name": "写备注",
+   "parent": "s-k0036",
+   "definition": "给每页写要讲的话",
+   "domain": "演示"
+  },
+  {
+   "id": "s-k0039",
+   "level": 2,
+   "name": "做课件",
+   "parent": "s-k0036",
+   "definition": "做上课、培训用的材料",
+   "domain": "演示"
+  },
+  {
+   "id": "s-k0040",
+   "level": 1,
+   "name": "改演示",
+   "parent": null,
+   "definition": "修改已有的幻灯片",
+   "domain": "演示"
+  },
+  {
+   "id": "s-k0041",
+   "level": 2,
+   "name": "调版式",
+   "parent": "s-k0040",
+   "definition": "调幻灯片的版式和配色",
+   "domain": "演示"
+  },
+  {
+   "id": "s-k0042",
+   "level": 1,
+   "name": "画示意图",
+   "parent": null,
+   "definition": "画流程图、架构图、组织图",
+   "domain": "演示"
+  },
+  {
+   "id": "s-k0043",
+   "level": 1,
+   "name": "看邮件",
+   "parent": null,
+   "definition": "看收到了什么邮件，或找某一封旧邮件",
+   "domain": "邮件和消息"
+  },
+  {
+   "id": "s-k0044",
+   "level": 1,
+   "name": "写邮件",
+   "parent": null,
+   "definition": "起草并发出一封新邮件",
+   "domain": "邮件和消息"
+  },
+  {
+   "id": "s-k0045",
+   "level": 2,
+   "name": "群发邮件",
+   "parent": "s-k0044",
+   "definition": "给一批人发同一封邮件",
+   "domain": "邮件和消息"
+  },
+  {
+   "id": "s-k0046",
+   "level": 1,
+   "name": "回邮件",
+   "parent": null,
+   "definition": "回复收到的邮件",
+   "domain": "邮件和消息"
+  },
+  {
+   "id": "s-k0047",
+   "level": 1,
+   "name": "整理邮件",
+   "parent": null,
+   "definition": "归档、清理、退订邮件",
+   "domain": "邮件和消息"
+  },
+  {
+   "id": "s-k0048",
+   "level": 2,
+   "name": "设过滤",
+   "parent": "s-k0047",
+   "definition": "设自动分类、自动回复",
+   "domain": "邮件和消息"
+  },
+  {
+   "id": "s-k0049",
+   "level": 1,
+   "name": "看消息",
+   "parent": null,
+   "definition": "看聊天工具里收到的消息",
+   "domain": "邮件和消息"
+  },
+  {
+   "id": "s-k0050",
+   "level": 1,
+   "name": "发消息",
+   "parent": null,
+   "definition": "给某人或某个群发一条消息",
+   "domain": "邮件和消息"
+  },
+  {
+   "id": "s-k0051",
+   "level": 2,
+   "name": "发通知",
+   "parent": "s-k0050",
+   "definition": "向一群人发布一条正式通知",
+   "domain": "邮件和消息"
+  },
+  {
+   "id": "s-k0052",
+   "level": 2,
+   "name": "催办",
+   "parent": "s-k0050",
+   "definition": "提醒别人做他该做的事",
+   "domain": "邮件和消息"
+  },
+  {
+   "id": "s-k0053",
+   "level": 1,
+   "name": "看通知",
+   "parent": null,
+   "definition": "看别处发来的通知、公告",
+   "domain": "邮件和消息"
+  },
+  {
+   "id": "s-k0054",
+   "level": 1,
+   "name": "约会议",
+   "parent": null,
+   "definition": "和别人约一个共同的时间",
+   "domain": "会议"
+  },
+  {
+   "id": "s-k0055",
+   "level": 2,
+   "name": "订会议室",
+   "parent": "s-k0054",
+   "definition": "订一个开会的地方",
+   "domain": "会议"
+  },
+  {
+   "id": "s-k0056",
+   "level": 2,
+   "name": "改会议",
+   "parent": "s-k0054",
+   "definition": "改期或取消已约的会议",
+   "domain": "会议"
+  },
+  {
+   "id": "s-k0057",
+   "level": 1,
+   "name": "备会议",
+   "parent": null,
+   "definition": "准备会议的议程和材料",
+   "domain": "会议"
+  },
+  {
+   "id": "s-k0058",
+   "level": 1,
+   "name": "写纪要",
+   "parent": null,
+   "definition": "把一次会议整理成纪要",
+   "domain": "会议"
+  },
+  {
+   "id": "s-k0059",
+   "level": 2,
+   "name": "列待办",
+   "parent": "s-k0058",
+   "definition": "把会上定的事列成待办",
+   "domain": "会议"
+  },
+  {
+   "id": "s-k0060",
+   "level": 2,
+   "name": "转写录音",
+   "parent": "s-k0058",
+   "definition": "把录音或视频转成文字",
+   "domain": "会议"
+  },
+  {
+   "id": "s-k0061",
+   "level": 1,
+   "name": "看日程",
+   "parent": null,
+   "definition": "看某段时间有哪些安排",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0062",
+   "level": 1,
+   "name": "改日程",
+   "parent": null,
+   "definition": "新建、改期或取消一项安排",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0063",
+   "level": 1,
+   "name": "设提醒",
+   "parent": null,
+   "definition": "让助手到某个时刻提一句",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0064",
+   "level": 1,
+   "name": "设闹钟",
+   "parent": null,
+   "definition": "定一个到点响的闹钟",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0065",
+   "level": 2,
+   "name": "开计时",
+   "parent": "s-k0064",
+   "definition": "开一个倒计时或番茄钟",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0066",
+   "level": 1,
+   "name": "看待办",
+   "parent": null,
+   "definition": "看待办清单里有什么",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0067",
+   "level": 1,
+   "name": "改待办",
+   "parent": null,
+   "definition": "往待办里加、勾掉或修改一项",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0068",
+   "level": 1,
+   "name": "排计划",
+   "parent": null,
+   "definition": "把一段时间要做的事排出先后",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0069",
+   "level": 2,
+   "name": "排日计划",
+   "parent": "s-k0068",
+   "definition": "排今天要做的事",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0070",
+   "level": 2,
+   "name": "排周计划",
+   "parent": "s-k0068",
+   "definition": "排一周的安排",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0071",
+   "level": 2,
+   "name": "排工期",
+   "parent": "s-k0068",
+   "definition": "排一个项目的阶段和时间",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0072",
+   "level": 2,
+   "name": "排训练",
+   "parent": "s-k0068",
+   "definition": "排运动训练的安排",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0073",
+   "level": 2,
+   "name": "排行程",
+   "parent": "s-k0068",
+   "definition": "排一趟出门的日程和路线",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0074",
+   "level": 1,
+   "name": "派任务",
+   "parent": null,
+   "definition": "把一件事分给人",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0075",
+   "level": 2,
+   "name": "拆任务",
+   "parent": "s-k0074",
+   "definition": "把一件事拆成小项",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0076",
+   "level": 1,
+   "name": "记进展",
+   "parent": null,
+   "definition": "记下一段时间做了什么",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0077",
+   "level": 2,
+   "name": "记专注",
+   "parent": "s-k0076",
+   "definition": "记下一个番茄钟或一段专注做了什么",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0078",
+   "level": 1,
+   "name": "回顾进展",
+   "parent": null,
+   "definition": "回看做了什么、还剩什么",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0079",
+   "level": 2,
+   "name": "回顾当天",
+   "parent": "s-k0078",
+   "definition": "回看今天做了什么",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0080",
+   "level": 2,
+   "name": "复盘",
+   "parent": "s-k0078",
+   "definition": "回看一件做完的事哪里好哪里不好",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0081",
+   "level": 1,
+   "name": "列清单",
+   "parent": null,
+   "definition": "把要带的、要买的、要做的列出来",
+   "domain": "日程和任务"
+  },
+  {
+   "id": "s-k0082",
+   "level": 1,
+   "name": "查资料",
+   "parent": null,
+   "definition": "就一个具体问题找答案",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0083",
+   "level": 2,
+   "name": "查法规",
+   "parent": "s-k0082",
+   "definition": "查一条法律或规定怎么说",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0084",
+   "level": 2,
+   "name": "查知识库",
+   "parent": "s-k0082",
+   "definition": "在自己单位的文档里找东西",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0085",
+   "level": 2,
+   "name": "核实说法",
+   "parent": "s-k0082",
+   "definition": "查一个说法是真是假",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0086",
+   "level": 2,
+   "name": "查价格",
+   "parent": "s-k0082",
+   "definition": "查一样东西现在多少钱",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0087",
+   "level": 2,
+   "name": "查合规",
+   "parent": "s-k0082",
+   "definition": "检查一件事是否符合规定",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0088",
+   "level": 1,
+   "name": "调研",
+   "parent": null,
+   "definition": "就一个题目查多个来源并汇总",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0089",
+   "level": 2,
+   "name": "查竞品",
+   "parent": "s-k0088",
+   "definition": "了解同类产品在做什么",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0090",
+   "level": 2,
+   "name": "查动态",
+   "parent": "s-k0088",
+   "definition": "看一个行业最近的消息",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0091",
+   "level": 2,
+   "name": "查文献",
+   "parent": "s-k0088",
+   "definition": "找论文、专利、标准",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0092",
+   "level": 2,
+   "name": "比方案",
+   "parent": "s-k0088",
+   "definition": "把几个选项摆在一起比",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0093",
+   "level": 2,
+   "name": "做调查",
+   "parent": "s-k0088",
+   "definition": "设计或整理问卷、访谈",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0094",
+   "level": 1,
+   "name": "读材料",
+   "parent": null,
+   "definition": "读一份文档或网页并答疑",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0095",
+   "level": 1,
+   "name": "整理笔记",
+   "parent": null,
+   "definition": "把查到或学到的内容整理成笔记",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0096",
+   "level": 1,
+   "name": "出点子",
+   "parent": null,
+   "definition": "一起想主意、起名字",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0097",
+   "level": 1,
+   "name": "商量决定",
+   "parent": null,
+   "definition": "就一件事征求意见、拿主意",
+   "domain": "资料"
+  },
+  {
+   "id": "s-k0098",
+   "level": 1,
+   "name": "查数据",
+   "parent": null,
+   "definition": "从数据库或系统里查出数据",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0099",
+   "level": 2,
+   "name": "写查询",
+   "parent": "s-k0098",
+   "definition": "写或改一条查询语句",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0100",
+   "level": 2,
+   "name": "抓取数据",
+   "parent": "s-k0098",
+   "definition": "从网页或接口成批取数据",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0101",
+   "level": 1,
+   "name": "分析数据",
+   "parent": null,
+   "definition": "从一份数据里找结论",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0102",
+   "level": 2,
+   "name": "找异常",
+   "parent": "s-k0101",
+   "definition": "找出数据里不对劲的地方",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0103",
+   "level": 2,
+   "name": "做预测",
+   "parent": "s-k0101",
+   "definition": "按历史数据推后面的走势",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0104",
+   "level": 2,
+   "name": "做估算",
+   "parent": "s-k0101",
+   "definition": "估一个数量、成本或时间",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0105",
+   "level": 2,
+   "name": "做检验",
+   "parent": "s-k0101",
+   "definition": "做对比实验和显著性检验",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0106",
+   "level": 2,
+   "name": "解读数据",
+   "parent": "s-k0101",
+   "definition": "讲清一份数据或一次实验的结果说明什么",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0107",
+   "level": 1,
+   "name": "清洗数据",
+   "parent": null,
+   "definition": "对成批数据做变形、转换、导出",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0108",
+   "level": 2,
+   "name": "标注数据",
+   "parent": "s-k0107",
+   "definition": "给一批数据打标签",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0109",
+   "level": 1,
+   "name": "做报表",
+   "parent": null,
+   "definition": "做一份定期看的数字报表",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0110",
+   "level": 2,
+   "name": "做看板",
+   "parent": "s-k0109",
+   "definition": "搭一个展示指标的页面",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0111",
+   "level": 2,
+   "name": "做财报",
+   "parent": "s-k0109",
+   "definition": "做利润、现金流这类报表",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0112",
+   "level": 1,
+   "name": "看指标",
+   "parent": null,
+   "definition": "看一个指标现在多少、怎么变",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0113",
+   "level": 2,
+   "name": "看运动量",
+   "parent": "s-k0112",
+   "definition": "看步数、运动量、成绩",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0114",
+   "level": 1,
+   "name": "算数",
+   "parent": null,
+   "definition": "算一道数、换算单位",
+   "domain": "数据"
+  },
+  {
+   "id": "s-k0115",
+   "level": 1,
+   "name": "写代码",
+   "parent": null,
+   "definition": "从头实现一个新的功能",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0116",
+   "level": 2,
+   "name": "写后端",
+   "parent": "s-k0115",
+   "definition": "实现接口、服务、数据管道",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0117",
+   "level": 2,
+   "name": "写界面",
+   "parent": "s-k0115",
+   "definition": "实现页面和交互",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0118",
+   "level": 2,
+   "name": "做原型",
+   "parent": "s-k0115",
+   "definition": "做一个能跑起来的新应用或小工具",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0119",
+   "level": 2,
+   "name": "做游戏",
+   "parent": "s-k0115",
+   "definition": "写游戏的玩法和规则",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0120",
+   "level": 2,
+   "name": "写脚本",
+   "parent": "s-k0115",
+   "definition": "写一段自动做某件事的脚本",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0121",
+   "level": 1,
+   "name": "改代码",
+   "parent": null,
+   "definition": "按新的要求改已有代码",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0122",
+   "level": 2,
+   "name": "重构",
+   "parent": "s-k0121",
+   "definition": "不改行为，只调整代码结构",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0123",
+   "level": 2,
+   "name": "优化性能",
+   "parent": "s-k0121",
+   "definition": "让程序更快或更省",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0124",
+   "level": 1,
+   "name": "修缺陷",
+   "parent": null,
+   "definition": "把出错或崩溃的行为修好",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0125",
+   "level": 1,
+   "name": "查问题",
+   "parent": null,
+   "definition": "找一个错误或异常的原因",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0126",
+   "level": 2,
+   "name": "看日志",
+   "parent": "s-k0125",
+   "definition": "看运行日志找线索",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0127",
+   "level": 1,
+   "name": "读代码",
+   "parent": null,
+   "definition": "弄懂一段代码或一个仓库",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0128",
+   "level": 1,
+   "name": "审代码",
+   "parent": null,
+   "definition": "看一份改动有没有问题",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0129",
+   "level": 2,
+   "name": "查安全",
+   "parent": "s-k0128",
+   "definition": "找漏洞、查权限和密钥",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0130",
+   "level": 1,
+   "name": "测代码",
+   "parent": null,
+   "definition": "运行测试看改动对不对",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0131",
+   "level": 2,
+   "name": "写测试",
+   "parent": "s-k0130",
+   "definition": "新写测试用例",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0132",
+   "level": 1,
+   "name": "定方案",
+   "parent": null,
+   "definition": "商量一个技术设计怎么做",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0133",
+   "level": 2,
+   "name": "定步骤",
+   "parent": "s-k0132",
+   "definition": "动手前定实现和上线的步骤",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0134",
+   "level": 1,
+   "name": "提交代码",
+   "parent": null,
+   "definition": "提交改动、推到远端",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0135",
+   "level": 2,
+   "name": "合并分支",
+   "parent": "s-k0134",
+   "definition": "合并、变基、解决冲突",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0136",
+   "level": 2,
+   "name": "提PR",
+   "parent": "s-k0134",
+   "definition": "发起或处理一个合并请求",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0137",
+   "level": 1,
+   "name": "发版本",
+   "parent": null,
+   "definition": "发布、上线一个版本",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0138",
+   "level": 2,
+   "name": "回滚",
+   "parent": "s-k0137",
+   "definition": "退回上一个版本",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0139",
+   "level": 2,
+   "name": "配流水线",
+   "parent": "s-k0137",
+   "definition": "配自动构建和自动测试",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0140",
+   "level": 1,
+   "name": "配环境",
+   "parent": null,
+   "definition": "装工具、配开发或运行环境",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0141",
+   "level": 2,
+   "name": "管依赖",
+   "parent": "s-k0140",
+   "definition": "装、升级、移除依赖",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0142",
+   "level": 2,
+   "name": "改配置",
+   "parent": "s-k0140",
+   "definition": "改项目或服务的配置项",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0143",
+   "level": 1,
+   "name": "运维服务",
+   "parent": null,
+   "definition": "让线上的服务保持运行",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0144",
+   "level": 2,
+   "name": "跑批任务",
+   "parent": "s-k0143",
+   "definition": "跑回填、定时任务、批处理",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0145",
+   "level": 2,
+   "name": "看告警",
+   "parent": "s-k0143",
+   "definition": "看指标面板、处理告警",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0146",
+   "level": 1,
+   "name": "改数据库",
+   "parent": null,
+   "definition": "改数据、改表结构、迁移",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0147",
+   "level": 1,
+   "name": "调接口",
+   "parent": null,
+   "definition": "调用一个接口看返回",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0148",
+   "level": 1,
+   "name": "写提示词",
+   "parent": null,
+   "definition": "写或改给模型用的提示词",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0149",
+   "level": 1,
+   "name": "跑评测",
+   "parent": null,
+   "definition": "比较模型或提示词的效果",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0150",
+   "level": 1,
+   "name": "调度代理",
+   "parent": null,
+   "definition": "指挥别的智能体或自动流程做事",
+   "domain": "代码"
+  },
+  {
+   "id": "s-k0151",
+   "level": 1,
+   "name": "做图",
+   "parent": null,
+   "definition": "生成或设计一张图",
+   "domain": "图和音视频"
+  },
+  {
+   "id": "s-k0152",
+   "level": 2,
+   "name": "做海报",
+   "parent": "s-k0151",
+   "definition": "做一张宣传用的版面",
+   "domain": "图和音视频"
+  },
+  {
+   "id": "s-k0153",
+   "level": 2,
+   "name": "做界面稿",
+   "parent": "s-k0151",
+   "definition": "画页面的设计稿",
+   "domain": "图和音视频"
+  },
+  {
+   "id": "s-k0154",
+   "level": 2,
+   "name": "改图",
+   "parent": "s-k0151",
+   "definition": "修改已有的图片",
+   "domain": "图和音视频"
+  },
+  {
+   "id": "s-k0155",
+   "level": 1,
+   "name": "剪视频",
+   "parent": null,
+   "definition": "剪辑、配字幕、配音",
+   "domain": "图和音视频"
+  },
+  {
+   "id": "s-k0156",
+   "level": 1,
+   "name": "发帖",
+   "parent": null,
+   "definition": "在社交平台发一条内容",
+   "domain": "图和音视频"
+  },
+  {
+   "id": "s-k0157",
+   "level": 1,
+   "name": "找文件",
+   "parent": null,
+   "definition": "找一份文件在哪",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0158",
+   "level": 1,
+   "name": "整理文件",
+   "parent": null,
+   "definition": "归类、改名、移动、删除文件",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0159",
+   "level": 2,
+   "name": "转格式",
+   "parent": "s-k0158",
+   "definition": "把文件从一种格式转成另一种",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0160",
+   "level": 2,
+   "name": "备份文件",
+   "parent": "s-k0158",
+   "definition": "备份或恢复数据",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0161",
+   "level": 2,
+   "name": "识别文字",
+   "parent": "s-k0158",
+   "definition": "从图片或扫描件里取出文字",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0162",
+   "level": 2,
+   "name": "打印",
+   "parent": "s-k0158",
+   "definition": "把一份文件打印出来",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0163",
+   "level": 2,
+   "name": "归档",
+   "parent": "s-k0158",
+   "definition": "把办完的文件存档",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0164",
+   "level": 1,
+   "name": "交作业",
+   "parent": null,
+   "definition": "把做好的东西提交上去",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0165",
+   "level": 1,
+   "name": "配置助手",
+   "parent": null,
+   "definition": "给助手加技能、连工具、设自动任务",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0166",
+   "level": 1,
+   "name": "操作网页",
+   "parent": null,
+   "definition": "在浏览器里打开网站、点按、取回内容",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0167",
+   "level": 2,
+   "name": "填表单",
+   "parent": "s-k0166",
+   "definition": "在网页或系统里填一张表并提交",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0168",
+   "level": 1,
+   "name": "控制家电",
+   "parent": null,
+   "definition": "开关或调节灯、空调、扫地机等",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0169",
+   "level": 1,
+   "name": "管设备",
+   "parent": null,
+   "definition": "装、调、修设备和软件",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0170",
+   "level": 2,
+   "name": "装软件",
+   "parent": "s-k0169",
+   "definition": "安装或更新一个软件",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0171",
+   "level": 2,
+   "name": "改设置",
+   "parent": "s-k0169",
+   "definition": "改设备或软件的设置",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0172",
+   "level": 2,
+   "name": "查故障",
+   "parent": "s-k0169",
+   "definition": "找设备或软件用不了的原因",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0173",
+   "level": 2,
+   "name": "清理空间",
+   "parent": "s-k0169",
+   "definition": "清理存储空间",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0174",
+   "level": 2,
+   "name": "管账号",
+   "parent": "s-k0169",
+   "definition": "改密码、开账号、给权限",
+   "domain": "文件和设备"
+  },
+  {
+   "id": "s-k0175",
+   "level": 1,
+   "name": "写需求",
+   "parent": null,
+   "definition": "把要做的东西写成需求",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0176",
+   "level": 2,
+   "name": "画流程",
+   "parent": "s-k0175",
+   "definition": "定用户一步步怎么操作",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0177",
+   "level": 2,
+   "name": "写验收",
+   "parent": "s-k0175",
+   "definition": "写一项工作怎样算做完",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0178",
+   "level": 1,
+   "name": "评审",
+   "parent": null,
+   "definition": "对一份需求、设计或结果做评审",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0179",
+   "level": 1,
+   "name": "记问题",
+   "parent": null,
+   "definition": "登记一个问题、缺陷或风险",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0180",
+   "level": 1,
+   "name": "走审批",
+   "parent": null,
+   "definition": "提交或处理一个审批",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0181",
+   "level": 2,
+   "name": "请假",
+   "parent": "s-k0180",
+   "definition": "提交或查看请假",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0182",
+   "level": 2,
+   "name": "领用品",
+   "parent": "s-k0180",
+   "definition": "申领用品或提采购申请",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0183",
+   "level": 2,
+   "name": "办入离职",
+   "parent": "s-k0180",
+   "definition": "办入职、转正、离职的手续",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0184",
+   "level": 1,
+   "name": "看排班",
+   "parent": null,
+   "definition": "看或调整值班、排班",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0185",
+   "level": 1,
+   "name": "招聘",
+   "parent": null,
+   "definition": "招人的各个步骤",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0186",
+   "level": 2,
+   "name": "写职位",
+   "parent": "s-k0185",
+   "definition": "写或改职位说明",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0187",
+   "level": 2,
+   "name": "筛简历",
+   "parent": "s-k0185",
+   "definition": "看候选人的简历",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0188",
+   "level": 2,
+   "name": "约面试",
+   "parent": "s-k0185",
+   "definition": "安排面试的时间和人",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0189",
+   "level": 2,
+   "name": "备面试",
+   "parent": "s-k0185",
+   "definition": "准备面试别人",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0190",
+   "level": 1,
+   "name": "写简历",
+   "parent": null,
+   "definition": "写或改简历、求职信",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0191",
+   "level": 2,
+   "name": "练面试",
+   "parent": "s-k0190",
+   "definition": "准备自己去应聘的面试",
+   "domain": "项目和办公事务"
+  },
+  {
+   "id": "s-k0192",
+   "level": 1,
+   "name": "记账",
+   "parent": null,
+   "definition": "记下一笔收入或支出",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0193",
+   "level": 1,
+   "name": "报销",
+   "parent": null,
+   "definition": "提交或跟进一笔报销",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0194",
+   "level": 1,
+   "name": "开发票",
+   "parent": null,
+   "definition": "开、查或整理发票",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0195",
+   "level": 1,
+   "name": "做预算",
+   "parent": null,
+   "definition": "编或调整一份预算",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0196",
+   "level": 1,
+   "name": "算报价",
+   "parent": null,
+   "definition": "算一件事的成本或给出报价",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0197",
+   "level": 1,
+   "name": "算工资",
+   "parent": null,
+   "definition": "算或核对工资、个税、社保",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0198",
+   "level": 1,
+   "name": "报税",
+   "parent": null,
+   "definition": "准备或提交税务申报",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0199",
+   "level": 1,
+   "name": "缴费",
+   "parent": null,
+   "definition": "缴一笔定期的费用",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0200",
+   "level": 2,
+   "name": "缴水电",
+   "parent": "s-k0199",
+   "definition": "缴水费、电费、燃气费",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0201",
+   "level": 2,
+   "name": "缴话费",
+   "parent": "s-k0199",
+   "definition": "缴手机费、宽带费",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0202",
+   "level": 2,
+   "name": "交房租",
+   "parent": "s-k0199",
+   "definition": "交房租或物业费",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0203",
+   "level": 1,
+   "name": "还款",
+   "parent": null,
+   "definition": "还一笔欠款",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0204",
+   "level": 2,
+   "name": "还信用卡",
+   "parent": "s-k0203",
+   "definition": "还信用卡账单",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0205",
+   "level": 2,
+   "name": "还贷款",
+   "parent": "s-k0203",
+   "definition": "还房贷、车贷",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0206",
+   "level": 1,
+   "name": "转账",
+   "parent": null,
+   "definition": "把钱转到另一个账户",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0207",
+   "level": 2,
+   "name": "付款",
+   "parent": "s-k0206",
+   "definition": "发起一笔对外付款",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0208",
+   "level": 1,
+   "name": "看余额",
+   "parent": null,
+   "definition": "看账户余额、流水或一段时间的开销",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0209",
+   "level": 1,
+   "name": "买理财",
+   "parent": null,
+   "definition": "买入或卖出股票、基金",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0210",
+   "level": 1,
+   "name": "办保险",
+   "parent": null,
+   "definition": "买、续保或理赔",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0211",
+   "level": 1,
+   "name": "看行情",
+   "parent": null,
+   "definition": "看股票、基金、汇率的价格",
+   "domain": "钱"
+  },
+  {
+   "id": "s-k0212",
+   "level": 1,
+   "name": "跟客户",
+   "parent": null,
+   "definition": "记录或安排和客户的往来",
+   "domain": "客户和合同"
+  },
+  {
+   "id": "s-k0213",
+   "level": 2,
+   "name": "回复咨询",
+   "parent": "s-k0212",
+   "definition": "答复客户的咨询或投诉",
+   "domain": "客户和合同"
+  },
+  {
+   "id": "s-k0214",
+   "level": 2,
+   "name": "写报价",
+   "parent": "s-k0212",
+   "definition": "给客户出一份报价",
+   "domain": "客户和合同"
+  },
+  {
+   "id": "s-k0215",
+   "level": 2,
+   "name": "更新客户",
+   "parent": "s-k0212",
+   "definition": "登记或修改客户信息",
+   "domain": "客户和合同"
+  },
+  {
+   "id": "s-k0216",
+   "level": 2,
+   "name": "处理工单",
+   "parent": "s-k0212",
+   "definition": "概括工单、分派、升级",
+   "domain": "客户和合同"
+  },
+  {
+   "id": "s-k0217",
+   "level": 2,
+   "name": "找客户",
+   "parent": "s-k0212",
+   "definition": "找可能的客户并整理名单",
+   "domain": "客户和合同"
+  },
+  {
+   "id": "s-k0218",
+   "level": 1,
+   "name": "做推广",
+   "parent": null,
+   "definition": "策划和评估一次推广",
+   "domain": "客户和合同"
+  },
+  {
+   "id": "s-k0219",
+   "level": 2,
+   "name": "排推广",
+   "parent": "s-k0218",
+   "definition": "定一次推广的内容和时间",
+   "domain": "客户和合同"
+  },
+  {
+   "id": "s-k0220",
+   "level": 2,
+   "name": "看投放",
+   "parent": "s-k0218",
+   "definition": "看广告或活动的数据",
+   "domain": "客户和合同"
+  },
+  {
+   "id": "s-k0221",
+   "level": 1,
+   "name": "处理订单",
+   "parent": null,
+   "definition": "录入、修改或跟进一笔订单",
+   "domain": "客户和合同"
+  },
+  {
+   "id": "s-k0222",
+   "level": 1,
+   "name": "学知识",
+   "parent": null,
+   "definition": "弄懂一个要学的知识点",
+   "domain": "学习"
+  },
+  {
+   "id": "s-k0223",
+   "level": 2,
+   "name": "讲题",
+   "parent": "s-k0222",
+   "definition": "讲解一道题",
+   "domain": "学习"
+  },
+  {
+   "id": "s-k0224",
+   "level": 2,
+   "name": "备考",
+   "parent": "s-k0222",
+   "definition": "为一场考试做准备",
+   "domain": "学习"
+  },
+  {
+   "id": "s-k0225",
+   "level": 1,
+   "name": "做练习",
+   "parent": null,
+   "definition": "出题或做题",
+   "domain": "学习"
+  },
+  {
+   "id": "s-k0226",
+   "level": 2,
+   "name": "查作业",
+   "parent": "s-k0225",
+   "definition": "看或核对作业",
+   "domain": "学习"
+  },
+  {
+   "id": "s-k0227",
+   "level": 1,
+   "name": "练外语",
+   "parent": null,
+   "definition": "背单词、练口语、练听写",
+   "domain": "学习"
+  },
+  {
+   "id": "s-k0228",
+   "level": 1,
+   "name": "看天气",
+   "parent": null,
+   "definition": "看某地某时的天气",
+   "domain": "资讯"
+  },
+  {
+   "id": "s-k0229",
+   "level": 1,
+   "name": "看新闻",
+   "parent": null,
+   "definition": "看新闻",
+   "domain": "资讯"
+  },
+  {
+   "id": "s-k0230",
+   "level": 1,
+   "name": "看赛果",
+   "parent": null,
+   "definition": "看比赛的比分、赛程",
+   "domain": "资讯"
+  },
+  {
+   "id": "s-k0231",
+   "level": 1,
+   "name": "要推荐",
+   "parent": null,
+   "definition": "要一个电影、书、地方、产品的推荐",
+   "domain": "资讯"
+  },
+  {
+   "id": "s-k0232",
+   "level": 2,
+   "name": "找影视",
+   "parent": "s-k0231",
+   "definition": "找一部电影或剧来看",
+   "domain": "资讯"
+  },
+  {
+   "id": "s-k0233",
+   "level": 1,
+   "name": "点外卖",
+   "parent": null,
+   "definition": "下一单送上门的餐",
+   "domain": "吃和买"
+  },
+  {
+   "id": "s-k0234",
+   "level": 1,
+   "name": "订餐厅",
+   "parent": null,
+   "definition": "找餐厅或订位子",
+   "domain": "吃和买"
+  },
+  {
+   "id": "s-k0235",
+   "level": 1,
+   "name": "查菜谱",
+   "parent": null,
+   "definition": "查一道菜怎么做",
+   "domain": "吃和买"
+  },
+  {
+   "id": "s-k0236",
+   "level": 1,
+   "name": "买东西",
+   "parent": null,
+   "definition": "买一件东西并下单",
+   "domain": "吃和买"
+  },
+  {
+   "id": "s-k0237",
+   "level": 2,
+   "name": "买菜",
+   "parent": "s-k0236",
+   "definition": "买食材或生鲜",
+   "domain": "吃和买"
+  },
+  {
+   "id": "s-k0238",
+   "level": 2,
+   "name": "备礼物",
+   "parent": "s-k0236",
+   "definition": "挑选或准备送人的礼物",
+   "domain": "吃和买"
+  },
+  {
+   "id": "s-k0239",
+   "level": 1,
+   "name": "查物流",
+   "parent": null,
+   "definition": "看订单状态、快递到哪了",
+   "domain": "吃和买"
+  },
+  {
+   "id": "s-k0240",
+   "level": 2,
+   "name": "退货",
+   "parent": "s-k0239",
+   "definition": "申请退货、换货、退款",
+   "domain": "吃和买"
+  },
+  {
+   "id": "s-k0241",
+   "level": 1,
+   "name": "管订阅",
+   "parent": null,
+   "definition": "续订或取消付费订阅",
+   "domain": "吃和买"
+  },
+  {
+   "id": "s-k0242",
+   "level": 1,
+   "name": "打车",
+   "parent": null,
+   "definition": "叫一辆车",
+   "domain": "出行"
+  },
+  {
+   "id": "s-k0243",
+   "level": 1,
+   "name": "查路线",
+   "parent": null,
+   "definition": "查怎么走、多久、堵不堵",
+   "domain": "出行"
+  },
+  {
+   "id": "s-k0244",
+   "level": 1,
+   "name": "订票",
+   "parent": null,
+   "definition": "订、改签或退一张票",
+   "domain": "出行"
+  },
+  {
+   "id": "s-k0245",
+   "level": 2,
+   "name": "订机票",
+   "parent": "s-k0244",
+   "definition": "订飞机票",
+   "domain": "出行"
+  },
+  {
+   "id": "s-k0246",
+   "level": 2,
+   "name": "订火车票",
+   "parent": "s-k0244",
+   "definition": "订火车票",
+   "domain": "出行"
+  },
+  {
+   "id": "s-k0247",
+   "level": 2,
+   "name": "订演出票",
+   "parent": "s-k0244",
+   "definition": "订电影、演出、景点的票",
+   "domain": "出行"
+  },
+  {
+   "id": "s-k0248",
+   "level": 1,
+   "name": "订酒店",
+   "parent": null,
+   "definition": "订、改或取消住宿",
+   "domain": "出行"
+  },
+  {
+   "id": "s-k0249",
+   "level": 1,
+   "name": "查航班",
+   "parent": null,
+   "definition": "看航班或车次准不准点",
+   "domain": "出行"
+  },
+  {
+   "id": "s-k0250",
+   "level": 1,
+   "name": "约保养",
+   "parent": null,
+   "definition": "约保养、维修、年检",
+   "domain": "出行"
+  },
+  {
+   "id": "s-k0251",
+   "level": 1,
+   "name": "记服药",
+   "parent": null,
+   "definition": "记下吃了药或保健品",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0252",
+   "level": 1,
+   "name": "记指标",
+   "parent": null,
+   "definition": "记下一个身体读数",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0253",
+   "level": 2,
+   "name": "记体重",
+   "parent": "s-k0252",
+   "definition": "记下体重",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0254",
+   "level": 2,
+   "name": "记血压",
+   "parent": "s-k0252",
+   "definition": "记下血压",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0255",
+   "level": 2,
+   "name": "记血糖",
+   "parent": "s-k0252",
+   "definition": "记下血糖",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0256",
+   "level": 2,
+   "name": "记睡眠",
+   "parent": "s-k0252",
+   "definition": "记下睡了多久",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0257",
+   "level": 1,
+   "name": "记症状",
+   "parent": null,
+   "definition": "记下身体哪里不舒服",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0258",
+   "level": 1,
+   "name": "约看病",
+   "parent": null,
+   "definition": "挂号、约医生",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0259",
+   "level": 1,
+   "name": "咨询健康",
+   "parent": null,
+   "definition": "问症状、药品、检查结果",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0260",
+   "level": 1,
+   "name": "记运动",
+   "parent": null,
+   "definition": "记下一次运动",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0261",
+   "level": 2,
+   "name": "记跑步",
+   "parent": "s-k0260",
+   "definition": "记下一次跑步",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0262",
+   "level": 2,
+   "name": "记健身",
+   "parent": "s-k0260",
+   "definition": "记下一次力量或器械训练",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0263",
+   "level": 2,
+   "name": "记拉伸",
+   "parent": "s-k0260",
+   "definition": "记下一次拉伸",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0264",
+   "level": 2,
+   "name": "记骑行",
+   "parent": "s-k0260",
+   "definition": "记下一次骑车",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0265",
+   "level": 2,
+   "name": "记游泳",
+   "parent": "s-k0260",
+   "definition": "记下一次游泳",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0266",
+   "level": 1,
+   "name": "记练习",
+   "parent": null,
+   "definition": "记下一次乐器、书法这类爱好的练习",
+   "domain": "健康和运动"
+  },
+  {
+   "id": "s-k0267",
+   "level": 1,
+   "name": "约上门",
+   "parent": null,
+   "definition": "约人上门服务",
+   "domain": "家里和个人"
+  },
+  {
+   "id": "s-k0268",
+   "level": 2,
+   "name": "约保洁",
+   "parent": "s-k0267",
+   "definition": "约保洁、家政",
+   "domain": "家里和个人"
+  },
+  {
+   "id": "s-k0269",
+   "level": 2,
+   "name": "约维修",
+   "parent": "s-k0267",
+   "definition": "约人修东西",
+   "domain": "家里和个人"
+  },
+  {
+   "id": "s-k0270",
+   "level": 1,
+   "name": "记家务",
+   "parent": null,
+   "definition": "记下做了哪项家务或照料",
+   "domain": "家里和个人"
+  },
+  {
+   "id": "s-k0271",
+   "level": 1,
+   "name": "找房",
+   "parent": null,
+   "definition": "找租的或买的房子",
+   "domain": "家里和个人"
+  },
+  {
+   "id": "s-k0272",
+   "level": 1,
+   "name": "记纪念日",
+   "parent": null,
+   "definition": "记下或查看生日、纪念日",
+   "domain": "家里和个人"
+  },
+  {
+   "id": "s-k0273",
+   "level": 1,
+   "name": "放音乐",
+   "parent": null,
+   "definition": "播放音乐、播客、有声书",
+   "domain": "家里和个人"
+  },
+  {
+   "id": "s-k0274",
+   "level": 1,
+   "name": "玩游戏",
+   "parent": null,
+   "definition": "玩一个游戏",
+   "domain": "家里和个人"
+  },
+  {
+   "id": "s-k0275",
+   "level": 1,
+   "name": "办聚会",
+   "parent": null,
+   "definition": "安排一次聚会或活动",
+   "domain": "家里和个人"
+  },
+  {
+   "id": "s-k0276",
+   "level": 1,
+   "name": "记心情",
+   "parent": null,
+   "definition": "记下情绪或写一段日记",
+   "domain": "家里和个人"
+  },
+  {
+   "id": "s-k0277",
+   "level": 1,
+   "name": "办政务",
+   "parent": null,
+   "definition": "预约或查询政务、社保、公积金",
+   "domain": "家里和个人"
+  },
+  {
+   "id": "s-k0278",
+   "level": 2,
+   "name": "办证件",
+   "parent": "s-k0277",
+   "definition": "办或换一个证件",
+   "domain": "家里和个人"
+  },
+  {
+   "id": "s-k0279",
+   "level": 1,
+   "name": "投诉",
+   "parent": null,
+   "definition": "投诉一个商家或机构",
+   "domain": "家里和个人"
+  }
+ ]
+}

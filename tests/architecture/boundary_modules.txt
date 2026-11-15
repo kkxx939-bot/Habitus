@@ -49,7 +49,8 @@ behavior/schema/validators.py
 behavior/fusion/lanes/session/prompt.py
 behavior/fusion/lanes/session/service.py
 behavior/kinds/calls.py
-behavior/kinds/revision/proposals.py
+# 选词的答复校验（词编号、固定选项、续的记录在不在列表里，词表方案 2026-11-14）
+behavior/kinds/pick/picker.py
 behavior/semantic/generator.py
 foresight/judge/prompt.py
 foresight/judge/service.py
@@ -69,8 +70,6 @@ model_client/schema_validation.py
 model_client/structured.py
 scene/advice/conditions.py
 scene/advice/prior.py
-scene/concepts/author.py
-scene/occurrences/mapper.py
 
 # E 外部服务的响应
 model_client/adapters/_http.py
@@ -134,10 +133,10 @@ behavior/fusion/lanes/session/model.py
 behavior/fusion/receipt.py
 behavior/fusion/receipt_store.py
 behavior/fusion/store.py
-behavior/kinds/codec.py
 behavior/kinds/ids.py
-behavior/kinds/journal.py
 behavior/kinds/store.py
+# 随代码发布的初始词表数据文件（严格解码）
+behavior/kinds/words.py
 behavior/model.py
 behavior/observation/store.py
 behavior/reduction/kinds_step.py

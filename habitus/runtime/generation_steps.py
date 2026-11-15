@@ -8,20 +8,19 @@ import asyncio
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
-from habitus.behavior.reduction import BehaviorReductionBusyError
 from habitus.runtime.foresight_nightly import OpportunityReport
 from habitus.runtime.generation_lease import LeaseBusyError
 from habitus.runtime.generation_marks import GenerationMark
 from habitus.runtime.generation_result import (
+    FALLBACK_ACTIVE,
     FALLBACK_CALENDAR,
     FALLBACK_COMPACTION,
     FALLBACK_HISTORY,
     FALLBACK_RELATIONS,
     FALLBACK_SCENE,
     FALLBACK_SETTLEMENT,
-    FALLBACK_UNMAPPED,
+    FALLBACK_UNSTAMPED,
     LOCK_BUSY,
-    MIGRATING,
     MODEL_UNREACHABLE,
     NO_MATERIALS,
     NO_RECORDS,
@@ -29,7 +28,6 @@ from habitus.runtime.generation_result import (
     RETRY_REDUCING,
     RETRY_UNFINISHED,
     UNREACHABLE_ERRORS,
-    VOCABULARY_MOVED,
     Degrade,
     GenerationResult,
     NotReady,
@@ -45,36 +43,14 @@ from habitus.runtime.generation_summary import (
     scene_summary,
     settlement_summary,
 )
+from habitus.runtime.generation_vocabulary import Counted
 from habitus.runtime.scene_night import NightReport
 from habitus.series import EventSeries, GapKind
 
 if TYPE_CHECKING:
     from habitus.runtime.generation import Generation
 
-# ── 1–3：续做词表迁移、重读放假数据、重试收尾 ─────────────────────────────
-
-
-async def migrate_step(gen: Generation, report: dict[str, object]) -> None:
-    """续做没做完的词表迁移（排在最前：迁移改的是树上的编号，结算、读序列都不能读到一半新编号一半旧编号；实时化方案第 3 节）。
-    有待生效的拆改就先交给迁移器（``VocabularyRunner.resume``）。
-    持 sweep 锁；锁被另一进程拿着是还没准备好（这一眼到此为止，用户 11-10 失败重试第 1 条）。两样都没有时不去拿
-    sweep 锁、直接算做完：模型队列的词表一项等模型时整段持着这把锁，换代不为一个空操作等它（模型多慢都不影响今天这一代）；
-    这之后才冒出来的迁移由读序列那一步挡下。别的失败只报出：迁移还没做完由结算（跳过、计入"结算留到下次"）与读序列
-    （这一代不成）各自挡下。"""
-
-    report["branches"] = len(gen.migration_jobs)
-    # 待生效的拆改（实时化阶段 2「生效时点」）：白天只出了计划，这一步把它交给迁移器、改树
-    revisions = gen.revisions() if gen.revisions is not None else 0
-    report["revisions"] = revisions
-    if not gen.vocabulary()[1] and not revisions:
-        report["migrating"] = False
-        return
-    for job in gen.migration_jobs:
-        try:
-            await job()
-        except BehaviorReductionBusyError as exc:
-            raise NotReady(LOCK_BUSY) from exc
-    report["migrating"] = gen.vocabulary()[1]
+# ── 1–2：重读放假数据、重试收尾 ─────────────────────────────────────
 
 
 async def calendar_step(gen: Generation, report: dict[str, object], result: GenerationResult) -> None:
@@ -116,7 +92,7 @@ async def retry_step(
         raise Degrade(RETRY_REDUCING)
 
 
-# ── 4：结算 ─────────────────────────────────────────────────────────────
+# ── 3：结算 ─────────────────────────────────────────────────────────────
 
 
 async def settle_step(
@@ -127,11 +103,9 @@ async def settle_step(
     settlement = gen.settlement
     if settlement is None:
         raise Skip("没接预测层")
-    if not deferred and gen.vocabulary()[1]:
-        deferred.append(MIGRATING)  # 续做迁移没做完：结算会整拍跳过，这里明确计入、报出（不再静默）
     if deferred:
         result.fallbacks[FALLBACK_SETTLEMENT] += 1
-        raise Degrade(deferred[0]) if deferred[0] == MIGRATING else Skip(deferred[0])
+        raise Skip(deferred[0])
     try:
         table = settlement.opportunities.latest(settlement.lane) if settlement.opportunities else None
         # 结算读到的机会表是哪一晚（必须边"结算 → 写新机会表"：它早于这一代要写的那一晚）
@@ -146,28 +120,21 @@ async def settle_step(
     report.update(settlement_summary(outcome, due=outcome.settled + still))
 
 
-# ── 5：读序列 ───────────────────────────────────────────────────────────
+# ── 4：读序列 ───────────────────────────────────────────────────────────
 
 
 async def series_step(
     gen: Generation, report: dict[str, object], day: date, result: GenerationResult, holder: list[EventSeries]
 ) -> None:
-    """读序列，截止到今天（触发已保证连续定稿到昨天）。词表迁移做到一半、或读的时候词表变了：这一代不成（改到一半时
-    一半新编号一半旧编号），下一眼从头。"""
+    """读序列，截止到今天（触发已保证连续定稿到昨天）。树上的编号落树之后不改（词表没有迁移），读的时候不用看词表。"""
 
     if gen.unreduced_gaps is not None:
         result.unreduced_gaps = await asyncio.to_thread(gen.unreduced_gaps, day)
         report["unreduced_gaps"] = result.unreduced_gaps
-    before = gen.vocabulary()
-    report["vocabulary_version"] = before[0]
-    if before[1]:
-        raise Degrade(MIGRATING)
     # 全量扫行为树是同步 IO：下沉到线程，不卡预测拍与同一个循环上的在线请求（2026-10-18 四方评审）
     series = await asyncio.to_thread(gen.series.read, cutoff=day)
-    if gen.vocabulary() != before:
-        raise Degrade(VOCABULARY_MOVED)
     holder.append(series)
-    result.series_cutoff, result.vocabulary_version = series.cutoff, before[0]
+    result.series_cutoff = series.cutoff
     yesterday = day - timedelta(days=1)
     result.unwatched = [
         (gap.started_at, gap.ended_at)
@@ -188,24 +155,62 @@ async def series_step(
         report["skipped"] = NO_RECORDS
 
 
+# ── 5：数在用的词 ─────────────────────────────────────────────────────
+
+
+async def active_step(
+    gen: Generation, report: dict[str, object], series: EventSeries, day: date, result: GenerationResult,
+    holder: list[Counted],
+) -> None:  # fmt: skip
+    """数在用的词（词表方案 2026-11-14 第 5、7 节）：按这一代的序列数一遍、在用状态落盘，数出来的集合交给这一代的语义树。
+    纯计数、不调模型。没做成走退路：语义树按盘上已有的在用状态（在用只增不减，下一代重数补上）。"""
+
+    try:
+        counted = await asyncio.to_thread(gen.vocabulary.count, series, day)
+    except BaseException:
+        result.fallbacks[FALLBACK_ACTIVE] += 1
+        raise
+    holder.append(counted)
+    result.vocabulary_version = counted.words.version
+    result.active_words, result.waiting_words = len(counted.words.words), counted.waiting
+    report.update(
+        {
+            "vocabulary_version": counted.words.version,
+            "active_words": len(counted.words.words),
+            "added_words": counted.added,
+            "waiting_words": counted.waiting,
+        }
+    )
+
+
 # ── 6：语义树 ───────────────────────────────────────────────────────────
 
 
 async def scene_step(
-    gen: Generation, report: dict[str, object], series: EventSeries, result: GenerationResult, holder: list[NightReport]
+    gen: Generation,
+    report: dict[str, object],
+    series: EventSeries,
+    counted: list[Counted],
+    result: GenerationResult,
+    holder: list[NightReport],
 ) -> None:
     """语义树那一步（``SceneNightlyRun.generate``，没有模型调用）尽力而为：同步词表或关系判定没做成的走退路，时间线与材料
     照样交给机会表。换代那一刻模型队列正在整体退避（模型整个调不通），关系判定这一代不做、沿用上一代（实时化方案第 2 节，
-    裁定 96）：不拿这一代没长成的词表、概念与映射判出一张新表——同一代不重写，判出来就一直留着。模型只是慢（没在退避）时
-    照判，没映射完的记录对细分概念算看不到。"""
+    裁定 96）：不拿这一代没长成的词表与先验判出一张新表——同一代不重写，判出来就一直留着。模型只是慢（没在退避）时
+    照判，缺的先验权重按 1。"""
 
     failures: list[tuple[str, BaseException]] = []
     down = gen.models_down is not None and gen.models_down()
+    # 这一代在用的词：数出来的那一份；数没做成就按盘上已有的在用状态
+    words = counted[0].words if counted else await asyncio.to_thread(gen.scene.syncing.catalog.current)
+    if not counted:
+        result.vocabulary_version, result.active_words = words.version, len(words.words)
     try:
         # 整步持语义树写锁：模型队列的落盘等这一步做完，这里读到的语义树是一份停住的样子
         async with gen.scene_writes():
             night = await gen.scene.generate(
                 series=series,
+                words=words,
                 now=gen.clock(),
                 failures=failures,
                 relations_held=f"{MODEL_UNREACHABLE}（{QUEUE_BACKING_OFF}）" if down else None,
@@ -218,9 +223,9 @@ async def scene_step(
     held = [] if night.relations_held is None else [f"b4: 关系沿用上一代（{night.relations_held}）"]
     result.stamped_days = len(done)
     stamped = frozenset(done)
-    unmapped = sum(1 for record in series.records if record.day not in stamped)
-    result.fallbacks[FALLBACK_UNMAPPED] += unmapped
-    report.update({"stamped_days": len(done), "unmapped_records": unmapped})
+    unstamped = sum(1 for record in series.records if record.day not in stamped)
+    result.fallbacks[FALLBACK_UNSTAMPED] += unstamped
+    report.update({"stamped_days": len(done), "unstamped_records": unstamped})
     if failures:
         result.fallbacks[FALLBACK_SCENE] += len(failures)
         report["failed_steps"] = [step for step, _exc in failures]
@@ -279,7 +284,7 @@ async def opportunities_step(
 
 
 async def days_step(gen: Generation, report: dict[str, object]) -> None:
-    """当天的日子预期（必须成）：这一代的表不是今天的（没写成）、词表迁移中都算没成。"""
+    """当天的日子预期（必须成）：这一代的表不是今天的（没写成）算没成。"""
 
     if gen.days is None:
         raise Skip("没接预测层")

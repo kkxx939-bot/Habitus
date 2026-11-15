@@ -1,17 +1,16 @@
 """归约写入层的编排：扫描 → 封口 → 定格（stage）→ 确定性落盘 → 消费账本。
 
-抄融合 ``StagedFusion`` 的检查点形状（死规则⑤）：白天归类、时间戳这些会随时间漂移的输入全部
+抄融合 ``StagedFusion`` 的检查点形状（死规则⑤）：选词、时间戳这些会随时间漂移的输入全部
 发生在 stage 之前；stage 之后只有确定性落盘——检查点里存的就是将要落盘的最终 payload（时间已是
 ISO 字符串）与文档时间戳，崩溃重试逐字节重放，落盘器的同字节幂等保证不撞车。
 
 运行节奏是运维决定（用户裁定 5 分钟一轮 sweep，由组合根/调度器调用 ``run_once``，本层不自带
 定时器）；同样的存储内容，无论哪一轮扫到，产出的文档逐字节相同。
 
-树的单一写入口：新文档只由本 runner 经 ``BehaviorDocumentWriter`` 发布；改已有文档的只有词表迁移
-（``kinds_migration``，同一个 writer、只重打 ``kind_token``）——观测 → 融合 → 归约，没有旁路。
+树的单一写入口：新文档只由本 runner 经 ``BehaviorDocumentWriter`` 发布，已落树的文档不改——观测 → 融合 → 归约，没有旁路。
 
 本类只留 sweep 编排骨架与落盘、释放、过期、语义刷新；检查点文件（``checkpoint``）、定稿日账（``day_ledger``）、
-待刷新集合（``refresh_pending``）、词表整理活的编排（``vocabulary``）与物化（``stager``）各是独立协作者。
+待刷新集合（``refresh_pending``）与物化（``stager``）各是独立协作者。
 """
 
 from __future__ import annotations
@@ -34,7 +33,6 @@ from habitus.behavior.reduction.checkpoint import CheckpointStore, document_days
 from habitus.behavior.reduction.day_ledger import DayClosureLedger
 from habitus.behavior.reduction.errors import BehaviorReductionBusyError, BehaviorReductionError
 from habitus.behavior.reduction.failed import FailedChains
-from habitus.behavior.reduction.kinds_jobs import VocabularyJobs
 from habitus.behavior.reduction.kinds_step import KindStamping, KindStamps
 from habitus.behavior.reduction.ledger import BehaviorReductionEntry, BehaviorReductionLedger
 from habitus.behavior.reduction.pending import PendingJudgements, pending_judgements
@@ -51,7 +49,6 @@ from habitus.behavior.reduction.telemetry import (
     seal_attributes,
     stage_attributes,
 )
-from habitus.behavior.reduction.vocabulary import VocabularyJobReport, VocabularyRunner
 from habitus.behavior.retry import RetryCause
 from habitus.behavior.semantic.model import BehaviorSemanticRefreshResult
 from habitus.behavior.semantic.refresher import BehaviorSemanticRefresher
@@ -127,7 +124,6 @@ class BehaviorReductionRunner:
         tree: BehaviorTree,
         lock_store: LockStore,
         kinds: KindStamping,
-        vocabulary_jobs: VocabularyJobs,
         ledger: BehaviorReductionLedger,
         semantic_refresher: BehaviorSemanticRefresher | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -163,7 +159,6 @@ class BehaviorReductionRunner:
             raise ValueError("sweep_lock_ttl_seconds must be an integer between 60 and 86400")
         self.sweep_lock_ttl_seconds = sweep_lock_ttl_seconds
         self.kinds = kinds
-        self.vocabulary_jobs = vocabulary_jobs
         self.ledger = ledger
         self.semantic_refresher = semantic_refresher
         self.refresh_retries = refresh_retries
@@ -189,21 +184,13 @@ class BehaviorReductionRunner:
         self._build_collaborators()
 
     def _build_collaborators(self) -> None:
-        """检查点、待刷新集合、定稿日账都落在消费账本的根下；词表编排与本轮共用 sweep 锁与语义刷新。"""
+        """检查点、待刷新集合、定稿日账都落在消费账本的根下。"""
 
         root = self.ledger.root
         self.checkpoints = CheckpointStore(root)
         self.refresh_pending = RefreshPendingLog(root, dirty_days=self.dirty_days, refresh_retries=self.refresh_retries)
         self.day_ledger = DayClosureLedger(root, tree=self.tree, now=self._now)
         self.stager = ReductionStager(tree=self.tree, observations=self.observations, checkpoints=self.checkpoints)
-        self.vocabulary = VocabularyRunner(
-            jobs=self.vocabulary_jobs,
-            checkpoints=self.checkpoints,
-            refresh_pending=self.refresh_pending,
-            hold_lock=self._hold_sweep_lock,
-            refresh_semantics=self._refresh_semantics,
-            now=self._now,
-        )
 
     def attach_reminder_lookup(self, lookup: Callable[[str, datetime], bool]) -> None:
         """组合根在预测层装好之后把账本的查法接进来（归约在预测层之前装配，接不进构造函数）。"""
@@ -247,22 +234,12 @@ class BehaviorReductionRunner:
             )
             attributes.update(replayed_documents=replayed, refresh_days=len(replayed_days))
         if replayed_days or self.checkpoints.exists():
-            # 重放已全部落树：先把那些日子记进待刷新集合，再立刻清检查点——之后的词表整理活可能重打这些条目，
-            # 检查点若还留着，下一轮重放就会与树上内容冲突而永久卡住。
+            # 重放已全部落树：先把那些日子记进待刷新集合，再立刻清检查点。
             self.refresh_pending.touch(replayed_days, guard)
             self.checkpoints.clear(guard)
         now = self._now()
         # 以下每一段在周尺度都可能跑很久且**不写任何东西**（另一条线实测：stage 前段静默 16 分钟即把
         # 600s 租约耗死，续约点再多也救不了已过期的租约）。因此每段边界都续，长循环内部按条数续。
-        guard.checkpoint()
-        # 没做完的词表迁移排在检查点重放之后、本轮归类之前续做：本轮新封口的链就按改过的清单归类；改过的日子并进本轮刷新。
-        # 词表的每晚新增与定期拆改不在这里，由模型队列在前一天封口之后做（裁定 94 第 9 条，``nightly_vocabulary``）。
-        with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_vocabulary") as attributes:
-            jobs = self.vocabulary.resume_migration(guard)
-            self.refresh_pending.touch(jobs.days, guard)
-            self._kind_signals.extend(jobs.signals)
-            attributes.update(changed_days=len(jobs.days), model_calls=jobs.model_calls)
-        replayed_days = replayed_days | jobs.days
         guard.checkpoint()
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_expire") as attributes:
             attributes.update(self._expire(now, guard))
@@ -270,7 +247,7 @@ class BehaviorReductionRunner:
         # 消费账本这一轮只读一次、在过期之后读：扫描与物化共用（之前各读一遍，账本一长就是三遍全量读，26 号清单 6.3）。
         # 这之后到物化之前没有任何一步写账本。
         entries = self.ledger.load()
-        # 上一轮没刷成的日子并进来（词表整理活改过 kind_token 的日子也在这里）
+        # 上一轮没刷成的日子并进来
         replayed_days = replayed_days | self.refresh_pending.days()
         # "哪些判断还没归约"只有一种答法（``pending``），此刻场景的未封口读口也用它。
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_assemble") as attributes:
@@ -298,7 +275,7 @@ class BehaviorReductionRunner:
             )
 
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_stage") as attributes:
-            # 归类只做一次：缩批只是少发布几条，复用同一份结果（不重复调模型、结论也不会变）。
+            # 选词只做一次：缩批只是少发布几条，复用同一份结果（不重复调模型、结论也不会变）。
             stamps = await self._classify([pending.occurrences[index] for index in sealed.ready_indexes], guard=guard)
             batch = await self.stager.stage_bounded(
                 pending,
@@ -390,22 +367,6 @@ class BehaviorReductionRunner:
             attributes["unsealed_days"] = len(unsealed_days)
         return _Sealed(horizon, ready_indexes, ready_gaps, unsealed_days)
 
-    async def nightly_vocabulary(self, night: date) -> VocabularyJobReport:
-        """模型队列在前一天封口之后调它（裁定 94 第 8、9 条）：这一天的每晚新增，与这一天所在拆改周期里还没做的定期拆改。锁被占抛
-        ``BehaviorReductionBusyError``（还没准备好，下一轮再来）；模型用不了、代码出错原样抛给模型队列（整体退避，或按重试账退避）。"""
-
-        return await self.vocabulary.nightly(night)
-
-    async def grow_vocabulary(self) -> VocabularyJobReport:
-        """立刻跑一次每晚新增（运维与实验用；常规路径是模型队列调的 ``nightly_vocabulary``）。"""
-
-        return await self.vocabulary.grow()
-
-    async def revise_vocabulary(self) -> VocabularyJobReport:
-        """立刻跑一次定期拆改（运维与实验用；常规路径是模型队列调的 ``nightly_vocabulary``）。"""
-
-        return await self.vocabulary.revise()
-
     def _hold_sweep_lock(self, held: ExitStack) -> LeaseGuard:
         """取 sweep 租约、挂到 ``held`` 上（随它退出释放）。``PathLock.acquire`` 是上下文管理器，真正取锁发生在进入时，
         所以进入本身包在 try 里：只有**这里**的超时是"锁被占"（``BehaviorReductionBusyError``，调用方让路）；持锁之后正文里
@@ -453,16 +414,16 @@ class BehaviorReductionRunner:
         return self.day_ledger.closed_days()
 
     async def _classify(self, records: Sequence[ReducibleJudgement], *, guard: LeaseGuard) -> KindStamps:
-        """白天归类——写入层唯一的 LLM 触点。只定"判断 → kind_token"，不改词表（白天不建类）。
+        """落 ``kind_token``——写入层唯一的 LLM 触点（只对判断上没带选词结果的，即物理 lane）。不改词表。
 
         结果随检查点定格：崩溃重放走检查点里的 token，不再问模型。
         """
 
-        with observe_operation(self.observer, OBSERVATION_CATEGORY, "kind_classify") as attributes:
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "kind_pick") as attributes:
             try:
                 stamps = await self.kinds.classify(records, checkpoint=guard.checkpoint)
-            except Exception as exc:  # noqa: BLE001 - 归类失败不拖住那天：这批链换成「错误」放一边（裁定 94 第 3 条）
-                guard.checkpoint()  # 租约丢了（另一进程接手）照常整轮失败，不当成归类失败
+            except Exception as exc:  # noqa: BLE001 - 选词失败不拖住那天：这批链换成「错误」放一边（裁定 94 第 3 条）
+                guard.checkpoint()  # 租约丢了（另一进程接手）照常整轮失败，不当成选词失败
                 # 按错误分类分开（裁定 94 第 8 条）：模型整个用不了的放一边等换代里的重试收尾（它据报告这一代跳过结算），
                 # 别的是我们自己的 bug，当场报出（``bugs``，常驻节拍据它挂到健康面）、不白试
                 failure = call_failure(exc)
@@ -472,28 +433,17 @@ class BehaviorReductionRunner:
                     f"kind_classify_failed {failure.value} {type(exc).__name__}: {len(records)} chains set aside"
                 )
                 attributes.update(failed=type(exc).__name__)
-                return KindStamps(
-                    {}, {}, len(records), 0, 0, 0, (), set_aside={record.chain_digest: failure for record in records}
-                )
+                return KindStamps({}, 0, 0, (), set_aside={record.chain_digest: failure for record in records})
             self._kind_signals.extend(stamps.signals)
             attributes.update(
                 kind_attributes(
-                    requests=stamps.requests,
-                    classified=stamps.classified,
-                    pending=len(stamps.pending),
+                    chains=len(records),
                     not_events=stamps.not_events,
                     model_calls=stamps.model_calls,
                     signals=stamps.signals,
                 )
             )
             return stamps
-
-    def _record_pending(self, documents: Sequence[Any]) -> int:
-        """发布后把待定条目放进待定池（按 occurrence 地址幂等；池满挤掉最老的旧条目、留信号，不抛错）。"""
-
-        admission = self.kinds.record_published(documents)
-        self._kind_signals.extend(admission.signals())
-        return admission.added
 
     # ── 落盘：stage 之后只有确定性动作 ────────────────────────────────────────────────
 
@@ -563,19 +513,14 @@ class BehaviorReductionRunner:
 
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_publish") as attributes:
             documents = self._publish_documents(checkpoint, guard)
-            pending_added = self._record_pending(documents)
             attributes.update(
-                publish_attributes(
-                    [item for item in documents if isinstance(item, Mapping)],
-                    published_at=self._now(),
-                    kind_pending=pending_added,
-                )
+                publish_attributes([item for item in documents if isinstance(item, Mapping)], published_at=self._now())
             )
             # 树写完、账本写完，原料才释放（顺序是崩溃安全的依据：重放路径重新走到这里再补删）。
             attributes["judgements_released"] = self._release(documents, guard)
 
     def _publish_documents(self, checkpoint: Mapping[str, Any], guard: LeaseGuard) -> list[Any]:
-        """逐篇落盘、记账；返回文档，供调用方记待定、计数与释放。"""
+        """逐篇落盘、记账；返回文档，供调用方计数与释放。"""
 
         staged_at_raw = checkpoint.get("staged_at")
         if not isinstance(staged_at_raw, str):

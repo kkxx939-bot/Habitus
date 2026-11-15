@@ -18,7 +18,7 @@ from habitus.behavior.model import BehaviorAddress, BehaviorKind
 from habitus.behavior.observation import BehaviorObservation, BehaviorObservationStore
 from habitus.behavior.reduction.checkpoint import CheckpointStore, document_days
 from habitus.behavior.reduction.errors import BehaviorReductionError
-from habitus.behavior.reduction.kinds_step import SET_ASIDE, KindStamps, judgement_content
+from habitus.behavior.reduction.kinds_step import SET_ASIDE, KindStamps, record_material
 from habitus.behavior.reduction.ledger import BehaviorReductionEntry
 from habitus.behavior.reduction.payloads import (
     REDUCTION_VERSION,
@@ -165,7 +165,7 @@ class ReductionStager:
         )
 
         documents: list[dict[str, Any]] = _gap_documents(ready_gaps, occupied, staged_at, dropped)
-        documents += _occurrence_documents(ready, naming, stamps, staged_at, guard)
+        documents += _occurrence_documents(ready, naming, staged_at, guard)
         documents, rejected = _publishable(self.tree, documents, now, dropped, guard)
         # 干跑校验不过的行为：同一份判断再归约也一样，走我们自己处理不了的那条路（换成「错误」、进堆不白试，那天等它落成空白
         # 才定稿），不留在判断存储里每轮重新归类
@@ -248,14 +248,14 @@ def _name_occurrences(
 
 
 def _set_aside(record: ReducibleJudgement, stamps: KindStamps, failed: list[Failed], dropped: list[str]) -> None:
-    """归类没给出 token 的链：换成「错误」、进夜里待处理的堆。"""
+    """选词没给出 token 的链：换成「错误」、进夜里待处理的堆。"""
 
-    if judgement_content(record) is None:
+    if record.kind_token is None and record_material(record, max_steps=0) is None:
         # 没有可给归类看的内容：我们自己处理不了，换成「错误」、进夜里待处理的堆但不白试（2.4.2；裁定 67、94）
         failed.append((record, "behavior name is not addressable", RetryCause.DETERMINISTIC))
         dropped.append(f"chain {record.chain_digest} isolated: behavior name is not addressable")
     else:
-        # 有内容、归类这一轮没给出结论：不再"下轮再归"拖住那天——换成「错误」、放一边（裁定 94 第 3 条）。
+        # 有内容、选词这一轮没给出结论：不再"下轮再选"拖住那天——换成「错误」、放一边（裁定 94 第 3 条）。
         # 进堆的原因按错误分类定（``kinds_step.SET_ASIDE``）：模型整个用不了的夜里放回去再归一次，内容安全与
         # 输入超长不重试，bug 当场报
         failure = stamps.set_aside.get(record.chain_digest, CallFailure.BUG)
@@ -336,7 +336,6 @@ def _gap_documents(
 def _occurrence_documents(
     ready: list[tuple[int, ReducibleJudgement]],
     naming: _Naming,
-    stamps: KindStamps,
     staged_at: str,
     guard: LeaseGuard | None,
 ) -> list[dict[str, Any]]:
@@ -356,16 +355,13 @@ def _occurrence_documents(
             "staged_at": staged_at,
             "reduction_version": REDUCTION_VERSION,
         }
-        item: dict[str, Any] = {
-            "kind": BehaviorKind.OCCURRENCE.value,
-            "payload": naming.payloads[index],
-            "ledger": entry,
-        }
-        note = stamps.pending.get(record.chain_digest)
-        if note is not None:
-            # 待定条目发布后进待定池要用这两样；随文档一起定格，重放时原样再用一次（按地址幂等）。
-            item["kind_pending"] = note.to_mapping()
-        documents.append(item)
+        documents.append(
+            {
+                "kind": BehaviorKind.OCCURRENCE.value,
+                "payload": naming.payloads[index],
+                "ledger": entry,
+            }
+        )
     return documents
 
 

@@ -114,7 +114,6 @@ def _miss(fact: AccountFact, **overrides: object) -> MissFacts:
     values: dict[str, object] = dict(
         spoken=True,
         standing=_standing(),
-        current=lambda token: (token,),
         window=(),
         today_note=None,
         basis=(),
@@ -166,7 +165,6 @@ def test_the_flags_of_a_miss_are_read_from_the_fact_the_window_the_basis_and_the
     assert _miss(_fact("过期待决"), standing=_standing(lower=0.7)).within_budget
     assert _miss(_fact("过期待决"), listed=set()).relation_gone
     assert not _miss(_fact("过期待决"), listed=None).relation_gone
-    assert _miss(_fact("过期待决"), current=lambda _token: ("s-k0004",)).reclassified
     absent = _expectation(antecedents=(Antecedent("session|s-k0009|s-k0003|chain", present=False, upward=True),))
     assert _miss(_fact("过期待决"), item=absent).antecedent_absent
     differs = _miss(_fact("过期待决"), today_note="调休上班", basis=[BasisSeen(None, None), BasisSeen("周一", None)])

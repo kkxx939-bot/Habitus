@@ -1,4 +1,4 @@
-"""读行为记录时间用的尺子（裁定 59）：槽宽、合并窗口、日内分布的邻域与收缩、峰下限。
+"""读行为记录时间用的尺子（裁定 59）：槽宽、合并窗口、日内分布的邻域与收缩。
 
 语义树与预测层都经 ``habitus.temporal`` 用这些尺子；全系统只此一处，不在别处另配一份。本模块只有纯标量与校验。
 """
@@ -14,7 +14,7 @@ from habitus.temporal.slots import MINUTES_PER_DAY
 
 @dataclass(frozen=True)
 class TemporalConfig:
-    """槽宽（分钟）、合并窗口（分钟，按开始时刻的秒数判断）、日内分布的邻域宽度（槽）与两档收缩强度、峰下限。"""
+    """槽宽（分钟）、合并窗口（分钟，按开始时刻的秒数判断）、日内分布的邻域宽度（槽）与两档收缩强度。"""
 
     # 槽宽：提醒精度目标与链内相邻间隔低分位里取小的那个（待定档）。须整除一天。
     slot_minutes: int = 15
@@ -26,8 +26,6 @@ class TemporalConfig:
     # 两档收缩的先验分量：本槽向邻域、邻域向全天（待定档：留出集上最小化对数损失）。
     shrink_slot_to_pool: float = 5.0
     shrink_pool_to_all_day: float = 5.0
-    # 一个峰里至少有这么多比例的发生（归一化之后比；裁定 59 第 6 条第 5 步）。
-    min_peak_mass: float = 0.10
 
     def __post_init__(self) -> None:
         for name in ("slot_minutes", "merge_window_minutes", "pool_half_width"):
@@ -44,8 +42,6 @@ class TemporalConfig:
             value = getattr(self, name)
             if not 0.0 <= float(value) <= 1_000.0:
                 raise ValueError(f"temporal.{name} must be a number between 0 and 1000")
-        if not 0.0 < float(self.min_peak_mass) < 1.0:
-            raise ValueError("temporal.min_peak_mass must lie in (0, 1)")
 
     @property
     def merge_window_seconds(self) -> int:

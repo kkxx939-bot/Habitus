@@ -49,22 +49,18 @@ def row(uri: str, at: datetime, kind: str = HOTEL) -> FlowRow:
     )
 
 
-def unchanged(token: str) -> tuple[str, ...]:
-    return (token,)
-
-
 NOW = FORMED + timedelta(days=1)
 
 
 def test_on_time_early_and_late_are_measured_against_the_window() -> None:
     item = expectation()
     on_time = settle(
-        item, [row("a", FORMED + timedelta(minutes=20))], spoken_at=None, settled_at=NOW, current=unchanged
+        item, [row("a", FORMED + timedelta(minutes=20))], spoken_at=None, settled_at=NOW
     )
     assert (on_time.outcome, on_time.occurrence_uri, on_time.offset_minutes) == ("准时", "a", None)
-    early = settle(item, [row("b", FORMED + timedelta(minutes=2))], spoken_at=None, settled_at=NOW, current=unchanged)
+    early = settle(item, [row("b", FORMED + timedelta(minutes=2))], spoken_at=None, settled_at=NOW)
     assert (early.outcome, early.offset_minutes) == ("早到", -2)
-    late = settle(item, [row("c", FORMED + timedelta(minutes=70))], spoken_at=None, settled_at=NOW, current=unchanged)
+    late = settle(item, [row("c", FORMED + timedelta(minutes=70))], spoken_at=None, settled_at=NOW)
     assert (late.outcome, late.offset_minutes) == ("晚了但做了", 19)
     assert on_time.hit and early.hit and late.hit
 
@@ -77,29 +73,20 @@ def test_only_the_first_occurrence_after_observed_from_counts_and_other_kinds_do
         row("first", FORMED + timedelta(minutes=30)),
         row("second", FORMED + timedelta(minutes=40)),
     ]
-    found = first_occurrence(item, rows, current=unchanged)
+    found = first_occurrence(item, rows)
     assert found is not None and found.uri == "first"
-    # 词表拆改之后按"现在对应哪些编号"认
-    split = settle(
-        item,
-        [row("s", FORMED + timedelta(minutes=30), kind="s-k0099")],
-        spoken_at=None,
-        settled_at=NOW,
-        current=lambda _t: ("s-k0099",),
-    )
-    assert split.outcome == "准时"
 
 
 def test_an_occurrence_after_the_reminder_is_not_a_natural_hit() -> None:
     item = expectation()
     spoken = FORMED + timedelta(minutes=10)
     result = settle(
-        item, [row("a", FORMED + timedelta(minutes=25))], spoken_at=spoken, settled_at=NOW, current=unchanged
+        item, [row("a", FORMED + timedelta(minutes=25))], spoken_at=spoken, settled_at=NOW
     )
     assert (result.outcome, result.offset_minutes, result.hit) == ("提醒后发生", 15, False)
     # 说之前就做了的，照常按时窗记
     before = settle(
-        item, [row("b", FORMED + timedelta(minutes=5))], spoken_at=spoken, settled_at=NOW, current=unchanged
+        item, [row("b", FORMED + timedelta(minutes=5))], spoken_at=spoken, settled_at=NOW
     )
     assert before.outcome == "准时"
 
@@ -107,7 +94,7 @@ def test_an_occurrence_after_the_reminder_is_not_a_natural_hit() -> None:
 def test_nothing_by_the_deadline_is_overdue_pending_and_one_done_before_forming_still_counts() -> None:
     item = expectation()
     none = settle(
-        item, [row("late", item.deadline + timedelta(minutes=1))], spoken_at=None, settled_at=NOW, current=unchanged
+        item, [row("late", item.deadline + timedelta(minutes=1))], spoken_at=None, settled_at=NOW
     )
     assert none.outcome == "过期待决" and none.occurrence_uri is None and not none.hit
     # 到了钟点才建、形成时他已经做了：从当天零点起算，照常按时窗结（裁定 49：每个机会都进账，不再有「多余」）
@@ -118,11 +105,11 @@ def test_nothing_by_the_deadline_is_overdue_pending_and_one_done_before_forming_
         observed_from=FORMED.replace(hour=0, minute=0),
     )
     done = settle(
-        clock, [row("ran", FORMED - timedelta(minutes=12))], spoken_at=None, settled_at=NOW, current=unchanged
+        clock, [row("ran", FORMED - timedelta(minutes=12))], spoken_at=None, settled_at=NOW
     )
     assert (done.outcome, done.occurrence_uri) == ("准时", "ran")
     earlier = settle(
-        clock, [row("ran", FORMED - timedelta(minutes=50))], spoken_at=None, settled_at=NOW, current=unchanged
+        clock, [row("ran", FORMED - timedelta(minutes=50))], spoken_at=None, settled_at=NOW
     )
     assert (earlier.outcome, earlier.offset_minutes) == ("早到", -30)
 
@@ -130,7 +117,7 @@ def test_nothing_by_the_deadline_is_overdue_pending_and_one_done_before_forming_
 def test_overdue_is_ruled_as_caught_up_only_before_the_next_opportunity() -> None:
     item = expectation()
     later = row("caught", item.deadline + timedelta(hours=5))
-    ruling = rule_overdue(item, [later], before=None, ruled_at=NOW, current=unchanged)
+    ruling = rule_overdue(item, [later], before=None, ruled_at=NOW)
     assert ruling is not None and (ruling.ruling, ruling.occurrence_uri, ruling.delay_minutes) == (
         "后补",
         "caught",
@@ -138,11 +125,11 @@ def test_overdue_is_ruled_as_caught_up_only_before_the_next_opportunity() -> Non
     )
     # 下一次同类机会已经形成：那之后做的属于下一次，不算补做
     assert (
-        rule_overdue(item, [later], before=item.deadline + timedelta(hours=1), ruled_at=NOW, current=unchanged) is None
+        rule_overdue(item, [later], before=item.deadline + timedelta(hours=1), ruled_at=NOW) is None
     )
     # 时限之前的行不算（那是结算的事），没有补做不裁
     assert (
-        rule_overdue(item, [row("x", item.deadline - timedelta(hours=1))], before=None, ruled_at=NOW, current=unchanged)
+        rule_overdue(item, [row("x", item.deadline - timedelta(hours=1))], before=None, ruled_at=NOW)
         is None
     )
 
@@ -155,7 +142,7 @@ def test_omissions_are_class_rows_without_a_covering_expectation() -> None:
         row("other-kind", FORMED + timedelta(minutes=30), kind="s-k0007"),
         row("pending", FORMED + timedelta(minutes=31), kind="s-待定"),
     ]
-    found = omissions(rows, [item], noticed_at=NOW, current=unchanged)
+    found = omissions(rows, [item], noticed_at=NOW)
     assert [(o.occurrence_uri, o.kind_token, o.had_expectation) for o in found] == [
         ("uncovered", HOTEL, True),
         ("other-kind", "s-k0007", False),
@@ -170,12 +157,12 @@ def test_an_abandoned_occurrence_is_not_a_hit_nor_a_catch_up_nor_an_omission() -
 
     item = expectation()
     gave_up = swap(row("gave-up", FORMED + timedelta(minutes=20)), status="abandoned")
-    assert settle(item, [gave_up], spoken_at=None, settled_at=NOW, current=unchanged).outcome == "过期待决"
+    assert settle(item, [gave_up], spoken_at=None, settled_at=NOW).outcome == "过期待决"
     stopped = swap(row("stopped", FORMED + timedelta(minutes=20)), status="interrupted")
-    assert settle(item, [stopped], spoken_at=None, settled_at=NOW, current=unchanged).outcome == "准时"
+    assert settle(item, [stopped], spoken_at=None, settled_at=NOW).outcome == "准时"
     later = swap(row("later", item.deadline + timedelta(hours=1)), status="abandoned")
-    assert rule_overdue(item, [later], before=None, ruled_at=NOW, current=unchanged) is None
-    assert omissions([later], [], noticed_at=NOW, current=unchanged) == ()
+    assert rule_overdue(item, [later], before=None, ruled_at=NOW) is None
+    assert omissions([later], [], noticed_at=NOW) == ()
 
 
 def test_an_event_expectation_whose_antecedent_turned_into_something_else_does_not_hold() -> None:
@@ -183,13 +170,12 @@ def test_an_event_expectation_whose_antecedent_turned_into_something_else_does_n
 
     item = expectation()
     flight = ("s-k0001",)
-    assert antecedent_holds(item, "s-k0001", flight, current=unchanged)
-    assert not antecedent_holds(item, "s-k0009", flight, current=unchanged)  # 封口后归成了别的类
-    assert not antecedent_holds(item, None, flight, current=unchanged)  # 成了非事件 / 被并掉：找不到了
-    assert antecedent_holds(item, "s-k0011", flight, current=lambda t: ("s-k0011",) if t == "s-k0001" else (t,))  # 拆改
-    assert antecedent_holds(item, None, None, current=unchanged)  # 关系已不在表里：说不清，不判作废
+    assert antecedent_holds(item, "s-k0001", flight)
+    assert not antecedent_holds(item, "s-k0009", flight)  # 封口后归成了别的类
+    assert not antecedent_holds(item, None, flight)  # 成了非事件 / 被并掉：找不到了
+    assert antecedent_holds(item, None, None)  # 关系已不在表里：说不清，不判作废
     clock = expectation(source="日子", trigger="weekday=3")
-    assert antecedent_holds(clock, None, flight, current=unchanged)  # 只管事件触发
+    assert antecedent_holds(clock, None, flight)  # 只管事件触发
 
 
 def _relation(**overrides: object) -> RelationOpportunities:
@@ -231,36 +217,28 @@ def test_settling_finds_the_antecedent_by_its_start_then_by_the_row_spanning_tha
     relation = _relation()
     exact = [row("flight", FLIGHT_AT, kind="s-k0001")]
     holds = antecedent_holds_when_settling(
-        _event(), relation, official=False, calendar_on=_no_calendar, rows_on=_rows_on(exact), current=unchanged
+        _event(), relation, official=False, calendar_on=_no_calendar, rows_on=_rows_on(exact)
     )
     assert holds
     # 封口时开始被更正挪了几分钟：跨过那一刻的那一行
     moved = [row("flight", FLIGHT_AT - timedelta(minutes=3), kind="s-k0001")]
     assert antecedent_holds_when_settling(
-        _event(), relation, official=False, calendar_on=_no_calendar, rows_on=_rows_on(moved), current=unchanged
+        _event(), relation, official=False, calendar_on=_no_calendar, rows_on=_rows_on(moved)
     )
-    # 封口后归成了别的类：前因不成立；词表把它拆改成了前因类之一：成立
+    # 封口后归成了别的类：前因不成立
     other = [row("flight", FLIGHT_AT, kind="s-k0007")]
     assert not antecedent_holds_when_settling(
-        _event(), relation, official=False, calendar_on=_no_calendar, rows_on=_rows_on(other), current=unchanged
-    )
-    assert antecedent_holds_when_settling(
-        _event(),
-        relation,
-        official=False,
-        calendar_on=_no_calendar,
-        rows_on=_rows_on(other),
-        current=lambda token: ("s-k0007",) if token == "s-k0001" else (token,),
+        _event(), relation, official=False, calendar_on=_no_calendar, rows_on=_rows_on(other)
     )
     # 找不到：前因不成立；关系不在表里、实例读不出时刻：说不清，不判作废
     assert not antecedent_holds_when_settling(
-        _event(), relation, official=False, calendar_on=_no_calendar, rows_on=_rows_on([]), current=unchanged
+        _event(), relation, official=False, calendar_on=_no_calendar, rows_on=_rows_on([])
     )
     assert antecedent_holds_when_settling(
-        _event(), None, official=False, calendar_on=_no_calendar, rows_on=_rows_on([]), current=unchanged
+        _event(), None, official=False, calendar_on=_no_calendar, rows_on=_rows_on([])
     )
     assert antecedent_holds_when_settling(
-        expectation(), relation, official=False, calendar_on=_no_calendar, rows_on=_rows_on([]), current=unchanged
+        expectation(), relation, official=False, calendar_on=_no_calendar, rows_on=_rows_on([])
     )
 
 
@@ -282,47 +260,45 @@ def test_settling_rechecks_a_situation_against_the_latest_calendar() -> None:
         return lambda _day: (("日历.日型", value),)
 
     assert antecedent_holds_when_settling(
-        item, relation, official=False, calendar_on=on("工作日"), rows_on=no_rows, current=unchanged
+        item, relation, official=False, calendar_on=on("工作日"), rows_on=no_rows
     )
     assert not antecedent_holds_when_settling(
-        item, relation, official=False, calendar_on=on("节假日"), rows_on=no_rows, current=unchanged
+        item, relation, official=False, calendar_on=on("节假日"), rows_on=no_rows
     )
     assert antecedent_holds_when_settling(
-        item, None, official=False, calendar_on=on("节假日"), rows_on=no_rows, current=unchanged
+        item, None, official=False, calendar_on=on("节假日"), rows_on=no_rows
     )
 
 
 def test_delivering_finds_the_antecedent_the_same_way_as_settling() -> None:
     """段 6 Q4：递送开口前与结算对"前因还成立吗"读同一份——按开始时刻找、找不到就找跨过那一刻的那一行（封口时开始被更正挪了
-    几分钟），类按 ``current`` 认词表拆改。原来递送只按开始时刻原样找、只认原编号：开始被更正或前因拆改后递送说不成立（不说），
+    几分钟），类按编号相等认。原来递送只按开始时刻原样找：开始被更正后递送说不成立（不说），
     结算却说成立（记过期待决，账上记一笔坏）。情境要不要按最新的日历重核是两边唯一的不同（递送不重核，待定）。"""
 
     relation = _relation()
-    split = lambda token: ("s-k0007",) if token == "s-k0001" else (token,)  # noqa: E731
     cases = [
-        ([row("flight", FLIGHT_AT, kind="s-k0001")], unchanged),
-        ([row("flight", FLIGHT_AT - timedelta(minutes=3), kind="s-k0001")], unchanged),  # 开始被更正
-        ([row("flight", FLIGHT_AT, kind="s-k0007")], unchanged),  # 归成了别的类
-        ([row("flight", FLIGHT_AT, kind="s-k0007")], split),  # 拆改成了前因类之一
-        ([], unchanged),  # 找不到
+        [row("flight", FLIGHT_AT, kind="s-k0001")],
+        [row("flight", FLIGHT_AT - timedelta(minutes=3), kind="s-k0001")],  # 开始被更正
+        [row("flight", FLIGHT_AT, kind="s-k0007")],  # 归成了别的类
+        [],  # 找不到
     ]
-    for rows, current in cases:
+    for rows in cases:
         settling = antecedent_holds_when_settling(
-            _event(), relation, official=False, calendar_on=_no_calendar, rows_on=_rows_on(rows), current=current
+            _event(), relation, official=False, calendar_on=_no_calendar, rows_on=_rows_on(rows)
         )
-        delivering = antecedent_holds_when_delivering(_event(), relation, rows_on=_rows_on(rows), current=current)
+        delivering = antecedent_holds_when_delivering(_event(), relation, rows_on=_rows_on(rows))
         assert delivering is settling
     assert [
-        antecedent_holds_when_delivering(_event(), relation, rows_on=_rows_on(rows), current=current)
-        for rows, current in cases
-    ] == [True, True, False, True, False]
+        antecedent_holds_when_delivering(_event(), relation, rows_on=_rows_on(rows))
+        for rows in cases
+    ] == [True, True, False, False]
 
     def never(_day: date) -> list[AntecedentRow]:
         raise AssertionError("not an event trigger, or no relation: nothing to look up")
 
-    assert antecedent_holds_when_delivering(_event(), None, rows_on=never, current=unchanged)
+    assert antecedent_holds_when_delivering(_event(), None, rows_on=never)
     weekday = expectation(source="日子", trigger="weekday=3")
-    assert antecedent_holds_when_delivering(weekday, relation, rows_on=never, current=unchanged)
+    assert antecedent_holds_when_delivering(weekday, relation, rows_on=never)
 
 
 # --- 段 6 Q18：存活变异补的边界断言 ------------------------------------------------------------------------------
@@ -333,9 +309,9 @@ def test_a_reminder_spoken_at_the_very_moment_it_happened_is_not_after_the_remin
 
     item = expectation()
     at = FORMED + timedelta(minutes=20)
-    same = settle(item, [row("a", at)], spoken_at=at, settled_at=NOW, current=unchanged)
+    same = settle(item, [row("a", at)], spoken_at=at, settled_at=NOW)
     assert same.outcome == "准时"
-    after = settle(item, [row("a", at)], spoken_at=at - timedelta(minutes=1), settled_at=NOW, current=unchanged)
+    after = settle(item, [row("a", at)], spoken_at=at - timedelta(minutes=1), settled_at=NOW)
     assert (after.outcome, after.offset_minutes) == ("提醒后发生", 1)
 
 
@@ -343,17 +319,8 @@ def test_an_occurrence_exactly_at_the_window_end_is_on_time() -> None:
     """时窗终点那一刻算窗内（M03：``<=`` 改 ``<``）。"""
 
     item = expectation()
-    end = settle(item, [row("a", item.window[1])], spoken_at=None, settled_at=NOW, current=unchanged)
+    end = settle(item, [row("a", item.window[1])], spoken_at=None, settled_at=NOW)
     assert (end.outcome, end.offset_minutes) == ("准时", None)
-
-
-def test_a_row_still_carrying_the_old_number_mid_migration_counts() -> None:
-    """词表迁移做到一半：那天的行可能还是原编号，原编号总认（M05：去掉原编号）。"""
-
-    item = expectation()
-    moved = lambda token: ("s-k0020",) if token == HOTEL else (token,)  # noqa: E731
-    found = first_occurrence(item, [row("old", FORMED + timedelta(minutes=20))], current=moved)
-    assert found is not None and found.uri == "old"
 
 
 def test_the_antecedent_is_also_looked_for_on_the_neighbouring_day() -> None:
@@ -364,7 +331,7 @@ def test_the_antecedent_is_also_looked_for_on_the_neighbouring_day() -> None:
     yesterday = [row("flight", instance.astimezone(UTC), kind="s-k0001")]
     assert yesterday[0].at.date() == date(2026, 12, 9)
     assert antecedent_holds_when_settling(
-        item, _relation(), official=False, calendar_on=_no_calendar, rows_on=_rows_on(yesterday), current=unchanged
+        item, _relation(), official=False, calendar_on=_no_calendar, rows_on=_rows_on(yesterday)
     )
 
 
@@ -374,10 +341,10 @@ def test_a_catch_up_needs_to_come_strictly_after_the_deadline_and_before_the_nex
 
     item = expectation()
     deadline = item.deadline
-    assert rule_overdue(item, [row("at", deadline)], before=None, ruled_at=NOW, current=unchanged) is None
+    assert rule_overdue(item, [row("at", deadline)], before=None, ruled_at=NOW) is None
     later = rule_overdue(
-        item, [row("late", deadline + timedelta(minutes=1))], before=None, ruled_at=NOW, current=unchanged
+        item, [row("late", deadline + timedelta(minutes=1))], before=None, ruled_at=NOW
     )
     assert later is not None and later.ruling == "后补"
     next_chance = deadline + timedelta(hours=2)
-    assert rule_overdue(item, [row("n", next_chance)], before=next_chance, ruled_at=NOW, current=unchanged) is None
+    assert rule_overdue(item, [row("n", next_chance)], before=next_chance, ruled_at=NOW) is None

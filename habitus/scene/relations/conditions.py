@@ -3,11 +3,11 @@
 1. **结构字段**（``FIELD``）——机械判，看前因那一条：地点、同在的人；周几、日型这类日历条件是日历情境概念，走第 3 种（裁定 59）；
 2. **时间线**（``TIMELINE``）——机械判：A 之前同一条链的窗口里出现过某一类（"讨论方案之后的修改代码"；**组合前因**
    "A 与 C 一起"就是这一种，不另起一套）；
-3. **情境概念**（``CONCEPT``）——前因那一条命中了某个情境概念（"约了人"这类交映射器打标签；日历情境按那一天的日历机械判，
-   答不出的那天不判）。
+3. **情境概念**（``CONCEPT``）——前因那一条那一天某个日历情境成立（只按那一天的日历机械判：答不出的那天、没给日历的时间线
+   都判不了）。
 
 条件的来源有两处：机械列举的（每个够样本的前因：出现过的地点 / 同在的人、出现在它之前的每一类、
-同 lane 的每个情境概念），以及大模型提的（第 7 步：读 A 那一条与它之前的概要、不看 B，提出"可能被什么左右"，
+每个日历情境），以及大模型提的（只有结构字段与时间线两种，第 7 步：读 A 那一条与它之前的概要、不看 B，提出"可能被什么左右"，
 经 ``compile_proposal`` 编译，落不成模板的进已拒清单，不每晚换个说法反复试）。第 N 晚提的只在 N 之后的数据上检验。
 
 **几个条件合起来**（裁定 61 第 6 条、62 第 1 条）：关系键里的条件是一个集合——各条件的文本排序后用 ``CONDITION_JOIN``
@@ -32,7 +32,7 @@ productive-rule 检验；裁定 63 第 1 条）：集合里每一个条件各比
 条件下那一组用层内精确检验（泊松二项），交互用上面的 z。只用交互 z 不够：条件下只有两三层时，z 的正态近似失灵，
 一层阳性就能把 z 推得很大（真实数据：条件下 2 层、阳性 1 层的"调节"出了几十条），精确检验在这种时候给的 p 本来就大，
 最小可达 p 也是两者里较大的那个——剔除那一道就把它们标成样本不够。
-前因那一条判不了条件的（没映射过、情境没判过）不进任何一组。
+前因那一条判不了条件的（没封口、情境没判过）不进任何一组。
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 
-from habitus.scene.concepts.model import ConceptRole, ConceptSet, members_retired
+from habitus.scene.concepts.model import ConceptRole, ConceptSet
 from habitus.scene.relations import stats
 from habitus.scene.relations.measures import ChainMeasure, PairedMeasure
 from habitus.scene.relations.spans import Chain, Stratum
@@ -55,6 +55,10 @@ class Template(str, Enum):
     FIELD = "field"
     TIMELINE = "timeline"
     CONCEPT = "concept"
+
+
+#: 模型能提的模板（``compile_proposal``）：情境概念只剩日历情境，日历条件由 ``mechanical`` 机械列举，不由模型提。
+PROPOSABLE = (Template.FIELD, Template.TIMELINE)
 
 
 # TODO(FORESIGHT-EVENT-FIRST-001)：天气等外部事实接进外部条件包（habitus/conditions），在这里注册成新字段（要有历史），
@@ -81,7 +85,7 @@ class Condition:
 
 
 class ConditionError(ValueError):
-    """提议落不成三种模板之一。"""
+    """提议落不成能提的模板（``PROPOSABLE``）之一。"""
 
 
 #: 条件集合的键里各条件之间的分隔符（``concepts/model.py`` 的 ``IDENTITY_SEPARATORS`` 预留，概念身份里不会出现）。
@@ -116,13 +120,17 @@ def compile_proposal(proposal: Mapping[str, object], concepts: ConceptSet, *, la
     """把一条提议编译成模板；落不成的抛 ``ConditionError``，说清是哪一条不对（进已拒清单）。
 
     提议的形状：``{"template": "field", "field": "place" | "with", "value": "..."}``、
-    ``{"template": "timeline", "concept": "<类名或概念名>"}``、``{"template": "concept", "concept": "<情境概念名>"}``。
+    ``{"template": "timeline", "concept": "<类名或概念名>"}``。情境概念模板不收（``PROPOSABLE``）：日历条件机械列举。
     """
 
     try:
         template = Template(str(proposal.get("template")))
     except ValueError as exc:
         raise ConditionError(f"unknown template: {proposal.get('template')!r}") from exc
+    if template not in PROPOSABLE:
+        raise ConditionError(
+            f"the {template.value} template is not proposable: calendar conditions are enumerated mechanically"
+        )
     if template is Template.FIELD:
         try:
             field = Field(str(proposal.get("field")))
@@ -139,10 +147,8 @@ def compile_proposal(proposal: Mapping[str, object], concepts: ConceptSet, *, la
     item = concepts[identity]
     if concepts.lane_of(identity) not in (lane, None):
         raise ConditionError(f"concept {name!r} belongs to another lane")
-    if template is Template.TIMELINE and item.role is not ConceptRole.BEHAVIOR:
+    if item.role is not ConceptRole.BEHAVIOR:
         raise ConditionError(f"the timeline template needs a behaviour concept, {name!r} is not one")
-    if template is Template.CONCEPT and item.role is ConceptRole.BEHAVIOR:
-        raise ConditionError(f"the concept template needs a situation concept, {name!r} is a behaviour")
     return Condition(template, identity)
 
 
@@ -209,15 +215,8 @@ def evaluator(line: LaneTimeline, condition: Condition, *, window: int) -> Calla
     calendar = line.calendar_days(condition.value)
 
     def by_concept(chain: Chain) -> bool | None:
-        if calendar is not None:
-            return calendar.get(chain.day)  # 日历情境：那一天的日历说了算，答不出就是 None
-        hits = line.hits.get(chain.anchor.uri)
-        if hits is None:
-            return None
-        names = {name for name in hits.situations_checked}
-        if condition.value not in names and not any(hit.identity == condition.value for hit in hits.situation_hits):
-            return None
-        return any(hit.identity == condition.value for hit in hits.situation_hits)
+        # 日历情境：那一天的日历说了算，答不出就是 None；时间线没按日历填过这个情境（没给日历）也判不了
+        return None if calendar is None else calendar.get(chain.day)
 
     return by_concept
 
@@ -500,9 +499,7 @@ def _resolve(concepts: ConceptSet, name: str) -> str | None:
         return concepts[name].identity
     # 名字只在在用的概念里唯一（停用的可以与在用的同名），按名字找只找在用的
     matches = [
-        identity
-        for identity in concepts
-        if concepts.label_of(identity) == name and not members_retired(concepts, identity)
+        identity for identity in concepts if concepts.label_of(identity) == name and not concepts[identity].retired
     ]
     return matches[0] if len(matches) == 1 else None
 
@@ -530,6 +527,7 @@ __all__ = [
     "ConditionError",
     "Field",
     "ModeratedMeasure",
+    "PROPOSABLE",
     "Template",
     "compile_proposal",
     "evaluator",

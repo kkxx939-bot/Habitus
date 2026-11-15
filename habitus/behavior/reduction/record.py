@@ -96,6 +96,8 @@ class ReducibleJudgement:
     status: str | None
     status_basis: str | None
     fusion_version: str
+    #: 判断上带着的选词结果（会话 lane 带、物理 lane 不带）：带着的归约直接落，没带的在归约里选（词表方案 2026-11-14）。
+    kind_token: str | None = None
 
     @property
     def is_readable(self) -> bool:
@@ -146,6 +148,7 @@ def parse_judgement_record(record: Mapping[str, Any]) -> ReducibleJudgement:
         status=_optional_text(record, "status"),
         status_basis=_optional_text(record, "status_basis"),
         fusion_version=_text(record, "fusion_version"),
+        kind_token=_optional_text(record, "kind_token"),
     )
     # 融合层不变量在门口复核：可读判断必带摘要/状态/主体。缺了说明存储被绕写，
     # 快失败优于让 "None" 之类的字面值一路走进树的正文。

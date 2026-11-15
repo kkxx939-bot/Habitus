@@ -2,8 +2,8 @@
 
 今天这一代完成之后才做，一条 lane 各一项，先验在前：
 
-- **先验**对着"概念集 + 同步词表将要生成的基础概念 + 待生效的概念"问（``SceneNightlyRun.prospect``），答案直接写缓存——只有
-  换代读它，概念进概念集的那一代先验已经备好。一对归哪一题只看两个概念出现的先后（``scene.advice.pairing``）。
+- **先验**对着"概念集 + 同步词表将要写的概念"问（``_prospect``），答案直接写缓存——只有换代读它，新类的行为概念进概念集的
+  那一代先验已经备好。一对归哪一题只看两个概念出现的先后（``scene.advice.pairing``）。
 - **候选条件**对着今天这一代的概念集与时间线问，提出日记成下一次换代的日子，直接写提议簿（只有换代读，写进去就等于待生效）。
 """
 
@@ -23,9 +23,7 @@ from habitus.series import EventSeries
 
 
 class AdviceWork:
-    def __init__(
-        self, *, state: ModelQueueState, scene: SceneNightlyRun, vocabulary: Callable[[], tuple[int, bool]]
-    ) -> None:
+    def __init__(self, *, state: ModelQueueState, scene: SceneNightlyRun, vocabulary: Callable[[], int]) -> None:
         self.state = state
         self.scene = scene
         self.vocabulary = vocabulary
@@ -34,8 +32,8 @@ class AdviceWork:
         self._priors_clear: str | None = None
 
     async def items(self, current: Round, night: date, series: EventSeries, concepts: ConceptSet) -> list[Item]:
-        """先验、候选条件的补问，一条 lane 各一项，先验在前。先验对着"概念集 + 同步词表将要生成的基础概念 + 待生效的概念"问
-        （概念进概念集的那一代先验已经备好）；候选条件对着今天这一代的概念集与时间线问，提出日记成下一次换代的日子。"""
+        """先验、候选条件的补问，一条 lane 各一项，先验在前。先验对着"概念集 + 同步词表将要写的概念"问（新类的行为概念进
+        概念集的那一代先验已经备好）；候选条件对着今天这一代的概念集与时间线问，提出日记成下一次换代的日子。"""
 
         scene = self.scene
         if scene.advice is None:
@@ -49,7 +47,7 @@ class AdviceWork:
     async def _priors(self, current: Round, night: date, series: EventSeries) -> list[Item]:
         advice = self.scene.advice
         assert advice is not None
-        prospect, settled = await self.scene.prospect(series, current.now)
+        prospect, settled = await self._prospect(series, current)
         signature = canonical_digest(
             {
                 "concepts": sorted(prospect[name].fingerprint for name in prospect),
@@ -82,6 +80,16 @@ class AdviceWork:
             return Item(ADVICE, f"priors:{lane}:{night.isoformat()}", run, night)
 
         return [item(lane) for lane in owed]
+
+    async def _prospect(self, series: EventSeries, current: Round) -> tuple[ConceptSet, frozenset[str]]:
+        """下一次换代之后概念集会是什么样（现在的概念集 + 同步词表将要写的：新类的行为概念、改名改判据、停用、新的日历情境），
+        以及其中现在已经在概念集里的那些身份。概念按身份排好，与整支读出来的先后相同。纯读盘、纯计算。"""
+
+        plan = await self.scene.syncing.plan(series, current.now)
+        settled = await asyncio.to_thread(self.scene.concepts.read_all)
+        merged = dict(settled.items())
+        merged.update((item.identity, item) for item in plan.write)
+        return ConceptSet(merged[identity] for identity in sorted(merged)), frozenset(settled)
 
     async def _conditions(self, night: date, series: EventSeries, concepts: ConceptSet) -> list[Item]:
         scene = self.scene
@@ -119,10 +127,10 @@ class AdviceWork:
             {
                 "night": night.isoformat(),
                 "records": [len(series.records), len(series.gaps)],
-                "vocabulary": self.vocabulary()[0],
+                "vocabulary": self.vocabulary(),
                 "concepts": sorted(concepts[name].fingerprint for name in concepts),
                 "hits": [
-                    [day.isoformat(), marker.mapper, marker.records, marker.completed_at.isoformat()]
+                    [day.isoformat(), marker.digest, marker.records, marker.completed_at.isoformat()]
                     for day in sorted(hits.days_done())
                     if (marker := hits.read_marker(day)) is not None
                 ],

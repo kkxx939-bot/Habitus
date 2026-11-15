@@ -1,9 +1,14 @@
-"""会话 lane：一轮一轮地描述并写成判断。
+"""会话 lane：一轮一轮地描述、选词并写成判断。
 
-规则（方案第五节）：
-- 一轮出一条记录，不判续、不合并；
+规则（方案第五节；选词见词表方案 2026-11-14 第 3 节）：
+- 一轮出一条记录，不合并；"描述这一轮"之后用同一份材料在初始词表里选一个词（``picker``），结果随判断一起存，归约直接落。
+  模型可以答"接着最近的某一条"（「续话」）：这一轮照常出记录、标「续话」，原来那条不改；
+- 后台通知轮（叫醒通知打头、整轮没有他说的话）不调模型，由代码写一条「非事件」判断，走判断、回执、覆盖记录的现成路径，
+  重放认得出它写过；
 - 助手在这一轮里既没有答复也没有任何调用的（被打断、出错），不出记录——重发同一句话的情况由这一条覆盖；
-- 同一轮重做时不重复写：写完了的跳过；上一次写到一半的（判断落了、回执没落）接着写完，不重问模型。
+- 同一轮重做时不重复写：写完了的跳过；上一次写到一半的（判断落了、回执没落）接着写完，连选词结果一起读回，不重问模型。
+- 选词失败与描述失败是同一条路（模型用不了、内容被拦、输入超长都写成「错误」）：描述成了、选词没成时什么都不落，
+  不留只有描述的半条判断；重试时描述与选词一起重做。
 - 预测层接上时（``reminders``，方案 30 第五节）：每轮把他开口那一刻还开着的提醒带给模型，判出的回应在这一轮记录落定之后
   写回去。一轮只判一次、重放不重判：已经记录过的轮不再问模型，也就不再写回应；记录落定之后、回应写回之前断了，这一轮的回应
   就丢了（结算按"没回应"处理），不为它重问模型。
@@ -26,8 +31,9 @@ from datetime import date
 from enum import Enum
 
 from habitus.behavior.fusion.errors import BehaviorFusionError
-from habitus.behavior.fusion.lanes.session.material import question_calls, without_answered
+from habitus.behavior.fusion.lanes.session.material import question_calls, render_turn, without_answered
 from habitus.behavior.fusion.lanes.session.model import SessionTurn, decode_turn, encode_turn
+from habitus.behavior.fusion.lanes.session.picking import NOTICE_DESCRIPTION, TurnPicker
 from habitus.behavior.fusion.lanes.session.recorder import SessionTurnRecorder
 from habitus.behavior.fusion.lanes.session.reminders import NoReminders, ReminderFeedback, ReminderResponse
 from habitus.behavior.fusion.lanes.session.service import (
@@ -40,6 +46,7 @@ from habitus.behavior.fusion.lanes.session.service import (
     RETRY_UNAVAILABLE,
     SessionTurnDescriber,
 )
+from habitus.behavior.kinds.ids import Lane, not_event_token
 from habitus.behavior.retry import (
     Admission,
     Attempt,
@@ -83,11 +90,14 @@ class SessionLane:
         recorder: SessionTurnRecorder,
         reminders: ReminderFeedback | None = None,
         *,
+        picker: TurnPicker,
         backlog: RetryBacklog | None = None,
         tree: BehaviorTree | None = None,
     ) -> None:
         self.describer = describer
         self.recorder = recorder
+        #: 选词（组合根注入词表包里的选词器）。
+        self.picker = picker
         #: 开着的提醒从哪来、回应写到哪去（组合根在预测层装好之后接上；没接就是空实现）。
         self.reminders: ReminderFeedback = reminders if reminders is not None else NoReminders()
         #: 写成「错误」的轮放到哪里等当晚重试（没接就只落「错误」）。
@@ -155,6 +165,8 @@ class SessionLane:
                 judgement_id = await asyncio.to_thread(self.recorder.resume, turn, interrupted, sources=sources)
                 resumed = TurnDisposition.ERROR if interrupted.unreadable else TurnDisposition.ALREADY_RECORDED
                 return TurnOutcome(turn, resumed, judgement_id)
+            if turn.notice_only:
+                return await self._notice(turn, sources)
             if given_up is not None:
                 return await self._error(turn, RetryCause.GIVEN_UP, sources)
             return await self._describe(turn, sources)
@@ -168,7 +180,7 @@ class SessionLane:
 
     async def retry(self, turn: SessionTurn) -> TurnOutcome:
         """重试堆里的一轮（每晚跑批前；时窗末用得着时白天先试，裁定 67、68）：不看写没写过（它已经落了「错误」，覆盖记录
-        会说"写过了"），再描述一次、补一条判断。上一次重试写到一半就断了的（可读判断落了、还没归约），接着写完、不重问模型。
+        会说"写过了"），再描述、选词一次，补一条判断。上一次重试写到一半就断了的（可读判断落了、还没归约），接着写完、不重问模型。
         失败就撤回这一次写下的（``withdraw``），错误照样抛给调用方（它按"模型用不了 / 内容不合格 / 确定性失败"计数）。"""
 
         unfinished = await asyncio.to_thread(self.recorder.readable_unfinished, turn)
@@ -208,11 +220,20 @@ class SessionLane:
         # 作答）也不给模型看：它已经记好了，留着只会被配到别的开着的提醒上、或写成这一轮做的事（v0.12 跑数 04-26 22:31）
         pending = await asyncio.to_thread(self.reminders.open, turn.last_said_at)
         answered = await asyncio.to_thread(self.reminders.answered, question_calls(turn), turn.last_said_at)
-        described = await self.describer.describe(without_answered(turn, answered), pending)
+        shown = without_answered(turn, answered)
+        described = await self.describer.describe(shown, pending)
+        # 选词用同一份材料（出口已记过回话的提问同样剔掉）；失败照描述失败的路走，这一轮什么都还没落
+        kind_token = await self.picker.pick_turn(
+            conversation=turn.identity,
+            # 本地时刻：会话源的消息时刻归一成 UTC，上文里给模型看的时刻要是他所在地的（与实验同口径）
+            at=turn.instructed_at.astimezone(self.recorder.zone),
+            material=render_turn(shown, config=self.describer.config),
+        )
         judgement_id = await asyncio.to_thread(
             self.recorder.record,
             turn,
             described.description,
+            kind_token=kind_token,
             validation_attempts=described.validation_attempts,
             sources=sources,
         )
@@ -220,6 +241,19 @@ class SessionLane:
             response = ReminderResponse(pending[number - 1].reminder_id, polarity)
             await asyncio.to_thread(self.reminders.respond, turn.key, response, at=turn.last_said_at)
         return TurnOutcome(turn, TurnDisposition.RECORDED, judgement_id, described.validation_attempts)
+
+    async def _notice(self, turn: SessionTurn, sources: tuple[str, ...]) -> TurnOutcome:
+        """后台通知轮：不调模型，写一条代码给的「非事件」判断（用户 2026-11-14：后台任务回来不算一件事）。"""
+
+        judgement_id = await asyncio.to_thread(
+            self.recorder.record,
+            turn,
+            NOTICE_DESCRIPTION,
+            kind_token=not_event_token(Lane.SESSION),
+            validation_attempts=1,
+            sources=sources,
+        )
+        return TurnOutcome(turn, TurnDisposition.RECORDED, judgement_id)
 
     async def _error(self, turn: SessionTurn, cause: RetryCause, sources: tuple[str, ...]) -> TurnOutcome:
         """先落「错误」（下游不等它），再把这一轮放进重试堆；堆满了就只是「错误」。"""

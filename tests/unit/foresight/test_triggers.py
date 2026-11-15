@@ -23,17 +23,16 @@ from habitus.foresight.triggers import antecedents_of, day_drafts, event_drafts,
 from habitus.foresight.triggers.draft import instance_at
 from habitus.scene.concepts import ConceptSet
 from habitus.scene.concepts.calendar_situations import calendar_concepts
-from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.scene.recurrence import recurrences_of
 from habitus.scene.relations import Relation, Segment, Status, build_timelines
 from habitus.series import EventSeries, SeriesRecord
-from habitus.temporal import DayInterval, OccurrenceDay
+from habitus.temporal import DayInterval, OccurrenceDay, Rulers
 from habitus.temporal.slots import absolute_slot
 from tests.unit.scene.concept_fixtures import CREATED
 from tests.unit.scene.relation_fixtures import CODE, CONCEPTS, CONFIG, DISCUSS, DOCS, RESEARCH, key, planted, record
 
 CST = timezone(timedelta(hours=8))
-RULERS = RhythmRulers(15, 2700, 3, 5.0, 5.0, 0.10, 35)
+RULERS = Rulers(15, 2700, 3, 5.0, 5.0, 35)
 #: 产品默认的那条线 θ = 1 − 可接受的误提醒率：「离上次够久」的时窗往后接几天由它定（裁定 89 第 1 条）。
 LINE = 1.0 - ForesightConfig().false_alarm_rate
 #: 带日历情境的概念集（周三、20 号、工作日……按天机械填）。
@@ -746,13 +745,14 @@ def test_a_family_forms_only_its_most_specific_holding_relation_and_the_base_whe
     assert [item.trigger for item in mine] == [primed_key.text]
 
 
-def test_conditions_the_day_cannot_judge_fall_back_to_the_plain_relation() -> None:
-    """映射器打的情境标签白天没有：那种条件判不了，不当成不成立——这一次只建不带条件的那条。"""
+def test_a_condition_the_table_should_never_hold_is_refused_not_read_as_unknown() -> None:
+    """语义树只剩词表类与日历之后，条件只有两种形状：时间线条件指向一个类、概念条件指向一个日历情境。机会表里出现一个不是
+    日历的概念条件，是表本身错了：白天判它时明确报错，不当成"判不了"悄悄退回不带条件的那条。"""
 
     from habitus.scene.relations import RelationKey
 
     series = planted(moderated=True)
-    tagged = RelationKey("session", DISCUSS, CODE, Segment.CHAIN, "concept:situation-only-the-mapper-knows")
+    tagged = RelationKey("session", DISCUSS, CODE, Segment.CHAIN, "concept:not-a-calendar-situation")
     table = table_of(series, (relation(DISCUSS, CODE), Relation(key=tagged, status=Status.ESTABLISHED, upward=True)))
     assert any(item.conditions and item.conditions[0].calendar_key is None for item in table.relations)
     discussion, _code = discussion_followed_by_code(series)
@@ -764,12 +764,10 @@ def test_conditions_the_day_cannot_judge_fall_back_to_the_plain_relation() -> No
         horizon=now.date() + timedelta(days=1),
         conditions=tuple(spec for item in table.relations for spec in item.conditions),
     )
-    drafts = event_drafts(
-        table, line, moment_at(now), now_slot=absolute_slot(now, slot_minutes=15), statuses=("established",)
-    )
-    assert [item.trigger for item in drafts if item.trigger_instance == instance_at(discussion.started_at)] == [
-        key(DISCUSS, CODE).text
-    ]
+    with pytest.raises(ValueError, match="not a calendar situation"):
+        event_drafts(
+            table, line, moment_at(now), now_slot=absolute_slot(now, slot_minutes=15), statuses=("established",)
+        )
 
 
 def test_an_antecedent_whose_start_was_corrected_keeps_the_same_expectation_identity() -> None:

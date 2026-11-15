@@ -11,9 +11,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.series.model import EventSeries
-from habitus.temporal import Coverage, DayInterval, OccurrenceDay, coverage_of, kind_reading
+from habitus.temporal import Coverage, DayInterval, OccurrenceDay, Rulers, coverage_of, kind_reading
 
 
 @dataclass(frozen=True)
@@ -26,7 +25,7 @@ class Recurrence:
     intervals: tuple[DayInterval, ...]
 
 
-def coverage_by_lane(series: EventSeries, rulers: RhythmRulers) -> Mapping[str, Coverage]:
+def coverage_by_lane(series: EventSeries, rulers: Rulers) -> Mapping[str, Coverage]:
     """序列里每条 lane 的观测覆盖（复现与预测层的久别共用这一份）。"""
 
     lanes = sorted({record.lane for record in series.records})
@@ -34,7 +33,7 @@ def coverage_by_lane(series: EventSeries, rulers: RhythmRulers) -> Mapping[str, 
 
 
 def recurrences_of(
-    series: EventSeries, rulers: RhythmRulers, coverage: Mapping[str, Coverage] | None = None
+    series: EventSeries, rulers: Rulers, coverage: Mapping[str, Coverage] | None = None
 ) -> Mapping[str, Recurrence]:
     """序列里每个（已转正的）类的复现。``coverage`` 是已经算好的各 lane 覆盖（没给就现算）。"""
 

@@ -181,12 +181,9 @@ class Controls:
     所有前因共用，一个对照窗口 O(1)。
     """
 
-    def __init__(self, line: LaneTimeline, window: int, *, blind_as: int | None = None) -> None:
+    def __init__(self, line: LaneTimeline, window: int) -> None:
         self.line = line
         self.window = window
-        #: 后果"判不了"（细分概念映射答看不到、或窗口里有「待定」）时当作什么：None = 结果未知（这一层不要），0 / 1 = 上下界
-        #: 检验的两头（裁定 27 第 6 条：细分概念的关系两遍都过才算，结论不依赖模型什么时候答"看不到"）
-        self.blind_as = blind_as
         self._days: dict[tuple[str, Segment, date], int | None] = {}
         self._prefix: dict[tuple[str, date], tuple[list[int], list[int]]] = {}
         self._on_day: dict[tuple[str, date], tuple[tuple[tuple[int, str], ...], frozenset[int]]] = {}
@@ -235,7 +232,7 @@ class Controls:
             return Arrival(False)
         first = self._first_arrival(segment, chain, consequent)
         if first is None:
-            return Arrival(None)  # 只有"判不了"被当成了来了（上下界那两份）：对机会表来说仍是未知
+            return Arrival(None)  # 窗口里找不到那条 B（与 ``_treated_slots`` 的判法对不上）：对机会表来说仍是未知
         return Arrival(True, first.uri, first.slot, first.started_at)
 
     def _first_arrival(self, segment: Segment, chain: Chain, consequent: str) -> Mark | None:
@@ -280,7 +277,7 @@ class Controls:
             if mark.slot - start in wanted and mark.uri not in chain.uris:
                 return 1
         blind = {slot - start for slot in line.unknown.get(consequent, [])}
-        return self.blind_as if blind & wanted else 0
+        return None if blind & wanted else 0
 
     def _slot_controls(
         self, segment: Segment, chain: Chain, consequent: str, pairing: Pairing, antecedent: str
@@ -316,16 +313,14 @@ class Controls:
                     continue
                 first = bisect_left(others, own)
                 other_hits, other_blind = self._prefix_of(consequent, other)
-                found.append(_count(other_hits, other_blind, first, first + self.window, self.blind_as))
+                found.append(_count(other_hits, other_blind, first, first + self.window))
             return found
         for other in self._peers(day, self._days_with(antecedent)):
             others = line.present.get(other, ())
             if own not in others:
                 continue  # 那天这个钟点人不在：不是可比的时刻
             other_hits, other_blind = self._prefix_of(consequent, other)
-            found.append(
-                _count(other_hits, other_blind, bisect_right(others, own + self.window), len(others) - 1, self.blind_as)
-            )
+            found.append(_count(other_hits, other_blind, bisect_right(others, own + self.window), len(others) - 1))
         return found
 
     def _after(self, consequent: str, day: date, slot: int, *, excluded: frozenset[str] | set[str]) -> int | None:
@@ -335,7 +330,7 @@ class Controls:
         last = slot + self.window
         if any(slot <= at <= last and uri not in excluded for at, uri in hits):
             return 1
-        return self.blind_as if any(slot <= at <= last for at in blind) else 0
+        return None if any(slot <= at <= last for at in blind) else 0
 
     def _day_marks(self, consequent: str, day: date) -> tuple[tuple[tuple[int, str], ...], frozenset[int]]:
         key = (consequent, day)
@@ -430,17 +425,17 @@ class Controls:
             return 1
         per_day = line.slots_per_day
         blind = any(date.fromordinal(slot // per_day) in days for slot in line.unknown.get(consequent, []))
-        return self.blind_as if blind else 0
+        return None if blind else 0
 
 
-def _count(hits: list[int], blind: list[int], first: int, last: int, blind_as: int | None) -> int | None:
+def _count(hits: list[int], blind: list[int], first: int, last: int) -> int | None:
     """在场槽位置 ``[first, last]`` 里有没有 B；位置超出当天的，未知。"""
 
     if first < 0 or last < first or last + 1 >= len(hits):
         return None
     if hits[last + 1] - hits[first] > 0:
         return 1
-    return blind_as if blind[last + 1] - blind[first] > 0 else 0
+    return None if blind[last + 1] - blind[first] > 0 else 0
 
 
 def _running(values: list[int]) -> list[int]:

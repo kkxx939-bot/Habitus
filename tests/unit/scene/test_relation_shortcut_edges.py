@@ -1,6 +1,5 @@
 """关系检验精确捷径的边缘（relations-incremental 验证轮对抗测试）：开测门第 1 道"整组到不了就不逐条量"的判据只在
-**链数**上数，这里专挑链数恰好卡在 ``MIN_PER_SIDE``（3）与差一条（2）的组，以及几种容易数错链的情形——模型提的条件
-（只看提出之后的数据）、几个条件合起来的组合键、非同一条链段合并之后链变少、条件判不了（``None``）的链——再加上
+**链数**上数，这里专挑链数恰好卡在 ``MIN_PER_SIDE``（3）与差一条（2）的组，以及几种容易数错链的情形——几个条件合起来的组合键、非同一条链段合并之后链变少、条件判不了（``None``）的链——再加上
 "跳过的键在加权归一之后可能进族、必须回退去逐条量"的那条路。
 
 只看对外结果：``fold`` 产出的 ``LaneState``（``document.encode_night``）与迁移的摘要、各段稀疏计数与族的大小。期望值一律
@@ -13,14 +12,13 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 
 import pytest
 
 from habitus.scene.concepts import ConceptSet
-from habitus.scene.occurrences import ConceptHit, ConceptHits
 from habitus.scene.relations import (
     LaneState,
     LaneTests,
@@ -42,13 +40,9 @@ from tests.unit.scene.concept_fixtures import base
 from tests.unit.scene.hit_fixtures import uri_for
 from tests.unit.scene.relation_fixtures import CODE, CONFIG, DISCUSS, PUSH, TITLES, record, watching, workdays
 
-SITUATION = "出差中"
-AWAY = Condition(Template.CONCEPT, SITUATION)
 PUSHED = Condition(Template.TIMELINE, PUSH)
 OFFICE = Condition(Template.FIELD, "公司", Field.PLACE)
 HOME = Condition(Template.FIELD, "家里", Field.PLACE)
-MAPPED_AT = datetime(2026, 8, 18, 3, 0, tzinfo=UTC)
-MAPPER = "scene_concept_mapper_prompt_v2+schemaabc+emb:fake+llm:fake+concepts:0123"
 Outcome = tuple[str, str, dict[str, int], int, int]
 RARE_TITLES = tuple(f"杂事{index}" for index in range(10))
 
@@ -65,9 +59,6 @@ class Plan:
     #: 第一次讨论方案的地点；都没列的那天没有地点（地点条件判不了）。
     office: frozenset[int] = frozenset()
     home: frozenset[int] = frozenset()
-    #: 映射器判过"出差中"的那几天（第一次讨论方案），其中 ``away`` 成立；没判过的那天这个条件判不了。
-    checked: frozenset[int] = frozenset()
-    away: frozenset[int] = frozenset()
     #: 讨论方案之后几分钟接修改代码：七成的日子；``follows`` 给了就恰好是那几天（第一次讨论之后）。
     code_after: int = 20
     follows: frozenset[int] | None = None
@@ -82,11 +73,10 @@ def _concepts(plan: Plan) -> ConceptSet:
     return ConceptSet([base(title) for title in (*TITLES, *RARE_TITLES[: plan.rare])])
 
 
-def _series(plan: Plan) -> tuple[EventSeries, dict[str, ConceptHits]]:
+def _series(plan: Plan) -> EventSeries:
     generator = random.Random(plan.seed)
     days = workdays(40)
     records: list[SeriesRecord] = []
-    hits: dict[str, ConceptHits] = {}
     for index, day in enumerate(days):
         number = 0
 
@@ -102,24 +92,10 @@ def _series(plan: Plan) -> tuple[EventSeries, dict[str, ConceptHits]]:
         if index in plan.primed:
             add(start - 20, "提交推送")
         first = add(start, "讨论方案")
-        # 映射器的命中记录要一个合法的行为 URI（``ConceptHits`` 校验）；地点没列的那天留空
+        # 第一次讨论方案换成按名字编号的行为 URI（期望值按这份 URI 写死）；地点没列的那天留空
         place = "公司" if index in plan.office else "家里" if index in plan.home else None
         uri = uri_for(day, f"讨论方案{number}", *divmod(start, 60))
         records[-1] = first = replace(first, uri=uri, place=place)
-        if index in plan.checked:
-            hits[first.uri] = ConceptHits(
-                occurrence_uri=first.uri,
-                kind_token=first.kind_token,
-                last_observed_at=first.last_observed_at,
-                hits=(),
-                situation_hits=(ConceptHit(SITUATION),) if index in plan.away else (),
-                situations_checked=(SITUATION,),
-                unresolved={},
-                baseline_snapshot={},
-                mapper=MAPPER,
-                mapped_at=MAPPED_AT,
-                lane="session",
-            )
         chance = generator.random()
         if index in plan.follows if plan.follows is not None else chance < 0.7:
             add(start + plan.code_after, "修改代码")
@@ -139,19 +115,18 @@ def _series(plan: Plan) -> tuple[EventSeries, dict[str, ConceptHits]]:
         names = [f"同事{index}" for index in range(plan.people)]
         records = [replace(item, subjects=tuple(name for name in names if company.random() < 0.5)) for item in records]
     records.sort(key=lambda item: (item.started_at, item.uri))
-    return EventSeries(cutoff=days[-1] + timedelta(days=1), records=tuple(records)), hits
+    return EventSeries(cutoff=days[-1] + timedelta(days=1), records=tuple(records))
 
 
 def _tests(
     plan: Plan,
     *,
-    proposals: Mapping[str, tuple[tuple[Condition, date], ...]] | None = None,
     established: tuple[RelationKey, ...] = (),
 ) -> LaneTests:
-    series, hits = _series(plan)
+    series = _series(plan)
     concepts = _concepts(plan)
-    line = build_timelines(series, concepts, hits, CONFIG)["session"]
-    return LaneTests(line, concepts, CONFIG, series.cutoff, proposals=proposals, established=established)
+    line = build_timelines(series, concepts, {}, CONFIG)["session"]
+    return LaneTests(line, concepts, CONFIG, series.cutoff, established=established)
 
 
 def _sides(tests: LaneTests, conditions: tuple[Condition, ...], segment: Segment) -> tuple[int, tuple[int, ...]]:
@@ -239,45 +214,8 @@ def _rows(state: LaneState, keys: set[RelationKey]) -> dict[str, str]:
     return {item.key.text: item.status.value for item in state.relations if item.key in keys}
 
 
-# ── 模型提的条件（只看提出之后的数据）在门 1 边缘 ─────────────────────────────────
-
+#: 强关系那几天（对照组用）。
 STRONG = frozenset(range(8, 40, 3))
-#: 判过"出差中"的那几天里：（成立的, 不成立的）；其余日子判不了。
-AWAY_PLANS = {
-    "3-3": Plan(checked=frozenset({2, 6, 10, 14, 18, 22}), away=frozenset({2, 14, 22})),
-    "2-3": Plan(checked=frozenset({2, 6, 10, 14, 18}), away=frozenset({2, 14})),
-    "3-2": Plan(checked=frozenset({2, 6, 10, 14, 22}), away=frozenset({2, 14, 22})),
-    # 全部历史上两边各 3 条，提出之后只剩成立 1 条、不成立 2 条：整组不该跳过（门 1 按全量的链数），读数只看提出之后
-    "3-3-late": Plan(checked=frozenset({2, 6, 10, 26, 30, 34}), away=frozenset({2, 10, 30})),
-    # 对照组：出差的日子讨论完必接修改代码、别的日子从不接——同一条链段过门且成了候选，第 2–7 天合并后只剩 2 条（跳过）
-    "strong": Plan(checked=frozenset(range(40)) - {1}, away=STRONG, follows=STRONG, doubled=frozenset(range(0, 40, 4))),
-}
-#: 第几个工作日提出的（默认第 24 个：大半历史在提出之前）。
-PROPOSED_ON = {"strong": 5}
-AWAY_EDGES = {"3-3": (3, (3,)), "2-3": (2, (3,)), "3-2": (3, (2,)), "3-3-late": (3, (3,)), "strong": (11, (28,))}
-
-
-@pytest.mark.parametrize("name", sorted(AWAY_PLANS))
-def test_a_proposed_condition_on_the_gate_edge_matches_the_baseline(name: str) -> None:
-    """ "出差中"是模型提的条件（机械列举里没有：它不在概念集里），只在提出之后的数据上量；它在每一段都卡在门 1 边上。
-    没映射过的那几天判不了，不计链。整份关系表与迁移与基线逐字相同。"""
-
-    plan = AWAY_PLANS[name]
-    proposed_on = workdays(40)[PROPOSED_ON.get(name, 24)]
-
-    def make() -> LaneTests:
-        return _tests(plan, proposals={DISCUSS: ((AWAY, proposed_on),)})
-
-    tests = make()
-    group = {item for item in tests.keys() if item.condition == AWAY.text}
-    assert group and all(item.antecedent == DISCUSS for item in group)
-    assert tests.candidates.proposed.keys() >= group  # 真是"提出之后才量"的那一种
-    assert _sides(tests, (AWAY,), Segment.CHAIN) == AWAY_EDGES[name]
-    if name == "strong":
-        assert _sides(tests, (AWAY,), Segment.DAYS_2_7)[0] == 2
-        state, _moves = fold(None, make(), watching=watching(_series(plan)[0]))
-        assert _rows(state, group) == GOLDEN_STRONG_ROWS["away"]
-    assert _outcome(make, series=_series(plan)[0]) == GOLDEN_AWAY[name]
 
 
 # ── 条件判不了（None）的链：地点没给的日子 ──────────────────────────────────────
@@ -312,9 +250,9 @@ def test_conditions_with_undecidable_chains_on_the_gate_edge_match_the_baseline(
     assert (_sides(tests, (OFFICE,), Segment.CHAIN), _sides(tests, (HOME,), Segment.CHAIN)) == PLACE_EDGES[name]
     if name == "strong":
         assert _sides(tests, (OFFICE,), Segment.DAYS_2_7) == (2, (2,))
-        state, _moves = fold(None, make(), watching=watching(_series(plan)[0]))
+        state, _moves = fold(None, make(), watching=watching(_series(plan)))
         assert _rows(state, {item for item in tests.keys() if item.condition}) == GOLDEN_STRONG_ROWS["place"]
-    assert _outcome(make, series=_series(plan)[0]) == GOLDEN_PLACE[name]
+    assert _outcome(make, series=_series(plan)) == GOLDEN_PLACE[name]
 
 
 # ── 几个条件合起来的组合键（裁定 62 第 1 条）在门 1 边缘 ───────────────────────────
@@ -374,7 +312,7 @@ def test_a_grown_combination_on_the_gate_edge_matches_the_baseline(name: str) ->
     组合键不是跨夜带着的，可以走捷径；父关系是带着的，必须完整读数。整份关系表与迁移与基线逐字相同。"""
 
     plan = GROWN_PLANS[name]
-    series, _hits = _series(plan)
+    series = _series(plan)
     previous = _with_parent(series.cutoff)
 
     def make() -> LaneTests:
@@ -422,7 +360,7 @@ def test_segments_whose_merged_chains_fall_to_the_gate_edge_match_the_baseline(n
     tests = make()
     found = {segment: _sides(tests, (PUSHED,), segment)[0] for segment in MERGED_EDGES[name]}
     assert found == MERGED_EDGES[name]
-    assert _outcome(make, series=_series(plan)[0]) == GOLDEN_MERGED[name]
+    assert _outcome(make, series=_series(plan)) == GOLDEN_MERGED[name]
 
 
 # ── 回退：跳过的键在加权归一之后可能进族，必须逐条量回来 ─────────────────────────────
@@ -450,7 +388,7 @@ def test_skipped_keys_that_could_enter_the_family_after_normalisation_are_measur
     short = [item for item in keys if not item.segment.long]
     total = sum(0.001 if not item.condition else 1.0 for item in short)
     assert total / len(short) <= CONFIG.thresholds.fdr
-    assert _outcome(make, weights=tiny, series=_series(plan)[0]) == GOLDEN_FALLBACK
+    assert _outcome(make, weights=tiny, series=_series(plan)) == GOLDEN_FALLBACK
 
 
 # ── 调用方给跳过的带条件键非 1 的权重；``night`` 直接传 ``outside`` 不传 ``keep`` ─────────────────
@@ -520,7 +458,7 @@ def test_skipped_keys_under_a_passing_parent_count_in_the_moderated_normalisatio
     tests = _tests(ADMITTED)
     group = _admitted_premise(tests)
     state, transitions = fold(
-        None, _tests(ADMITTED), {item: hopeless for item in group}, watching=watching(_series(ADMITTED)[0])
+        None, _tests(ADMITTED), {item: hopeless for item in group}, watching=watching(_series(ADMITTED))
     )
     family, sparse, digest = GOLDEN_ADMITTED_WEIGHTS[hopeless]
     assert (state.family, dict(state.sparse)) == (family, sparse)
@@ -539,7 +477,7 @@ def test_a_skipped_key_that_may_enter_the_moderated_family_is_measured_like_the_
     night = _tests(CROWDED).night(weights)
     verdicts = {test.key: test.verdict.value for test in night.tests}
     assert verdicts[PUSHED_CHILD] == "tested"
-    state, transitions = fold(None, _tests(CROWDED), weights, watching=watching(_series(CROWDED)[0]))
+    state, transitions = fold(None, _tests(CROWDED), weights, watching=watching(_series(CROWDED)))
     assert (night.family, state.family, dict(state.sparse), _digest(state, transitions)) == GOLDEN_MAY_ENTER
 
 
@@ -547,71 +485,33 @@ def test_a_skipped_key_that_may_enter_the_moderated_family_is_measured_like_the_
 
 #: （不加权折叠的摘要, 加权折叠的摘要, 不加权的各段稀疏, 不加权的族, 加权的族）
 GOLDEN_STRONG_ROWS: dict[str, dict[str, str]] = {
-    "away": {"session|s-k839254|s-k778238|chain|concept:出差中": "candidate"},
     "place": {"session|s-k839254|s-k778238|chain|field:place=公司": "candidate"},
-}
-GOLDEN_AWAY: dict[str, Outcome] = {
-    "2-3": (
-        "6c6a1292c23529b159c1cd5491392a129149729d6653896d65b35d9e32c52619",
-        "f9f54f253ad758e13e4d6ee7e05d4bc3e3fce4637f16dfcc937c146ab82745d1",
-        {"chain": 19, "days_2_7": 20, "next_day": 20, "rest_of_day": 20},
-        1,
-        2,
-    ),
-    "3-2": (
-        "6c6a1292c23529b159c1cd5491392a129149729d6653896d65b35d9e32c52619",
-        "f9f54f253ad758e13e4d6ee7e05d4bc3e3fce4637f16dfcc937c146ab82745d1",
-        {"chain": 19, "days_2_7": 20, "next_day": 20, "rest_of_day": 20},
-        1,
-        2,
-    ),
-    "3-3": (
-        "6c6a1292c23529b159c1cd5491392a129149729d6653896d65b35d9e32c52619",
-        "f9f54f253ad758e13e4d6ee7e05d4bc3e3fce4637f16dfcc937c146ab82745d1",
-        {"chain": 19, "days_2_7": 20, "next_day": 20, "rest_of_day": 20},
-        1,
-        2,
-    ),
-    "3-3-late": (
-        "6c6a1292c23529b159c1cd5491392a129149729d6653896d65b35d9e32c52619",
-        "f9f54f253ad758e13e4d6ee7e05d4bc3e3fce4637f16dfcc937c146ab82745d1",
-        {"chain": 19, "days_2_7": 20, "next_day": 20, "rest_of_day": 20},
-        1,
-        2,
-    ),
-    "strong": (
-        "7a71e08828bba28d92e801f183dcde8e40704e49d5cded1cc9b3445c6210561f",
-        "d75f620bdfd3d1191b471efe65cbe65c43cd2433841943a8f8d8c85858680d94",
-        {"chain": 18, "days_2_7": 20, "next_day": 20, "rest_of_day": 19},
-        3,
-        3,
-    ),
 }
 GOLDEN_PLACE: dict[str, Outcome] = {
     "2-3": (
-        "7bc8890ee9781add69055d84745d712021408cba2f2d2a8885d99f94cd7690a2",
-        "b1181aa18f8504b18e4c8691784f511832fc60ed3cbeaadd4b24a59838146eb1",
+        "82165d92fea375cab72908c995916c396579617c2b5750cd3b411ab0fa0e8fc7",
+        "9856fa03bc08185d6f73c934fd84dda8bf687699fb391f8bb2b6e0a42e619b5f",
         {"chain": 33, "days_2_7": 34, "next_day": 33, "rest_of_day": 34},
         2,
         2,
     ),
     "3-2": (
-        "7bc8890ee9781add69055d84745d712021408cba2f2d2a8885d99f94cd7690a2",
-        "b1181aa18f8504b18e4c8691784f511832fc60ed3cbeaadd4b24a59838146eb1",
+        "82165d92fea375cab72908c995916c396579617c2b5750cd3b411ab0fa0e8fc7",
+        "9856fa03bc08185d6f73c934fd84dda8bf687699fb391f8bb2b6e0a42e619b5f",
         {"chain": 33, "days_2_7": 34, "next_day": 33, "rest_of_day": 34},
         2,
         2,
     ),
     "3-3": (
-        "7bc8890ee9781add69055d84745d712021408cba2f2d2a8885d99f94cd7690a2",
-        "b1181aa18f8504b18e4c8691784f511832fc60ed3cbeaadd4b24a59838146eb1",
+        "82165d92fea375cab72908c995916c396579617c2b5750cd3b411ab0fa0e8fc7",
+        "9856fa03bc08185d6f73c934fd84dda8bf687699fb391f8bb2b6e0a42e619b5f",
         {"chain": 33, "days_2_7": 34, "next_day": 33, "rest_of_day": 34},
         2,
         2,
     ),
     "strong": (
-        "52279946d302c45e1d0e92d44f1b9cb7e19a954b9f520f2f3dda4099fe3736e6",
-        "e67f640286fb0d69329637868866e17c6dcd0a214c8440c03fd4b278a8eb2df8",
+        "f8ba0fa4e002f449689c0e51d9e74a68f03908f2eda5de1bf222c3b97415a328",
+        "662ac666e1887e68d65e2e684c0b31d02b0bf46f008eea4be41d813049e18ca9",
         {"chain": 29, "days_2_7": 30, "next_day": 31, "rest_of_day": 30},
         4,
         4,
@@ -619,29 +519,29 @@ GOLDEN_PLACE: dict[str, Outcome] = {
 }
 GOLDEN_GROWN: dict[str, Outcome] = {
     "2-3-3": (
-        "2b4f9af5c94f2258ae50acfb84cc88a1416328787faa85e606eee70a44316a50",
-        "ea56f9f66fac8259f50aed865b83e94d3a70bf06d47f0be12cf49d294d70f4ed",
+        "82b4cf16f130cba2fd49a1b7cd5ccd6d911fa43a3222d8fed0294c825558eb98",
+        "27780a9431de3c3c403cbd3888a9bc8b91a27a0d205875f7062ad72ef6da3f9d",
         {"chain": 31, "days_2_7": 34, "high_state": 3, "next_day": 32, "rest_of_day": 33},
         8,
         7,
     ),
     "3-2-3": (
-        "191468a20742ec9dd4a2d5f1bca292cdcb86b6e97ec5c15aad4984d74ec30e6e",
-        "4a6d824a15a7e63d3f29d220fd328634f99f2fe037ae1989a4af8efeb1396e50",
+        "1bbcd3b42f7095b53315a39238cdb2466e42c9af8e899c6ff3a3c3571d1a0ed8",
+        "77b847d9dfda4020b6c6296c1808d35eb73f30bb89c0b3425343f5c7ee3ddbe6",
         {"chain": 31, "days_2_7": 34, "high_state": 3, "next_day": 33, "rest_of_day": 34},
         6,
         6,
     ),
     "3-3-2": (
-        "e468532912a514910ffc86667c3e7128f23c483fe16c0c65003a0c55b024cd2e",
-        "581433948e070b69c818d6b8b3a377db0c0b76ff9c9302664007206277fcbeda",
+        "78ce83e6401c0e9119d0cb0172e68af88d86fc4c82c460208188d392331c3e9d",
+        "19c463c1899fbd5f064b68ba7c41cc285b3559c6e0f148978bbdb7d4833db3de",
         {"chain": 31, "days_2_7": 34, "high_state": 3, "next_day": 32, "rest_of_day": 33},
         8,
         8,
     ),
     "3-3-3": (
-        "75a38ea71ed69b0004fa39ccc7290e73ea9c8ab01b48e8a17297542181a01260",
-        "c34d82bbc832b47282c885b9703ed16729e354013b9e4392b278a4ef4c2af40b",
+        "6306b0d1387e60a09b190d61a97e3df94a889dc97b01aebf30e940a735f8cfff",
+        "058a438838e0e413280cd062740d389398cfa794da02729b9a686d2750eb4bc5",
         {"chain": 31, "days_2_7": 34, "high_state": 3, "next_day": 32, "rest_of_day": 33},
         8,
         8,
@@ -649,23 +549,23 @@ GOLDEN_GROWN: dict[str, Outcome] = {
 }
 GOLDEN_MERGED: dict[str, Outcome] = {
     "4-to-2": (
-        "c09d3e160561ae9175f0febc0e2981ac2dbde9be77ff71c09e892fb9f269ffe2",
-        "c0ad216e40b16e1bae3e1c235045e664920cdc2fbd5a07a28f11235de08a276e",
+        "f3ccc1cdd3fe789e74e38209e1b2375caa5b3867fa004b35727002862ddd0267",
+        "d9578d563a72fd2e8ca1f13613b4db4de473018f788b0667f960462035dd9bfe",
         {"chain": 23, "days_2_7": 26, "next_day": 26, "rest_of_day": 25},
         4,
         4,
     ),
     "4-to-3": (
-        "0cb78023a3b5cafc6a998f931805907376fccc89a5d16342d4f5b2f8b907f83b",
-        "f81839be89fb6232d366b33d080c3646558c6cdc17f41bed631c4b0842932b23",
+        "587ff8015e57cec5c2a27461d805c38ea90c5e104dc6a1072722bb9945036b0f",
+        "27a102a29c2d2a501d6009f25533746cb904c23ce0aa87f404240835a2a6d828",
         {"chain": 23, "days_2_7": 26, "next_day": 25, "rest_of_day": 25},
         5,
         5,
     ),
 }
 GOLDEN_FALLBACK: Outcome = (
-    "38d8b7276800d633bab0a64fa91885e6ed77f974c818c0ca86e8bc616fa990ff",
-    "7d8ccb540674fa0637692f17a8b58b1328b53d78c374ae1c43ea6113818387a7",
+    "07993f9d31564e3a78a131fe3c954fa7a1a8e5e566ec47439367957df8e074d5",
+    "297e76a2031edc52f1c9055d64f098400df674bdf2c42bce7491b33de996e81f",
     {"chain": 222, "days_2_7": 223, "next_day": 220, "rest_of_day": 223},
     4,
     4,
@@ -674,22 +574,22 @@ GOLDEN_HOPELESS_WEIGHTS: dict[tuple[float, bool], tuple[int, dict[str, int], str
     (0.1, True): (
         5,
         {"chain": 42, "days_2_7": 47, "next_day": 47, "rest_of_day": 47},
-        "130a5804cf33cfc5b56b8caf4cc9483054e68897284a2891cfd34531109513a4",
+        "398f69525e012108a09de2e91ea7bd1757451b5cf9198eeedae5126a0742abfc",
     ),
     (0.1, False): (
         5,
         {"chain": 42, "days_2_7": 47, "next_day": 47, "rest_of_day": 47},
-        "d64852d36114a74f77f50e114f6e105b2edc93cf040b3e8ef35f2ccdcc989538",
+        "51cca9a1689e32a0bf24a8598c7dbb94e4883841f183caf668e70bd383853df8",
     ),
     (10.0, True): (
         5,
         {"chain": 42, "days_2_7": 47, "next_day": 47, "rest_of_day": 47},
-        "130a5804cf33cfc5b56b8caf4cc9483054e68897284a2891cfd34531109513a4",
+        "398f69525e012108a09de2e91ea7bd1757451b5cf9198eeedae5126a0742abfc",
     ),
     (10.0, False): (
         5,
         {"chain": 42, "days_2_7": 47, "next_day": 47, "rest_of_day": 47},
-        "d64852d36114a74f77f50e114f6e105b2edc93cf040b3e8ef35f2ccdcc989538",
+        "51cca9a1689e32a0bf24a8598c7dbb94e4883841f183caf668e70bd383853df8",
     ),
 }
 GOLDEN_OUTSIDE_READING: list[tuple[str, int, int, float, float]] = [("tested", 40, 40, 1.0, 1.0)]
@@ -699,12 +599,12 @@ GOLDEN_ADMITTED_WEIGHTS: dict[float, tuple[int, dict[str, int], str]] = {
     0.1: (
         6,
         {"chain": 75, "days_2_7": 78, "next_day": 79, "rest_of_day": 78},
-        "f7cf56b5335c2927b19dd2c363b51e18136fa6f0019fb8a0ac4e88454cbd899d",
+        "9567efd6c139fe71a3e2077a10d4062d5b72ab7063eecf381a1836fd2b921648",
     ),
     10.0: (
         5,
         {"chain": 76, "days_2_7": 78, "next_day": 79, "rest_of_day": 78},
-        "b692c8a2e9ef9aaa6bd5975efdff1f11f96952fdeeebd8eacf18b3b70ff425ea",
+        "b452f1eb58ec1b727f72a80cf48c738275329902a6ee42753abfe73a9297ed21",
     ),
 }
 #: （当晚加权的族, 折叠后的族, 各段稀疏, 摘要）
@@ -712,5 +612,38 @@ GOLDEN_MAY_ENTER: tuple[int, int, dict[str, int], str] = (
     5,
     5,
     {"chain": 348, "days_2_7": 350, "next_day": 351, "rest_of_day": 350},
-    "180e9b31aa7421ab5748bf9d7dd777d41b65f94abc120027281457525e5d0b69",
+    "3398b8f39176cd7e62577da89a3260cb0f2d0797de5a9feee9298089acb49deb",
 )
+
+
+# ── 模型提的结构字段条件在门 1 边缘：能两边都量出来的，必然也是机械列举的，照全部历史量 ─────────────────
+
+
+@pytest.mark.parametrize("name", ["3-3", "3-2", "2-3"])
+def test_a_proposed_place_condition_on_the_gate_edge_keeps_the_full_history(name: str) -> None:
+    """模型只能提结构字段与时间线（``conditions.PROPOSABLE``）。在可判的链恰好卡在门 1 边上（3 / 2 条）的组上，模型很晚才提
+    "在公司"：它与机械列举撞上（链上公司、家里两面都有），不算新条件，不进"只在提出之后量"（``candidates.proposed``），
+    门 1 数的链与量的链是同一批全部历史。整份关系表与迁移与不提时逐字相同。
+    （原来这一族用模型提的非日历情境条件守"提出之后才量"的门边；那种条件已经没有了。）"""
+
+    plan = PLACE_PLANS[name]
+    series = _series(plan)
+    concepts = _concepts(plan)
+    late = workdays(40)[30]
+
+    def make(*, proposed: bool) -> Callable[[], LaneTests]:
+        def build() -> LaneTests:
+            line = build_timelines(series, concepts, {}, CONFIG)["session"]
+            proposals = {DISCUSS: ((OFFICE, late),)} if proposed else None
+            return LaneTests(line, concepts, CONFIG, series.cutoff, proposals=proposals)
+
+        return build
+
+    tests = make(proposed=True)()
+    group = {item for item in tests.keys() if item.condition == OFFICE.text}
+    assert group and all(item.antecedent == DISCUSS for item in group)
+    assert not (tests.candidates.proposed.keys() & group)
+    assert _sides(tests, (OFFICE,), Segment.CHAIN) == PLACE_EDGES[name][0]
+    with_proposal = _outcome(make(proposed=True), series=series)
+    assert with_proposal == _outcome(make(proposed=False), series=series)
+    assert with_proposal == GOLDEN_PLACE[name]

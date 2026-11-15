@@ -350,7 +350,7 @@ def test_weights_are_normalised_over_every_key_including_the_hopeless_moderated_
 
 GOLDEN_SPARSE = {"chain": 42, "days_2_7": 47, "next_day": 47, "rest_of_day": 47}
 GOLDEN_FAMILY = 5
-GOLDEN_PLAIN_DIGEST = "130a5804cf33cfc5b56b8caf4cc9483054e68897284a2891cfd34531109513a4"
+GOLDEN_PLAIN_DIGEST = "398f69525e012108a09de2e91ea7bd1757451b5cf9198eeedae5126a0742abfc"
 #: （状态, 当晚判定, 前因次数, 块数, p, 最小可达 p, 时间上稳, 影响够大）
 GOLDEN_CARRIED: dict[str, tuple[object, ...]] = {
     "讨论→代码 chain｜推送": ("candidate", "tested", 40, 40, 1.0, 1.0, False, False),
@@ -359,7 +359,7 @@ GOLDEN_CARRIED: dict[str, tuple[object, ...]] = {
     "讨论→代码 next_day｜推送": ("rejected", "sparse", 0, 0, 1.0, 1.0, None, None),
 }
 GOLDEN_CARRIED_SPARSE = {"chain": 40, "days_2_7": 47, "next_day": 46, "rest_of_day": 47}
-GOLDEN_CARRIED_DIGEST = "4d98a6185c147ebca65ff9d350701ed9c2d06fe4cfe2ed84736973d89f53f202"
+GOLDEN_CARRIED_DIGEST = "8ce4a5410061c247ed05da8f94c86cbe09d0b3420dfff0b12685d6caca1a681b"
 #: （打了"靠先验"的, 不加权能找到、加权丢了的, 族的大小）
 GOLDEN_PRIOR: dict[tuple[int, float], tuple[list[str], list[str], int]] = {
     (5, 0.5): ([], [], 4),
@@ -367,18 +367,18 @@ GOLDEN_PRIOR: dict[tuple[int, float], tuple[list[str], list[str], int]] = {
     (5, 2.0): ([], [], 4),
 }
 GOLDEN_PRIOR_DIGEST = {
-    (5, 0.5): "38d887d9590fd10f6d1e0f026fc670d8014cfd3923d0755acd47f33669b77c44",
-    (2, 1.5): "524baaf2e5bb7280bc2ab19a3373a748082602a9342a375596e5bd5f5702f48b",
-    (5, 2.0): "b658f4dc6ca2fe4d5bc623131d3cf5848949a87dfb5149361f62b81153ba5f18",
+    (5, 0.5): "1da2e93f5962a43ca791ce36cdf0b8f505dfafaef288e99ad79bf6eebee00c83",
+    (2, 1.5): "7018bd25feb4a8e3106903432ab4bed84ec8d7c366497f50a0066181bf1e8e8c",
+    (5, 2.0): "7b717c26aac10676e9b6dfcf3f537a3d758284dd14f300a2d579c384b1719f9a",
 }
 GOLDEN_SECOND_NIGHT_PRIOR_ONLY: list[str] = []
-GOLDEN_SECOND_NIGHT_DIGEST = "cc2e0e398572707ff82896bb8e76a111288695e0e9c78327ccee4efb9629f286"
+GOLDEN_SECOND_NIGHT_DIGEST = "b112fe3d776e8ea19f34f989e16f42c03a6e4fb37961413e6fd4e0cf5831660d"
 #: （不加权的族, 加权的族）
 GOLDEN_NORMALISED_FAMILY = (5, 5)
 GOLDEN_NORMALISED = ["讨论→代码 chain"]
 GOLDEN_NORMALISED_SPARSE = {"chain": 42, "days_2_7": 47, "next_day": 47, "rest_of_day": 47}
 GOLDEN_NORMALISED_COUNTS = Counter({Status.TESTED: 4, Status.CANDIDATE: 1})
-GOLDEN_NORMALISED_DIGEST = "b00fbdb0ab1fedd1c440d91d79dc2510c5e86f07fe539e42bb7151769419ca0e"
+GOLDEN_NORMALISED_DIGEST = "eec5722581f4756ae91bddb6d74839d454ec8313ead1bcb22793422e9ffedbd2"
 #: （打了"靠先验"的, 不加权能找到、加权丢了的, 不加权的族, 加权的族）
 GOLDEN_PRIOR_THROUGH_PARENT: dict[str, tuple[list[str], list[str], int, int]] = {
     "boosted": (["讨论→代码 chain", "讨论→代码 chain｜调研"], [], 15, 16),
@@ -387,7 +387,7 @@ GOLDEN_PRIOR_THROUGH_PARENT: dict[str, tuple[list[str], list[str], int, int]] = 
 }
 #: 摘要是 ``_stable_digest``（浮点取 9 位有效数字）：这几份带权重的情形跨平台只差浮点末位。
 GOLDEN_PRIOR_THROUGH_PARENT_DIGEST = {
-    "boosted": "3fa4ec5e8ec966894adc5d92d3b17ac7ee40bcd985fcafa7060b68632bd14eb0",
-    "boosted-second-night": "2ac4b4b07fb5a363e3c3051f68cfb190ef39afc88079ffb62a0ae2643af8b835",
-    "damped": "8eed3918c05bd23dd89c6010066a4670a7658c73d3ae6f4f16673dfb01304766",
+    "boosted": "461ba8a925ae29aef6aed2f5ddaa825edf7f8d69e083c85d654819a315b37ee1",
+    "boosted-second-night": "a39c58974e05d441c461d76b7288d890d75876b40bfda77fa5c2e639bd6d9ee4",
+    "damped": "810ec1516808d858c3d5dbef0ca8aef1c72ad0bf63f10384712ad77676ae32d2",
 }

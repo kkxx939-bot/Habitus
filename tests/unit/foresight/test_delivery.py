@@ -147,48 +147,40 @@ def seen(at: datetime, *, kind: str = KIND, abandoned: bool = False) -> Seen:
     return Seen(at, at + timedelta(minutes=5), kind, f"behavior://{at:%H%M}.md", abandoned=abandoned)
 
 
-def unchanged(token: str) -> tuple[str, ...]:
-    return (token,)
-
-
 def test_done_since_counts_the_same_kind_started_after_observed_from_up_to_now_and_not_abandoned() -> None:
-    assert done_since(ITEM, [seen(FORMED + timedelta(minutes=10))], now=NOW, current=unchanged)
-    assert not done_since(ITEM, [seen(FORMED)], now=NOW, current=unchanged)  # 起算那一刻不算
-    assert not done_since(ITEM, [seen(NOW + timedelta(minutes=1))], now=NOW, current=unchanged)
-    assert not done_since(ITEM, [seen(FORMED + timedelta(minutes=10), abandoned=True)], now=NOW, current=unchanged)
-    assert not done_since(ITEM, [seen(FORMED + timedelta(minutes=10), kind="s-k0099")], now=NOW, current=unchanged)
+    assert done_since(ITEM, [seen(FORMED + timedelta(minutes=10))], now=NOW)
+    assert not done_since(ITEM, [seen(FORMED)], now=NOW)  # 起算那一刻不算
+    assert not done_since(ITEM, [seen(NOW + timedelta(minutes=1))], now=NOW)
+    assert not done_since(ITEM, [seen(FORMED + timedelta(minutes=10), abandoned=True)], now=NOW)
+    assert not done_since(ITEM, [seen(FORMED + timedelta(minutes=10), kind="s-k0099")], now=NOW)
 
 
-def test_done_since_reads_like_the_settlement_the_mapped_kind_and_nothing_after_the_deadline() -> None:
-    """段 6 Q4 / Q15：递送判做了与结算（``first_occurrence``）同一个口径——词表把后果拆成了别的编号，做了就是做了（原来只认
-    原编号：他做完了还被问一遍）；最晚时限之后才做的不算这一回做了（原来照算「已发生」，结算却结成过期待决）。"""
+def test_done_since_reads_like_the_settlement_the_same_kind_and_nothing_after_the_deadline() -> None:
+    """段 6 Q4 / Q15：递送判做了与结算（``first_occurrence``）同一个口径——编号相等才算（词表没有迁移，词表方案
+    2026-11-14）；最晚时限之后才做的不算这一回做了（原来照算「已发生」，结算却结成过期待决）。"""
 
     from habitus.foresight.ledger import first_occurrence
     from habitus.scene.views import FlowRow
 
-    split = lambda token: ("s-k0099",) if token == KIND else (token,)  # noqa: E731
     later = ITEM.deadline + timedelta(minutes=10)
-    for at, kind, current in (
-        (FORMED + timedelta(minutes=10), "s-k0099", split),
-        (FORMED + timedelta(minutes=10), "s-k0099", unchanged),
-        (later, KIND, unchanged),
-        (ITEM.deadline, KIND, unchanged),
+    for at, kind in (
+        (FORMED + timedelta(minutes=10), KIND),
+        (FORMED + timedelta(minutes=10), "s-k0099"),
+        (later, KIND),
+        (ITEM.deadline, KIND),
     ):
         row = FlowRow(uri="u", name="u", kind_token=kind, at=at, last_observed_at=at, summary="", day_count=1)
-        settled = first_occurrence(ITEM, [row], current=current) is not None
-        assert done_since(ITEM, [seen(at, kind=kind)], now=later, current=current) is settled
-    assert done_since(ITEM, [seen(FORMED + timedelta(minutes=10), kind="s-k0099")], now=NOW, current=split)
-    assert not done_since(ITEM, [seen(later)], now=later, current=unchanged)
+        settled = first_occurrence(ITEM, [row]) is not None
+        assert done_since(ITEM, [seen(at, kind=kind)], now=later) is settled
+    assert not done_since(ITEM, [seen(later)], now=later)
 
 
-def test_reminded_before_needs_the_decision_first_the_record_in_range_and_the_current_kind() -> None:
+def test_reminded_before_needs_the_decision_first_the_record_in_range_and_the_same_kind() -> None:
     started = FORMED + timedelta(minutes=30)
     decided = FORMED + timedelta(minutes=10)
-    unchanged = lambda token: (token,)  # noqa: E731
-    assert reminded_before(ITEM, decided, kind_token=KIND, started_at=started, current=unchanged)
-    assert not reminded_before(ITEM, started, kind_token=KIND, started_at=started, current=unchanged)
+    assert reminded_before(ITEM, decided, kind_token=KIND, started_at=started)
+    assert not reminded_before(ITEM, started, kind_token=KIND, started_at=started)
     assert not reminded_before(
-        ITEM, decided, kind_token=KIND, started_at=ITEM.deadline + timedelta(minutes=1), current=unchanged
+        ITEM, decided, kind_token=KIND, started_at=ITEM.deadline + timedelta(minutes=1)
     )
-    assert not reminded_before(ITEM, decided, kind_token="s-k0099", started_at=started, current=unchanged)
-    assert reminded_before(ITEM, decided, kind_token="s-k0099", started_at=started, current=lambda _t: ("s-k0099",))
+    assert not reminded_before(ITEM, decided, kind_token="s-k0099", started_at=started)

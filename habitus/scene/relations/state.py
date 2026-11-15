@@ -28,7 +28,7 @@
 - 当晚测不了的关系（概念从概念集里没了）原样带着，不改状态。
 - **退休**（方案 ``19`` §8，用户 11-10、11-12）：候选、失效、前向未复现在前因或后果久没来时退休（``retirement``：账的久别
   同一把尺，日历情境当前因只判后果），只留键与退休那一代，不再每代存读数、不做前向验证；以后只能靠退休之后的数据重新过
-  第 1 道回到候选。成立的不退。一条键一代只迁移一次：这一代刚迁移过的（含折叠之前被词表拆改打回候选的）下一代才判。
+  第 1 道回到候选。成立的不退。一条键一代只迁移一次：这一代刚迁移过的下一代才判。
   退休行不算"带着的行"（``carried``），从 ``LaneState.of(Status.RETIRED)`` 取。
 """
 
@@ -39,7 +39,6 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
 
-from habitus.scene.concepts.model import members_retired
 from habitus.scene.relations import stats
 from habitus.scene.relations.engine import (
     RelationKey,
@@ -261,8 +260,7 @@ def _retire(
     before: Relation, after: Relation, tests: LaneTests, night: date, away: Callable[[str], Absence | None]
 ) -> tuple[Relation, str | None]:
     """这一代没迁移的行判不判退休、退不退（共享说明 3.3）。只判上一代带进来、这一代之后仍是候选 / 失效 / 前向未复现的；
-    发现日是这一代的候选只能是折叠之前被词表拆改打回的（``revert_touched``：上一代的发现日都早于这一代），它这一代已经
-    迁移过（一条键一代只迁移一次），下一代才判。"""
+    发现日是这一代的不判（一条键一代只迁移一次），下一代才判。"""
 
     if before.status not in _RETIRABLE or after.status not in _RETIRABLE or before.discovered_on == night:
         return after, None
@@ -316,53 +314,13 @@ def _drop_stale_measures(previous: LaneState) -> LaneState:
     return replace(previous, relations=kept, measure_versions={**previous.measure_versions, **MEASURE_VERSIONS})
 
 
-def revert_touched(
-    previous: LaneState, touched: frozenset[str], night: date
-) -> tuple[LaneState, tuple[Transition, ...]]:
-    """词表拆分 / 合并改了某些类的成员（裁定 59）：以这些概念为前因或后果的候选与成立退回候选，发现日记成 ``night``，
-    在新成员上重新做前向验证——这期间不开口，影子照记。否则"查看信息"拆出"看日程"之后，"起床 → 查看信息"还靠搬走的那批
-    记录成立着、照样开口，要等维持检验连判两段才失效。只改运行中的状态，不迁移任何旧数据。退休行不动（它不带读数，
-    回来时本就在新数据上从第 1 道重新过）。发现日记成 ``night`` 也是 ``fold`` 认出"这一代被打回过、这一代不判退休"的依据。"""
-
-    reverted: list[Relation] = []
-    transitions: list[Transition] = []
-    for relation in previous.relations:
-        key = relation.key
-        if relation.status in (Status.CANDIDATE, Status.ESTABLISHED) and ({key.antecedent, key.consequent} & touched):
-            reverted.append(
-                replace(
-                    relation,
-                    status=Status.CANDIDATE,
-                    discovered_on=night,
-                    forward=None,
-                    forward_passed_on=None,
-                    established_on=None,
-                    maintenance=None,
-                    maintained_through=None,
-                    misses=0,
-                )
-            )
-            transitions.append(
-                Transition(
-                    night=night,
-                    key=key,
-                    before=relation.status,
-                    after=Status.CANDIDATE,
-                    reason="词表拆改改了类的成员，退回候选、在新成员上重新做前向验证",
-                )
-            )
-        else:
-            reverted.append(relation)
-    return replace(previous, relations=tuple(reverted)), tuple(transitions)
-
-
 def _step(
     before: Relation | None, test: RelationTest | None, tests: LaneTests, night: date
 ) -> tuple[Relation, str | None]:
     """一条关系这一晚怎么走；返回（新样子, 迁移原因——不迁移是 None）。"""
 
     if _retired(test.key if test is not None else before.key if before is not None else None, tests):
-        # 词表拆改把前因或后果的类停用了：这条关系随之停用（裁定 27 第 9 条）——不是"效应没了"，新类上要从头发现、前向验证
+        # 前因或后果的行为概念停用了：这条关系随之停用（裁定 27 第 9 条）——不是"效应没了"。二甲里在用的词不退出，没有来源
         if before is not None and before.status in (Status.CANDIDATE, Status.ESTABLISHED):
             return replace(
                 before, status=Status.EXPIRED, expired_on=night, maintenance=None
@@ -524,7 +482,7 @@ def _retired(key: RelationKey | None, tests: LaneTests) -> bool:
     if key is None:
         return False
     concepts = tests.concepts
-    return any(name in concepts and members_retired(concepts, name) for name in (key.antecedent, key.consequent))
+    return any(name in concepts and concepts[name].retired for name in (key.antecedent, key.consequent))
 
 
 def _plain(test: RelationTest | None) -> Status:
@@ -533,4 +491,4 @@ def _plain(test: RelationTest | None) -> Status:
     return Status.TESTED
 
 
-__all__ = ["LaneState", "Relation", "StateError", "Status", "Transition", "fold", "revert_touched"]
+__all__ = ["LaneState", "Relation", "StateError", "Status", "Transition", "fold"]

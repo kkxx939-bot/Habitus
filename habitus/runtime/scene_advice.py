@@ -2,7 +2,7 @@
 
 - **先验**：混合问法（实时化阶段 2）——一对（前因, 后果）只归一题：后果比前因晚出现的归"这个后果"那一题（旧问法，
   固定后果、列前因），否则归"这个前因"那一题（新问法，固定前因、列后果）；每题三遍乱序取中位，两份缓存分开存
-  （``runtime.scene_priors``）。一个新概念出现只多两题。模型队列对着"概念集 + 将要生成的基础概念 + 待生效的概念"问
+  （``runtime.scene_priors``）。一个新概念出现只多两题。模型队列对着"概念集 + 同步词表将要写的概念"问
   （``ask_priors``），答案直接写缓存；换代折叠时只读（``weights``）。
   权重只给不带条件的关系（短跨度与长跨度都给，按前因、后果这一对）；情境概念当前因的、带条件的按 1。
 - **候选条件**：只问够样本的前因（与调节检验同一个门槛），只在概念集变了（或前因刚够样本）时问；收下的与拒掉的都记进提议簿。
@@ -26,10 +26,10 @@ from habitus.scene.advice.conditions import question_for as condition_question
 from habitus.scene.advice.model import Proposal, ProposalBook, tidy_book
 from habitus.scene.advice.prior import PriorAdvisor
 from habitus.scene.advice.store import AdviceStore, AdviceStoreError
-from habitus.scene.concepts.calendar_situations import calendar_key, is_calendar
+from habitus.scene.concepts.calendar_situations import calendar_key
 from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.relations import LaneTests, LaneTimeline, RelationKey
-from habitus.scene.relations.conditions import Condition, parse
+from habitus.scene.relations.conditions import PROPOSABLE, Condition, parse
 from habitus.scene.relations.spans import Chain
 
 #: 给候选条件那个触点看几次 A（按时间均匀取）。
@@ -92,7 +92,7 @@ class RelationAdvice:
     async def ask_priors(
         self, concepts: ConceptSet, lane: str, signals: list[str], settled: Container[str] | None = None
     ) -> None:
-        """补问这条 lane 的先验（模型队列调，``concepts`` 是"概念集 + 同步词表将要生成的基础概念 + 待生效的概念"）、清孤儿缓存。
+        """补问这条 lane 的先验（模型队列调，``concepts`` 是"概念集 + 同步词表将要写的概念"）、清孤儿缓存。
         答案直接写缓存：只有换代读它，概念进概念集的那一代先验已经备好。"""
 
         if self.cache_only or self.prior is None:
@@ -146,10 +146,10 @@ class RelationAdvice:
         usable: dict[str, list[tuple[Condition, date]]] = {}
         for item in book.proposals:
             if item.condition is not None and item.proposed_on <= night and item.antecedent in concepts:
-                try:
-                    condition = parse(item.condition)
-                except ValueError:
-                    # 旧提议簿里的条件落不成现在的模板（日历字段 v2 起拿掉了）：跳过并报出来，不让整晚抛（2026-10-18 四方评审）
+                condition = _proposable(item.condition)
+                if condition is None:
+                    # 旧提议簿里的条件落不成现在模型能提的模板（日历字段 v2 起拿掉了；情境概念模板 2026-11-14 起只由系统机械
+                    # 列举）：跳过并报出来，不让整晚抛（2026-10-18 四方评审）
                     signals.append(f"advice: {lane} 提议簿里的条件「{item.condition}」现在读不了，跳过")
                     continue
                 usable.setdefault(item.antecedent, []).append((condition, item.proposed_on))
@@ -201,17 +201,15 @@ MAX_REFUSED_PER_ANTECEDENT = 20
 
 
 def _condition_fingerprint(concepts: ConceptSet, lane: str) -> str:
-    """候选条件"问过没有"认的概念集指纹。只看这条 lane 的概念（与不属于任何 lane 的情境）：另一条 lane 改了概念不该连带这条
-    重问（裁定 21-2；E9）。日历情境不算：它们不进问题（系统机械检验），长出一个周几集合不该让两条 lane 全部前因重问一遍；
+    """候选条件"问过没有"认的概念集指纹。只看这条 lane 的行为概念：另一条 lane 改了概念不该连带这条重问
+    （裁定 21-2；E9）。日历情境不算：它们不进问题（系统机械检验），长出一个周几集合不该让两条 lane 全部前因重问一遍；
     提示词版本算进去：改了提示词要重问（2026-10-18 四方评审）。"""
 
     return canonical_digest(
         {
             "version": CONDITION_PROMPT_VERSION,
             "concepts": sorted(
-                concepts[name].fingerprint
-                for name in concepts
-                if concepts.lane_of(name) in (lane, None) and not is_calendar(concepts, name)
+                concepts[name].fingerprint for name in concepts.behaviors() if concepts.lane_of(name) == lane
             ),
         }
     )
@@ -227,11 +225,17 @@ def _tidied(book: ProposalBook, concepts: ConceptSet) -> ProposalBook:
 
 
 def _compiles(condition: str) -> bool:
+    return _proposable(condition) is not None
+
+
+def _proposable(text: str) -> Condition | None:
+    """提议簿里存的条件文本 → 条件；落不成模型现在能提的模板（``PROPOSABLE``）就是 None。"""
+
     try:
-        parse(condition)
+        condition = parse(text)
     except ValueError:
-        return False
-    return True
+        return None
+    return condition if condition.template in PROPOSABLE else None
 
 
 def _day_type(line: LaneTimeline, concepts: ConceptSet, day: date) -> str:

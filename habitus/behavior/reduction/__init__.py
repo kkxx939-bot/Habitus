@@ -1,7 +1,7 @@
 """归约写入层：封口的判断 → 行为树文档。
 
 行为树唯一的生产入口（观测 → 融合 → **归约** → 落盘），零发明：语义逐字来自判断，唯一的
-LLM 触点是词表的白天归类（``kinds_step``）；词表的整理活与落树在 ``kinds_jobs`` / ``kinds_migration``。见 ``TODO(BHV-TREE-REBUILD-001)`` 与各模块 docstring。
+LLM 触点是给没带选词结果的判断选词（``kinds_step``，物理 lane）。见 ``TODO(BHV-TREE-REBUILD-001)`` 与各模块 docstring。
 """
 
 from habitus.behavior.reduction.errors import BehaviorReductionBusyError, BehaviorReductionError
@@ -22,7 +22,6 @@ from habitus.behavior.reduction.runner import (
     BehaviorReductionRunner,
 )
 from habitus.behavior.reduction.sealing import arrival_horizon, seal_horizon, sealed_gaps, sealed_indexes
-from habitus.behavior.reduction.vocabulary import VocabularyJobReport
 
 __all__ = [
     "DEFAULT_SWEEP_LOCK_TTL_SECONDS",
@@ -36,7 +35,6 @@ __all__ = [
     "BehaviorReductionReport",
     "BehaviorReductionRunner",
     "PendingJudgements",
-    "VocabularyJobReport",
     "ReducibleJudgement",
     "pending_judgements",
     "gap_payload",

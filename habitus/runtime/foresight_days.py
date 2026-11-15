@@ -7,8 +7,7 @@
 
 每天都建、从当天零点起算（裁定 94 第 2 条）：这一步看的是零点以来的整段（``looked_since`` = 零点），所以时窗在换代做完之前
 就已关掉的也照建——做了照常结，没做结过期待决（时窗已过，递送本来不说）；不许只建做了的一侧（裁定 49 第 1 条）。
-读材料与落账同预测拍（``runtime.foresight_forming``），未封口的读口也是同一个：模型此刻用不了只是这一次没归上类，不抛。
-词表迁移做到一半时不建。
+读材料与落账同预测拍（``runtime.foresight_forming``），未封口的读口也是同一个：模型此刻用不了只是这一次没选上词，不抛。
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ from habitus.runtime.foresight_forming import (
     ExpectationForming,
     Formed,
     FormingReadSide,
-    held_by_migration,
     observe_foresight,
     tonight_table,
 )
@@ -55,7 +53,6 @@ class DayExpectationStage:
         tolerance: Tolerance,
         shadow_unestablished: bool = False,
         vocabulary_version: Callable[[], int] | None = None,
-        migrating: Callable[[], bool] | None = None,
         observer: Observer | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -73,7 +70,6 @@ class DayExpectationStage:
         self.ledger = ledger
         self.opportunities = opportunities
         self.lane = lane
-        self.migrating = migrating
         self.observer: Observer = observer if observer is not None else NullObserver()
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
@@ -102,9 +98,6 @@ class DayExpectationStage:
 
     async def _run(self) -> DayReport:
         now = self._clock().astimezone(self.forming.read_side.zone)
-        held = held_by_migration(self.migrating)
-        if held is not None:
-            return DayReport(now, Formed(), held)
         table, skipped = tonight_table(self.opportunities, self.lane, now.date())
         if table is None or skipped is not None:
             return DayReport(now, Formed(), skipped)

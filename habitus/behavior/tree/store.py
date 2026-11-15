@@ -120,38 +120,6 @@ class BehaviorTree:
             raise BehaviorTreeConflictError("behavior L2 address already contains different content") from exc
         return document
 
-    def replace(self, document: BehaviorDocument) -> BehaviorDocument:
-        """改写一个已存在的 L2：**只允许 ``kind_token`` 变**（词表重打），其余字段、地址逐字不变。
-
-        树是 add-only 的，这是唯一的改写通道，且只为"归错可改词表重打、不动地址"这一条设计裁定而开
-        （``behavior/model.py`` 与 occurrences schema 都写明 kind_token 可修）。修订号 +1、created_at 不变、
-        updated_at 不早于原值；任何别的差异都拒绝——防止它被当成通用更新入口。
-        """
-
-        current = self.read(document.address)
-        if current.kind is not document.kind:
-            raise BehaviorTreeConflictError("behavior L2 replace cannot change the document kind")
-        changed = {
-            name
-            for name in set(current.fields) | set(document.fields)
-            if current.fields.get(name) != document.fields.get(name)
-        }
-        if changed - {"kind_token"}:
-            raise BehaviorTreeConflictError(f"behavior L2 replace may only change kind_token, not {sorted(changed)}")
-        meta, prior = document.metadata, current.metadata
-        if (
-            meta.revision != prior.revision + 1
-            or meta.created_at != prior.created_at
-            or meta.updated_at < prior.updated_at
-        ):
-            raise BehaviorTreeConflictError("behavior L2 replace must advance the revision in place")
-        encoded = self.storable_bytes(document)
-        try:
-            atomic_replace_bytes(self._existing_document_path(document.address), encoded, artifact_root=self.root)
-        except DurablePathIntegrityError as exc:
-            raise BehaviorTreeIntegrityError("behavior L2 document cannot be replaced safely") from exc
-        return document
-
     def iter_documents(self, kind: BehaviorKind) -> Iterator[BehaviorDocument]:
         """按地址序分页读出某类的全部文档（全量扫描；夜批/离线整理用）。"""
 

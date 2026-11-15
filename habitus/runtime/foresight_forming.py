@@ -6,7 +6,7 @@
 同一个身份已经在账上的不再写（身份不含槽号、时刻与日子，账本按身份索引，跨天重算得到同一条）；人说过「以后别提了」的行为不再建
 （裁定 50、61）。进程不留内存状态：重启后重扫得到的都是已有的身份。
 
-两处共用的闸也在这里一份：词表迁移做到一半时不建（``held_by_migration``）、表是不是今天这一代的（``tonight_table``，实时化方案
+两处共用的闸也在这里一份：表是不是今天这一代的（``tonight_table``，实时化方案
 第 3 节"白天那道闸"），以及观测怎么记（``observe_foresight``）。
 """
 
@@ -148,17 +148,10 @@ class ExpectationForming:
         return Formed(len(expectations), recorded, by_source, recorded_by_source)
 
 
-MIGRATING = "词表迁移还没做完"
 NO_TABLE = "还没有机会表"
 STALE_TABLE = "今天这一代的机会表还没有"
 UNFINISHED = "今天这一代还没完成"
 MARK_UNREADABLE = "今天的完成标记读不了"
-
-
-def held_by_migration(migrating: Callable[[], bool] | None) -> str | None:
-    """词表迁移做到一半时不建（归类一半新编号一半旧编号）：返回没建的原因，不挡是 None。"""
-
-    return MIGRATING if migrating is not None and migrating() else None
 
 
 def tonight_table(
@@ -211,7 +204,6 @@ def observe_foresight(
 
 
 __all__ = [
-    "MIGRATING",
     "NO_TABLE",
     "MARK_UNREADABLE",
     "STALE_TABLE",
@@ -220,7 +212,6 @@ __all__ = [
     "Formed",
     "FormingReadSide",
     "Recent",
-    "held_by_migration",
     "observe_foresight",
     "tonight_table",
 ]

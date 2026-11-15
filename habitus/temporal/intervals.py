@@ -196,7 +196,7 @@ def gap_days(days: Sequence[date]) -> tuple[int, ...]:
 
 
 def common_interval_days(days: Sequence[date]) -> float | None:
-    """常见间隔的不加权读法：相邻发生日间隔的中位数。给只有日子、没有观测覆盖的调用方用（语义树的块长，概念可以是几个类的汇总）；
+    """常见间隔的不加权读法：相邻发生日间隔的中位数。给只有日子、没有观测覆盖的调用方用（语义树的块长）；
     与 ``median_days`` 同一个定义，只是没有漏看与截尾的权重。不到两个发生日就是 None。"""
 
     gaps = sorted(gap_days(days))

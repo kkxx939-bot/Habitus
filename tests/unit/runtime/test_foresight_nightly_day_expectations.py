@@ -80,8 +80,6 @@ def settle(w: World, through: date) -> None:
         w.ledger,
         read_side(w),  # type: ignore[arg-type]
         closed_days=lambda: closed,
-        current=lambda token: (token,),
-        migrating=lambda: False,
         evidence=EVIDENCE,
         opportunities=w.opportunities,
         lane="session",

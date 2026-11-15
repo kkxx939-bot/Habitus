@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -43,7 +43,6 @@ class SettlementDiagnosis:
         read_side: BehaviorReadSide,
         *,
         evidence: Evidence,
-        current: Callable[[str], Sequence[str]],
         opportunities: OpportunityStore | None,
         lane: str,
         history: HistoryStore | None,
@@ -51,7 +50,6 @@ class SettlementDiagnosis:
         self.ledger = ledger
         self.read_side = read_side
         self.evidence = evidence
-        self.current = current
         self.opportunities = opportunities
         self.lane = lane
         self.history = history
@@ -149,7 +147,6 @@ class SettlementDiagnosis:
             fact,
             spoken=spoken,
             standing=standing,
-            current=self.current,
             window=rows_between(cache, item.observed_from.date(), item.deadline.date()),
             today_note=cache.day(item.day).day_note,
             basis=[BasisSeen(cache.day(row.at.date()).day_note, row.prompted_by) for row in basis],

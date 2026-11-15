@@ -225,8 +225,6 @@ def test_reminder_to_reply_to_doing_closes_the_loop(  # noqa: PLR0913 - 四条�
         ledger,
         ForesightReadSide(site.behavior_tree, SUBJECT, LocalCalendar(), ZoneInfo("Asia/Shanghai")),
         closed_days=lambda: (DAY,),
-        current=lambda token: (token,),
-        migrating=lambda: False,
         evidence=Evidence(alpha=0.05, half_life=8.0),
         clock=lambda: at(DAY + timedelta(days=1), 4, 0).astimezone(UTC),
     )

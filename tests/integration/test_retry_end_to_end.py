@@ -43,7 +43,11 @@ class Site:
     def lane(self, bodies):  # type: ignore[no-untyped-def]
         chat, provider = sf.client(bodies)
         session = SessionLane(
-            SessionTurnDescriber(chat, zone=sf.ZONE), self.recorder, backlog=self.backlog, tree=self.h.tree
+            SessionTurnDescriber(chat, zone=sf.ZONE),
+            self.recorder,
+            picker=sf.FixedPicker(),
+            backlog=self.backlog,
+            tree=self.h.tree,
         )
         return session, provider
 

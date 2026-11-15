@@ -7,16 +7,15 @@ CI 钉的两条都在这里：
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
 from habitus.behavior.kinds.ids import Lane, not_event_token, pending_token
 from habitus.scene.concepts import ConceptSet
-from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.scene.occurrences import ConceptHitStore
-from habitus.scene.occurrences.mapper import ConceptMapper, MapperConfig
+from habitus.scene.occurrences.daily import apply_seal, plan_seal
+from habitus.scene.occurrences.situations import SituationOutcome
 from habitus.scene.recurrence import recurrences_of
 from habitus.series import (
     SILENT_DAY_UNWATCHED_LANES,
@@ -28,14 +27,13 @@ from habitus.series import (
     silent_day_unwatched,
 )
 from habitus.series.reader import read_series
-from tests.unit.foresight.scripted_model import recording_client
+from habitus.temporal import Rulers
 from tests.unit.scene.concept_fixtures import BEDTIME, BREAKFAST, CODING
-from tests.unit.scene.day_mapping import map_closed_day
-from tests.unit.scene.fixtures import DAY1, SUBJECT, Site, at, publish, publish_gap
+from tests.unit.scene.fixtures import DAY1, Site, at, publish, publish_gap
 
 NOW = datetime(2026, 9, 1, 3, 0, tzinfo=UTC)
 PENDING = pending_token(Lane.SESSION)
-RULERS = RhythmRulers(15, 2700, 3, 5.0, 5.0, 0.10, 35)
+RULERS = Rulers(15, 2700, 3, 5.0, 5.0, 35)
 NOT_EVENT = not_event_token(Lane.SESSION)
 
 
@@ -117,7 +115,7 @@ def test_appending_data_from_the_cutoff_on_changes_nothing_on_night_n(tmp_path) 
 
 
 def test_the_semantic_layer_and_the_recurrences_read_the_same_records(tmp_path) -> None:
-    """同一条记录各个读者读法一致：语义树映射下来的有类记录，就是复现里数到的那几类；待定的两边都不当成一类的发生
+    """同一条记录各个读者读法一致：语义树封口生成的有类记录，就是复现里数到的那几类；待定的两边都不当成一类的发生
     （同一份序列给的）。第二轮评审 D5 就是两处各写一遍写反了（「待定」在一处是占位、在另一处被当成"没来"）。
     """
 
@@ -137,27 +135,10 @@ def test_the_semantic_layer_and_the_recurrences_read_the_same_records(tmp_path) 
     recurrences = recurrences_of(series, RULERS)
 
     hits = ConceptHitStore(tmp_path / "scene")
-    client, _provider = recording_client([])
-    mapper = ConceptMapper(
-        client,
-        ConceptSet([BEDTIME, BREAKFAST, CODING]),  # 只有基础概念：不问模型
-        config=MapperConfig(transient_retry_delay_seconds=0.0),
-        subject=SUBJECT,
-        clock=lambda: NOW,
-    )
+    concepts = ConceptSet([BEDTIME, BREAKFAST, CODING])
     for offset in range(7):
-        asyncio.run(
-            map_closed_day(
-                site.behavior_tree,
-                hits,
-                mapper,
-                day(offset),
-                now=NOW,
-                series=series,
-                situation_for=lambda _d: (),
-                baseline_for=lambda _d: {},
-            )
-        )
+        plan = plan_seal(hits, day(offset), series.on(day(offset)), concepts, SituationOutcome((), ()), now=NOW)
+        apply_seal(hits, plan, now=NOW)
     mapped = {record.occurrence_uri: record for offset in range(7) for record in hits.read_day(day(offset))}
     assert set(mapped) == {record.uri for record in series.records}
     # 类 / 待定两边分得一样：复现里的类 = 语义树里有类的记录的类，待定的不在复现里

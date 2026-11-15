@@ -109,13 +109,14 @@ def _relations_of(text: str) -> list[dict[str, object]]:
 
 
 def test_rows_that_existed_before_retirement_keep_their_canonical_bytes() -> None:
-    """c55f7da 上这份状态的规范形的 sha256：加了退休之后，没有退休行的表一个字节不变、仍是同一个 SCHEMA。"""
+    """这份状态的规范形的 sha256：加了退休之后，没有退休行的表一个字节不变（c55f7da 上取的值；2026-11-14 语义树只留词表类
+    与日历时 SCHEMA 升到 v5，摘要随版本号换过一次，其余字节不变）。"""
 
     text = encode_night(_state(*_existing_rows()))
     assert hashlib.sha256(text.encode("utf-8")).hexdigest() == (
-        "4444a8cb896e12adc637c45b1b19a33882fdbeaa1e51db33a4b9b3a3432ee9c0"
+        "408a956201749821b41b7cac6b51f8de9dc0fef5742d466a64175ddb00b5d9e6"
     )
-    assert SCHEMA == "habitus.scene.relations.night/v4"
+    assert SCHEMA == "habitus.scene.relations.night/v5"
     assert all("retired_on" not in item for item in _relations_of(text))
 
 

@@ -1,4 +1,5 @@
-"""未封口读口：按归约自己的口径（存储里有、账本里没有）、自己的并链、自己的白天归类（提前到封口之前、按链缓存），读成此刻场景的行。"""
+"""未封口读口：按归约自己的口径（存储里有、账本里没有）、判断上带着的选词结果，没带的用归约自己的选词器（提前到封口之前、
+按链缓存），读成此刻场景的行（词表方案 2026-11-14）。"""
 
 from __future__ import annotations
 
@@ -9,20 +10,11 @@ from pathlib import Path
 import pytest
 
 from habitus.behavior.fusion.store import BehaviorJudgementStore
-from habitus.behavior.kinds.changes import AddClass, ChangeReason, VersionRecord
 from habitus.behavior.kinds.config import BehaviorKindConfig
 from habitus.behavior.reduction.ledger import BehaviorReductionEntry, BehaviorReductionLedger
-from habitus.behavior.tree import BehaviorTree
 from habitus.model_client import ModelQuotaError, ModelTransportError
 from habitus.runtime.unsealed import UnsealedFromJudgements
-from tests.lock_store import ProcessLocalLockStore
-from tests.unit.behavior.kinds_fixtures import (
-    NOW,
-    NameMatchingProvider,
-    ScriptedProvider,
-    kind_components,
-    named_classes,
-)
+from tests.unit.behavior.kinds_fixtures import NameMatchingProvider, ScriptedProvider, kind_components
 from tests.unit.behavior.reduction_fixtures import at, judgement_record, record_id
 
 PLAY, WASH = "s-k0001", "s-k0002"
@@ -31,19 +23,13 @@ PLAY, WASH = "s-k0001", "s-k0002"
 def reader(
     tmp_path: Path, *, names: tuple[str, ...] = ("打球", "洗手"), provider: ScriptedProvider | None = None
 ) -> tuple[UnsealedFromJudgements, BehaviorJudgementStore, BehaviorReductionLedger, ScriptedProvider]:
-    """词表第 1 版是 ``names``（打球 = s-k0001、洗手 = s-k0002）；假模型按原话与类名逐字相同归类，「挠头」答不是一件事。"""
+    """测试词表是 ``names``（打球 = s-k0001、洗手 = s-k0002）；假模型按名字与词名逐字相同选词，没有就答 ``missing``。"""
 
     root = tmp_path / "behavior"
     judgements = BehaviorJudgementStore(root)
     ledger = BehaviorReductionLedger(root / "reduction")
-    resolved = provider if provider is not None else NameMatchingProvider(not_events=frozenset({"挠头"}))
-    stamping, _jobs, _store = kind_components(
-        BehaviorTree(root / "tree"),
-        ProcessLocalLockStore(),
-        names=names,
-        provider=resolved,
-        config=BehaviorKindConfig(transient_retries=0),
-    )
+    resolved = provider if provider is not None else NameMatchingProvider()
+    stamping = kind_components(names=names, provider=resolved, config=BehaviorKindConfig(transient_retries=0))
     return UnsealedFromJudgements(judgements, ledger, stamping), judgements, ledger, resolved
 
 
@@ -85,7 +71,7 @@ def test_pending_chains_become_rows_and_consumed_ones_do_not(tmp_path) -> None:
 
     assert [(row.name, row.kind_token, row.started_at, row.last_observed_at, row.summary) for row in rows] == [
         ("打球", PLAY, at(0), at(600), "打球的摘要"),
-        ("喝口水", None, at(700), at(720), "喝口水的摘要"),  # 归类答「都不是」（待定）：带原名进场景、标未归类，不猜
+        ("喝口水", None, at(700), at(720), "喝口水的摘要"),  # 选词答「表外」：带原名进场景、标未归类，不猜
     ]
 
 
@@ -137,18 +123,24 @@ def test_each_judgement_is_classified_once(tmp_path) -> None:
     assert [(row.started_at, row.kind_token) for row in rows] == [(at(0), PLAY), (at(1200), PLAY)]
 
 
-def test_unclassified_until_prepared_and_not_events_stay_out(tmp_path) -> None:
-    """还没归过的链标未归类；归为「非事件」的不进场景（与序列同一口径）。"""
+def test_unclassified_until_prepared_and_carried_picks_are_used_as_they_are(tmp_path) -> None:
+    """没带选词结果、还没选过的链标未归类；判断上带着的直接用、不问模型：「非事件」「续话」不进场景（与序列同一口径）。"""
 
-    unsealed, judgements, _ledger, _provider = reader(tmp_path)
+    unsealed, judgements, _ledger, provider = reader(tmp_path)
     judgements.put_payload(record("play", behavior="打球", start=0, end=600))
-    judgements.put_payload(record("scratch", behavior="挠头", start=650, end=660))
+    judgements.put_payload(record("wash", behavior="洗手", start=610, end=640, kind_token=WASH))
+    judgements.put_payload(record("scratch", behavior="挠头", start=650, end=660, kind_token="s-非事件"))
+    judgements.put_payload(record("again", behavior="再问", start=670, end=680, kind_token="s-续话"))
     assert [(row.name, row.kind_token) for row in unsealed.rows(since=at(-100), until=at(3600))] == [
         ("打球", None),
-        ("挠头", None),
+        ("洗手", WASH),
     ]
     prepared(unsealed, at(3600))
-    assert [(row.name, row.kind_token) for row in unsealed.rows(since=at(-100), until=at(3600))] == [("打球", PLAY)]
+    assert provider.calls == 1
+    assert [(row.name, row.kind_token) for row in unsealed.rows(since=at(-100), until=at(3600))] == [
+        ("打球", PLAY),
+        ("洗手", WASH),
+    ]
 
 
 def test_a_model_outage_leaves_rows_unclassified_and_retries_next_tick(tmp_path) -> None:
@@ -164,17 +156,8 @@ def test_a_model_outage_leaves_rows_unclassified_and_retries_next_tick(tmp_path)
     assert provider.calls > first  # 没缓存失败的结果：下一拍又试
 
 
-def test_no_model_call_before_the_vocabulary_exists(tmp_path) -> None:
-    """词表还在第 0 版（第一次归约才写入预置清单）：没有类可归，不问模型。"""
-
-    unsealed, judgements, _ledger, provider = reader(tmp_path, names=())
-    judgements.put_payload(record("play", behavior="打球", start=0, end=600))
-    prepared(unsealed, at(700))
-    assert provider.calls == 0
-
-
-def test_an_exhausted_answer_is_not_cached_and_is_retried_next_tick(tmp_path) -> None:
-    """结构化输出重问用尽给的「待定」不是模型的判断：不缓存，下一拍再试（E12）。"""
+def test_an_exhausted_answer_is_kept_as_pending_like_the_reduction_does(tmp_path) -> None:
+    """答复重问用尽：选词器记「待定」（与归约同一口径），按未归类进场景；它就是这一条的结果，下一拍不再问。"""
 
     provider = ScriptedProvider([{"items": []}])
     unsealed, judgements, _ledger, _provider = reader(tmp_path, provider=provider)
@@ -183,7 +166,7 @@ def test_an_exhausted_answer_is_not_cached_and_is_retried_next_tick(tmp_path) ->
     first = provider.calls
     assert [row.kind_token for row in unsealed.rows(since=at(-100), until=at(700))] == [None]
     prepared(unsealed, at(800))
-    assert provider.calls > first
+    assert provider.calls == first
 
 
 def test_a_quota_error_leaves_the_tick_running(tmp_path) -> None:
@@ -194,22 +177,6 @@ def test_a_quota_error_leaves_the_tick_running(tmp_path) -> None:
     judgements.put_payload(record("play", behavior="打球", start=0, end=600))
     prepared(unsealed, at(700))
     assert [row.kind_token for row in unsealed.rows(since=at(-100), until=at(700))] == [None]
-
-
-def test_a_new_vocabulary_version_reclassifies_the_open_chains(tmp_path) -> None:
-    """词表拆改（版本变了）之后，缓存里的编号可能已停用：按新版本重归（E12）。"""
-
-    unsealed, judgements, _ledger, provider = reader(tmp_path)
-    judgements.put_payload(record("play", behavior="打球", start=0, end=600))
-    prepared(unsealed, at(700))
-    assert provider.calls == 1
-    store = unsealed.stamping.store
-    store.append(
-        VersionRecord(2, NOW, ChangeReason.NIGHTLY, (AddClass(named_classes(("打球", "洗手", "跑步"))[2]),)),
-        expected_version=1,
-    )
-    prepared(unsealed, at(800))
-    assert provider.calls == 2
 
 
 def test_an_unusable_model_never_raises_for_the_day_expectations_either(tmp_path) -> None:

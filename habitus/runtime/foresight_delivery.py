@@ -140,7 +140,6 @@ class DeliveryStage:
         unit_prior_share: float = 1 / 3,
         history: HistoryStore | None = None,
         lane: str = "session",
-        current: Callable[[str], Sequence[str]] = lambda token: (token,),
         claimed: Callable[[str], bool] = lambda request_id: False,
     ) -> None:
         if daily_cap < 1:
@@ -156,8 +155,6 @@ class DeliveryStage:
         #: 提醒出口（没有 = 没有宿主活着：提醒档到时窗末都「不可达」，也不问模型）；``claimed``：出口上这条请求取走过没有。
         self.outlet, self.claimed = outlet, claimed
         self.units = UnitPlanner(history, evidence=evidence, prior_share=unit_prior_share, lane=lane)
-        #: 编号 → 现在对应哪些在用编号（与结算同一个映射）：开口前核前因、判做没做都按它认词表拆改。
-        self.current = current
         #: 只读可见面（账、单元、漏报）：边的位置与递送引擎同一个读法。
         self.views = DeliveryViews(ledger, standing=self._standing)
 
@@ -412,7 +409,6 @@ class DeliveryStage:
             item,
             table.relation(item.trigger) if table is not None else None,
             rows_on=rows_on,
-            current=self.current,
         )
 
     def _subsume(self, tally: _Tally, item: Expectation, basis_id: str, level: int) -> None:

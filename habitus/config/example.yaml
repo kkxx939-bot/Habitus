@@ -477,32 +477,18 @@ workflow:
 #   physical_max_device_chars: 120     # 设备名最多多少字
 #   physical_max_segment_id_chars: 200  # 段编号最多多少字
 #   physical_max_future_seconds: 300   # 段的结束最多比交付的送出时刻晚多少秒（留给时钟不齐）
-#   # 基础词表（裁定 6：门槛全部是配置）；留空取 behavior/kinds/config.py 的默认值。标"待定档"的要等真实数据重定
-#   kinds_batch_size: 10               # 白天归类一次调用判几条
-#   kinds_validation_rounds: 2         # 没答好的条目重问几轮（每轮只问没答好的），用尽当「待定」
+#   # 基础词表（裁定 6：门槛全部是配置；词表方案 2026-11-14）；留空取 behavior/kinds/config.py 的默认值
+#   kinds_pick_retries: 2              # 选词答复结构不合格时带着错误重问几次，用尽记「待定」
 #   kinds_transient_retries: 5         # 模型调用对超时/断连的有界重试
 #   kinds_transient_retry_delay_seconds: 5
-#   kinds_max_encoded_bytes: 16777216  # 词表各文件（清单、变更日志、待定池……）的字节上限
-#   kinds_max_examples: 3              # 每类最多几条代表例子
-#   kinds_recurrence_min_count: 2      # 每晚新增：一组待定至少几条才建类；拆分两边也按它（裁定 59）
-#   kinds_recurrence_min_days: 2       # 每晚新增：且至少跨几天（同一天追问几轮不算复现）；拆分同上
-#   kinds_max_pending: 5000            # 待定池上限（保护闸）
-#   kinds_nightly_max_new: 200         # 每晚新增一晚最多交几条新条目（保护闸，多的留到下一晚；旧条目不进，按相似召回）
-#   kinds_recall_per_entry: 3          # 每条新条目按字符二元组相似召回几条旧条目一起聚组
-#   kinds_revision_weekday: 2          # 定期拆改的周期从每周几那一晚起（0=周一，2=周三；在换代里做，不挂钟点）
-#   kinds_merge_evidence_runs: 2       # 合并要在连续几个拆改周期里都被提出才算有证据（裁定 17）
-#   kinds_cooldown_days: 14            # 改过的类冷却几天（待定档）
-#   kinds_max_changes_per_revision: 3  # 一次拆改最多改几处（待定档）
-#   kinds_lane_candidate_cap: 80       # 同 lane 在用类超过这个数就报警（保护闸；以后接回向量召回）
-#   kinds_anchors_per_class: 8         # 定期拆改锚点自检：每个没动过的类取几个锚点（裁定 17）
-#   kinds_max_anchor_pull: 0.02        # 锚点自检：新清单下被拉走的锚点最多占几成（裁定 17）
-#   kinds_revision_samples_per_class: 8  # 拆改提合并 / 改判据时每类给模型看几条原话
-#   kinds_revision_window_days: 120    # 拆改分组定拆：只看每个类最近多少天的成员（按月做的事要攒够 3 次）
-#   kinds_grouping_min_members: 6      # 成员少于这个数的类不分组（实际门槛至少是两边各 recurrence_min_count 条）
-#   kinds_grouping_batch_size: 60      # 一次分组最多给模型看几条，多了分批、后一批看得见前几批的组
-#   kinds_checkpoint_every: 200        # 扫树、重打树时每处理多少条续一次 sweep 租约
-#   kinds_prompt_max_steps: 12         # 归类与待定池给模型看的每条最多列几步
-#   kinds_sample_max_steps: 4          # 定期拆改抽样原话每条最多列几步
+#   kinds_max_encoded_bytes: 16777216  # 在用状态文件与清单视图（kinds.state.json、kinds.md）的字节上限
+#   kinds_active_min_days: 2           # 一个词在几个不同的本地日被直接选中，下一次换代起在用
+#   kinds_active_cap: 100              # 每条 lane 在用的词最多几个；满了够条件的词等着、不挤别人
+#   kinds_recent_records: 8            # 会话 lane 选词给模型看这条 lane 最近几条成了记录的轮
+#   kinds_recent_same_conversation: 3  # 再加同一会话最近几条（去重、按时间排）
+#   kinds_earlier_turns: 3             # 这场对话里之前最多几轮给模型作上文
+#   kinds_earlier_chars: 600           # 之前每一轮的材料截几字
+#   kinds_prompt_max_steps: 12         # 物理 lane 选词时每条最多列几步
 #   observation_max_files: 100000      # 观测存储最多多少份交付（保护闸；观测在发布后即释放，常态远低于它）
 #   fusion_max_receipt_files: 100000   # 回执最多多少份（保护闸；按覆盖窗口过期）
 #   fusion_max_judgement_files: 1000000  # 判断最多多少份（保护闸；发布即释放）
@@ -523,7 +509,6 @@ workflow:
 # 跑真实数据后再校）。和时间有关的数（槽宽、转移窗口）只认 temporal 那一组，这里不另配。
 # scene:
 #   enabled: true
-#   baseline_slack_slots: 3          # 常态按峰分份时峰两边各放宽几槽（待定档；原借预测树 pool_half_width，裁定 59）
 #   generation_kept_days: 366            # 完成标记、每代报告、trace 文件留几天（scene/generation/{<日>.json,reports,traces}）
 #   generation_lease_ttl_seconds: 120    # 预测根租约、语义树写锁、模型队列租约多久过期（换代由预测 worker 每个槽边界看一眼，在预测根租约之内做；两个进程挂同一个 storage root 时同一天只换代一次）
 #   generation_heartbeat_seconds: 30     # 多久续一次租约（必须小于 generation_lease_ttl_seconds）
@@ -534,7 +519,6 @@ workflow:
 #   model_queue_backoff_base_seconds: 60     # 模型整个调不通时队列整体退避：首次等多久（单项失败也按它各自等；到点接着做，不另探模型）
 #   model_queue_backoff_max_seconds: 3600    #   ……逐次加倍，最多等这么久（退避只在进程里）
 #   model_queue_unreachable_after_failures: 3 # 连着几项（不同的项）都是模型失败、中间没有一项做成，就整体退避（不分失败原因）
-#   mapping_margin_slots: 2                  # 映射按槽：一条记录所在的槽过后再留几槽就映射，不等那一天封口（0–96；留小了只是多几次重判）
 #   model_queue_shutdown_timeout_seconds: 30 # 停机时等模型队列当前这一项多久，超时取消（下次从盘上重新认出来）
 #   model_queue_backlog_warning_items: 50    # 欠账到这么多项，健康面报降级（non-critical；清完自动消掉）
 #   model_queue_backlog_warning_seconds: 21600 # ……或最老一项等了这么久（秒）
@@ -552,7 +536,6 @@ workflow:
 #     first_seen_min_days: 14          # 长跨度"新类第一次出现"：记录开始后至少过这么多天
 #     first_seen_min_blocks: 3         #   ……并且至少这么多个这一类自己的块长
 #     condition_ask_min_antecedents: 40  # 前因攒到这么多次才问模型要调节条件（机械列举的条件按最小可达 p 开检验，不看它）
-#     max_blind_share: 0.5             # 后果是细分概念时，"判不了"的窗口超过这一成就不进检验族
 #     max_combined_conditions: 3       # 一条关系最多挂几个条件（第二个起只长在已成立的带条件关系上；保护闸）
 
 # 读行为记录时间用的尺子（裁定 59）：语义树与预测层都经 habitus.temporal 用它们，全系统只此一处。
@@ -563,7 +546,6 @@ workflow:
 #   pool_half_width: 3               # 日内分布收缩的邻域：本槽 ← 前后各这么多槽 ← 全天（待定档）
 #   shrink_slot_to_pool: 5           # 本槽向邻域收缩的先验分量（待定档）
 #   shrink_pool_to_all_day: 5        # 邻域向全天收缩的先验分量（待定档）
-#   min_peak_mass: 0.10              # 一个峰里至少有这么多比例的发生（归一化之后比）
 
 # 主体所在地。时区与当地日历**两层共用**：语义树与预测层用它取每一天的日历条件（周几、几号、日型），预测层用它
 # 造"此刻"的时钟与本地日界。分别配两份迟早对不上，所以单独一组，由组合根分发。

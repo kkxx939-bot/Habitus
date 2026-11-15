@@ -35,7 +35,6 @@ class SceneRelationsConfig:
     first_seen_min_days: int | None = None
     first_seen_min_blocks: int | None = None
     condition_ask_min_antecedents: int | None = None
-    max_blind_share: float | None = None
     max_combined_conditions: int | None = None
 
     def __post_init__(self) -> None:
@@ -54,8 +53,6 @@ class SceneConfig:
 
     enabled: bool = False
     relations: SceneRelationsConfig = field(default_factory=SceneRelationsConfig)
-    # 常态按峰分份时，峰的两边各放宽几槽的容差（待定档）。原来借预测树的 pool_half_width，预测树删除后归语义树自己（裁定 59）。
-    baseline_slack_slots: int = 3
     # 换代什么时候做不是配置：预测 worker 每个槽边界看一眼，连续定稿到昨天、预测拍水位过了余量就做（实时化阶段 1、2）。
     # 完成标记、每代报告、trace 文件留几天（一年）：结算认"那天没有这一代"只往回看到过期待决的预期还没裁的那一段。
     generation_kept_days: int = 366
@@ -78,16 +75,11 @@ class SceneConfig:
     model_queue_unreachable_after_failures: int = 3
     # 停机时等模型队列当前这一项多久，超时取消（取消掉的那一项下次从盘上重新认出来）。
     model_queue_shutdown_timeout_seconds: float = 30.0
-    # 映射按槽：一条记录最后所见所在的槽过后再留几槽就可以映射（不等那一天封口；"过了几槽"按预测拍水位算）。留小了不会出错——
-    # 之后才落树的记录让当天时间线变了，受影响的那一条按现有规则重判，只是多花调用。
-    mapping_margin_slots: int = 2
     # 欠账到这么多项、或最老一项等了这么久，健康面报降级（non-critical；清完自动消掉）。
     model_queue_backlog_warning_items: int = 50
     model_queue_backlog_warning_seconds: float = 21_600.0
 
     def __post_init__(self) -> None:
-        if not 0 <= self.baseline_slack_slots <= 96:
-            raise ValueError("scene.baseline_slack_slots must be an integer between 0 and 96")
         if not 1 <= self.generation_kept_days <= 3_660:
             raise ValueError("scene.generation_kept_days must be an integer between 1 and 3660")
         if not 5.0 <= float(self.generation_lease_ttl_seconds) <= 3_600.0:
@@ -109,9 +101,6 @@ class SceneConfig:
             raise ValueError(
                 "scene.model_queue_backoff_base_seconds must be at least 1 and at most model_queue_backoff_max_seconds (≤ 86400)"
             )
-        margin = self.mapping_margin_slots
-        if isinstance(margin, bool) or not isinstance(margin, int) or not 0 <= margin <= 96:
-            raise ValueError("scene.mapping_margin_slots must be an integer between 0 and 96")
         if not 1 <= self.model_queue_unreachable_after_failures <= 1_000:
             raise ValueError("scene.model_queue_unreachable_after_failures must be an integer between 1 and 1000")
         if not 1.0 <= float(self.model_queue_shutdown_timeout_seconds) <= 3_600.0:

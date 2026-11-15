@@ -1,7 +1,7 @@
 """「开始前有没有被提醒过」——归约封口时盖 ``reminded`` 的查法（方案第九节第 0 步）。
 
-一条记录这一类在它开始之前被提醒过 = 账本里有一条**说出口的**递送（话已经带给他了），它的预期认的类现在对应着这条记录的类
-（与结算同一个 ``current`` 映射：词表拆改之后两边认的是同一件事）、决定在这条记录开始之前、而且这条记录落在那条预期说中的
+一条记录这一类在它开始之前被提醒过 = 账本里有一条**说出口的**递送（话已经带给他了），它的预期认的类与这条记录的类编号相等
+（与结算同一个口径）、决定在这条记录开始之前、而且这条记录落在那条预期说中的
 范围里（形成之后、最晚时限之前）——判法在 ``foresight.delivery.reminded_before``，这里只读账。只看账本里还没结完的日子（``open_days``：说中的范围还没过完的预期都在那里）。
 端口由组合根注入归约 runner（``BehaviorReductionRunner.attach_reminder_lookup``），behavior 对 foresight 零知识。
 
@@ -13,7 +13,6 @@ reminded、按自然发生算——这是一份坏文件的代价，不让它停
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
 from datetime import date, datetime
 
 from habitus.foresight import ForesightError
@@ -23,11 +22,8 @@ from habitus.runtime.foresight_ledger import ForesightLedgerStore
 
 
 class RemindedLookup:
-    def __init__(
-        self, ledger: ForesightLedgerStore, *, current: Callable[[str], Sequence[str]] = lambda token: (token,)
-    ) -> None:
+    def __init__(self, ledger: ForesightLedgerStore) -> None:
         self.ledger = ledger
-        self.current = current
         #: 日子 → (递送目录的文件名, 那天说出口的 [(预期, 决定时刻)])。
         self._spoken: dict[date, tuple[frozenset[str], tuple[tuple[Expectation, datetime], ...]]] = {}
 
@@ -44,9 +40,7 @@ class RemindedLookup:
             if day > started_at.date():
                 continue
             for item, decided_at in self._spoken_on(day):
-                if reminded_before(
-                    item, decided_at, kind_token=kind_token, started_at=started_at, current=self.current
-                ):
+                if reminded_before(item, decided_at, kind_token=kind_token, started_at=started_at):
                     return True
         return False
 

@@ -1,5 +1,5 @@
 """换代（实时化方案第 3 节，阶段 1）：取代夜线的五段 Job。迁自 ``test_nightly.py`` / ``test_nightly_line.py`` 里仍须成立的不变式
-（先后、只读一次序列、词表迁移中不读、结算在语义树之前、重试 → 结算、本地日、同一棵树），加上换代自己的：触发要连续定稿到
+（先后、只读一次序列、结算在语义树之前、重试 → 结算、本地日、同一棵树），加上换代自己的：触发要连续定稿到
 昨天与预测拍水位过了余量、必须成 / 尽力而为、各个退路的计数、完成标记的三值。
 
 实时化阶段 2（A1）起换代里没有模型调用：探模型、词表的每晚新增与定期拆改、语义树里调模型的那几段归模型队列
@@ -15,7 +15,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from habitus.behavior.reduction import BehaviorReductionBusyError
 from habitus.behavior.retry import RetryReport
 from habitus.model_client import ModelUnreachable
 from habitus.runtime.foresight_days import DayReport
@@ -24,6 +23,7 @@ from habitus.runtime.foresight_nightly import LaneOpportunitySummary, Opportunit
 from habitus.runtime.generation import Generation
 from habitus.runtime.generation_marks import GenerationMark, GenerationMarkError, GenerationMarks
 from habitus.runtime.generation_result import (
+    ACTIVE,
     CALENDAR,
     DAYS,
     DEGRADED,
@@ -32,11 +32,8 @@ from habitus.runtime.generation_result import (
     FALLBACK_CALENDAR,
     FALLBACK_RELATIONS,
     FALLBACK_SETTLEMENT,
-    FALLBACK_UNMAPPED,
-    HELD,
+    FALLBACK_UNSTAMPED,
     MARK,
-    MIGRATE,
-    MIGRATING,
     NO_RECORDS,
     OPPORTUNITIES,
     RETRY,
@@ -44,10 +41,11 @@ from habitus.runtime.generation_result import (
     SERIES,
     SETTLE,
     SKIPPED,
-    VOCABULARY_MOVED,
     GenerationResult,
 )
+from habitus.runtime.generation_vocabulary import Counted
 from habitus.runtime.generation_watermark import TickWatermark
+from habitus.scene.concepts.catalog import ClassCatalog
 from tests.unit.runtime.test_scene_night import NOW, nightly, publish_tonight, site_with_three_bedtimes
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -60,11 +58,22 @@ def sealed_through(last):  # type: ignore[no-untyped-def]
     return lambda: tuple(last - timedelta(days=offset) for offset in range(30))
 
 
-def steady() -> tuple[int, bool]:
-    return (1, False)
+class StubVocabulary:
+    """"数在用的词"那一步的替身：在用的词就是语义树那份假词表口给的（这里不数，数法在 ``test_kinds_vocabulary``）。"""
+
+    def __init__(self, catalog: ClassCatalog) -> None:
+        self.catalog = catalog
+        self.counts = 0
+
+    def revision(self) -> int:
+        return self.catalog.current().version
+
+    def count(self, series, today):  # type: ignore[no-untyped-def]
+        self.counts += 1
+        return Counted(self.catalog.current(), 0, 0)
 
 
-def assembled(tmp_path, *, clock=lambda: NOW, closed_days=None, vocabulary=steady, **options):  # type: ignore[no-untyped-def]
+def assembled(tmp_path, *, clock=lambda: NOW, closed_days=None, vocabulary=None, **options):  # type: ignore[no-untyped-def]
     site, hits = site_with_three_bedtimes(tmp_path)
     scene, _provider = nightly(tmp_path, hits, site)
     return site, Generation(
@@ -72,7 +81,7 @@ def assembled(tmp_path, *, clock=lambda: NOW, closed_days=None, vocabulary=stead
         scene=scene,
         zone=SHANGHAI,
         closed_days=closed_days if closed_days is not None else sealed_through(TODAY - timedelta(days=1)),
-        vocabulary=vocabulary,
+        vocabulary=vocabulary if vocabulary is not None else StubVocabulary(scene.syncing.catalog),
         marks=GenerationMarks(tmp_path / "scene" / "generation", artifact_root=tmp_path),
         clock=clock,
         **options,
@@ -84,7 +93,7 @@ def assembled_with(tmp_path, site, scene, **options) -> Generation:  # type: ign
 
     values = dict(
         closed_days=sealed_through(TODAY - timedelta(days=1)),
-        vocabulary=steady,
+        vocabulary=StubVocabulary(scene.syncing.catalog),
         marks=GenerationMarks(tmp_path / "scene" / "generation", artifact_root=tmp_path),
         clock=lambda: NOW,
     )
@@ -154,9 +163,6 @@ def wired(tmp_path, order: list[str], *, retried=None, **options):  # type: igno
             order.append("日子")
             return DayReport(datetime.now().astimezone(), Formed())
 
-    async def migrate() -> None:
-        order.append("迁移")
-
     scene_run = run.scene.generate
 
     async def scene_then(**kwargs):  # type: ignore[no-untyped-def]
@@ -168,11 +174,10 @@ def wired(tmp_path, order: list[str], *, retried=None, **options):  # type: igno
     run.settlement = StubSettlement(order)  # type: ignore[assignment]
     run.foresight = Foresight()  # type: ignore[assignment]
     run.days = Days()  # type: ignore[assignment]
-    run.migration_jobs = (migrate,)
     return run
 
 
-#: A1：探模型、词表两步不在换代里了；修复轮 G1：没有没做完的词表迁移时，续做迁移那一步不调迁移（不去拿 sweep 锁）。
+#: A1：探模型、词表两步不在换代里了；词表方案 2026-11-14：续做迁移那一步没有了。
 ALL = ["重试", "结算", "语义树", "机会表", "日子"]
 
 
@@ -186,11 +191,11 @@ def test_a_generation_runs_its_steps_in_the_ruled_order_and_writes_its_mark(tmp_
     result = generate(run)
     assert order == ALL
     assert [item.step for item in result.steps] == [
-        MIGRATE,
         CALENDAR,
         RETRY,
         SETTLE,
         SERIES,
+        ACTIVE,
         SCENE,
         OPPORTUNITIES,
         DAYS,
@@ -218,8 +223,8 @@ def test_one_read_feeds_the_semantic_layer_and_is_done_off_the_event_loop(tmp_pa
     assert reads == [TODAY] and threads == [False]
     scene = result.step(SCENE)
     assert scene is not None and scene.outcome == DONE
-    # A1：换代不映射（映射归模型队列）——今晚封口的那天还没盖章，它的两条记录计入"换代时还没映射的记录"
-    assert "mapped_days" not in scene.report and result.fallbacks[FALLBACK_UNMAPPED] == 2
+    # 换代的封口直接生成命中记录、盖章：今晚封口的那天两条记录都有命中记录，没有"还没封好的记录"
+    assert "mapped_days" not in scene.report and result.fallbacks[FALLBACK_UNSTAMPED] == 0
 
 
 def test_nothing_to_build_on_an_empty_tree_still_writes_the_mark(tmp_path) -> None:
@@ -243,7 +248,7 @@ def test_the_scene_run_must_read_the_same_tree(tmp_path) -> None:
             scene=other.scene,
             zone=SHANGHAI,
             closed_days=tuple,
-            vocabulary=steady,
+            vocabulary=other.vocabulary,
             marks=other.marks,
         )
 
@@ -281,28 +286,6 @@ def test_a_generation_waits_until_the_tick_watermark_passes_the_margin(tmp_path)
     assert run.ready().day is None  # 空白刚写下：再等余量
     mark[0] = TickWatermark(ticked_at=midnight + timedelta(hours=2, minutes=15), unwatched_until=midnight + timedelta(hours=1, minutes=30))
     assert run.ready().day == TODAY
-
-
-def test_a_migration_left_half_done_means_no_generation_today(tmp_path) -> None:
-    """改树必须成：读序列时词表迁移做到一半、或读的时候词表变了，这一代不成（不写完成标记），下一眼从头。"""
-
-    site, run = assembled(tmp_path, vocabulary=lambda: (2, True))
-    publish_tonight(site)
-    result = generate(run)
-    assert result.failed == SERIES and result.reason == MIGRATING and not result.complete
-    assert run.marks.finished(TODAY) is None and SCENE not in outcomes(result)
-    version = [1]
-    site, run = assembled(tmp_path / "b", vocabulary=lambda: (version[0], False))
-    publish_tonight(site)
-    read = run.series.read
-
-    def moved(*, cutoff):  # type: ignore[no-untyped-def]
-        version[0] = 2  # 读的时候词表变了
-        return read(cutoff=cutoff)
-
-    run.series.read = moved  # type: ignore[method-assign]
-    result = generate(run)
-    assert result.failed == SERIES and result.reason == VOCABULARY_MOVED
 
 
 def test_the_calendar_is_refreshed_first_and_a_failing_refresh_is_a_fallback(tmp_path) -> None:
@@ -455,57 +438,6 @@ def test_completion_marks_answer_finished_in_three_values_and_refuse_a_corrupt_m
 
 
 # ── 第一轮修复（04-修复清单 F1、F2、F4）──────────────────────────────────
-
-
-def test_a_busy_lock_is_not_ready_and_writes_no_mark(tmp_path) -> None:
-    """F2（用户 11-10 失败重试第 1 条）：续做迁移碰到锁被另一进程拿着，是还没准备好——这一眼到此为止、不写完成标记、不算失败
-    （``held``），下一眼从头做。A1：重试收尾不跑归约、每晚新增不在换代里，换代里会碰锁的只剩续做迁移这一步。
-
-    修复轮 G1：只有真有没做完的迁移时才去拿 sweep 锁。没有时这一步直接算做完——模型队列的词表一项等模型时整段持着这把锁，
-    换代不为一个空操作等它，这一代照常写成。"""
-
-    async def locked(*_args) -> None:  # type: ignore[no-untyped-def]
-        raise BehaviorReductionBusyError("sweep lock held")
-
-    order: list[str] = []
-    run = wired(tmp_path, order, vocabulary=lambda: (1, True))
-    run.migration_jobs = (locked,)
-    result = generate(run)
-    assert result.held == MIGRATE and result.failed is None and not result.complete
-    assert outcomes(result)[MIGRATE] == HELD and MARK not in outcomes(result)
-    assert run.marks.finished(TODAY) is None and "机会表" not in order
-    assert result.fallbacks[FALLBACK_SETTLEMENT] == 0
-
-    order = []
-    run = wired(tmp_path / "idle", order)  # 没有没做完的迁移：sweep 锁被谁拿着都不影响
-    run.migration_jobs = (locked,)
-    result = generate(run)
-    assert result.complete and result.held is None and outcomes(result)[MIGRATE] == DONE and order == ALL
-
-
-def test_the_migration_is_resumed_first_and_a_migration_left_unfinished_defers_the_settlement_loudly(tmp_path) -> None:
-    """F1：续做没做完的词表迁移排在最前（重读放假数据与结算之前）；续完了照常结算。续不完（迁移还挂着）时结算
-    跳过，计入"结算留到下次"并报出（``degraded``），读序列那一步再挡下这一代——不再静默跳过。"""
-
-    order: list[str] = []
-    migrating = [True]
-    run = wired(tmp_path, order, vocabulary=lambda: (1, migrating[0]))
-
-    async def migrate() -> None:
-        order.append("迁移")
-        migrating[0] = False
-
-    run.migration_jobs = (migrate,)
-    result = generate(run)
-    assert order[:1] == ["迁移"] and "结算" in order and result.complete
-
-    order.clear()
-    run = wired(tmp_path / "stuck", order, vocabulary=lambda: (1, True))
-    result = generate(run)
-    settle = result.step(SETTLE)
-    assert settle is not None and settle.outcome == DEGRADED and settle.reason == MIGRATING
-    assert "结算" not in order and result.fallbacks[FALLBACK_SETTLEMENT] == 1
-    assert result.failed == SERIES  # 改树必须成：这一代不成
 
 
 def test_a_closed_today_without_yesterday_does_not_trigger(tmp_path) -> None:

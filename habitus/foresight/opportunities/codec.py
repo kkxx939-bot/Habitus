@@ -26,7 +26,7 @@ from habitus.temporal import DayInterval, OccurrenceDay
 #: v6（2026-10-18，S8）：日历关系带"见过的日型"、表上带"没见过的日型怎么办"。
 #: v7（26 号清单 3.3）：表上带每天看着的比例与日型（账的久别用）。表每晚整张重写，项目没上线，旧版不迁移。
 #: v8（裁定 61 第 6 条）：成立的带条件关系进表，每条关系带它挂的条件（文本 + 白天判它要的类编号 / 日历键）。
-OPPORTUNITY_SCHEMA = "habitus.foresight.opportunities/v8"
+OPPORTUNITY_SCHEMA = "habitus.foresight.opportunities/v9"
 
 
 def encode_table(table: OpportunityTable) -> str:
@@ -53,13 +53,21 @@ def encode_table(table: OpportunityTable) -> str:
         raise ForesightError(f"opportunity table cannot be serialised: {exc}") from exc
 
 
+class OpportunitySchemaError(ForesightError, ValueError):
+    """机会表的格式版本不是这一版（旧盘面上的表）。"""
+
+
 def decode_table(text: str, *, lane: str | None = None, night: date | None = None) -> OpportunityTable:
     """读回；给了 ``lane`` / ``night`` 就核对它与文件名一致。"""
 
+    payload = _parse(text)
+    if payload.get("schema") != OPPORTUNITY_SCHEMA:
+        # 旧版本的表（语义树还有模型写的概念时算的）不支持：明确报错、点出是哪一张，不迁移
+        raise OpportunitySchemaError(
+            f"opportunity table {lane or payload.get('lane')!s} {night or payload.get('night')!s} has schema "
+            f"{payload.get('schema')!r}, this build reads {OPPORTUNITY_SCHEMA!r}"
+        )
     try:
-        payload = _parse(text)
-        if payload["schema"] != OPPORTUNITY_SCHEMA:
-            raise ForesightError(f"unknown opportunity table schema: {payload['schema']!r}")
         table = OpportunityTable(
             lane=str(payload["lane"]),
             night=_date(payload["night"]),
@@ -280,4 +288,4 @@ def _flag(raw: object) -> bool:
     return raw
 
 
-__all__ = ["OPPORTUNITY_SCHEMA", "decode_table", "encode_table"]
+__all__ = ["OPPORTUNITY_SCHEMA", "OpportunitySchemaError", "decode_table", "encode_table"]

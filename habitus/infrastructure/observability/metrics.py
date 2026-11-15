@@ -126,13 +126,8 @@ _BEHAVIOR_COUNTERS: tuple[tuple[str, str, str], ...] = (
     ("physical_delivery", "units_unusable_name", "behavior_physical_unusable_names_total"),
     ("reduction_publish", "occurrences", "behavior_occurrences_published_total"),
     ("reduction_publish", "gaps", "behavior_gaps_published_total"),
-    ("kind_classify", "classified", "behavior_kind_classified_total"),
-    ("kind_classify", "pending", "behavior_kind_pending_total"),
-    ("kind_classify", "not_events", "behavior_kind_not_events_total"),
-    ("kind_classify", "model_calls", "behavior_kind_model_calls_total"),
-    ("reduction_vocabulary", "model_calls", "behavior_kind_model_calls_total"),
-    ("reduction_vocabulary", "changed_days", "behavior_kind_changed_days_total"),
-    ("reduction_publish", "kind_pending", "behavior_kind_pending_admitted_total"),
+    ("kind_pick", "not_events", "behavior_kind_not_events_total"),
+    ("kind_pick", "model_calls", "behavior_kind_model_calls_total"),
     ("semantic_refresh", "failed_days", "behavior_semantic_refresh_failures_total"),
 )
 # 行为管线的时效：小时级的等待放不进操作时长直方图的桶，按最近一次的值记 gauge。
@@ -245,6 +240,14 @@ def _generation_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, .
         gaps = _non_negative_number(attributes.get("unreduced_gaps"))
         if gaps is not None:
             updates.append(MetricUpdate("generation_unreduced_gaps", "gauge", gaps))
+        # 在用的词数、够条件却因满额等着的词数（词表方案 2026-11-14）；这一代没数是 -1，不记
+        for attribute, metric in (
+            ("active_words", "generation_active_words"),
+            ("waiting_words", "generation_waiting_words"),
+        ):
+            value = _non_negative_number(attributes.get(attribute))
+            if value is not None:
+                updates.append(MetricUpdate(metric, "gauge", value))
         return tuple(updates)
     if operation == ("generation", "fallback"):
         count = _non_negative_number(attributes.get("count")) or 0.0

@@ -32,13 +32,11 @@ from habitus.scene.relations import (
 from habitus.scene.relations.config import RelationConfigError
 from habitus.scene.relations.document import RelationRecordError, decode_night, encode_night
 from habitus.scene.relations.retirement import Watching, absence, visits
-from habitus.scene.relations.state import revert_touched
 from habitus.scene.relations.store import RelationStore
 from habitus.series import EventSeries
 from habitus.temporal.absence import Visit
 from habitus.temporal.coverage import Coverage
 from tests.unit.scene import retirement_fixtures as fx
-from tests.unit.scene.concept_fixtures import base, situation
 from tests.unit.temporal.fixtures import at, record, series
 
 C = fx.chain_key()
@@ -87,37 +85,6 @@ def once_per_key(transitions: tuple[Transition, ...]) -> None:
 
     repeated = [key for key, count in Counter(item.key for item in transitions).items() if count > 1]
     assert repeated == []
-
-
-# ── 被 revert_touched 打回的行：这一代不判，下一代判 ───────────────────────────
-
-
-@pytest.mark.parametrize("stored", ["candidate", "established"])
-def test_a_row_sent_back_by_the_vocabulary_is_not_retired_in_the_same_generation(stored: str) -> None:
-    through = 28  # 前因第 0–20 天来、之后 8 天没来：按 3.5 是退休的那一侧
-    relation = fx.candidate(C, discovered=18) if stored == "candidate" else fx.established(C, on=18)
-    previous = fx.previous_state(through - 1, relation)
-    cutoff = fx.day(through + 1)
-    sent_back, reverted = revert_touched(previous, frozenset({fx.CAUSE}), cutoff)
-    assert [(item.key, item.after) for item in reverted] == [(C, Status.CANDIDATE)]
-
-    state, transitions, events = fold_at(
-        sent_back, cause_days=range(21), effect_days=range(through + 1), through=through
-    )
-    assert events.cutoff == cutoff
-    kept = row(state, C)
-    assert kept is not None and kept.status is Status.CANDIDATE and kept.retired_on is None
-    assert [item for item in transitions if item.key == C] == []
-    once_per_key((*reverted, *transitions))
-
-    # 下一代：前因仍没来（空白 9 天），这一回退
-    later, again, later_events = fold_at(
-        state, cause_days=range(21), effect_days=range(through + 2), through=through + 1
-    )
-    retired = row(later, C)
-    assert retired == Relation(key=C, status=Status.RETIRED, upward=True, retired_on=later_events.cutoff)
-    assert [(item.before, item.after) for item in again if item.key == C] == [(Status.CANDIDATE, Status.RETIRED)]
-    once_per_key(again)
 
 
 def test_a_carried_row_retiring_moves_once_per_generation() -> None:
@@ -231,23 +198,15 @@ def test_a_retired_row_goes_when_the_condition_it_depends_on_is_gone() -> None:
     assert all(item.key != conditioned for item in transitions)
 
 
-def test_a_retired_row_is_not_sent_back_by_the_vocabulary() -> None:
-    retired = Relation(key=C, status=Status.RETIRED, upward=True, retired_on=fx.day(20))
-    previous = fx.previous_state(27, retired)
-    after, moved = revert_touched(previous, frozenset({fx.CAUSE, fx.EFFECT}), fx.day(29))
-    assert after == previous and moved == ()
-
-
-def test_rewriting_a_generation_with_a_sent_back_row_keeps_the_log_single(tmp_path: Path) -> None:
-    """同一代重做（含打回 + 别的行退休）：状态文件相同、迁移日志不重复追加。"""
+def test_rewriting_a_generation_keeps_the_log_single(tmp_path: Path) -> None:
+    """同一代重做（两行退休）：状态文件相同、迁移日志不重复追加。"""
 
     other = fx.chain_key(fx.EFFECT, fx.CAUSE)
 
     def generation() -> tuple[LaneState, tuple[Transition, ...]]:
         previous = fx.previous_state(27, fx.candidate(C, discovered=18), fx.candidate(other, discovered=18))
-        sent_back, reverted = revert_touched(previous, frozenset({"不相干"}), fx.day(29))
-        state, transitions, _ = fold_at(sent_back, cause_days=range(21), effect_days=range(29), through=28)
-        return state, (*reverted, *transitions)
+        state, transitions, _ = fold_at(previous, cause_days=range(21), effect_days=range(29), through=28)
+        return state, transitions
 
     state, transitions = generation()
     assert {item.key for item in transitions if item.after is Status.RETIRED} == {C, other}
@@ -274,22 +233,6 @@ def test_a_calendar_antecedent_retires_on_its_consequent() -> None:
     assert row(state, relation) == Relation(key=relation, status=Status.RETIRED, upward=True, retired_on=events.cutoff)
     (moved,) = [item for item in transitions if item.key == relation]
     assert "后果" in moved.reason
-
-
-def test_a_non_calendar_situation_antecedent_retires_when_it_stops_holding() -> None:
-    """非日历情境当前因：第 0–20 天成立、之后 8 天不成立（人在场，后果天天来）→ 前因久没来，退。"""
-
-    name = "出差中"
-    concept_set = ConceptSet((base(fx.CAUSE_TITLE), base(fx.EFFECT_TITLE), situation(name, "人在常住地之外过夜")))
-    events, line, concepts = fx.build(cause_days=range(29), effect_days=range(29), through=28, concept_set=concept_set)
-    line.situations[name] = {fx.day(index): index <= 20 for index in range(29)}
-    relation = RelationKey(fx.LANE, name, fx.EFFECT, Segment.SITUATION)
-    tests = LaneTests(line, concepts, config(), events.cutoff)
-    previous = fx.previous_state(27, fx.candidate(relation, discovered=24))
-    state, transitions = fold(previous, tests, watching=Watching(fx.coverage(0, 28), fx.every_day, events.last_day))
-    assert row(state, relation) == Relation(key=relation, status=Status.RETIRED, upward=True, retired_on=events.cutoff)
-    (moved,) = [item for item in transitions if item.key == relation]
-    assert "前因" in moved.reason
 
 
 # ── 退化输入 ─────────────────────────────────────────────────────────────────

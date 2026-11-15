@@ -7,25 +7,20 @@
  类          欠着的判据（全部现读盘）                      一项是什么
 ==========  ==========================================  ====================================================
  retry       重试堆里属于还没封口的日子、能重试的项        就近试一遍（``RetryStage.run_once``；会话轮、链各归各的处理器）
- vocabulary  这一晚的每晚新增 / 定期拆改还没做            一支一项（``nightly_vocabulary``：长新类 → 到期的拆改 → 迁移，
-             （``VocabularyJobs.due``）                    一次持 sweep 锁做完）
- unsealed    今天这一代还没做、有没归过类的未封口判断      白天归类一次（换代里的日子预期只读它的缓存）
- sync        同步词表的计划不空、或同步到的版本没记        同步词表 + 迁移牵到的重映射（``SyncStage.run``）
- concepts    有 lane 类清单指纹变了、或这一周还没写过      写概念（``SceneNightlyRun.author``）
- mapping     有记录没有命中记录、口径不是现在的、或输入变了  一条记录一项（``MappingStage.map_one``；情境留空，换代封口时算）
+ unsealed    今天这一代还没做、有没选过词的未封口判断      选词一次（换代里的日子预期只读它的缓存；会话 lane 的判断
+             （判断上没带选词结果的，即物理 lane）          都带着选词结果，不欠）
  advice      有 lane 要问候选条件、缺先验、提议簿要整理    一条 lane 一项（``RelationStage.ask``）
+ sync        同步到的版本没记、又没有要写的概念            记下同步到的版本（``SyncStage.run``；不调模型）
 ==========  ==========================================  ====================================================
 
-retry 与 mapping 之外都是**已封口的日子**的活：只在"换代的触发条件里除今天的完成标记之外都满足"时才算欠着（``sealed_day``：
-早于这一刻读序列，「未观测」的空白可能还没落树）。mapping 按条、不等封口（实时化阶段 2「映射按槽」）：一条记录最后所见所在的
-槽过后再留 ``scene.mapping_margin_slots`` 槽（按预测拍水位算，没接预测层按时钟）、它那一天的那一代做完了，就可以映射；先后是
-还没封口的日子里的新记录 → 口径或输入变了要重判的 → 历史回填（最新的先），没有一晚的预算。日完成章不在这里盖：换代的
-语义树一步封口时统一重算情境、核条数、盖章；补问候选条件与先验排在今天这一代完成之后（实时化阶段 2「生效时点」），那时昨天已经封口，时间线读盘上盖了章的命中。完成标记有没有不影响映射的欠账——换代不等队列，换代先做完、队列后做是允许的；只有 unsealed
-是专为今天这一代的日子预期备的，这一代做完之后归预测拍自己归类。
+retry 之外都是**已封口的日子**的活：只在"换代的触发条件里除今天的完成标记之外都满足"时才算欠着（``sealed_day``：
+早于这一刻读序列，「未观测」的空白可能还没落树）。命中记录不在这里建：换代的语义树一步封口时由代码直接生成、核条数、
+盖章；补问候选条件与先验排在今天这一代完成之后（实时化阶段 2「生效时点」），那时昨天已经封口，时间线读盘上盖了章的命中。
+换代不等队列，换代先做完、队列后做是允许的；只有 unsealed 是专为今天这一代的日子预期备的，这一代做完之后归预测拍自己选。
 
 **一项没做成**分两种。
 
-*不是模型失败的*（代码抛了、做完之后判据还说欠着——模型答了但不合格）：按重试账退避（``RetryLedger``；映射用它自己那一本），
+*不是模型失败的*（代码抛了、做完之后判据还说欠着——模型答了但不合格）：按重试账退避（``RetryLedger``），
 队列接着做下一项——账的键带着这一晚，下一晚重新给机会。锁被另一进程拿着是还没准备好：这一类这一轮到此为止，不算失败。
 认欠账时读盘抛了：这一类这一轮记失败、后面的类照做，这一趟做完再抛出来。
 
@@ -40,7 +35,7 @@ retry 与 mapping 之外都是**已封口的日子**的活：只在"换代的触
 
 同一进程的换代在那一刻问"队列是不是在整体退避"（``ModelQueueState.down``），是就不判关系、沿用上一代（裁定 96）。
 
-**与换代不抢盘**（阶段 2 第二小步）：写语义树的那几类活（sync、concepts、mapping、advice）每一项在语义树写锁之内做，调模型
+**与换代不抢盘**（阶段 2 第二小步）：写语义树的那几类活（sync、advice）每一项在语义树写锁之内做，调模型
 的那几段先放开锁（``runtime.scene_lock``）；同一进程的换代在做时（``ModelQueueState.generating``），两项之间先不取下一项，等它
 做完。队列租约包着整趟，换代不拿它。
 
@@ -57,7 +52,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
 from datetime import UTC, date, datetime, timedelta
 
@@ -72,22 +67,18 @@ from habitus.runtime.generation_marks import GenerationMarks
 from habitus.runtime.generation_result import LOCK_BUSY, MODEL_UNREACHABLE, UNREACHABLE_ERRORS
 from habitus.runtime.generation_summary import flatten, reason_code
 from habitus.runtime.generation_trace import TraceFiles
-from habitus.runtime.generation_watermark import TickWatermark
 from habitus.runtime.model_queue_journal import QueueJournal, QueueRecorder
 from habitus.runtime.model_queue_state import (
     ADVICE,
     CATEGORIES,
-    CONCEPTS,
     DONE,
     FAILED,
     ITEM_SPAN,
-    MAPPING,
     RETRY,
     SYNC,
     UNFINISHED,
     UNREACHABLE,
     UNSEALED,
-    VOCABULARY,
     WAITING,
     DrainReport,
     Item,
@@ -96,7 +87,6 @@ from habitus.runtime.model_queue_state import (
     ModelQueueState,
     QueueSettings,
     Round,
-    VocabularyBranch,
 )
 from habitus.runtime.model_queue_work import DayWork, SceneWork, owed
 from habitus.runtime.scene_lock import SceneWriteLock
@@ -111,9 +101,9 @@ _MAX_ROUNDS = 64
 #: 换代在做时队列隔多久看一眼它做完没有（进程内的一个标志，不读盘）。
 _GENERATING_POLL_SECONDS = 0.2
 #: 写语义树的那几类活：一项在语义树写锁之内做。
-_SCENE_CATEGORIES = frozenset({SYNC, CONCEPTS, MAPPING, ADVICE})
-#: 不等日子封口就能做的类：出错重试、映射（按条，所在的槽过后留够余量就做）。
-_UNSEALED_CATEGORIES = frozenset({RETRY, MAPPING})
+_SCENE_CATEGORIES = frozenset({SYNC, ADVICE})
+#: 不等日子封口就能做的类：出错重试。
+_UNSEALED_CATEGORIES = frozenset({RETRY})
 
 
 class ModelQueue:
@@ -124,28 +114,26 @@ class ModelQueue:
         series: SeriesReader,
         today: Callable[[], date],
         sealed_day: Callable[[], date | None],
-        vocabulary: Callable[[], tuple[int, bool]],
+        vocabulary: Callable[[], int],
         retries: RetryLedger,
         lease: Lease,
         state: ModelQueueState | None = None,
         scene_lock: SceneWriteLock | None = None,
         marks: GenerationMarks | None = None,
         retry: RetryStage | None = None,
-        vocabulary_branches: Sequence[VocabularyBranch] = (),
         unsealed: UnsealedFromJudgements | None = None,
         settings: QueueSettings | None = None,
         traces: TraceFiles | None = None,
         journal: QueueJournal | None = None,
         observer: Observer | None = None,
         clock: Callable[[], datetime] | None = None,
-        watermark: Callable[[], TickWatermark] | None = None,
     ) -> None:
         if series.tree is not scene.behavior_tree:
             raise ValueError("the model queue must read the scene's behaviour tree")
         self.scene = scene
         self.today = today
         self.sealed_day = sealed_day
-        #: 队列的重试账：一项没做成按它退避（映射另用语义树那一本，键带映射口径）。
+        #: 队列的重试账：一项没做成按它退避。
         self.retries = retries
         #: 队列租约（语义树根派生）：两个进程挂同一个根时同一时刻只有一个在做。
         self.lease = lease
@@ -169,14 +157,10 @@ class ModelQueue:
             state=self.state,
             clock=self.clock,
             retry=retry,
-            vocabulary_branches=vocabulary_branches,
             unsealed=unsealed,
             marks=marks,
         )
-        self.sealed = SceneWork(
-            state=self.state, scene=scene, reader=series, vocabulary=vocabulary,
-            settings=self.settings, marks=marks, watermark=watermark,
-        )  # fmt: skip
+        self.sealed = SceneWork(state=self.state, scene=scene, reader=series, vocabulary=vocabulary, marks=marks)
 
     # ── 做到没有欠账 ─────────────────────────────────────────────────────────
 
@@ -216,7 +200,6 @@ class ModelQueue:
             return False  # 整体退避期内不逐项试；到点就接着做
         today = await asyncio.to_thread(self.today)
         current = Round(now=now, today=today, night=await asyncio.to_thread(self.sealed_day))
-        state.blocked = None
         progressed = False
         for category in CATEGORIES:
             if category not in _UNSEALED_CATEGORIES and current.night is None:
@@ -369,17 +352,14 @@ class ModelQueue:
 __all__ = [
     "ADVICE",
     "CATEGORIES",
-    "CONCEPTS",
     "DONE",
     "FAILED",
     "ITEM_SPAN",
-    "MAPPING",
     "RETRY",
     "SYNC",
     "UNFINISHED",
     "UNREACHABLE",
     "UNSEALED",
-    "VOCABULARY",
     "WAITING",
     "DrainReport",
     "ItemResult",
@@ -388,5 +368,4 @@ __all__ = [
     "ModelQueueState",
     "QueueJournal",
     "QueueSettings",
-    "VocabularyBranch",
 ]

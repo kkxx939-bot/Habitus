@@ -42,6 +42,8 @@ class RuntimeLifecycle:
             # 静默跳过反而会让 RUNNING 状态掩盖一个坏掉的存储根。
             for branch in self.components.behavior:
                 branch.tree.initialize()
+                # 旧词表（变更日志、待定池、迁移计划……）不迁移、不兼容：盘上还有就在启动时报错、点出文件（词表方案 2026-11-14）
+                branch.kind_store.check()
         oldest_job = self.components.workflow.jobs.oldest_uncommitted()
         recovered = self.components.workflow.runner.transaction_recovery.recover_pending() if oldest_job is None else ()
         return memory_root, recovered

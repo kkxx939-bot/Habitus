@@ -9,20 +9,20 @@
 - 预测拍水位过了 max(昨天日终, 最后一段「未观测」的结尾) 再 ``margin`` 那么久（用户 11-10「按槽留余量」）：没在看的空白先写成
   判断、再给归约留几槽把它落树，结算与读序列才看得到它（必须边"没在看的空白写进树 → 读那天的记录、结算"）。
 
-**换代里没有模型调用**（实时化阶段 2）：出错重试、词表的每晚新增与定期拆改、迁移牵到的重映射、写概念、映射、候选条件
-与先验的补问都归模型队列（``runtime.model_queue``），模型多慢、调不通都不影响这里写出今天这一代。换代不等队列：队列没做完的
-按"不知道"算（没映射完的日子关系检验读不到、缺的先验权重按 1），下一代补上。
+**换代里没有模型调用**（实时化阶段 2）：出错重试、候选条件与先验的补问都归模型队列
+（``runtime.model_queue``），模型多慢、调不通都不影响这里写出今天这一代。换代不等队列：队列没做完的按"不知道"算（缺的先验
+权重按 1），下一代补上。
 
 **先后**（各步一个子 span ``generation.<步>``，挂在 ``generation.run`` 下；每步记它读到的输入是哪一代）：
 
 =====  ==================================================  ==========  ==================================================
  #      步                                                  必须成      没做成时
 =====  ==================================================  ==========  ==================================================
- 1      待生效的拆改交给迁移器、续做没做完的词表迁移        迁移是      没做完由结算（跳过）与读序列（这一代不成）各自挡下
- 2      重读放假数据                                        否          照用上一次读到的日历
- 3      重试收尾（through = 昨天；只丢弃、撤回，不试）      否          这一代跳过结算（守住"重试 → 结算"），下一代补结
- 4      结算                                                否          下一代补结（幂等）
- 5      读序列（前后各看一次词表状态）                      是          这一代不成，下一眼从头
+ 1      重读放假数据                                        否          照用上一次读到的日历
+ 2      重试收尾（through = 昨天；只丢弃、撤回，不试）      否          这一代跳过结算（守住"重试 → 结算"），下一代补结
+ 3      结算                                                否          下一代补结（幂等）
+ 4      读序列                                              是          这一代不成，下一眼从头
+ 5      数在用的词（纯计数、落盘，词表方案 2026-11-14）     否          语义树按盘上已有的在用状态
  6      语义树（整步持语义树写锁）：同步词表（概念落盘）→    否          关系判定没做成、或换代那一刻模型队列在整体退避 →
         按缓存判关系 → 关系表 → 补日历取值                              这一代不写关系表，机会表退到上一代
  7      机会表（含各类的日历）                              是          今天没有这一代
@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager, nullcontext
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as clock_time
@@ -64,6 +64,7 @@ from habitus.runtime.foresight_nightly import ForesightNightlyRun
 from habitus.runtime.foresight_settlement import SettlementStage
 from habitus.runtime.generation_marks import GenerationMarkError, GenerationMarks
 from habitus.runtime.generation_result import (
+    ACTIVE,
     ALREADY_DONE,
     CALENDAR,
     DAYS,
@@ -73,7 +74,6 @@ from habitus.runtime.generation_result import (
     HELD,
     LABELS,
     MARK,
-    MIGRATE,
     MODEL_UNREACHABLE,
     MUST,
     OPPORTUNITIES,
@@ -95,6 +95,7 @@ from habitus.runtime.generation_result import (
 )
 from habitus.runtime.generation_summary import flatten, reason_code
 from habitus.runtime.generation_trace import GENERATION_SPAN, STEP_SPAN_PREFIX
+from habitus.runtime.generation_vocabulary import Counted, VocabularyCounter
 from habitus.runtime.generation_watermark import TickWatermark
 from habitus.runtime.scene_lock import SceneWriteLock
 from habitus.runtime.scene_night import NightReport, SceneNightlyRun
@@ -110,7 +111,7 @@ class Generation:
         scene: SceneNightlyRun,
         zone: ZoneInfo,
         closed_days: Callable[[], Iterable[date]],
-        vocabulary: Callable[[], tuple[int, bool]],
+        vocabulary: VocabularyCounter,
         marks: GenerationMarks,
         clock: Callable[[], datetime] | None = None,
         foresight: ForesightNightlyRun | None = None,
@@ -119,14 +120,12 @@ class Generation:
         series: SeriesReader | None = None,
         retry: RetryStage | None = None,
         days: DayExpectationStage | None = None,
-        migration_jobs: Sequence[Callable[[], Awaitable[object]]] = (),
         models_down: Callable[[], bool] | None = None,
         queue_owed: Callable[[], Mapping[str, int]] | None = None,
         watermark: Callable[[], TickWatermark] | None = None,
         margin: timedelta = timedelta(0),
         scene_lock: SceneWriteLock | None = None,
         generating: Callable[[bool], None] | None = None,
-        revisions: Callable[[], int] | None = None,
         closed_at: Callable[[date], datetime | None] | None = None,
         unreduced_gaps: Callable[[date], int] | None = None,
     ) -> None:
@@ -144,21 +143,19 @@ class Generation:
         self.scene = scene
         self.zone = zone
         self.closed_days = closed_days
-        self.vocabulary = vocabulary  # 词表此刻的（版本, 有没有未完成的迁移）
+        self.vocabulary = vocabulary  # 数在用的词、读在用状态（会话一支）
         self.marks = marks
         self.retry = retry
         self.foresight = foresight
         self.settlement = settlement
         self.days = days
         self.refresh_calendar = refresh_calendar
-        self.migration_jobs = tuple(migration_jobs)  # 各支续做没做完的词表迁移：排在最前（``steps.migrate_step``）
         #: 同一进程的模型队列：此刻是不是在整体退避（是就这一代不判关系、沿用上一代，裁定 96）、各类此刻还欠着几项。没接是 None。
         self.models_down, self.queue_owed = models_down, queue_owed
         #: 预测拍的水位（没接预测层就没有：触发不看它）与要过的余量。
         self.watermark, self.margin = watermark, margin
-        #: 语义树写锁（语义树一步整步持有）、换代开始 / 做完时立撤的标志（模型队列看它）、各支待生效的拆改有几份（续做迁移
-        #: 那一步先把它们交给迁移器）；没接都是 None。
-        self.scene_lock, self.generating, self.revisions = scene_lock, generating, revisions
+        #: 语义树写锁（语义树一步整步持有）、换代开始 / 做完时立撤的标志（模型队列看它）；没接都是 None。
+        self.scene_lock, self.generating = scene_lock, generating
         #: 某一天什么时候定的稿（归约的定稿日账：量"从昨天定稿到今天这一代写出"）；截止日之前还没归约的空判断条数。
         self.closed_at, self.unreduced_gaps = closed_at, unreduced_gaps
         self.clock: Callable[[], datetime] = clock if clock is not None else lambda: datetime.now(UTC)
@@ -242,7 +239,6 @@ class Generation:
     async def _run(self, result: GenerationResult) -> None:
         day = result.day
         deferred: list[str] = []
-        await self._step(result, MIGRATE, lambda report: steps.migrate_step(self, report))
         await self._step(result, CALENDAR, lambda report: steps.calendar_step(self, report, result))
         await self._step(result, RETRY, lambda report: steps.retry_step(self, report, day, deferred, result))
         await self._step(result, SETTLE, lambda report: steps.settle_step(self, report, deferred, result))
@@ -250,8 +246,10 @@ class Generation:
         await self._step(result, SERIES, lambda report: steps.series_step(self, report, day, result, holder))
         series = holder[0]
         if result.nothing is None:
+            words: list[Counted] = []
+            await self._step(result, ACTIVE, lambda report: steps.active_step(self, report, series, day, result, words))
             scene: list[NightReport] = []
-            await self._step(result, SCENE, lambda report: steps.scene_step(self, report, series, result, scene))
+            await self._step(result, SCENE, lambda report: steps.scene_step(self, report, series, words, result, scene))
             await self._step(
                 result, OPPORTUNITIES, lambda report: steps.opportunities_step(self, report, series, scene, result)
             )

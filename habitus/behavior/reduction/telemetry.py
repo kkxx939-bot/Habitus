@@ -61,22 +61,16 @@ def seal_attributes(
 
 def kind_attributes(
     *,
-    requests: int,
-    classified: int,
-    pending: int,
+    chains: int,
     not_events: int,
     model_calls: int,
     signals: Iterable[str],
 ) -> Attributes:
-    """白天归类：多少条链交去归类、归进在用类 / 进待定 / 判为非事件各多少；信号按首词计。
-
-    ``model_calls`` 含结构不对之后的重问。
-    """
+    """落 ``kind_token``：多少条链、在归约里选词调了几次模型（判断上没带结果的，一条一次）、判为「非事件」的多少；
+    信号按首词计。"""
 
     attributes: Attributes = {
-        "chains": requests,
-        "classified": classified,
-        "pending": pending,
+        "chains": chains,
         "not_events": not_events,
         "model_calls": model_calls,
     }
@@ -118,9 +112,7 @@ def stage_attributes(
     return attributes
 
 
-def publish_attributes(
-    documents: Sequence[Mapping[str, Any]], *, published_at: datetime, kind_pending: int
-) -> Attributes:
+def publish_attributes(documents: Sequence[Mapping[str, Any]], *, published_at: datetime) -> Attributes:
     """落盘：文档数与上树时效。
 
     ``end_to_publish`` 从行为最后一次被看到算起，``onset_to_publish`` 从系统第一次能知道它开始了
@@ -133,7 +125,6 @@ def publish_attributes(
         "occurrences": kinds.get(BehaviorKind.OCCURRENCE.value, 0),
         "gaps": kinds.get(BehaviorKind.GAP.value, 0),
         "gaps_by_reference": kinds.get(_LEDGER_ONLY, 0),
-        "kind_pending": kind_pending,
     }
     occurrences = [item["payload"] for item in documents if item.get("kind") == BehaviorKind.OCCURRENCE.value]
     if occurrences:

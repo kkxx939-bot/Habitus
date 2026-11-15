@@ -218,14 +218,6 @@ def test_the_whole_generation_runs_inside_the_slots_ledger_lease_and_only_the_sc
 
     run.scene.generate = scene_probe  # type: ignore[method-assign]
 
-    migrating = [True]  # 修复轮 G1：有没做完的迁移时才调续做迁移
-
-    async def migrate_probe() -> None:
-        seen["迁移"] = await asyncio.to_thread(both)
-        migrating[0] = False
-
-    run.vocabulary = lambda: (1, migrating[0])
-    run.migration_jobs = (migrate_probe,)
     tick, _ledger = _tick(tmp_path, lease(locks(tmp_path)))
     results = []
 
@@ -235,7 +227,6 @@ def test_the_whole_generation_runs_inside_the_slots_ledger_lease_and_only_the_sc
     report = asyncio.run(tick.run_once(before=generation))
     assert results[0].complete and report.skipped is None  # 换代做完、同一次持有之内这一拍也做了
     assert seen == {
-        "迁移": (True, False),
         "结算": (True, False),
         "语义树": (True, True),
         "机会表": (True, False),

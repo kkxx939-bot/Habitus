@@ -231,16 +231,13 @@ def hand_over(
     return tuple(found), subsumed
 
 
-def done_since(
-    item: Expectation, seen: Iterable[Seen], *, now: datetime, current: Callable[[str], Sequence[str]]
-) -> bool:
+def done_since(item: Expectation, seen: Iterable[Seen], *, now: datetime) -> bool:
     """递送判"这件事这回已经做了"（做了就不递：那句话说的事他刚做完）：这一拍读到的行（已封口的与还没封口、现场归上类的）里，
     有到此刻为止开始、按结算同一个口径算做了的（``ledger.settle.counts_as_done``：说中的范围里——起算之后、最晚时限之前——
-    这一类按 ``current`` 认、没放弃）。过了最晚时限才做的不算这一回做了：结算也不认它（结成过期待决）。"""
+    这一类按编号相等认、没放弃）。过了最晚时限才做的不算这一回做了：结算也不认它（结成过期待决）。"""
 
     return any(
-        row.started_at <= now
-        and counts_as_done(item, row.kind_token, row.started_at, abandoned=row.abandoned, current=current)
+        row.started_at <= now and counts_as_done(item, row.kind_token, row.started_at, abandoned=row.abandoned)
         for row in seen
     )
 
@@ -251,13 +248,12 @@ def reminded_before(
     *,
     kind_token: str,
     started_at: datetime,
-    current: Callable[[str], Sequence[str]],
 ) -> bool:
     """一条 ``started_at`` 开始、类为 ``kind_token`` 的记录，是不是被这条说出口的预期（``decided_at`` 决定说的）提醒过：决定在它
-    开始之前、它落在那条预期说中的范围里（起算之后、最晚时限之前），而且那条预期认的类现在对应着它的类（``current`` 与结算同一个
-    映射：词表拆改之后两边认的是同一件事）。"""
+    开始之前、它落在那条预期说中的范围里（起算之后、最晚时限之前），而且编号相等（与结算同一个
+    口径）。"""
 
-    return decided_at < started_at and item.covers(started_at) and kind_token in current(item.kind_token)
+    return decided_at < started_at and item.covers(started_at) and kind_token == item.kind_token
 
 
 __all__ = [

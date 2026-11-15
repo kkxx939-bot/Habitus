@@ -147,21 +147,21 @@ def test_a_failed_must_step_is_retried_the_same_day_with_a_bounded_backoff_and_a
 
 
 def test_a_held_generation_does_not_back_off(tmp_path) -> None:
-    from habitus.behavior.reduction import BehaviorReductionBusyError
+    from habitus.runtime.generation_lease import LeaseBusyError
 
     order: list[str] = []
-    migrating = [True]  # 修复轮 G1：有没做完的迁移时才去拿 sweep 锁
-    run = wired(tmp_path, order, vocabulary=lambda: (1, migrating[0]))
+    run = wired(tmp_path, order)
     busy = [True]
+    scene = run.scene.generate
 
-    async def migrate() -> None:  # A1：换代里会碰 sweep 锁的只剩续做迁移（每晚新增归模型队列）
+    async def generate(**kwargs):  # type: ignore[no-untyped-def]  # 语义树写锁被另一进程拿着：还没准备好
         if busy[0]:
-            raise BehaviorReductionBusyError("sweep lock held")
-        migrating[0] = False
+            raise LeaseBusyError("scene write lock held")
+        return await scene(**kwargs)
 
-    run.migration_jobs = (migrate,)
+    run.scene.generate = generate  # type: ignore[method-assign]
     worker = worker_for(run, tmp_path)
     held = asyncio.run(worker.look())
-    assert held is not None and held.held == "migrate" and worker.retry_at is None and worker.last_error is None
+    assert held is not None and held.held == "scene" and worker.retry_at is None and worker.last_error is None
     busy[0] = False
     assert asyncio.run(worker.look()) is not None and run.marks.finished(TODAY) is True  # 下一眼从头做、写成

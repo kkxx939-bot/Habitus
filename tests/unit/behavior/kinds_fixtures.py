@@ -1,4 +1,4 @@
-"""词表测试的共用现场：脚本化模型、两个最小行为类、一条请求。"""
+"""词表测试的共用现场：脚本化模型、按名字作答的选词替身、归约侧的选词一步（词表方案 2026-11-14）。"""
 
 from __future__ import annotations
 
@@ -8,10 +8,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from habitus.behavior.kinds.calls import KindModelCaller
-from habitus.behavior.kinds.classify import ClassifyRequest, OccurrenceContent
 from habitus.behavior.kinds.config import BehaviorKindConfig
 from habitus.behavior.kinds.ids import ClassId, Lane
-from habitus.behavior.kinds.model import BehaviorClass, ClassOrigin, Exclusion
+from habitus.behavior.kinds.model import Vocabulary, Word
+from habitus.behavior.kinds.pick.picker import WordPicker
+from habitus.behavior.reduction.kinds_step import KindStamping
 from habitus.model_client import (
     ChatClient,
     ChatModelConfig,
@@ -24,8 +25,6 @@ from habitus.model_client import (
 )
 
 NOW = datetime(2026, 10, 5, 12, 0, 0, tzinfo=UTC)
-EDIT = ClassId(Lane.SESSION, 1)
-RESEARCH = ClassId(Lane.SESSION, 2)
 
 
 class ScriptedProvider:
@@ -109,170 +108,53 @@ def scripted_caller(
     return KindModelCaller(client, config=config or BehaviorKindConfig()), provider
 
 
-def edit_class() -> BehaviorClass:
-    return BehaviorClass(
-        EDIT,
-        "修改代码",
-        "动手改代码、加功能、重构",
-        "该改代码了",
-        examples=("为 Tagent 加 ReAct 支持",),
-        origin=ClassOrigin.PROMOTED,
+def named_words(names: tuple[str, ...], *, lane: Lane = Lane.SESSION) -> Vocabulary:
+    """一份只有这几个第 1 层词的词表（编号按先后从 1 起），代替随代码发布的初始词表给归约侧的测试用。"""
+
+    return Vocabulary(
+        lane,
+        tuple(
+            Word(ClassId(lane, number), 1, name, None, f"{name}这件事", "测试")
+            for number, name in enumerate(names, start=1)
+        ),
     )
-
-
-def research_class() -> BehaviorClass:
-    return BehaviorClass(
-        RESEARCH,
-        "调研",
-        "读代码、读资料，弄清楚一件事",
-        "该调研一下了",
-        excludes=(Exclusion("动手改代码", EDIT),),
-        origin=ClassOrigin.PROMOTED,
-    )
-
-
-def request(key: str, name: str, *, lane: Lane = Lane.SESSION, summary: str | None = None) -> ClassifyRequest:
-    return ClassifyRequest(key, lane, OccurrenceContent(name=name, summaries=(summary,) if summary else ()))
-
-
-def answer(*rows: tuple[str, str, str | None]) -> dict[str, Any]:
-    """``(记录编号, 选择, 提议名)`` → 一份模型输出；理由统一写"理由"。"""
-
-    return {"items": [{"record": r, "reason": "理由", "choice": c, "proposed": p} for r, c, p in rows]}
 
 
 class NameMatchingProvider(ScriptedProvider):
-    """归类调用的确定性假模型：记录的原话与某个类名逐字相同就归那一类，在 ``not_events`` 里就答「不是一件事」，
-    否则答「都不是」并把原话当提议名。只认白天归类的提示词形状（``## 词表`` / ``## 待归类的记录``）。"""
+    """选词的确定性假模型（物理 lane 那种一条记录一问）：记录的名字与词表里某个词名逐字相同就答那个词的编号，否则答
+    ``missing``。只认选词提示词的形状（系统消息里【词表】一段的 "编号 名字：定义"，用户消息里【这一段】打头的名字）。"""
 
-    def __init__(self, *, not_events: frozenset[str] = frozenset()) -> None:
+    def __init__(self) -> None:
         super().__init__([])
-        self.not_events = not_events
 
     async def complete_async(self, request: PreparedChatRequest) -> ModelResponse:
+        system = "\n".join(message.content or "" for message in request.request.messages[:-1])
         text = request.request.messages[-1].content or ""
         self.prompts.append(text)
         self.calls += 1
-        head, _, tail = text.partition("## 待归类的记录")
-        classes = {
-            line.split("  ", 1)[1].strip(): line.split("  ", 1)[0]
-            for line in head.splitlines()
-            if line.startswith("C") and "  " in line
-        }
-        items = []
-        for line in tail.splitlines():
-            if not line.startswith("R") or "  " not in line:
-                continue
-            record, rest = line.split("  ", 1)
-            name = rest.split("　｜", 1)[0]
-            if name in self.not_events:
-                items.append({"record": record, "reason": "小动作", "choice": "不是一件事", "proposed": None})
-            elif name in classes:
-                items.append({"record": record, "reason": "同名", "choice": classes[name], "proposed": None})
-            else:
-                items.append({"record": record, "reason": "没有合适的类", "choice": "都不是", "proposed": name})
+        words = {}
+        for line in system.partition("【词表】")[2].splitlines():
+            number, _, rest = line.strip().partition(" ")
+            if number.isdigit():
+                words[rest.split("：", 1)[0].split("（", 1)[0]] = int(number)
+        name = text.partition("【这一段】\n")[2].split("　｜", 1)[0]
+        pick: object = words.get(name, "missing")
         return ModelResponse(
-            content=json.dumps({"items": items}, ensure_ascii=False),
+            content=json.dumps({"pick": pick}, ensure_ascii=False),
             model=self.model,
             provider=self.provider_name,
             finish_reason="stop",
         )
-
-
-class RoutingProvider(ScriptedProvider):
-    """白天归类的调用按路由表确定性作答，其余调用（拆改提议、每晚新增）按脚本回放。
-
-    ``routes``：原话 → 依次偏好的类名，取清单里第一个出现的；没有路由的原话与类名逐字相同就归那一类，否则答「都不是」。
-    同一份清单答同样的话——锚点"站得稳"、新清单是否把锚点拉走，都由清单里有哪些类名决定。
-    """
-
-    def __init__(self, bodies: list[Any], routes: Mapping[str, tuple[str, ...]] | None = None) -> None:
-        super().__init__(bodies)
-        self.routes = dict(routes or {})
-        self.classify_calls = 0
-
-    async def complete_async(self, request: PreparedChatRequest) -> ModelResponse:
-        text = request.request.messages[-1].content or ""
-        if "## 待归类的记录" not in text:
-            return await super().complete_async(request)
-        self.prompts.append(text)
-        self.classify_calls += 1
-        head, _, tail = text.partition("## 待归类的记录")
-        classes = {
-            line.split("  ", 1)[1].strip(): line.split("  ", 1)[0]
-            for line in head.splitlines()
-            if line.startswith("C") and "  " in line
-        }
-        items = []
-        for line in tail.splitlines():
-            if not line.startswith("R") or "  " not in line:
-                continue
-            record, rest = line.split("  ", 1)
-            name = rest.split("　｜", 1)[0]
-            chosen = next((classes[c] for c in self.routes.get(name, (name,)) if c in classes), None)
-            choice = chosen or "都不是"
-            items.append({"record": record, "reason": "路由", "choice": choice, "proposed": None if chosen else name})
-        return ModelResponse(
-            content=json.dumps({"items": items}, ensure_ascii=False),
-            model=self.model,
-            provider=self.provider_name,
-            finish_reason="stop",
-        )
-
-
-def catalog_in_sync(store: Any) -> bool:
-    """清单视图是不是当前词表推出来的样子（崩在两次写之间时会是 False，下一次追加即修复）。"""
-
-    from habitus.behavior.kinds.render import render_catalog
-    from habitus.behavior.kinds.store import KINDS_SCHEMA_VERSION
-
-    if not store.catalog_path.exists():
-        return False
-    return store.catalog_path.read_text(encoding="utf-8") == render_catalog(
-        store.read(), schema_version=KINDS_SCHEMA_VERSION
-    )
-
-
-def named_classes(names: tuple[str, ...], *, lane: Lane = Lane.SESSION) -> tuple[BehaviorClass, ...]:
-    return tuple(
-        BehaviorClass(ClassId(lane, number), name, f"{name}的判据", f"该{name}了", origin=ClassOrigin.PROMOTED)
-        for number, name in enumerate(names, start=1)
-    )
 
 
 def kind_components(
-    tree: Any,
-    lock_store: Any,
     *,
     names: tuple[str, ...],
     provider: ScriptedProvider,
     config: BehaviorKindConfig | None = None,
-) -> tuple[Any, Any, Any]:
-    """归约侧的词表两块（白天归类 + 整理活）与它们共用的存储；``names`` 非空时先把它们写成第 1 版（会话 lane）。"""
-
-    from habitus.behavior.kinds.changes import AddClass, ChangeReason, VersionRecord
-    from habitus.behavior.kinds.classify import DaytimeClassifier
-    from habitus.behavior.kinds.nightly import NightlyGrower, PendingRecheck
-    from habitus.behavior.kinds.revision import AnchorGate, Reviser
-    from habitus.behavior.kinds.store import BehaviorKindStore
-    from habitus.behavior.reduction.kinds_jobs import VocabularyJobs
-    from habitus.behavior.reduction.kinds_migration import KindMigrator
-    from habitus.behavior.reduction.kinds_step import KindStamping
+) -> KindStamping:
+    """归约侧的选词一步：在 ``names`` 这几个词里选（判断上没带选词结果的才问模型）。"""
 
     resolved = config or BehaviorKindConfig()
-    store = BehaviorKindStore(tree.root, config=resolved)
-    if names:
-        operations = tuple(AddClass(item) for item in named_classes(names))
-        store.append(VersionRecord(1, NOW, ChangeReason.NIGHTLY, operations), expected_version=0)
-    caller = KindModelCaller(client_for(provider), config=resolved)
-    classifier = DaytimeClassifier(caller)
-    stamping = KindStamping(store, classifier, lane=Lane.SESSION)
-    jobs = VocabularyJobs(
-        tree=tree,
-        stamping=stamping,
-        migrator=KindMigrator(tree, lock_store, store),
-        grower=NightlyGrower(caller, PendingRecheck(classifier)),
-        reviser=Reviser(caller, AnchorGate(classifier)),
-        zone=UTC,
-    )
-    return stamping, jobs, store
+    picker = WordPicker(KindModelCaller(client_for(provider), config=resolved), named_words(names))
+    return KindStamping(picker, lane=Lane.SESSION)

@@ -21,8 +21,7 @@
 
 整拍持预测根租约（两个进程挂同一个根也不重复建同一身份）。常驻 worker 把换代的那一眼交进来（``run_once`` 的 ``before``）：
 拿到租约之后先做它、再做这一拍，同一次持有之内串行——换代那一槽的预测拍顺延到换代做完，``lateness_seconds`` 里含换代用时；换代
-占用的那一段系统是在看的，不算进没在看的时段（空当只量到进这一槽的那一刻）。词表迁移做到一半时整拍不做（归类一半新编号
-一半旧编号，结算那一拍同一口径），水位照推（那一拍系统在看）。建不出来（派生树读不到、装配失败）留观测、抛出，让调用方决定
+占用的那一段系统是在看的，不算进没在看的时段（空当只量到进这一槽的那一刻）。建不出来（派生树读不到、装配失败）留观测、抛出，让调用方决定
 下一拍。账本里读不出来的文件条数进观测。
 """
 
@@ -53,7 +52,6 @@ from habitus.runtime.foresight_forming import (
     Formed,
     FormingReadSide,
     Recent,
-    held_by_migration,
     observe_foresight,
     tonight_table,
 )
@@ -119,7 +117,6 @@ class ForesightTick:
         lane: str = "session",
         shadow_unestablished: bool = False,
         vocabulary_version: Callable[[], int] | None = None,
-        migrating: Callable[[], bool] | None = None,
         observer: Observer | None = None,
         clock: Callable[[], datetime] | None = None,
         delivery: DeliveryStage | None = None,
@@ -147,7 +144,6 @@ class ForesightTick:
         self.opportunities = opportunities
         self.read_side = read_side
         self.lane = lane
-        self.migrating = migrating
         if delivery is not None and delivery.ledger is not ledger:
             raise TypeError("delivery must be a DeliveryStage on the same ledger")
         self.delivery = delivery
@@ -219,10 +215,6 @@ class ForesightTick:
         mark, gap = await self.track.begin(now, entered) if self.track is not None else (TickWatermark(), None)
         previous = gap[0] if gap is not None else mark.watched_until  # 刚写了「未观测」：``begin`` 已把水位推到此刻
         ticks = None if previous is None or self.track is None else round((now - previous) / self.track.slot)
-        held = held_by_migration(self.migrating)
-        if held is not None:
-            await self._advance(mark.ticked(now))
-            return TickReport(now, 0, 0, skipped=held, unwatched=gap, ticks_since_previous=ticks)
         materials = await self._read(now)
         formed, looked_since = self._form(materials, mark)
         if looked_since is not None:
@@ -315,13 +307,12 @@ class ForesightTick:
         if self.delivery is None:
             return None
         now, seen = materials.now, materials.recent.seen
-        current = self.delivery.current
         return await self.delivery.run_once(
             now,
             JudgeMaterials(
                 materials.table,
                 lambda uris: _rows_for(uris, materials.recent.cache, materials.recent.unsealed, seen, now),
-                lambda item: done_since(item, seen, now=now, current=current),
+                lambda item: done_since(item, seen, now=now),
                 lambda day: day_note(self.read_side.calendar, day),
                 lambda item: _unobserved(item, materials.recent, now),
                 None if self.reread is None else _reread_for(self.reread, now),

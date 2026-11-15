@@ -39,6 +39,8 @@ def behavior_enabled_config(tmp_path: Path, **behavior: object):
 
     raw = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     raw["storage"]["root"] = str(tmp_path / "data")
+    # 单测不往 127.0.0.1:4318 真导出：没关掉的 Runtime 会留下每 10 秒导出一次的线程，串进后面设了代理环境变量的测试
+    raw["observability"]["tracing"]["enabled"] = False
     raw["models"]["chat"]["route"].update(provider="fake", adapter="fake_chat", credential_ref="")
     raw["models"]["embedding"]["route"].update(provider="fake", adapter="fake_embedding", credential_ref="")
     raw["models"]["rerank"]["route"].update(provider="fake", adapter="fake_rerank", credential_ref="")
@@ -137,7 +139,8 @@ def physical_delivery() -> dict:
     }
 
 
-CLASSIFY_BODY = {"items": [{"record": "R1", "reason": "在水池边洗手", "choice": "都不是", "proposed": "洗手"}]}
+#: 物理 lane 在归约里选词：这一条答"表里没有"。
+PICK_BODY = {"pick": "missing"}
 
 
 def test_behavior_stays_dark_until_a_subject_is_configured(tmp_path: Path) -> None:
@@ -202,17 +205,12 @@ def test_each_lane_gets_its_own_whole_pipeline_and_they_share_only_the_chat_clie
         assert behavior.fusion.recorder.primary_subject == SUBJECT
         assert behavior.fusion.recorder.coverage is behavior.coverage
         assert behavior.kind_store.catalog_path == behavior.tree.root / "kinds.md"
-        # 这一支归的是它自己那条 lane 的类
-        assert behavior.reduction_runner.kinds.lane is behavior.lane
-        # 词表两块（白天归类、整理活）共用这一支的那一份词表存储与组合根的那一个结构化客户端
-        assert behavior.reduction_runner.kinds.store is behavior.kind_store
-        assert behavior.reduction_runner.vocabulary_jobs.store is behavior.kind_store
-        assert behavior.reduction_runner.kinds.classifier.caller.client is runtime.components.models.structured_chat
-        # 所有用户都装定期拆改（裁定 17），锚点自检与白天归类共用同一个归类器
-        assert (
-            behavior.reduction_runner.vocabulary_jobs.reviser.anchors.classifier
-            is behavior.reduction_runner.kinds.classifier
-        )
+        # 这一支选的是它自己那条 lane 的词；选词与组合根共用同一个模型客户端（另起的结构化客户端只换重问次数）
+        assert behavior.reduction_runner.kinds.lane is behavior.lane and behavior.picker.vocabulary.lane is behavior.lane
+        assert behavior.picker.caller.client.client is runtime.components.models.structured_chat.client
+        # 会话一支的判断都带着选词结果，归约不选；物理一支在归约里选
+        expected = None if behavior.lane.value == "session" else behavior.picker
+        assert behavior.reduction_runner.kinds.picker is expected
         # sweep 锁 TTL 走 Config 边界（周尺度回填要调大它，不该改代码）；留空取领域默认
         assert behavior.reduction_runner.sweep_lock_ttl_seconds == DEFAULT_SWEEP_LOCK_TTL_SECONDS
     # 两支不共用任何一样东西：存储、词表、归约、Worker 都各是各的
@@ -251,7 +249,6 @@ def test_every_behaviour_override_reaches_the_component_that_uses_it(tmp_path: P
         runner = branch.reduction_runner
         assert branch.tree.document_config.max_encoded_bytes == 4096
         assert runner.write_config is not None and runner.write_config.lock_ttl_seconds == 45
-        assert runner.vocabulary_jobs.migrator.write_config is runner.write_config
         assert runner.semantic_refresher is not None
         assert runner.semantic_refresher.config.max_prompt_chars == 5000
         assert runner.semantic_refresher.generator.config.max_prompt_chars == 5000
@@ -263,9 +260,9 @@ def test_a_physical_delivery_reaches_the_tree_end_to_end_through_the_runtime(tmp
     语义层的模型响应故意给垃圾：刷新按设计降级成信号、不阻塞归约——树上必须已有 occurrence。
     """
 
-    # 唯一的模型调用是词表的白天归类：词表从空开始（裁定 29），这一条判成一件事、提议名「洗手」进待定池。
+    # 唯一的模型调用是物理 lane 在归约里的选词：这一条答"表里没有"，落成「表外」。
     # 之后的语义层调用也会拿到它——对语义层是垃圾，按设计降级成信号。
-    providers, vectors = scripted_dependencies([CLASSIFY_BODY])
+    providers, vectors = scripted_dependencies([PICK_BODY])
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
         providers=providers,
@@ -295,9 +292,7 @@ def test_a_physical_delivery_reaches_the_tree_end_to_end_through_the_runtime(tmp
     addresses = behavior.tree.list_addresses(BehaviorKind.OCCURRENCE)
     assert [address.name for address in addresses] == ["洗手"]
     document = behavior.tree.read(addresses[0])
-    assert document.fields["kind_token"] == "p-待定"
-    (pending,) = behavior.kind_store.read_pending().pool.entries.values()
-    assert pending.proposed == "洗手"
+    assert document.fields["kind_token"] == "p-表外"
     # 手表在充电的那一段是"没在看"，不是"看了没读懂"
     (gap,) = behavior.tree.list_addresses(BehaviorKind.GAP)
     assert behavior.tree.read(gap).fields["gap_kind"] == "未观测"
@@ -318,7 +313,7 @@ def test_a_physical_delivery_reaches_the_tree_end_to_end_through_the_runtime(tmp
 
 
 def test_runtime_start_and_stop_manage_behavior_workers(tmp_path: Path) -> None:
-    providers, vectors = scripted_dependencies([CLASSIFY_BODY])
+    providers, vectors = scripted_dependencies([PICK_BODY])
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
         providers=providers,
@@ -342,7 +337,7 @@ def test_a_behavior_branch_that_cannot_start_does_not_block_the_runtime_or_the_o
 
     from habitus.runtime import RuntimeState
 
-    providers, vectors = scripted_dependencies([CLASSIFY_BODY])
+    providers, vectors = scripted_dependencies([PICK_BODY])
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
         providers=providers,
@@ -369,7 +364,7 @@ def test_a_behavior_branch_that_cannot_start_does_not_block_the_runtime_or_the_o
 def test_storage_layout_follows_each_stores_root_contract(tmp_path: Path) -> None:
     """全部存储传同一个行为根：传子目录会目录二次嵌套（评审实测的口吃布局）。"""
 
-    providers, vectors = scripted_dependencies([CLASSIFY_BODY])
+    providers, vectors = scripted_dependencies([PICK_BODY])
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
         providers=providers,
@@ -396,7 +391,7 @@ def test_close_stops_behavior_workers_like_stop_does(tmp_path: Path) -> None:
     """``async with`` 的退出走 close 不走 stop——close 漏停行为循环会让它带着已关闭的
     模型客户端继续空转（评审实测泄漏）。"""
 
-    providers, vectors = scripted_dependencies([CLASSIFY_BODY])
+    providers, vectors = scripted_dependencies([PICK_BODY])
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
         providers=providers,
@@ -422,7 +417,7 @@ def test_component_group_rejects_foreign_instances(tmp_path: Path) -> None:
 
     from habitus.behavior.fusion.store import BehaviorJudgementStore
 
-    providers, vectors = scripted_dependencies([CLASSIFY_BODY])
+    providers, vectors = scripted_dependencies([PICK_BODY])
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
         providers=providers,
@@ -467,50 +462,13 @@ def test_reduction_worker_treats_lock_busy_as_a_skip_not_a_failure() -> None:
     assert worker.last_error is None  # 让路不是故障
 
 
-def test_vocabulary_jobs_are_exposed_through_the_access_layer(tmp_path) -> None:
-    """词表运维动作从接入层暴露（与物理 lane 的交付同一正门形态），不让调用方伸手进归约 runner。"""
-
-    providers, vectors = runtime_dependencies()
-    runtime = build_runtime(
-        behavior_enabled_config(tmp_path),
-        providers=providers,
-        vector_stores=vectors,
-        path_lock=PathLock(ProcessLocalLockStore()),
-    )
-    runtime.initialize()
-    grown = asyncio.run(runtime.run_vocabulary_job("grow", lane="session"))
-    assert grown.model_calls == 0  # 待定池是空的
-    assert runtime.components.behavior is not None
-    assert all(branch.kind_store.read().version == 0 for branch in runtime.components.behavior)
-    revised = asyncio.run(runtime.run_vocabulary_job("revise", lane="physical"))
-    assert (
-        revised.model_calls == 0 and revised.days == ()
-    )  # 词表从空开始（裁定 29）：两条 lane 都还没有类，没什么可拆改
-    with pytest.raises(ValueError, match="unknown vocabulary job"):
-        asyncio.run(runtime.run_vocabulary_job("bootstrap", lane="session"))
-    # 行为侧未启用时同样明确拒绝
-    dark = build_runtime(
-        runtime_config(tmp_path / "dark"),
-        providers=providers,
-        vector_stores=vectors,
-        path_lock=PathLock(ProcessLocalLockStore()),
-    )
-    dark.initialize()
-    with pytest.raises(RuntimeStateError, match="behavior pipeline is not configured"):
-        asyncio.run(dark.run_vocabulary_job("grow", lane="session"))
-
-
-def test_the_behavior_participant_expires_physical_units_truncates_the_journal_and_reports_pools(
-    tmp_path: Path,
-) -> None:
-    """6.14：行为侧参与者挂进生命周期 Worker，每轮放掉物理一支过了补发跨度的小账、把词表变更日志截到还要读的最老一版、
-    报两支待定池的容量（L10.14 补测：原先这个参与者一条测试都没有）。"""
+def test_the_behavior_participant_expires_physical_units_and_reports_words_in_use(tmp_path: Path) -> None:
+    """6.14：行为侧参与者挂进生命周期 Worker，每轮放掉物理一支过了补发跨度的小账、报两支在用的词数对上限
+    （L10.14 补测；词表方案 2026-11-14 起没有变更日志可截）。"""
 
     from datetime import UTC
 
     from habitus.behavior.fusion.lanes.physical.ledger import AcceptedSpan, SpanKind
-    from habitus.behavior.kinds.changes import AddClass, ChangeReason, VersionRecord
-    from tests.unit.behavior.kinds_fixtures import named_classes
 
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
@@ -528,12 +486,6 @@ def test_the_behavior_participant_expires_physical_units_truncates_the_journal_a
     assert ledger is not None
     stale = now - timedelta(days=runtime.config.lifecycle.physical_max_backfill_days + 5)
     ledger.accept("watch-1", "u-1", "digest", AcceptedSpan(SpanKind.SEGMENT, stale, stale + timedelta(minutes=5)))
-    store = branches.session.kind_store
-    for version, item in enumerate(named_classes(("一", "二")), start=store.read().version + 1):
-        store.append(
-            VersionRecord(version, now - timedelta(days=400), ChangeReason.NIGHTLY, (AddClass(item),)),
-            expected_version=version - 1,
-        )
 
     class _Context:
         def __init__(self) -> None:
@@ -545,9 +497,9 @@ def test_the_behavior_participant_expires_physical_units_truncates_the_journal_a
     report = participant._maintain_blocking(_Context())
 
     assert ledger.accepted("watch-1", "u-1", stale) is None
-    assert store.journal.segments()[0] == store.read().version  # 没有派生物还在读：截到当前
-    assert {reading.name for reading in report.readings} == {"session_kinds_pending", "physical_kinds_pending"}
-    assert report.released >= 2
+    readings = {reading.name: (reading.count, reading.limit) for reading in report.readings}
+    assert readings == {"session_kinds_active": (0, 100), "physical_kinds_active": (0, 100)}
+    assert report.released >= 1
 
 
 def test_the_reduction_worker_skips_a_tick_when_a_real_runner_finds_the_sweep_lock_held(tmp_path: Path) -> None:

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import timedelta
 from itertools import product
 
 import pytest
@@ -32,12 +32,11 @@ from habitus.scene.relations.spans import Chain, Stratum
 from habitus.scene.relations.timeline import Mark
 from habitus.series import EventSeries, GapKind, SeriesGap
 from tests.unit.kind_ids import kind_id
-from tests.unit.scene.concept_fixtures import EXERCISE, REWORK, base, cid
+from tests.unit.scene.concept_fixtures import base, cid
 from tests.unit.scene.relation_fixtures import (
     CODE,
     CONCEPTS,
     CONFIG,
-    CST,
     DISCUSS,
     DOCS,
     PUSH,
@@ -146,12 +145,11 @@ def test_only_present_time_counts_gaps_and_the_cutoff_make_the_outcome_unknown()
     assert len(morning) == 1 and morning[0].treated == 0 and morning[0].controls == 1
 
 
-def test_pairs_that_read_the_same_records_are_never_compared() -> None:
-    concepts = ConceptSet([base("修改代码"), REWORK, base("打球"), base("跑步"), EXERCISE])
-    assert not comparable(concepts, cid("修改代码"), cid("修改代码"))
-    assert not comparable(concepts, "返工", cid("修改代码")) and not comparable(concepts, cid("修改代码"), "返工")
-    assert not comparable(concepts, "运动", cid("打球"))
-    assert comparable(concepts, cid("打球"), cid("跑步")) and comparable(concepts, "返工", "运动")
+def test_a_concept_is_never_compared_with_itself() -> None:
+    """一条记录只算它那个类的行为概念：两个不同的概念不会读同一批记录，只有自己与自己不比。"""
+
+    assert not comparable(cid("修改代码"), cid("修改代码"))
+    assert comparable(cid("打球"), cid("跑步")) and comparable("周末", cid("打球"))
 
 
 def test_the_configuration_refuses_contradictions() -> None:
@@ -226,7 +224,6 @@ def test_a_chain_that_cannot_reach_alpha_upward_stays_out_of_the_family(monkeypa
     strata = tuple(stratum(1, 2, 3, block=index) for index in range(6))
     monkeypatch.setattr(tests, "keys", lambda: (chain,))
     monkeypatch.setattr(tests, "measure", lambda key, since=None: ChainMeasure(strata))
-    monkeypatch.setattr(tests, "refined_consequent", lambda key: False)
     (test,) = tests.night().tests
     assert test.minimum_p == pytest.approx(0.75**6) and test.verdict is Verdict.SPARSE
 
@@ -333,9 +330,9 @@ def test_a_daily_antecedent_at_random_times_still_has_same_slot_controls() -> No
     )
 
 
-def test_a_hit_record_mapped_under_another_class_counts_as_unmapped() -> None:
-    """映射时这条还是「调研」，之后词表拆改把它重打成「修改代码」：那份命中不是现在这个类的，细分概念「返工」当没映射过（判不了），
-    不把旧类的细分命中算到新类头上（E3）。"""
+def test_a_record_counts_only_toward_its_current_class() -> None:
+    """一条记录只算它现在那个类的行为概念：词表迁移把它从「调研」重打成「修改代码」之后，盘上那份按旧编号写的命中记录
+    不影响它算哪个概念（命中记录只带日历情境）。"""
 
     from habitus.series import SeriesRecord
     from tests.unit.scene.concept_fixtures import CODING
@@ -343,7 +340,7 @@ def test_a_hit_record_mapped_under_another_class_counts_as_unmapped() -> None:
     from tests.unit.scene.hit_fixtures import uri_for
 
     day = START
-    concepts = ConceptSet([CODING, REWORK, base("调研")])
+    concepts = ConceptSet([CODING, base("调研")])
     started = at(day, 10, 0)
     series_record = SeriesRecord(
         uri=uri_for(day, "改一处", 10, 0),
@@ -357,135 +354,11 @@ def test_a_hit_record_mapped_under_another_class_counts_as_unmapped() -> None:
         reminded=False,
         summary="改一处",
     )
-    stale = hit_record(day, "改一处", 10, 0, "返工", kind="调研")
+    stale = hit_record(day, "改一处", 10, 0, kind="调研")
     series = EventSeries(cutoff=day + timedelta(days=1), records=(series_record,))
     line = build_timelines(series, concepts, {series_record.uri: stale}, CONFIG)["session"]
-    assert not line.marks.get("返工")
-    assert line.unknown.get("返工")
-
-
-def _hits_for(series: EventSeries, blind_every: int) -> dict:
-    """修改代码的每条记录都映射过：每 ``blind_every`` 条里有一条「返工」判不了，其余判了"不是返工"。"""
-
-    from habitus.scene.occurrences import ConceptHits
-    from habitus.scene.occurrences.model import UnresolvedReason
-    from tests.unit.scene.hit_fixtures import uri_for
-
-    found = {}
-    coding = [item for item in series.records if item.kind_token == CODE]
-    for index, item in enumerate(coding):
-        blind = index % blind_every == 0
-        found[item.uri] = ConceptHits(
-            occurrence_uri=uri_for(item.day, item.name, item.started_at.hour, item.started_at.minute),
-            kind_token=item.kind_token,
-            last_observed_at=item.last_observed_at,
-            hits=(),
-            situation_hits=(),
-            situations_checked=(),
-            unresolved={"返工": UnresolvedReason.MODEL_UNSEEN} if blind else {},
-            baseline_snapshot={},
-            mapper="test",
-            mapped_at=datetime(2026, 10, 1, tzinfo=CST),  # 晚于「返工」的创建：映射时已经有这个细分概念
-            lane="session",
-            classified=True,
-        )
-    return found
-
-
-def test_a_refinement_consequent_that_is_mostly_blind_stays_out_of_the_family() -> None:
-    """「返工」当后果，修改代码的记录八成判不了：上下界宽到什么都说明不了，不进检验族（裁定 27 第 6 条）。"""
-
-    concepts = ConceptSet([*CONCEPTS.values(), REWORK])
-    series = planted(40)
-    line = build_timelines(series, concepts, _hits_for(series, blind_every=1), CONFIG)["session"]
-    tests = LaneTests(line, concepts, CONFIG, series.cutoff)
-    night = tests.night()
-    rework = [test for test in night.tests if test.key == key(DISCUSS, "返工")]
-    assert rework and rework[0].verdict is Verdict.SPARSE
-    # 走的是上下界那条路：判不了的太多，只留一条 p = 1、最小可达 p = 1 的读数，不按"判了的那几条"照常算
-    assert (rework[0].p_value, rework[0].minimum_p) == (1.0, 1.0)
-
-
-def test_a_refinement_consequent_takes_its_reading_from_the_bounded_reading(monkeypatch) -> None:
-    """细分概念当后果的不带条件短跨度关系，当晚的读数取上下界检验那一份（不按"判了的那几条"照常算）。"""
-
-    concepts = ConceptSet([*CONCEPTS.values(), REWORK])
-    series = planted(40)
-    line = build_timelines(series, concepts, _hits_for(series, blind_every=10), CONFIG)["session"]
-    tests = LaneTests(line, concepts, CONFIG, series.cutoff)
-    target = key(DISCUSS, "返工")
-    assert tests.refined_consequent(target)
-    monkeypatch.setattr(
-        tests.evaluator,
-        "_bounded_reading",
-        lambda key, since, measure: (measure, 0.5, 0.25, False) if key == target else None,
-    )
-    (rework,) = [test for test in tests.night().tests if test.key == target]
-    assert (rework.p_value, rework.minimum_p, rework.upward) == (0.5, 0.25, False)
-
-
-def test_a_refinement_consequent_is_judged_on_both_bounds() -> None:
-    """一成判不了：照常检验，判不了的窗口按"当没出现 / 当出现了"各算一遍。埋的是「讨论方案 → 修改代码」、没有一条是返工：
-    当没出现那一头读不出"更多"，这条不显著——不再把"窗口里有修改代码"读成"返工更多"。"""
-
-    concepts = ConceptSet([*CONCEPTS.values(), REWORK])
-    series = planted(40)
-    line = build_timelines(series, concepts, _hits_for(series, blind_every=10), CONFIG)["session"]
-    tests = LaneTests(line, concepts, CONFIG, series.cutoff)
-    (rework,) = [test for test in tests.night().tests if test.key == key(DISCUSS, "返工")]
-    assert rework.verdict is not Verdict.SIGNIFICANT
-
-
-def test_a_refined_consequent_on_the_same_chain_is_only_tested_for_more() -> None:
-    """裁定 27 第 1 条：同一条链只检"更多"，后果是细分概念（「返工」，走上下界检验）也一样。讨论方案之后接写文档、调研 /
-    提交推送之后接修改代码（一半映射成返工）：「讨论方案 → 返工」少得显著，但这条链不检"更少"，不判显著、方向只记朝上。"""
-
-    import random
-
-    from habitus.scene.occurrences import ConceptHits
-    from habitus.scene.occurrences.model import ConceptHit
-    from tests.unit.scene.hit_fixtures import uri_for
-
-    generator = random.Random(11)
-    records = []
-    for workday in workdays(50):
-        hours = list(range(8, 19))
-        generator.shuffle(hours)
-        for hour in hours[:3]:
-            minute = generator.choice((0, 10))
-            records += [record(workday, hour, minute, "讨论方案", number=hour)]
-            records += [record(workday, hour, minute + 20, "写文档", number=hour)]
-        for hour in hours[3:7]:
-            minute = generator.choice((0, 10))
-            records += [record(workday, hour, minute, generator.choice(("调研", "提交推送")), number=hour)]
-            records += [record(workday, hour, minute + 20, "修改代码", number=hour)]
-    records.sort(key=lambda item: (item.started_at, item.uri))
-    series = EventSeries(cutoff=workdays(50)[-1] + timedelta(days=1), records=tuple(records))
-    concepts = ConceptSet([*CONCEPTS.values(), REWORK])
-    hits = {}
-    for index, item in enumerate(item for item in series.records if item.kind_token == CODE):
-        hits[item.uri] = ConceptHits(
-            occurrence_uri=uri_for(item.day, item.name, item.started_at.hour, item.started_at.minute),
-            kind_token=item.kind_token,
-            last_observed_at=item.last_observed_at,
-            hits=(ConceptHit(cid("返工")),) if index % 2 == 0 else (),
-            situation_hits=(),
-            situations_checked=(),
-            unresolved={},
-            baseline_snapshot={},
-            mapper="t",
-            mapped_at=datetime(2026, 10, 1, tzinfo=CST),
-            lane="session",
-            classified=True,
-        )
-    line = build_timelines(series, concepts, hits, CONFIG)["session"]
-    night = LaneTests(line, concepts, CONFIG, series.cutoff).night()
-    (rework,) = [
-        test
-        for test in night.tests
-        if test.key == RelationKey("session", DISCUSS, cid("返工"), Segment.CHAIN)
-    ]
-    assert rework.upward and rework.verdict is not Verdict.SIGNIFICANT and rework.effect.treated_rate < 0.05
+    assert [mark.uri for mark in line.marks[cid("修改代码")]] == [series_record.uri]
+    assert not line.marks.get(cid("调研")) and not line.unknown
 
 
 def test_a_record_past_midnight_ends_in_the_last_slot_of_its_day() -> None:

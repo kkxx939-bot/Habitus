@@ -28,7 +28,7 @@ from datetime import date, datetime
 
 from habitus.behavior.document import BehaviorDocument
 from habitus.behavior.kinds.counted import uncounted
-from habitus.behavior.kinds.ids import KindIdError, Lane, lane_of_token, pending_token
+from habitus.behavior.kinds.ids import KindIdError, Lane, is_word, lane_of_token
 from habitus.behavior.schema.vocabulary import PROMPTERS
 from habitus.behavior.tree import BehaviorKind, BehaviorTree
 from habitus.behavior.tree.dirty_days import DirtyDayLog
@@ -143,7 +143,7 @@ def _assemble(
 
 
 def skip_reason(document: BehaviorDocument) -> SkipReason | None:
-    """一条 occurrence 为什么不进序列（不进是 None）：撞车消歧的已知重复、「非事件」。
+    """一条 occurrence 为什么不进序列（不进是 None）：撞车消歧的已知重复、「非事件」、「续话」。
 
     规则本身在行为层（``behavior.kinds.counted``，语义概览也用它）；这里只把它译成序列的跳过原因。读今天还没封口那段的读侧（预测层的证据卡）也用它——组合根把它注入
     ``scene.views.DayIndexCache``，不各写一遍（第二轮评审 D5 就是两处各写一遍写反了）。
@@ -157,7 +157,7 @@ def skip_reason(document: BehaviorDocument) -> SkipReason | None:
         raise SeriesError(
             f"kind_token is neither a class id nor a marker: {document.fields.get('kind_token')!r}"
         ) from exc
-    return None if reason is None else SkipReason.DUPLICATE if reason == "duplicate" else SkipReason.NOT_EVENT
+    return None if reason is None else SkipReason(reason)
 
 
 def admitted(document: BehaviorDocument) -> bool:
@@ -180,7 +180,8 @@ def _record(document: BehaviorDocument, uri: str, token: str, lane: Lane) -> Ser
         last_observed_at=_local(fields.get("last_observed_at"), "last_observed_at").astimezone(started_at.tzinfo),
         kind_token=token,
         lane=lane.value,
-        classified=token != pending_token(lane),
+        # 是一个词的编号才算归了类；「表外」「待定」是一件没有归类的事（词表方案 2026-11-14）
+        classified=is_word(token),
         reminded=_flag(fields.get("reminded")),
         summary=_text(fields.get("summary"), "summary"),
         goal=goal if isinstance(goal, str) and goal else None,

@@ -52,17 +52,6 @@ def test_reminded_means_a_spoken_delivery_of_that_class_before_the_occurrence_st
         lookup("s-k0002", FORMED.replace(tzinfo=None))
 
 
-def test_reminded_recognises_the_class_through_the_same_mapping_as_settlement(tmp_path) -> None:
-    """词表把 s-k0002 拆成 s-k0020 之后：预期记的是旧编号，这条记录是新编号，结算按映射认它，提醒标记也要认。"""
-
-    ledger = ForesightLedgerStore(tmp_path / "ledger")
-    ledger.record_expectation(expectation("e1"))
-    ledger.record_delivery(FORMED.date(), Delivery("e1", FORMED + timedelta(minutes=15), 1, True, "说了", 1.0, "话"))
-    split = RemindedLookup(ledger, current=lambda token: ("s-k0020",) if token == "s-k0002" else (token,))
-    assert split("s-k0020", FORMED + timedelta(minutes=30))
-    assert not RemindedLookup(ledger)("s-k0020", FORMED + timedelta(minutes=30))
-
-
 @pytest.mark.parametrize("bad", ["expectations", "deliveries"])
 def test_a_bad_ledger_file_is_skipped_and_counted_not_raised(tmp_path, bad) -> None:
     """段 6 Q3：坏的预期 / 递送文件不让查法抛（抛的话会话 lane 归约每轮失败、那天定稿不了、结算等定稿，互等成死锁）——

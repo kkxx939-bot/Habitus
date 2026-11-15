@@ -60,7 +60,7 @@ class OccurrenceDay:
 
 
 def episodes_of(records: Sequence[SeriesRecord], *, window_seconds: int) -> tuple[Episode, ...]:
-    """一组发生（一个类，或汇总概念的几个成员类合在一起）、按开始时刻升序的记录 → 一次一次。没排好序是调用方的错，硬拒。"""
+    """一个类按开始时刻升序的记录 → 一次一次。没排好序是调用方的错，硬拒。"""
 
     ordered = tuple(records)
     groups = merge_starts([record.started_at for record in ordered], window_seconds=window_seconds)

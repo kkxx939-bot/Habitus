@@ -5,7 +5,7 @@
 
 1. 前因不成立（结算已记作废）；2. 他可能做了、我们没看到（窗里有观测空白，或回了「已做过」）；3. 他开始了但放弃了；
 4. 推迟（之后补做了：后补）；5. 规律断了（账在那一刻判出断点、这次在断点之后）；
-6. 树上已成立的原因：关系已不在机会表里（失效 / 前向未复现）、这一类在词表里已拆改；
+6. 树上已成立的原因：关系已不在机会表里（失效 / 前向未复现）；
 7. 疑点（只报不改）：惯常的前因这次没来、今天的日型和历史那几次都不一样、历史那几次里有宿主助手先通知的；
 8. 都不是：说不清，与我们的数据无关。
 
@@ -21,7 +21,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Protocol
@@ -46,7 +46,6 @@ ABANDONED = "开始了但放弃了"
 BROKEN = "规律断了"
 BUDGET = "预算内"
 RELATION_GONE = "关系不成立了"
-RECLASSIFIED = "归类变了"
 ANTECEDENT_ABSENT = "疑点：惯常的前因没来"
 DAY_TYPE = "疑点：日型不同"
 NOTICE = "疑点：由外部通知发起"
@@ -58,7 +57,6 @@ CAUSES = (
     POSTPONED,
     BROKEN,
     RELATION_GONE,
-    RECLASSIFIED,
     ANTECEDENT_ABSENT,
     DAY_TYPE,
     NOTICE,
@@ -82,7 +80,6 @@ class MissFacts:
     broken: bool = False
     within_budget: bool = False
     relation_gone: bool = False
-    reclassified: bool = False
     antecedent_absent: bool = False
     day_type_differs: bool = False
     notice_driven: bool = False
@@ -100,7 +97,6 @@ def cause_of(miss: MissFacts) -> str:
         (miss.postponed, POSTPONED),
         (miss.broken, BROKEN),
         (miss.relation_gone, RELATION_GONE),
-        (miss.reclassified, RECLASSIFIED),
         (miss.antecedent_absent, ANTECEDENT_ABSENT),
         (miss.day_type_differs, DAY_TYPE),
         (miss.notice_driven, NOTICE),
@@ -213,7 +209,6 @@ def miss_facts(
     *,
     spoken: bool,
     standing: Standing,
-    current: Callable[[str], Sequence[str]],
     window: Iterable[WindowRow],
     today_note: str | None,
     basis: Iterable[BasisSeen],
@@ -224,7 +219,6 @@ def miss_facts(
     机会表里现在还有的关系（没有机会表是 None：说不清，不判关系没了）。"""
 
     voided = fact.kind == VOID
-    kinds = {item.kind_token, *current(item.kind_token)}
     seen = tuple(basis)
     notes = {found.day_note for found in seen}
     return MissFacts(
@@ -238,12 +232,12 @@ def miss_facts(
         # 观测空白结出的强度 0 的过期待决：与「一次机会」同一口径（``clock.is_opportunity``），作废另算
         unseen=not voided and not is_opportunity(fact),
         abandoned=any(
-            row.kind_token in kinds and row.status in NOT_DONE and item.covers(row.at.astimezone(UTC)) for row in window
+            row.kind_token == item.kind_token and row.status in NOT_DONE and item.covers(row.at.astimezone(UTC))
+            for row in window
         ),
         broken=standing.break_at is not None and item.formed_at >= standing.break_at,
         within_budget=standing.prediction.lower >= standing.threshold,
         relation_gone=relation_backed(item.source) and listed is not None and item.trigger not in listed,
-        reclassified=tuple(current(item.kind_token)) != (item.kind_token,),
         antecedent_absent=any(a.upward and not a.present for a in item.antecedents),
         day_type_differs=today_note is not None and bool(notes) and today_note not in notes,
         notice_driven=any(found.prompted_by == "host_agent" for found in seen),

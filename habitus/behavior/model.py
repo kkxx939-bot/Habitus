@@ -23,7 +23,7 @@ _MAX_SEMANTIC_NAME_UTF8_BYTES = _MAX_IDENTITY_NAME_UTF8_BYTES - _IDENTITY_SUFFIX
 # 空间——否则贴着预算上限的合法判断名，一旦触发消歧就会在归约期撑爆地址身份、卡死整条队列。
 MAX_BEHAVIOR_NAME_UTF8_BYTES = _MAX_SEMANTIC_NAME_UTF8_BYTES - 8
 
-# 基础词表的清单视图放在树根（behavior://kinds.md）；它由 ``behavior/kinds`` 从变更日志生成，树只给它一个地址。
+# 基础词表的清单视图放在树根（behavior://kinds.md）；它由 ``behavior/kinds`` 从初始词表与在用状态生成，树只给它一个地址。
 # 地址叶名不可能与它撞车：semantic_name 拒绝 .md 后缀，gap 叶名是受控枚举。
 KINDS_REGISTRY_FILENAME = "kinds.md"
 
@@ -284,8 +284,9 @@ def is_ascii_digits(value: object) -> bool:
 #       gaps/       YYYY/MM/DD/{类型}--{ts}.md     观测空白（add-only；类型=没读懂|未观测）
 #       episodes/   （代码零占位，用户裁定）        预测闭环成熟后再设计（BHV-EPISODE-002）
 #       kinds.md                                    基础词表的清单视图（URI behavior://kinds.md，REGISTRY
-#                                                   节点类型）；真源是同目录的 kinds.changes.jsonl 变更日志，
-#                                                   读写只经 ``behavior/kinds``，树本身不认识词表
+#                                                   节点类型）；真源是随代码发布的初始词表与同目录的
+#                                                   kinds.state.json 在用状态，读写只经 ``behavior/kinds``，
+#                                                   树本身不认识词表
 #     各级日期目录带 .abstract.md/.overview.md（L0/L1 由 behavior/semantic/ 生成与刷新；调优
 #     子项见 generator.py 的 TODO(BHV-SEMANTIC-004·调优)）。
 # - 目录归一：旧 behaviors/events + behaviors/outcomes + episodes 三处 → 上述形状；BehaviorKind
@@ -301,13 +302,12 @@ def is_ascii_digits(value: object) -> bool:
 #   available_at 也不例外——带偏移的本地时间就是完整瞬时，混用两种约定才是"取错时间"的事故源；
 #   换算只在归约写入时发生一次，树内与读侧零换算。UTC 归一保持在观测/判断层的入口纪律，不进树。
 #   时序比较一律先解析为瞬时；地址文本不承诺时间序。
-# - 地址：occurred_on（本地日历日，即目录）+ name（**原始名**，融合层原话，永不变；kind_token 可修
-#   而地址不动）+ started_at（本地+偏移）+ utc_offset_minutes（显式成分，自校验 occurred_on ==
+# - 地址：occurred_on（本地日历日，即目录）+ name（**原始名**，融合层原话，永不变）+ started_at（本地+偏移）+ utc_offset_minutes（显式成分，自校验 occurred_on ==
 #   started_at 的本地日；canonicalize 折 UTC 的旧坑由"序列化一律保留偏移的字符串"挡住）。
 # - 数字面（经 ``series`` 读成每晚的事件序列，``temporal`` 与语义树用；机器类型白名单、全部必填）：
-#     kind_token         基础词表的类编号（s-k0007 / p-k0003）或占位标记（s-待定 / s-非事件）；schema 只收
-#                        这两种形状（裁定 19）。归约发布前由白天归类给出，之后只能由词表迁移改写
-#                        （``writer.restamp_kind_token``）；不渲染进正文——它是统计用的机器字段
+#     kind_token         词编号（s-k0007 / p-k0003）或占位标记（s-非事件 / s-续话 / s-表外 / s-待定）；schema 只收
+#                        这两种形状（裁定 19）。归约发布时由选词结果给出，落树之后不改（词表没有迁移，词表方案
+#                        2026-11-14）；不渲染进正文——它是统计用的机器字段
 #     status             ongoing|completed|interrupted|abandoned  ← 判断逐字，零发明
 #     status_basis       observed|inferred|observation_lost       ← 同上；interrupted 与
 #                        observation_lost 之分是删失纪律的根
@@ -349,11 +349,11 @@ def is_ascii_digits(value: object) -> bool:
 #   ④ 两个"日"分界：树只认日历日——行为按**实际发生时刻**落目录，没有别的选项：时间统计
 #     （``temporal``）直接按钟面槽位对实际时刻计数，凌晨的行为就该落在凌晨的槽里。"这属于前一晚"式的归属是
 #     语义解释，归语义关联层，行为树与 temporal 零处理、不为它建任何结构。
-#   ⑤ staged 幂等（抄融合 StagedFusion 的检查点形状）：白天归类、reminded 查询这些会随时间漂移
+#   ⑤ staged 幂等（抄融合 StagedFusion 的检查点形状）：选词、reminded 查询这些会随时间漂移
 #     的输入全部发生在 stage 之前；stage 之后只有确定性落盘——否则崩溃重试间词表/账本已变，
 #     同地址不同字节，add-only 撞车卡死串行队列。
 # - 其余规则：summary/basis/goal 逐字取判断、不再调模型（原封不动保留，语义关联层要用，不许置空丢失）；
-#   白天归类是写入层唯一的 LLM 触点（只在已有类里选，选不上标待定）；
+#   选词是写入层唯一的 LLM 触点（只给判断上没带选词结果的，即物理 lane；词表方案 2026-11-14）；
 #   behavior=空的判断不进树，但在释放前转成
 #   带起止的"没读懂"gap 节点（语义关联要用：「没发生」与「发生了但没读懂」是两种空白）。
 #

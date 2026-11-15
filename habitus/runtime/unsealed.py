@@ -9,16 +9,14 @@
 - 哪些判断算"没封口"：``reduction.pending_judgements``——归约每轮第一步用的同一个函数
   （存储里有且账本里没有；坏记录隔离）。
 - 一条的起点与最后看到：判断的 ``started_at`` 与 ``last_observed_at``，occurrence 上写的就是这两个。
-- 归到哪一类：归约用的**同一个白天归类**（``KindStamping``，看原话 + 概要 + 目标 + 步骤），只是提前到
-  封口之前做；按节点身份缓存。归约封口时照常再归一次，这里的结果只给此刻场景用，不写回任何地方。
-  （原来按"近 30 天原话 → 编号"查：新口径下原话是每一次自己的名字，几乎不逐字重复——54 天真实数据 560 条只命中
-  9 条，1.6%，最近一小时等于全是未归类。）
+- 选的哪个词（词表方案 2026-11-14）：判断上带着选词结果的（会话 lane）直接用；没带的（物理 lane）用归约的同一个选词器
+  提前选、按节点身份缓存。归约封口时照常再选一次，这里的结果只给此刻场景用，不写回任何地方。
 
-归类要调模型，所以分两步：``prepare``（异步，每拍装配之前调一次）归新出现的判断；``rows``（同步，装配时调）只读缓存。
-模型此刻用不了就留着下一拍再归（实时化方案第 2 节：模型调不通不停一天）。换代里没有模型调用（实时化阶段 2）：换代里的
-日子预期读 ``cache_only`` 那一份——只对上词表版本、读缓存，不问模型；换代之前由模型队列把还没归的归好（``unclassified``
-是它认欠账的数），没归上的按未归类进场景。
-还没归上的（模型这一拍不可用、或归为「待定」）带原名进场景、标未归类，不猜；归为「非事件」的不进场景（与序列同一口径）。
+选词要调模型，所以分两步：``prepare``（异步，每拍装配之前调一次）选新出现的没带结果的判断；``rows``（同步，装配时调）只读
+判断与缓存。模型此刻用不了就留着下一拍再选（实时化方案第 2 节：模型调不通不停一天）。换代里没有模型调用（实时化阶段 2）：
+换代里的日子预期读 ``cache_only`` 那一份——只读缓存，不问模型；换代之前由模型队列把还没选的选好（``unclassified`` 是它认
+欠账的数），没选上的按未归类进场景。
+还没选上的、选成「表外」「待定」的带原名进场景、标未归类，不猜；「非事件」「续话」不进场景（与序列同一口径）。
 没读懂、出错的判断（``behavior`` 为 None）是一段看不到的空白，按空白行给出；依据写着"没在看"（``unobserved``）的空判断是
 「未观测」，不是看不到——照常说话（裁定 68 第 2 条、94 第 3 条），不给出。隔离的坏记录归约每轮都会报，这里不报第二遍。
 """
@@ -28,17 +26,19 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, tzinfo
 
 from habitus.behavior.fusion.store import BehaviorJudgementStore
-from habitus.behavior.kinds.classify import EXHAUSTED, ClassifyRequest, Outcome
-from habitus.behavior.reduction.kinds_step import KindStamping, judgement_content
+from habitus.behavior.kinds.calls import KindModelOutputError
+from habitus.behavior.kinds.ids import continued_token, is_word, not_event_token
+from habitus.behavior.reduction.kinds_step import KindStamping, record_material
 from habitus.behavior.reduction.ledger import BehaviorReductionLedger
 from habitus.behavior.reduction.payloads import UNOBSERVED_GAP_KIND, gap_kind_of
 from habitus.behavior.reduction.pending import pending_judgements
+from habitus.behavior.reduction.record import ReducibleJudgement
 from habitus.foresight import UnsealedRow
 from habitus.model_client import MODEL_UNAVAILABLE
 
 
 class UnsealedFromJudgements:
-    """``UnsealedReader`` 的生产实现：判断存储 + 消费账本 + 归约的白天归类。"""
+    """``UnsealedReader`` 的生产实现：判断存储 + 消费账本 + 归约的选词器。"""
 
     def __init__(
         self,
@@ -49,58 +49,49 @@ class UnsealedFromJudgements:
         self.judgements = judgements
         self.ledger = ledger
         self.stamping = stamping
-        #: （节点身份, 词表版本）→ （结局, 编号）。只留还没封口的；词表拆改之后版本变了，自动重归（不留停用的编号）。
-        self._classified: dict[tuple[str, int], tuple[Outcome, str]] = {}
-        self._version = 0
-        #: 最近一次 ``prepare`` 因模型此刻用不了没归成时的那个异常（归成了、或没有要归的是 None）：模型队列读它，
+        #: 节点身份 → 选词结果（只缓存判断上没带结果的；只留还没封口的）。
+        self._picked: dict[str, str] = {}
+        #: 最近一次 ``prepare`` 因模型此刻用不了没选成时的那个异常（选成了、或没有要选的是 None）：模型队列读它，
         #: 好分清是整体性的故障还是这一项自己没做成。
         self.unavailable: BaseException | None = None
 
     async def prepare(self, *, until: datetime) -> None:
-        """把还没归过的未封口判断交白天归类。模型这一拍不可用（``MODEL_UNAVAILABLE``）就留着不归（下一拍再试），不让此刻场景
-        因此失败；配置错误照样抛出来——吞掉它会让每一拍都悄悄归不上。"""
+        """把判断上没带选词结果、还没选过的未封口判断交选词器。模型这一拍不可用（``MODEL_UNAVAILABLE``）就留着不选（下一拍
+        再试），不让此刻场景因此失败；这一份被拦、输入超长的这一拍跳过；配置错误照样抛出来——吞掉它会让每一拍都悄悄选不上。"""
 
         if until.utcoffset() is None:
             raise ValueError("until must be a timezone-aware datetime")
-        requests = self._unclassified()
-        vocabulary = self.stamping.store.read()
         self.unavailable = None
-        if not requests or vocabulary.version != self._version:
-            return  # 没有要归的；或刚对上版本词表又变了：下一拍按新版本再归
-        try:
-            result = await self.stamping.classify_requests(requests, vocabulary, checkpoint=lambda: None)
-        except MODEL_UNAVAILABLE as exc:
-            self.unavailable = exc
+        picker = self.stamping.picker
+        if picker is None:
             return
-        for key, verdict in result.verdicts.items():
-            if verdict.outcome is Outcome.PENDING and verdict.reason == EXHAUSTED:
-                continue  # 这次没问成（结构化输出重问用尽），不是模型说"都不是"：不缓存，下一拍再试
-            self._classified[(key, vocabulary.version)] = (verdict.outcome, verdict.token)
+        for record in self._unpicked():
+            material = record_material(record, max_steps=picker.config.prompt_max_steps)
+            if material is None:
+                continue
+            try:
+                self._picked[record.chain_digest] = await picker.pick_record(material)
+            except MODEL_UNAVAILABLE as exc:
+                self.unavailable = exc
+                return
+            except KindModelOutputError:
+                continue  # 这一份被拦、输入超长：此刻场景里按未归类，归约封口时照常处理
 
-    def _unclassified(self) -> list[ClassifyRequest]:
-        """对上词表此刻的版本（换了版本的、已封口的从缓存里清掉），给出还没归过的未封口判断。不问模型。"""
+    def _unpicked(self) -> list[ReducibleJudgement]:
+        """还没选过词的未封口判断（判断上没带结果、缓存里也没有）；已封口的从缓存里清掉。不问模型。"""
 
         records = pending_judgements(self.judgements, self.ledger).occurrences
-        vocabulary = self.stamping.store.read()
-        self._version = vocabulary.version
-        alive = {(record.chain_digest, vocabulary.version) for record in records}
-        self._classified = {key: value for key, value in self._classified.items() if key in alive}
-        if vocabulary.version == 0:
-            return []  # 词表还是空的（还没有一类从待定池长出来）：没有类可归
-        requests = []
-        for record in records:
-            content = judgement_content(record)
-            if (record.chain_digest, vocabulary.version) not in self._classified and content is not None:
-                requests.append(ClassifyRequest(record.chain_digest, self.stamping.lane, content))
-        return requests
+        alive = {record.chain_digest for record in records}
+        self._picked = {key: value for key, value in self._picked.items() if key in alive}
+        return [record for record in records if record.kind_token is None and record.chain_digest not in self._picked]
 
     def unclassified(self) -> int:
-        """还没归过类的未封口判断条数（按词表此刻的版本）。"""
+        """还没选过词的未封口判断条数（会话 lane 的判断都带着结果，不算）。"""
 
-        return len(self._unclassified())
+        return 0 if self.stamping.picker is None else len(self._unpicked())
 
     def cache_only(self) -> CachedUnsealed:
-        """只读缓存的那一份（换代里的日子预期用）：``prepare`` 只对上词表版本，不问模型。"""
+        """只读缓存的那一份（换代里的日子预期用）：``prepare`` 不问模型。"""
 
         return CachedUnsealed(self)
 
@@ -112,15 +103,17 @@ class UnsealedFromJudgements:
                 raise ValueError(f"{label} must be a timezone-aware datetime")
         begin, finish = since.astimezone(UTC), until.astimezone(UTC)
         pending = pending_judgements(self.judgements, self.ledger)
+        lane = self.stamping.lane
+        uncounted = {not_event_token(lane), continued_token(lane)}
         rows: list[UnsealedRow] = []
         for record in pending.occurrences:
-            outcome, token = self._classified.get((record.chain_digest, self._version), (Outcome.PENDING, ""))
-            if outcome is Outcome.NOT_EVENT:
+            token = record.kind_token if record.kind_token is not None else self._picked.get(record.chain_digest)
+            if token in uncounted:
                 continue
             rows.append(
                 UnsealedRow(
                     name=str(record.behavior),
-                    kind_token=token if outcome is Outcome.CLASS else None,
+                    kind_token=token if token is not None and is_word(token) else None,
                     started_at=record.started_at,
                     last_observed_at=record.last_observed_at,
                     summary=record.summary,

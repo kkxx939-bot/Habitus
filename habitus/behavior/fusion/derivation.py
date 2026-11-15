@@ -59,7 +59,7 @@ from habitus.foundation.integrity import canonical_digest
 FUSION_IMPLEMENTATION_VERSION = "behavior_judgement_fusion_v5"
 FUSION_VERSION = FUSION_IMPLEMENTATION_VERSION
 
-_IDENTITY_SCHEMA = "behavior_judgement_identity_v1"
+_IDENTITY_SCHEMA = "behavior_judgement_identity_v2"
 
 
 @dataclass(frozen=True)
@@ -91,6 +91,8 @@ class DurableJudgement:
     status_basis: JudgementStatusBasis | None
     fusion_version: str
     prompt_version: str
+    #: 选词结果（会话 lane 带、物理 lane 不带），见 ``BehaviorClaim.kind_token``。
+    kind_token: str | None = None
 
     @property
     def is_readable(self) -> bool:
@@ -164,6 +166,8 @@ def _identity(
             ],
             "status": judgement.status,
             "status_basis": judgement.status_basis,
+            # 选词结果是判断内容的一部分：中断后接着写完不能把旧描述配上新选的词（词表方案 2026-11-14）
+            "kind_token": claim.kind_token,
         }
     )
 
@@ -204,6 +208,7 @@ def _derive(
         status_basis=judgement.status_basis,
         fusion_version=fusion_version,
         prompt_version=prompt_version,
+        kind_token=claim.kind_token,
     )
 
 
@@ -282,6 +287,7 @@ def judgement_payload(judgement: DurableJudgement) -> dict[str, Any]:
         "status_basis": None if judgement.status_basis is None else judgement.status_basis.value,
         "fusion_version": judgement.fusion_version,
         "prompt_version": judgement.prompt_version,
+        "kind_token": judgement.kind_token,
     }
 
 

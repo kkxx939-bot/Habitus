@@ -38,8 +38,6 @@ from habitus.runtime.generation import Generation
 from habitus.runtime.generation_report import GenerationReports
 from habitus.runtime.generation_result import ALREADY_DONE, DEGRADED, FAILED, FALLBACKS, HELD, GenerationResult
 from habitus.runtime.generation_trace import TraceFiles
-from habitus.runtime.scene_rhythms import prune_rhythms
-from habitus.runtime.scene_seal_files import prune_seals
 from habitus.scene.relations.diff import RelationChange
 
 logger = logging.getLogger("habitus.generation")
@@ -249,6 +247,8 @@ class GenerationRunner:
             "failed_step": result.failed or "",
             "duration_seconds": duration,
             "unreduced_gaps": -1 if result.unreduced_gaps is None else result.unreduced_gaps,
+            "active_words": -1 if result.active_words is None else result.active_words,
+            "waiting_words": -1 if result.waiting_words is None else result.waiting_words,
         }
         if result.lag_seconds is not None:
             attributes["lag_seconds"] = result.lag_seconds
@@ -276,8 +276,6 @@ class GenerationRunner:
                 self.reports.prune(day, kept)
             if self.traces is not None:
                 self.traces.prune(day, kept)
-            prune_rhythms(self.generation.scene, day, kept)
-            prune_seals(self.generation.scene, day, kept)
         except Exception as exc:  # noqa: BLE001 - 留存清理是旁路：清不掉下一代再清
             self._observe("prune", ObservationStatus.FAILURE, {"error_type": type(exc).__name__})
 

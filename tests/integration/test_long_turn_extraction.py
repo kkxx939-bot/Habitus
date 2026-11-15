@@ -101,6 +101,8 @@ def runtime_and_chat(tmp_path: Path, *, max_segment_tokens: int | None = None):
 
     payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
+    # 单测不往 127.0.0.1:4318 真导出：没关掉的 Runtime 会留下每 10 秒导出一次的线程，串进后面设了代理环境变量的测试
+    payload["observability"]["tracing"]["enabled"] = False
     # chat 保持默认路由（deepseek / openai_compatible_chat / 64000 / json_object），只去掉凭据引用（不发网络）
     payload["models"]["chat"]["route"]["credential_ref"] = ""
     for route in (

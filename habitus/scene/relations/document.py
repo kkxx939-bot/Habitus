@@ -19,7 +19,7 @@ from habitus.scene.relations.spans import Segment
 from habitus.scene.relations.state import LaneState, Relation, Status, Transition
 from habitus.scene.relations.stats import Effect
 
-SCHEMA = "habitus.scene.relations.night/v4"
+SCHEMA = "habitus.scene.relations.night/v5"
 TRANSITION_SCHEMA = "habitus.scene.relations.transition/v1"
 
 

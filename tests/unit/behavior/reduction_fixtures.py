@@ -63,6 +63,7 @@ def judgement_record(
     basis: tuple[tuple[str, tuple[str, ...]], ...] = (),
     status: str | None = "completed",
     status_basis: str | None = "observed",
+    kind_token: str | None = None,
 ) -> dict[str, Any]:
     unreadable = behavior is None
     return {
@@ -82,6 +83,7 @@ def judgement_record(
         "status_basis": None if unreadable else status_basis,
         "fusion_version": FUSION_VERSION_TEXT,
         "prompt_version": "behavior_judgement_prompt_v15",
+        "kind_token": None if unreadable else kind_token,
     }
 
 

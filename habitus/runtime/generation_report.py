@@ -1,8 +1,8 @@
 """每代报告文件 ``<scene_root>/generation/reports/<日子>.json``（数据逻辑看这里，不开 OTLP 也能看）：
 
 - 每一步：结局、原因、耗时、起止、调模型次数（按触点）、这一步原有的报告；
-- 各个退路的计数（关系判定退到上一代、结算留到下次、单元历史跳过、换代时还没映射的记录数……）；
-- 换代时模型队列各类还欠着几项（``queue_owed``：出错重试、词表、同步词表、写概念、映射、候选条件与先验；没接队列是 null）；
+- 各个退路的计数（关系判定退到上一代、结算留到下次、单元历史跳过、换代时还没封好的记录数……）；
+- 换代时模型队列各类还欠着几项（``queue_owed``：出错重试、词表、未封口判断的归类、候选条件与先验、同步词表；没接队列是 null）；
 - 这一代读到的输入是哪一代（序列截止日、词表版本、各 lane 关系表那一晚、已盖章天数），截止日之前还没归约的空判断条数；
 - 昨天没在看的时段（「未观测」空白，从这一代读到的序列里取）；
 - **关系表双向变化**（用户 11-09：「关系的变化，无论是增加还是减少，这些都需要看」）：每条 lane 这一代的关系表比上一晚多出 /
@@ -68,6 +68,8 @@ class GenerationReports:
             "inputs": {
                 "series_cutoff": None if result.series_cutoff is None else result.series_cutoff.isoformat(),
                 "vocabulary_version": result.vocabulary_version,
+                "active_words": result.active_words,
+                "waiting_words": result.waiting_words,
                 "relation_nights": {
                     lane: None if night is None else night.isoformat()
                     for lane, night in sorted(result.relation_nights.items())

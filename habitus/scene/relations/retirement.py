@@ -2,8 +2,8 @@
 
 - **尺**：账的久别同一把（``temporal.absence.long_absence``）——这次空白比历史上没截尾的间隔都长，且不短于 H 个典型间隔；
   样本不够不判。H 与最少间隔数在 ``RelationConfig``（组合根从预测层抄）。
-- **来过**：行为概念是时间线上有记号的日子，那天的记号全是被提醒之后才做的记成 ``Visit(prompted=True)``（以它结尾的间隔截尾）；
-  非日历情境当前因是它成立的日子。没来过的一端不判。
+- **来过**：行为概念时间线上有记号的日子，那天的记号全是被提醒之后才做的记成 ``Visit(prompted=True)``（以它结尾的间隔截尾）。
+  没来过的一端不判。判的两端都是行为概念（前因是日历情境时不判前因）。
 - **在看**：来过的日子按 1，其余按观测覆盖的日占比（``temporal.coverage``；不是时间线的"人在场"）。
 - **只数日型**：只数这个概念来过的日型的日子（账的久别同一个口径，``foresight.absence._rulers``）；日型答不出的归 None。
 - **两端**：前因、后果各判一次，任一端久没来就退；不看条件。前因是日历情境时只判后果。
@@ -45,16 +45,12 @@ class Absence:
 
 
 def visits(line: LaneTimeline, identity: str) -> tuple[Visit, ...]:
-    """这个概念来过的日子：有记号的是行为概念（那天全是被提醒之后才做的记 ``prompted``）；否则是情境成立的日子。"""
+    """这个行为概念来过的日子：时间线上有记号的日子（那天全是被提醒之后才做的记 ``prompted``）；没有记号就是没来过。"""
 
-    marks = line.marks.get(identity)
-    if marks:
-        prompted: dict[date, bool] = {}
-        for mark in marks:
-            prompted[mark.day] = prompted.get(mark.day, True) and mark.reminded
-        return tuple(Visit(day, prompted=flag) for day, flag in sorted(prompted.items()))
-    held = line.situations.get(identity, {})
-    return tuple(Visit(day) for day, value in sorted(held.items()) if value)
+    prompted: dict[date, bool] = {}
+    for mark in line.marks.get(identity, ()):
+        prompted[mark.day] = prompted.get(mark.day, True) and mark.reminded
+    return tuple(Visit(day, prompted=flag) for day, flag in sorted(prompted.items()))
 
 
 def absence(came: tuple[Visit, ...], watching: Watching, config: RelationConfig) -> Absence | None:

@@ -23,18 +23,16 @@ def test_every_mapped_operation_is_emitted_somewhere_in_production_code() -> Non
     assert missing == []
 
 
-def test_vocabulary_classification_feeds_its_counters() -> None:
+def test_word_picking_feeds_its_counters() -> None:
     event = ObservationEvent(
         category="behavior",
-        operation="kind_classify",
+        operation="kind_pick",
         status=ObservationStatus.SUCCESS,
         duration_seconds=1.0,
-        attributes={"classified": 7, "pending": 2, "not_events": 1, "model_calls": 3},
+        attributes={"chains": 9, "not_events": 1, "model_calls": 7},
     )
     names = {update.name: update.value for update in _behavior_metric_updates(event)}
     assert names == {
-        "behavior_kind_classified_total": 7.0,
-        "behavior_kind_pending_total": 2.0,
         "behavior_kind_not_events_total": 1.0,
-        "behavior_kind_model_calls_total": 3.0,
+        "behavior_kind_model_calls_total": 7.0,
     }

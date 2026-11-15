@@ -74,6 +74,7 @@ include = ["habitus*"]
 "habitus.memory.schema.definitions" = ["*.yaml"]
 "habitus.behavior.schema.definitions" = ["*.yaml"]
 "habitus.conditions" = ["holidays/*/*.json"]
+"habitus.behavior.kinds" = ["words/*.json"]
 
 [tool.ruff]
 line-length = 120

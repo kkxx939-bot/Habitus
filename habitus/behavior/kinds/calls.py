@@ -1,10 +1,10 @@
 """词表唯一的模型触点：一次结构化调用 + 瞬态错误的有界重试。
 
-归类、每晚新增、定期拆改都经这里调模型；它们只交出系统提示、用户消息、schema 与形状校验。
+选词经这里调模型（``pick``），只交出系统提示、用户消息、schema 与形状校验。
 这一次调用本身答不了时（校验用尽、输入过长、内容安全拦截）抛 ``KindModelOutputError``，调用方按"没答好"降级；
 瞬态错误重试用尽、配额与鉴权这类全局故障原样抛出。
 
-调用方要按错误分类分开处理时（裁定 94 错误分类：归约的白天归类）用 ``call_failure``：模型整个用不了 / 这一份触发内容安全 /
+调用方要按错误分类分开处理时（裁定 94 错误分类）用 ``call_failure``：答复重问之后仍不合格 / 模型整个用不了 / 这一份触发内容安全 /
 输入超长 / 别的（我们自己的 bug）。分类只在这里认模型客户端的异常，行为侧别处不直接依赖它。
 """
 
@@ -22,9 +22,10 @@ from habitus.model_client import (
     MODEL_UNUSABLE,
     ChatMessage,
     ChatRequest,
+    ModelStructuredOutputError,
     StructuredChatClient,
 )
-from habitus.model_client.contracts import ModelResponseError, ModelStructuredOutputError, ModelTransportError
+from habitus.model_client.contracts import ModelResponseError, ModelTransportError
 
 T = TypeVar("T")
 
@@ -39,6 +40,7 @@ class KindModelOutputError(RuntimeError):
 class CallFailure(str, Enum):
     """一次词表调模型失败属于哪一类（裁定 94 错误分类）。"""
 
+    INVALID = "invalid"  # 答复重问之后仍不合格：选词记「待定」，不硬归
     UNAVAILABLE = "unavailable"  # 模型整个用不了（此刻用不了、没配好）：换代里走退路照常往下做，白天放一边等重试收尾
     REFUSED = "refused"  # 这一份触发内容安全：不重试
     TOO_LARGE = "too_large"  # 输入超长：材料上限与模型窗口没对上，是 bug，不重试
@@ -50,6 +52,8 @@ def call_failure(exc: BaseException) -> CallFailure:
 
     current: BaseException | None = exc
     while current is not None:
+        if isinstance(current, ModelStructuredOutputError):
+            return CallFailure.INVALID
         if isinstance(current, MODEL_UNUSABLE):
             return CallFailure.UNAVAILABLE
         if isinstance(current, MODEL_REFUSED):

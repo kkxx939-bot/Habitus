@@ -197,7 +197,7 @@ def construct_overrides(
     """用配置里写了的覆盖项构造一份领域配置；值域只由领域配置校验，拒了就包成指得出配置键的 ``ConfigError``。
 
     领域的报错只认它自己的字段名（``batch_size must ...``），这里把报错里出现的覆盖项还原成配置键
-    （``config.behavior.kinds_batch_size``）；一个都认不出（例如几项之间互相矛盾、报错没点名写了的那项）时指到这一组。
+    （``config.behavior.kinds_active_cap``）；一个都认不出（例如几项之间互相矛盾、报错没点名写了的那项）时指到这一组。
     """
 
     try:
