@@ -127,10 +127,13 @@ class ModelQueue:
         journal: QueueJournal | None = None,
         observer: Observer | None = None,
         clock: Callable[[], datetime] | None = None,
+        lane: str = "",
     ) -> None:
         if series.tree is not scene.behavior_tree:
             raise ValueError("the model queue must read the scene's behaviour tree")
         self.scene = scene
+        #: 这是哪一支的队列（裁定 42：一支一个队列、一份状态与整体退避；worker 每一轮按支依次做）。
+        self.lane = lane
         self.today = today
         self.sealed_day = sealed_day
         #: 队列的重试账：一项没做成按它退避。
@@ -322,7 +325,10 @@ class ModelQueue:
         trace = open_trace(self.traces.sink(current.today)) if self.traces is not None else nullcontext()
         with (
             trace,
-            span(ITEM_SPAN, {"category": item.category, "day": (item.day or current.today).isoformat()}) as found,
+            span(
+                ITEM_SPAN,
+                {"category": item.category, "day": (item.day or current.today).isoformat(), "lane": self.lane},
+            ) as found,
         ):
             try:
                 async with self._writes(item):

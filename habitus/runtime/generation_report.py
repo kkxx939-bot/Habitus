@@ -31,8 +31,12 @@ _MAX_BYTES = 64 * 1024 * 1024
 
 
 class GenerationReports:
-    def __init__(self, root: str | Path, *, artifact_root: str | Path, relations: RelationStore | None) -> None:
+    def __init__(
+        self, root: str | Path, *, artifact_root: str | Path, relations: RelationStore | None, lane: str = ""
+    ) -> None:
         self.root = Path(root)
+        #: 这是哪一支的报告（两支各写各的根，报告里也写明，裁定 42）。
+        self.lane = lane
         self.artifact_root = Path(artifact_root)
         self.relations = relations
 
@@ -56,6 +60,7 @@ class GenerationReports:
             relations = kept if isinstance(kept, dict) else {}
         payload = {
             "schema": _SCHEMA,
+            "lane": self.lane,
             "day": result.day.isoformat(),
             "generated_at": now.isoformat(),
             "complete": result.complete,

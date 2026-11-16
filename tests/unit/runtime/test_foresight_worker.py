@@ -13,7 +13,7 @@ from habitus.foresight import ForesightError, NoUnsealed
 from habitus.foundation.observability import ObservationEvent, ObservationStatus
 from habitus.runtime.foresight import ForesightReadSide
 from habitus.runtime.foresight_tick import ForesightTick
-from habitus.runtime.foresight_worker import ForesightWorker
+from habitus.runtime.foresight_worker import ForesightWorker, SlotBranch
 from tests.unit.runtime.test_foresight_tick import TODAY, TOLERANCE, site_with_three_mornings, stores
 from tests.unit.scene.fixtures import SUBJECT, at, publish
 
@@ -42,7 +42,7 @@ def worker(tmp_path, *, broken: bool = False, recorder: Recorder | None = None) 
         tick._read = unreadable  # type: ignore[method-assign,assignment]
     # 时钟停在 10:15，正好是一个槽边界：起来这一拍就跑，下一拍等 10:30
     return ForesightWorker(
-        tick,
+        (SlotBranch("session", tick=tick),),
         interval_seconds=900.0,
         shutdown_timeout_seconds=5.0,
         zone=ZoneInfo("Asia/Shanghai"),
@@ -67,7 +67,7 @@ def test_the_loop_runs_a_tick_then_waits_and_stops(tmp_path) -> None:
     asyncio.run(scenario())
     loops = [event for event in recorder.events if event.operation == "tick_loop"]
     assert loops and loops[0].status is ObservationStatus.SUCCESS and loops[0].attributes["recorded"] == 1
-    assert asyncio.run(run.run_once()).recorded == 0  # 手动再跑一拍：同一身份不再写
+    assert asyncio.run(run.run_once())["session"].recorded == 0  # 手动再跑一拍：同一身份不再写
 
 
 def test_a_failing_tick_is_recorded_and_the_loop_survives(tmp_path) -> None:
@@ -83,7 +83,7 @@ def test_a_failing_tick_is_recorded_and_the_loop_survives(tmp_path) -> None:
     asyncio.run(scenario())
     assert [event.status for event in recorder.events if event.operation == "tick_loop"] == [ObservationStatus.FAILURE]
     with pytest.raises(ValueError):
-        ForesightWorker(run.tick, interval_seconds=0.0, shutdown_timeout_seconds=1.0, zone=ZoneInfo("Asia/Shanghai"))
+        ForesightWorker(run.branches, interval_seconds=0.0, shutdown_timeout_seconds=1.0, zone=ZoneInfo("Asia/Shanghai"))
     assert timedelta(seconds=run.interval_seconds) == timedelta(minutes=15)
 
 

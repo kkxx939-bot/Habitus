@@ -8,10 +8,14 @@
 - **出口记过的提问**：出口按固定选项写回话时 ``Response.turn`` 记的是那次提问调用的 call_id（会话 lane 判的记轮的身份）；
   会话 lane 问"这几次调用里哪些出口记过"，据此把那次问答剔出给模型的材料。
 - **省读**：先只读递送目录，这一天没有说出口的就不读预期与回话；``at`` 可能是 UTC 写法而预期的日子是主体本地日，预筛留一天余量。
+- **两支**（丙二 D4）：两支的提醒都从宿主里的会话说出口，他的回应也都由会话 lane 的"描述这一轮"读出来。``BranchReminders``
+  把各支的桥合成会话 lane 看到的那一个：开着的合在一起按截止排、取前 ``limit`` 条；回应写回认得这条提醒的那一支的账本。
+  共用的是出口，不是数据：一支的账里永远只有它自己的提醒与回应。
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 
 from habitus.behavior.fusion.lanes.session.reminders import PendingReminder, ReminderResponse
@@ -88,4 +92,40 @@ class ReminderResponses:
         record_observation(self.observer, "foresight", "response", status, attributes=attributes)
 
 
-__all__ = ["ReminderResponses"]
+class BranchReminders:
+    """会话 lane 看到的那一座桥（``ReminderFeedback``）：各支一个 ``ReminderResponses``，按支的先后（会话在前）。"""
+
+    def __init__(self, branches: Sequence[ReminderResponses], *, limit: int) -> None:
+        if not branches:
+            raise ValueError("the reminder bridge needs at least one branch")
+        if limit < 1:
+            raise ValueError("limit must be a positive integer")
+        self.branches = tuple(branches)
+        self.limit = limit
+
+    def open(self, at: datetime) -> tuple[PendingReminder, ...]:
+        """各支此刻开着的提醒合在一起，与一支之内同一个排法（``foresight.responses.open_reminders``：截止由近到远、再按说的时刻、
+        身份），最多 ``limit`` 条。"""
+
+        found = [item for branch in self.branches for item in branch.open(at)]
+        found.sort(key=lambda item: (item.deadline, item.said_at, item.reminder_id))
+        return tuple(found[: self.limit])
+
+    def answered(self, calls: frozenset[str], at: datetime) -> frozenset[str]:
+        return frozenset(call for branch in self.branches for call in branch.answered(calls, at))
+
+    def respond(self, turn: str, response: ReminderResponse, *, at: datetime) -> None:
+        """写回这条提醒所属的那一支（预期身份含类编号，两支不会撞）；哪一支都不认得，交第一支照常记"不认得"。"""
+
+        for branch in self.branches:
+            try:
+                known = branch.ledger.day_of(response.reminder_id) is not None
+            except (ForesightError, OSError):
+                known = False  # 读不了这一支的索引：问下一支；都读不了时第一支照常记失败
+            if known:
+                branch.respond(turn, response, at=at)
+                return
+        self.branches[0].respond(turn, response, at=at)
+
+
+__all__ = ["BranchReminders", "ReminderResponses"]

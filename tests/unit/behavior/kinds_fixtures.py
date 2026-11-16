@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -140,7 +140,7 @@ class NameMatchingProvider(ScriptedProvider):
         name = text.partition("【这一段】\n")[2].split("　｜", 1)[0]
         pick: object = words.get(name, "missing")
         return ModelResponse(
-            content=json.dumps({"pick": pick}, ensure_ascii=False),
+            content=json.dumps({"pick": pick, "new": None}, ensure_ascii=False),
             model=self.model,
             provider=self.provider_name,
             finish_reason="stop",
@@ -156,5 +156,24 @@ def kind_components(
     """归约侧的选词一步：在 ``names`` 这几个词里选（判断上没带选词结果的才问模型）。"""
 
     resolved = config or BehaviorKindConfig()
-    picker = WordPicker(KindModelCaller(client_for(provider), config=resolved), named_words(names))
+    words = named_words(names)
+    picker = WordPicker(KindModelCaller(client_for(provider), config=resolved), words, state=HeldVocabulary(words))
     return KindStamping(picker, lane=Lane.SESSION)
+
+
+class HeldVocabulary:
+    """进程里的一份词表状态（选词器的 ``state``）：给 ``named_words`` 那种测试词表用，收新节点只改内存。"""
+
+    def __init__(self, vocabulary: Vocabulary) -> None:
+        self.vocabulary = vocabulary
+
+    @property
+    def lane(self) -> Lane:
+        return self.vocabulary.lane
+
+    def read(self) -> Vocabulary:
+        return self.vocabulary
+
+    def update(self, change: Callable[[Vocabulary], Vocabulary]) -> Vocabulary:
+        self.vocabulary = change(self.vocabulary)
+        return self.vocabulary

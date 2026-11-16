@@ -23,7 +23,7 @@ from habitus.config import HabitusConfig
 from habitus.infrastructure.store.sqlite import SQLiteLockStore
 from habitus.model_client import ChatClient
 from habitus.model_client.structured import StructuredChatClient
-from habitus.runtime.scene import build_scene_nightly
+from habitus.runtime.scene import build_scene_nightly, scene_branch_root
 from habitus.runtime.scene_night import NightReport, SceneNightlyRun
 from habitus.scene.occurrences.model import ConceptHits
 from habitus.series.reader import read_series
@@ -101,8 +101,10 @@ def vocabulary(tmp_path: Path) -> BehaviorKindStore:
 def scene_run(tmp_path: Path, site: Site, client: StructuredChatClient) -> SceneNightlyRun:
     """一支语义树，由组合根装（``runtime.scene.build_scene_nightly``）；日历用 ``LocalCalendar``（只给周几、几号）。"""
 
+    config = scene_config(tmp_path)
     run = build_scene_nightly(
-        scene_config(tmp_path),
+        config,
+        root=scene_branch_root(config, "session"),
         behavior_tree=site.behavior_tree,
         kind_store=vocabulary(tmp_path),
         structured_chat=client,

@@ -12,10 +12,12 @@ from habitus.scene.relations.store import RelationStore
 
 
 class SceneParticipant:
-    name = "scene"
+    """一支语义树的参与者（两支各一个，名字带支：生命周期按名字区分参与者）。"""
 
-    def __init__(self, relations: RelationStore) -> None:
+    def __init__(self, relations: RelationStore, *, lane: str) -> None:
         self.relations = relations
+        self.lane = lane
+        self.name = f"scene_{lane}"
 
     async def maintain(self, ctx: LifecycleContext) -> ParticipantReport:
         return await asyncio.to_thread(self._maintain_blocking, ctx)

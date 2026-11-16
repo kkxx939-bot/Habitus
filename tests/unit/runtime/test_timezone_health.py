@@ -42,7 +42,9 @@ def test_the_service_compares_the_configured_zone_even_without_a_generation(monk
     configured = "Etc/GMT-14" if local_offset == timedelta(hours=-12) else "Etc/GMT+12"
     service = RuntimeHealthService(
         SimpleNamespace(
-            generation=None,
+            pipelines=(),
+            foresights=(),
+            slot_worker=None,
             memory=SimpleNamespace(vector_index=SimpleNamespace(store=None)),
             conversation=SimpleNamespace(summary_vector_index=SimpleNamespace(store=None)),
         ),

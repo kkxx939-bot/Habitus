@@ -153,8 +153,7 @@ class DeliveryStage:
         self.ledger = ledger
         self.tolerance = tolerance
         self.evidence = evidence
-        self.daily_cap = daily_cap
-        self.judge = judge
+        self.daily_cap, self.judge = daily_cap, judge
         self.tick = timedelta(seconds=float(tick_seconds))
         #: 提醒出口（没有 = 没有宿主活着：提醒档到时窗末都「不可达」，也不问模型）；``claimed``：出口上这条请求取走过没有。
         self.outlet, self.claimed = outlet, claimed
@@ -294,7 +293,7 @@ class DeliveryStage:
         )
 
     def _publish(self, found: _Due, tally: Tally, materials: JudgeMaterials | None, now: datetime) -> int:
-        """这一拍末尾把可取的请求清单交给出口：之前「待取」还没终局的，加上这一拍刚记「待取」的。"""
+        """这一拍末尾把可取的请求清单交给出口（只换这一支的）：之前「待取」还没终局的，加上这一拍刚记「待取」的。"""
 
         if self.outlet is None:
             return 0
@@ -307,6 +306,7 @@ class DeliveryStage:
                 item.formed_at,
                 pending.level,
                 item.day,
+                self.units.lane,  # 这一支：「说了」与回话写回这一支的账本
             )
             for item, pending in (*found.awaiting, *tally.awaiting)
             if item.expectation_id not in tally.withdrawn

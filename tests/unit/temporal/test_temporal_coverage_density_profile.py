@@ -63,10 +63,10 @@ def test_coverage_counts_every_calendar_day_and_subtracts_gaps_by_share() -> Non
     skipped = SkippedRecord("behavior://s-非事件/x", START + timedelta(days=2), SkipReason.NOT_EVENT)
     with_skip = replace(series(records, cutoff=START + timedelta(days=5), gaps=gaps), skipped=(skipped,))
     assert coverage_of(with_skip, "session", slot_minutes=15).day_share(START + timedelta(days=2)) == 1.0
-    # 物理 lane：上游没在看时自己报空白，空着的一天照旧算在看（那天就是没做）
+    # 物理 lane 同一个规矩（用户 2026-11-16）：上游一点数据都没送来的那天也算没在看；有记录的那天照样按空白扣
     physical = [replace(item, lane="physical", kind_token="p-k0001") for item in records]
     worn = coverage_of(series(physical, cutoff=START + timedelta(days=5), gaps=gaps), "physical", slot_minutes=15)
-    assert worn.day_share(START + timedelta(days=2)) == 1.0 and worn.days[START + timedelta(days=1)][40] == second[40]
+    assert worn.day_share(START + timedelta(days=2)) == 0.0 and worn.days[START + timedelta(days=1)][40] == second[40]
     assert coverage_of(series([], cutoff=START), "session", slot_minutes=15).days == {}
 
 

@@ -18,13 +18,11 @@ from habitus.scene.occurrences.daily import apply_seal, plan_seal
 from habitus.scene.occurrences.situations import SituationOutcome
 from habitus.scene.recurrence import recurrences_of
 from habitus.series import (
-    SILENT_DAY_UNWATCHED_LANES,
     EventSeries,
     GapKind,
     SeriesError,
     SkippedRecord,
     SkipReason,
-    silent_day_unwatched,
 )
 from habitus.series.reader import read_series
 from habitus.temporal import Rulers
@@ -328,13 +326,6 @@ def test_a_last_seen_written_with_another_offset_is_read_in_the_start_offset(tmp
     )["session"]
     ((ended, _uri),) = line.ends[DAY1]
     assert ended == DAY1.toordinal() * 96 + 95
-
-
-def test_only_the_session_lane_reads_a_day_without_records_as_unwatched() -> None:
-    """裁定 89 第 2 条：会话 lane 一整天没有记录 = 没在看；物理 lane 的上游自己报空白，不在里面。取值与 ``Lane`` 的 value 一致。"""
-
-    assert frozenset({Lane.SESSION.value}) == SILENT_DAY_UNWATCHED_LANES
-    assert silent_day_unwatched(Lane.SESSION.value) and not silent_day_unwatched(Lane.PHYSICAL.value)
 
 
 def test_active_days_count_skipped_records_too() -> None:

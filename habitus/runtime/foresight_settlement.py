@@ -70,7 +70,7 @@ from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement_diagnosis import SettlementDiagnosis
 from habitus.runtime.foresight_tree_rows import basis_row, day_cache, hierarchy_of, rows_between
 from habitus.scene.views import DayIndexCache
-from habitus.series.model import KindResolution, silent_day_unwatched
+from habitus.series.model import KindResolution
 
 
 @dataclass(frozen=True)
@@ -358,12 +358,12 @@ class SettlementStage:
         return settlement_fact(item, result, known=known, earlier_offsets=earlier)
 
     def _unobserved(self, item: Expectation, cache: DayIndexCache) -> bool:
-        """这条说中的范围里有没有没在看的：上游报的空白，或（会话 lane）一整天没有会话的日子——后者等同上游报了全天「未观测」
-        （裁定 89 第 2 条，``series.model.silent_day_unwatched``）。递送那一拍不看这一条（裁定 68 第 2 条：白天还不知道这天会不会空着）。"""
+        """这条说中的范围里有没有没在看的：上游报的空白，或一整天一条记录都没有的日子——后者等同上游报了全天「未观测」
+        （裁定 89 第 2 条；两条 lane 同一个规矩，用户 2026-11-16）。递送那一拍不看这一条（裁定 68 第 2 条：白天还不知道这天会不会空着）。"""
 
         if cache.has_gap(item.observed_from, item.deadline):
             return True
-        return silent_day_unwatched(self.lane) and cache.silent_within(item.observed_from, item.deadline)
+        return cache.silent_within(item.observed_from, item.deadline)
 
     def _said_done(self, asked: Asked) -> bool:
         """说给他的那句提醒（这条自己的，或单元一并决定时依据那条的）他回了「已做」（裁定 91 第 3 条②）。"""

@@ -176,7 +176,7 @@ def test_c26_after_the_node_is_deleted_nothing_more_is_said_and_the_waiting_requ
 def test_c29_starting_the_runtime_alone_refuses_an_old_proposal_book(tmp_path: Path) -> None:
     """C29 只靠启动（``Runtime.initialize``，``GrowSite`` 的构造里做）就报出来，不等换代或模型队列。"""
 
-    book = tmp_path / "data" / "scene" / "advice" / "conditions" / "session.json"
+    book = tmp_path / "data" / "scene" / "session" / "advice" / "conditions" / "session.json"
     book.parent.mkdir(parents=True)
     book.write_text(OLD_BOOK, encoding="utf-8")
     with pytest.raises(Exception, match=r"conditions[/\\]session\.json"):  # noqa: PT011 - 报错类型由实现定，只要点出文件

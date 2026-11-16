@@ -7,7 +7,7 @@ import re
 import threading
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from habitus.foundation.observability import ObservationEvent, ObservationStatus
 
@@ -155,12 +155,26 @@ def _domain_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
     if event.category == "behavior":
         return _behavior_metric_updates(event)
     if event.category in ("generation", "scene"):
-        return _generation_metric_updates(event)
+        return _by_lane(event, _generation_metric_updates(event))
     if event.category == "foresight" and event.operation == "tick":
-        return _tick_metric_updates(event)
+        return _by_lane(event, _tick_metric_updates(event))
     if event.category == "model_queue":
-        return _model_queue_metric_updates(event)
+        return _by_lane(event, _model_queue_metric_updates(event))
     return ()
+
+
+def _by_lane(event: ObservationEvent, updates: tuple[MetricUpdate, ...]) -> tuple[MetricUpdate, ...]:
+    """换代、模型队列、预测拍两支各一条管线（裁定 42）：事件带着是哪一支时，指标多一个 ``lane`` 标签（两个取值，基数恒定）。"""
+
+    lane = event.attributes.get("lane")
+    if not isinstance(lane, str) or not lane:
+        return updates
+    return tuple(
+        update
+        if any(name == "lane" for name, _value in update.labels)
+        else replace(update, labels=(*update.labels, ("lane", _label_value(lane))))
+        for update in updates
+    )
 
 
 def _model_queue_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:

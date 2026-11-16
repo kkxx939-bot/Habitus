@@ -86,8 +86,8 @@ class World:
         self.protocol, self.host, self.session = conversation
         self.ledger = ForesightLedgerStore(tmp_path / "foresight")
         self.outlet = ReminderOutlet(
-            OutletStore(self.ledger.root / "outlet"),
-            self.ledger,
+            {"session": OutletStore(self.ledger.root / "outlet")},
+            {"session": self.ledger},
             liveness=timedelta(hours=48),
             lease=timedelta(minutes=30),
             max_attempts=3,
@@ -108,8 +108,8 @@ class World:
         task = expectation(TASK_ID, TASK_KIND, deadline_hours=4)
         self.ledger.record_expectation(task)
         self.ledger.record_delivery(DAY, Delivery(TASK_ID, AWAITING_AT, 1, False, "待取", 1.0, TASK_TEXT))
-        self.outlet.publish(
-            [OpenRequest(TASK_ID, TASK_KIND, TASK_TEXT, task.deadline, task.formed_at, 1, DAY)], now=AWAITING_AT
+        self.outlet.publish("session", 
+            [OpenRequest(TASK_ID, TASK_KIND, TASK_TEXT, task.deadline, task.formed_at, 1, DAY, "session")], now=AWAITING_AT
         )
         claimed = self.outlet.claim(self.host, self.session, CLAIMED_AT, 3)
         assert [item.request_id for item in claimed] == [TASK_ID]

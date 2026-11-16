@@ -58,7 +58,7 @@ def expectation(identity: str = "e1", *, kind: str = "s-k0002", deadline_hours: 
 
 
 def request(item: Expectation, text: str = TEXT) -> OpenRequest:
-    return OpenRequest(item.expectation_id, item.kind_token, text, item.deadline, item.formed_at, 1, item.day)
+    return OpenRequest(item.expectation_id, item.kind_token, text, item.deadline, item.formed_at, 1, item.day, "session")
 
 
 def outlet(tmp_path, **overrides):  # type: ignore[no-untyped-def]
@@ -70,11 +70,11 @@ def outlet(tmp_path, **overrides):  # type: ignore[no-untyped-def]
         max_attempts=3,
         claim_limit=3,
         similarity=0.6,
-        kind_label=lambda token: {"s-k0002": "写周报"}.get(token),
+        kind_labels={"session": lambda token: {"s-k0002": "写周报"}.get(token)},
         observer=recorder,
     )
     values.update(overrides)
-    return ReminderOutlet(OutletStore(tmp_path / "ledger" / "outlet"), ledger, **values), ledger, recorder
+    return ReminderOutlet({"session": OutletStore(tmp_path / "ledger" / "outlet")}, {"session": ledger}, **values), ledger, recorder
 
 
 def awaiting(ledger: ForesightLedgerStore, item: Expectation) -> None:
@@ -119,7 +119,7 @@ def test_claims_hand_out_open_requests_by_deadline_with_a_lease_and_keep_the_hos
         awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
     assert not run.alive(now)
-    assert run.publish([request(first), request(second), request(third), request(fourth)], now=now) == 4
+    assert run.publish("session", [request(first), request(second), request(third), request(fourth)], now=now) == 4
     given = run.claim("codex", SESSION, now, 3)
     assert [item.request_id for item in given] == ["e2", "e1", "e3"]  # 按最晚时限由近到远，最多 3 条
     assert (
@@ -146,7 +146,7 @@ def test_an_expired_lease_frees_the_request_for_another_session_without_counting
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     assert run.claim("codex", SESSION, now, 3)
     assert run.claim("codex", "codex-thread-2", now + timedelta(minutes=29), 3) == ()
     later = run.claim("codex", "codex-thread-2", now + timedelta(minutes=31), 3)
@@ -161,7 +161,7 @@ def test_a_request_put_back_three_times_is_not_handed_out_again(tmp_path) -> Non
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     for attempt in range(3):
         at = now + timedelta(minutes=attempt)
         assert run.claim("codex", SESSION, at, 3), attempt
@@ -180,7 +180,7 @@ def test_a_question_carrying_the_reminder_is_recorded_as_spoken_and_a_fixed_opti
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("claude-code", "claude-s1", now, 3)
     asked_at = now + timedelta(minutes=2)
     answered_at = asked_at + timedelta(seconds=40)
@@ -214,7 +214,7 @@ def test_a_free_text_answer_is_left_to_the_session_lane_model(tmp_path) -> None:
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("claude-code", "claude-s1", now, 3)
     report = run.observe(
         "claude-s1",
@@ -229,7 +229,7 @@ def test_a_free_text_answer_is_left_to_the_session_lane_model(tmp_path) -> None:
     # 他没答就关了会话：「说了」照记，没有回话
     other = expectation("e2", kind="s-k0003")
     awaiting(ledger, other)
-    run.publish([request(other, "周四了，账还没对。")], now=now)
+    run.publish("session", [request(other, "周四了，账还没对。")], now=now)
     run.claim("claude-code", "claude-s2", now, 3)
     report = run.observe(
         "claude-s2", turn(claude_question("周四了，账还没对。", call_id="toolu_9")), host="claude-code"
@@ -242,7 +242,7 @@ def test_a_question_about_something_else_does_not_count_and_the_request_goes_bac
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("claude-code", "claude-s1", now, 3)
     unrelated = HostMessage(
         3,
@@ -271,7 +271,7 @@ def test_a_question_asked_after_the_deadline_is_not_spoken(tmp_path) -> None:
     item = expectation()
     awaiting(ledger, item)
     now = item.deadline - timedelta(minutes=5)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("claude-code", "claude-s1", now, 3)
     late = item.deadline + timedelta(minutes=1)
     report = run.observe(
@@ -286,7 +286,7 @@ def test_codex_desktop_answers_arrive_in_the_next_transcript_and_still_write_the
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("codex", SESSION, now, 3)
     arguments = json.dumps({"questions": [{"title": TEXT, "options": list(OPTIONS)}]}, ensure_ascii=False)
     asked_at = now + timedelta(minutes=1)
@@ -334,7 +334,7 @@ def test_only_one_spoken_record_per_expectation_even_when_two_sessions_both_aske
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("claude-code", "claude-s1", now, 3)
     later = now + timedelta(minutes=31)
     run.claim("claude-code", "claude-s2", later, 3)  # 第一个会话的租约过期了，第二个也取走了、也问了
@@ -357,13 +357,13 @@ def test_the_outlet_checks_its_inputs(tmp_path) -> None:
         liveness=timedelta(hours=1), lease=timedelta(minutes=1), max_attempts=1, claim_limit=1, similarity=0.5
     )
     with pytest.raises(ValueError):
-        ReminderOutlet(store, ledger, **{**common, "lease": timedelta(0)})
+        ReminderOutlet({"session": store}, {"session": ledger}, **{**common, "lease": timedelta(0)})
     with pytest.raises(ValueError):
-        ReminderOutlet(store, ledger, **{**common, "similarity": 0.0})
+        ReminderOutlet({"session": store}, {"session": ledger}, **{**common, "similarity": 0.0})
     with pytest.raises(ForesightError, match="role"):
         HostMessage(1, ASKED, "system", "x")
     with pytest.raises(ForesightError, match="request_id"):
-        OpenRequest("", "s-k0002", TEXT, ASKED, ASKED, 1, ASKED.date())
+        OpenRequest("", "s-k0002", TEXT, ASKED, ASKED, 1, ASKED.date(), "session")
     with pytest.raises(ForesightError, match="safe file name"):
         store.write_claim("../x", {})
 
@@ -419,7 +419,7 @@ def test_bug1_a_desktop_answer_in_the_same_transcript_as_its_question_is_recorde
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("codex", SESSION, now, 3)
     asked_at = now + timedelta(minutes=1)
     messages = (
@@ -450,7 +450,7 @@ def test_bug2_two_sessions_claiming_at_the_same_instant_never_both_get_the_reque
         item = expectation(f"e{round_number}", kind=f"s-k{round_number:04d}")
         awaiting(ledger, item)
         now = ASKED + timedelta(minutes=10, seconds=round_number)
-        run.publish([request(item)], now=now)
+        run.publish("session", [request(item)], now=now)
         barrier = threading.Barrier(2)
         got: dict[str, tuple[str, ...]] = {}
 
@@ -471,7 +471,7 @@ def test_bug3_an_asked_record_names_the_session_that_asked_not_the_latest_holder
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("codex", "codex-s1", now, 3)
     later = now + timedelta(minutes=31)
     run.claim("codex", "codex-s2", later, 3)  # s1 租约过期，s2 取走
@@ -508,7 +508,7 @@ def test_bug4_one_call_with_two_questions_pairs_both_reminders_and_both_answers(
     for item in (first, second):
         awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(first), request(second, text2)], now=now)
+    run.publish("session", [request(first), request(second, text2)], now=now)
     assert len(run.claim("codex", SESSION, now, 3)) == 2
     asked_at = now + timedelta(minutes=1)
     messages = (
@@ -535,13 +535,13 @@ def test_bug4_one_call_with_two_questions_pairs_both_reminders_and_both_answers(
 
 
 def test_bug5_similar_texts_pair_by_best_score_not_by_list_order(tmp_path) -> None:
-    run, ledger, _ = outlet(tmp_path, kind_label=lambda token: None)
+    run, ledger, _ = outlet(tmp_path, kind_labels={"session": lambda token: None})
     text1, text2 = "往常周四下午你会写周报，今天还没有。", "往常周四下午你会对账，今天还没有。"
     first, second = expectation("e1"), expectation("e2", kind="s-k0003")
     for item in (first, second):
         awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(first, text1), request(second, text2)], now=now)
+    run.publish("session", [request(first, text1), request(second, text2)], now=now)
     run.claim("claude-code", "claude-s1", now, 3)
     messages = turn(
         claude_question(text2, "toolu_b", now + timedelta(minutes=1)),
@@ -562,7 +562,7 @@ def test_bug6_a_failed_ledger_write_leaves_the_request_claimable_and_a_replay_wr
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("claude-code", "claude-s1", now, 3)
     messages = turn(claude_question(TEXT, at=now + timedelta(minutes=1)), at=now + timedelta(seconds=2))
 
@@ -584,7 +584,7 @@ def test_bug7_a_late_transcript_of_the_previous_turn_does_not_release_the_claim(
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("claude-code", "claude-s1", now, 3)
     previous = (
         HostMessage(1, now - timedelta(seconds=60), "prompt", "上一句话"),
@@ -600,7 +600,7 @@ def test_bug9_the_same_session_reclaiming_after_its_lease_expired_keeps_the_clai
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     (first,) = run.claim("codex", SESSION, now, 3)
     (again,) = run.claim("codex", SESSION, now + timedelta(minutes=31), 3)
     assert again.claimed_at == first.claimed_at == now  # 续租：宿主按它判是同一次，不再注入
@@ -630,7 +630,7 @@ def test_ruling65a_the_agents_own_question_mentioning_the_class_is_not_our_remin
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("claude-code", "claude-s1", now, 3)
     own = HostMessage(
         3,
@@ -664,12 +664,12 @@ def test_ruling65b_a_question_asked_after_the_thing_was_already_done_is_not_spok
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("claude-code", "claude-s1", now, 3)
     ledger.record_delivery(
         item.day, Delivery("e1", now + timedelta(minutes=5), 1, False, "已发生", 0.0)
     )  # 15:55 他自己做了
-    run.publish([], now=now + timedelta(minutes=6))  # 下一拍：清单里没有它了，但取走记录还在
+    run.publish("session", [], now=now + timedelta(minutes=6))  # 下一拍：清单里没有它了，但取走记录还在
     asked_at = now + timedelta(minutes=8)
     report = run.observe(
         "claude-s1",
@@ -693,7 +693,7 @@ def test_opencode_question_tool_is_recognised_with_its_answer(tmp_path) -> None:
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("opencode", "opencode-ses_1", now, 3)
     arguments = {
         "questions": [
@@ -732,7 +732,7 @@ def test_a_dismissed_synchronous_question_is_spoken_but_never_waits_for_a_late_a
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("opencode", "opencode-ses_1", now, 3)
     arguments = {"questions": [{"question": TEXT, "header": "提醒", "options": [{"label": o} for o in OPTIONS]}]}
     call = HostMessage(
@@ -775,7 +775,7 @@ def test_the_reminder_day_reads_each_stage_from_the_ledger_and_the_claim_trail(t
     ledger.record_delivery(quiet.day, Delivery("e5", ASKED, 1, False, "等时窗末", 1.0, TEXT))
     ledger.record_delivery(missed.day, Delivery("e4", missed.deadline, 1, False, "宿主没取", 1.0))
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(spoken), request(taken), request(waiting)], now=now)
+    run.publish("session", [request(spoken), request(taken), request(waiting)], now=now)
     run.claim("claude-code", "claude-s1", now, 1)  # 取走 e1
     asked_at = now + timedelta(minutes=2)
     run.observe(
@@ -792,7 +792,7 @@ def test_the_reminder_day_reads_each_stage_from_the_ledger_and_the_claim_trail(t
     )
     run.claim("codex", SESSION, now + timedelta(minutes=5), 1)  # 取走 e2，还在租约里
 
-    report = reminder_day(ledger, run, FORMED.date())
+    report = reminder_day({"session": ledger}, run, FORMED.date())
     stages = {item.expectation_id: item.stage for item in report.reminders}
     assert stages == {"e1": "说了", "e2": "取走了", "e3": "待取", "e4": "宿主没取"}
     first = report.reminders[0]
@@ -808,7 +808,7 @@ def test_the_reminder_day_reads_each_stage_from_the_ledger_and_the_claim_trail(t
         ("codex", SESSION, None)
     ]
     assert (report.count("说了"), report.count("宿主没取"), report.responded) == (1, 1, 1)
-    assert reminder_day(ledger, None, FORMED.date()).reminders[0].kind == "s-k0002"  # 没有出口就给编号
+    assert reminder_day({"session": ledger}, None, FORMED.date()).reminders[0].kind == "s-k0002"  # 没有出口就给编号
 
 
 def test_an_unreadable_claim_or_question_is_swept_away_and_counted(tmp_path) -> None:
@@ -818,7 +818,7 @@ def test_an_unreadable_claim_or_question_is_swept_away_and_counted(tmp_path) -> 
     run, ledger, recorder = outlet(tmp_path)
     item = expectation()
     awaiting(ledger, item)
-    run.publish([request(item)], now=ASKED)
+    run.publish("session", [request(item)], now=ASKED)
     run.claim("claude-code", SESSION, ASKED + timedelta(minutes=11), 1)
     claim = tmp_path / "ledger" / "outlet" / "claims" / f"{item.expectation_id}.json"
     claim.write_text('{"request": ', encoding="utf-8")
@@ -843,7 +843,7 @@ def test_a_reminder_he_did_before_being_asked_shows_as_happened(tmp_path) -> Non
     ledger.record_delivery(
         item.day, Delivery(item.expectation_id, ASKED + timedelta(minutes=15), 1, False, "已发生", 0.0)
     )
-    (row,) = reminder_day(ledger, run, FORMED.date()).reminders
+    (row,) = reminder_day({"session": ledger}, run, FORMED.date()).reminders
     assert row.stage == "已发生"
 
 
@@ -854,7 +854,7 @@ def test_an_answer_whose_asked_record_is_unreadable_is_reported_not_silently_dro
     item = expectation()
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("codex", SESSION, now, 3)
     arguments = json.dumps({"questions": [{"title": TEXT, "options": list(OPTIONS)}]}, ensure_ascii=False)
     asked_at = now + timedelta(minutes=1)
@@ -889,7 +889,7 @@ def test_the_spoken_and_response_times_are_stored_in_the_subjects_local_offset(t
     item = expectation()  # deadline 在 CST (+08:00)
     awaiting(ledger, item)
     now = ASKED + timedelta(minutes=10)
-    run.publish([request(item)], now=now)
+    run.publish("session", [request(item)], now=now)
     run.claim("claude-code", "claude-s1", now, 3)
     asked_utc = (now + timedelta(minutes=2)).astimezone(UTC)
     answered_utc = (now + timedelta(minutes=2, seconds=40)).astimezone(UTC)

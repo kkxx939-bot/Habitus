@@ -65,7 +65,7 @@ class KindStamping:
                 continue
             calls += 1
             try:
-                tokens[record.chain_digest] = await self.picker.pick_record(material)
+                tokens[record.chain_digest] = await self.picker.pick_record(material, at=record.started_at)
             except KindModelOutputError as exc:
                 failure = call_failure(exc)
                 set_aside[record.chain_digest] = failure

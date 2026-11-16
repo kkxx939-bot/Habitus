@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from habitus.runtime.foresight_tick import TickReport
-from habitus.runtime.foresight_worker import ForesightWorker
+from habitus.runtime.foresight_worker import ForesightWorker, SlotBranch
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -27,6 +27,8 @@ def loop(start: datetime, costs: list[float], ticks: int) -> list[tuple[datetime
     calls: list[tuple[datetime, datetime | None]] = []
 
     class Tick:
+        lane = "session"
+
         async def run_once(self, *, scheduled: datetime | None = None) -> TickReport:
             calls.append((clock[0], scheduled))
             clock[0] += timedelta(seconds=costs[len(calls) - 1] if len(calls) <= len(costs) else 1.0)
@@ -35,7 +37,7 @@ def loop(start: datetime, costs: list[float], ticks: int) -> list[tuple[datetime
             return TickReport(clock[0], 0, 0)
 
     worker = ForesightWorker(
-        Tick(),  # type: ignore[arg-type]
+        (SlotBranch("session", tick=Tick()),),  # type: ignore[arg-type]
         interval_seconds=900.0,
         shutdown_timeout_seconds=1.0,
         zone=SHANGHAI,
@@ -79,13 +81,15 @@ def test_a_wait_that_overshoots_the_boundary_starts_the_tick_late_but_keeps_the_
     seen: list[tuple[datetime, datetime | None]] = []
 
     class Tick:
+        lane = "session"
+
         async def run_once(self, *, scheduled: datetime | None = None) -> TickReport:
             seen.append((clock[0], scheduled))
             worker._stop_requested.set()
             return TickReport(clock[0], 0, 0)
 
     worker = ForesightWorker(
-        Tick(),  # type: ignore[arg-type]
+        (SlotBranch("session", tick=Tick()),),  # type: ignore[arg-type]
         interval_seconds=900.0,
         shutdown_timeout_seconds=1.0,
         zone=SHANGHAI,

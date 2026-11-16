@@ -748,8 +748,8 @@ def test_a1_11_health_degrades_on_a_backlog_with_counts_and_the_oldest_wait_and_
         clock=lambda: clock[0],
         settings=QueueSettings(warning_items=1, warning_wait_seconds=3_600.0),
     )
-    worker = ModelQueueWorker(queue, shutdown_timeout_seconds=1.0)
-    assert health_module._model_queue_checks(worker) == []
+    worker = ModelQueueWorker((queue,), shutdown_timeout_seconds=1.0)
+    assert health_module._model_queue_checks(worker.queues[0]) == []
 
     real = scene.syncing.run
 
@@ -759,7 +759,7 @@ def test_a1_11_health_degrades_on_a_backlog_with_counts_and_the_oldest_wait_and_
     scene.syncing.run = broken  # type: ignore[method-assign]
     report = asyncio.run(queue.drain())
     assert report.owed[SYNC] == 1
-    checks = {check.name: check for check in health_module._model_queue_checks(worker)}
+    checks = {check.name: check for check in health_module._model_queue_checks(worker.queues[0])}
     backlog = checks["model_queue_backlog"]
     assert backlog.status.value == "degraded" and backlog.critical is False
     assert "sync=1" in backlog.detail and "oldest waited" in backlog.detail and "owed 1" in backlog.detail
@@ -767,7 +767,7 @@ def test_a1_11_health_degrades_on_a_backlog_with_counts_and_the_oldest_wait_and_
     scene.syncing.run = real  # type: ignore[method-assign]
     clock[0] = NOW + timedelta(hours=2)
     assert asyncio.run(queue.drain()).clear
-    assert health_module._model_queue_checks(worker) == []
+    assert health_module._model_queue_checks(worker.queues[0]) == []
 
 
 # ── A1-12：配置 ─────────────────────────────────────────────────────────
@@ -1053,18 +1053,18 @@ def test_g5_a_category_whose_backlog_cannot_be_read_does_not_stop_the_ones_after
     site, scene, _provider, advisor = fresh(tmp_path, advice=True)
     broken = [True]
     queue = queue_on(tmp_path, scene, site, unsealed=FakeBridge(broken=broken))
-    worker = ModelQueueWorker(queue, shutdown_timeout_seconds=1.0)
+    worker = ModelQueueWorker((queue,), shutdown_timeout_seconds=1.0)
     with pytest.raises(ValueError, match="judgement store is corrupt"):
         asyncio.run(queue.drain())
     assert advisor.calls > 0  # 后面的类做完了
     assert queue.state.errors == {"unsealed": "ValueError"}
-    checks = {check.name: check for check in health_module._model_queue_checks(worker)}
+    checks = {check.name: check for check in health_module._model_queue_checks(worker.queues[0])}
     assert "unsealed: ValueError" in checks["model_queue_scan"].detail
     assert checks["model_queue_scan"].status.value == "degraded" and checks["model_queue_scan"].critical is False
 
     broken[0] = False
     assert asyncio.run(queue.drain()).clear and queue.state.errors == {}
-    assert health_module._model_queue_checks(worker) == []
+    assert health_module._model_queue_checks(worker.queues[0]) == []
 
 
 def test_g5_a_corrupt_prior_cache_is_reported_per_category_and_the_earlier_ones_are_done(tmp_path) -> None:

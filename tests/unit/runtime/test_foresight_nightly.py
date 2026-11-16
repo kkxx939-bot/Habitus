@@ -51,6 +51,7 @@ def components(tmp_path, site) -> ForesightRuntimeComponents:  # type: ignore[no
         statuses=("established", "candidate"),
     )
     return ForesightRuntimeComponents(
+        lane="session",
         read_side=read_side,
         ledger=ledger,
         settlement=settlement,

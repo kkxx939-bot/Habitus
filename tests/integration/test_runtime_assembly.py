@@ -745,34 +745,38 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
 
     runtime = _fully_enabled_runtime(tmp_path)
     branches = runtime.components.behavior
-    worker = runtime.components.generation
-    assert branches is not None and worker is not None
-    # 换代与预测层（与结算）现在只接会话那一支；预测树删了（裁定 59）。换代不是常驻 worker（阶段 2 第二小步）：预测 worker 每槽先调它。
+    pipeline = runtime.components.pipeline("session")
+    assert branches is not None and pipeline is not None
+    worker = pipeline.generation
+    # 两支各一条下游管线（裁定 42，丙二）；这里看会话那一支，物理一支的另见 ``tests/unit/physical_downstream``。预测树删了（裁定 59）。
+    # 换代不是常驻 worker（阶段 2 第二小步）：预测 worker 每槽按支先调它。
+    assert [item.lane for item in runtime.components.pipelines] == ["session", "physical"]
     behavior = branches.session
     generation = worker.generation
-    assert generation.marks.root == runtime.config.scene_root / "generation"
-    assert worker.reports is not None and worker.reports.root == runtime.config.scene_root / "generation" / "reports"
-    assert worker.traces is not None and worker.traces.root == runtime.config.scene_root / "generation" / "traces"
+    scene_root = runtime.config.scene_root / "session"
+    assert generation.marks.root == scene_root / "generation"
+    assert worker.reports is not None and worker.reports.root == scene_root / "generation" / "reports"
+    assert worker.traces is not None and worker.traces.root == scene_root / "generation" / "traces"
     # 三把锁都在组合根共用的那一份 SQLite 锁库上；运维数都来自 ``config.scene.generation_*``。换代租约没有了：
     # 语义树写锁沿用它的键，换代与模型队列共用同一个实例
     scene_lock = generation.scene_lock
     queue_worker = runtime.components.model_queue
-    assert scene_lock is not None and queue_worker is not None and queue_worker.queue.scene_lock is scene_lock
+    assert scene_lock is not None and queue_worker is not None and pipeline.queue.scene_lock is scene_lock
     assert scene_lock.lease.lock_store is runtime.components.infrastructure.path_lock.lock_store
     assert scene_lock.lease.key.startswith("scene:generation:")
-    assert queue_worker.queue.lease.key.startswith("scene:model-queue:")
+    assert pipeline.queue.lease.key.startswith("scene:model-queue:")
     assert worker.settings.kept_days == runtime.config.scene.generation_kept_days
-    # 预测根租约（另一个键）在预测拍手里：预测 worker 每槽持一次，先调换代的那一眼、再做这一拍
-    assert runtime.components.foresight is not None and runtime.components.foresight.worker is not None
-    slots = runtime.components.foresight.worker
-    assert slots.generation is worker and runtime.components.slot_worker is slots
-    assert runtime.components.generation_slots is None  # 开了预测层：那个 worker 在预测层的部件里
-    ledger_lease = slots.tick.lease
-    assert ledger_lease is not None and slots.lease is None
+    # 预测根租约（另一个键）在预测拍手里：预测 worker 每槽按支持一次，先调这一支换代的那一眼、再做这一支的一拍
+    slots = runtime.components.slot_worker
+    assert slots is not None and pipeline.tick is not None
+    slot = slots.branches[0]
+    assert slot.generation is worker and slot.tick is pipeline.tick
+    ledger_lease = pipeline.tick.lease
+    assert ledger_lease is not None and slot.lease is None
     assert ledger_lease.key.startswith("foresight:root:") and ledger_lease.key != scene_lock.lease.key
-    assert generation.generating == queue_worker.queue.state.set_generating  # 换代在做的标志立在队列读的那一份状态上
+    assert generation.generating == pipeline.queue.state.set_generating  # 换代在做的标志立在队列读的那一份状态上
     # 预测拍的 ``foresight.tick`` span 落换代同一份本地 trace
-    assert runtime.components.foresight.worker.tick.trace == worker.traces.sink
+    assert pipeline.tick.trace == worker.traces.sink
     # 换代开头的重试收尾接着两支各自的重试堆（裁定 67）；会话一支连同它的会话 lane
     retry = generation.retry
     assert retry is not None
@@ -780,9 +784,14 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     from habitus.behavior.reduction.failed import ChainHandler
     from habitus.behavior.retry import RetryKind
 
+    # 一支的换代只编排自己那一支的重试堆（丙二：原来会话一支的换代也收物理一支的堆）
     assert [(item.name, item.backlog, sorted(item.handlers)) for item in retry.branches] == [
         ("session", branches.session.retry_backlog, [RetryKind.CHAIN, RetryKind.TURN]),
-        ("physical", branches.physical.retry_backlog, [RetryKind.CHAIN]),
+    ]
+    physical = runtime.components.pipeline("physical")
+    assert physical is not None and physical.generation.generation.retry is not None
+    assert [(item.name, item.backlog) for item in physical.generation.generation.retry.branches] == [
+        ("physical", branches.physical.retry_backlog)
     ]
     session_handlers = retry.branches[0].handlers
     assert isinstance(session_handlers[RetryKind.TURN], TurnHandler)
@@ -791,10 +800,9 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert session_handlers[RetryKind.CHAIN].failed is branches.session.reduction_runner.failed_chains
     assert branches.session.fusion.tree is branches.session.tree  # 补救时认"已经落树"（裁定 68 第 5 条）
     # 时窗末当场重读接着会话一支的重试堆（裁定 68 第 1 条）
-    assert runtime.components.foresight is not None and runtime.components.foresight.worker is not None
-    assert runtime.components.foresight.worker.tick.reread is not None
+    assert pipeline.tick.reread is not None
     assert runtime.reminders_enabled()
-    foresight = runtime.components.foresight
+    foresight = pipeline.foresight
     assert foresight is not None
     assert foresight.read_side.behavior_tree is behavior.tree
     # 账本在 storage.root/foresight/<支>；结算认的是归约的定稿日。
@@ -807,17 +815,21 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     from habitus.runtime.foresight_worker import ForesightWorker
     from habitus.runtime.unsealed import UnsealedFromJudgements
 
-    assert isinstance(foresight.worker, ForesightWorker)
-    tick = foresight.worker.tick
+    assert isinstance(slots, ForesightWorker)
+    tick = pipeline.tick
     assert tick.ledger is foresight.ledger and tick.opportunities is foresight.opportunities
     # 提醒出口（方案 32）：递送那一拍按它的活性问不问模型；会话源的行为侧消费者外面包着它，同一份会话先过出口再进 lane
     from habitus.conversation import ConversationSourceConsumer
     from habitus.runtime.foresight_outlet import ReminderOutlet
     from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
 
-    assert isinstance(foresight.outlet, ReminderOutlet) and foresight.outlet.ledger is foresight.ledger
-    assert foresight.outlet.store.root == foresight.ledger.root / "outlet"
-    assert tick.delivery.outlet is foresight.outlet
+    # 出口两支共用一个（丙二 D4）；传输状态与账都按支存
+    assert isinstance(foresight.outlet, ReminderOutlet) and foresight.outlet.ledgers.get("session") is foresight.ledger
+    assert foresight.outlet is runtime.components.outlet and physical.foresight is not None
+    assert foresight.outlet.ledgers.get("physical") is physical.foresight.ledger
+    assert foresight.outlet.store.of("session").root == foresight.ledger.root / "outlet"
+    assert foresight.outlet.store.of("physical").root == physical.foresight.ledger.root / "outlet"
+    assert tick.delivery.outlet.outlet is foresight.outlet and tick.delivery.outlet.lane == "session"
     consumer = runtime.components.conversation.behavior_session_consumer
     assert isinstance(consumer, OutletObservingConsumer) and consumer.outlet is foresight.outlet
     assert consumer.inner.lane is branches.session_lane
@@ -834,7 +846,7 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     # 当地日历只建一份：语义树、预测层的读侧共用，整晚开头重读的就是它（2026-10-18 四方评审）
     assert nightly.scene.calendar is foresight.read_side.calendar and nightly.refresh_calendar is not None
     assert nightly.foresight.calendar is foresight.read_side.calendar
-    assert nightly.scene.behavior_tree is behavior.tree and nightly.scene.relations.root == runtime.config.scene_root
+    assert nightly.scene.behavior_tree is behavior.tree and nightly.scene.relations.root == scene_root
     assert nightly.foresight is not None and nightly.foresight.store is foresight.opportunities
     assert nightly.closed_days == behavior.reduction_runner.closed_days
     assert nightly.settlement is foresight.settlement
@@ -847,7 +859,8 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     # 未封口的桥、完成标记；租约与语义树写锁不同键
     queue_worker = runtime.components.model_queue
     assert queue_worker is not None
-    queue = queue_worker.queue
+    queue = pipeline.queue
+    assert queue_worker.queues == (queue, physical.queue)
     assert queue.scene is nightly.scene and queue.sealed_day == nightly.sealed_day
     assert nightly.models_down == queue.state.down and nightly.queue_owed == queue.state.owed_now
     assert queue.daily.retry is nightly.retry and queue.daily.bridge is tick.forming.unsealed
@@ -876,7 +889,7 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     unsealed = tick.forming.unsealed
     assert isinstance(unsealed, UnsealedFromJudgements) and unsealed.judgements is behavior.judgements
     assert tick.delivery is not None and tick.delivery.ledger is foresight.ledger
-    assert foresight.worker.interval_seconds == runtime.config.foresight.tick_interval_seconds
+    assert slots.interval_seconds == runtime.config.foresight.tick_interval_seconds
     # 「离上次够久」的时窗往后接几天用的是递送那同一条线（裁定 89 第 1 条）：配置里的 1 − 可接受的误提醒率
     assert tick.forming.tolerance == tick.delivery.tolerance == foresight.days.forming.tolerance
     assert tick.forming.tolerance.line == pytest.approx(1.0 - runtime.config.foresight.false_alarm_rate)
@@ -885,6 +898,7 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     other = BehaviorTree(tmp_path / "elsewhere")
     with pytest.raises(ValueError, match="assembled behaviour tree"):
         ForesightRuntimeComponents(
+            lane="session",
             read_side=replace(foresight.read_side, behavior_tree=other),
             ledger=foresight.ledger,
             settlement=foresight.settlement,
@@ -899,15 +913,15 @@ def test_the_runtime_starts_and_stops_the_foresight_worker(tmp_path: Path) -> No
     import asyncio
 
     runtime = _fully_enabled_runtime(tmp_path)
-    foresight = runtime.components.foresight
-    assert foresight is not None and foresight.worker is not None
+    slots = runtime.components.slot_worker
+    assert runtime.components.foresights and slots is not None
 
     async def scenario() -> None:
         await runtime.start()
         await asyncio.sleep(0.05)
-        assert foresight.worker is not None and foresight.worker.running and foresight.worker.last_error is None
+        assert slots.running and slots.last_error is None
         await runtime.stop()
-        assert not foresight.worker.running
+        assert not slots.running
 
     asyncio.run(scenario())
 
@@ -916,7 +930,7 @@ def test_with_the_scene_on_and_foresight_off_the_slot_worker_drives_the_generati
     tmp_path: Path,
 ) -> None:
     """只开语义树、不开预测层（配置校验允许）：换代没有自己的循环，仍由预测 worker 的位置驱动——同一个对齐槽边界的 worker，
-    每槽持预测根租约看一眼换代，没有预测拍。它挂在 ``generation_slots``，Runtime 起停它，健康面看它活着。漏装的话进程照常、
+    每槽按支持这一支的预测根租约看一眼这一支的换代，没有预测拍。它在 ``slot_worker``（健康面叫 ``generation_slots``），Runtime 起停它，健康面看它活着。漏装的话进程照常、
     健康全绿，一代都不会做。"""
 
     import asyncio
@@ -925,17 +939,23 @@ def test_with_the_scene_on_and_foresight_off_the_slot_worker_drives_the_generati
 
     runtime = _fully_enabled_runtime(tmp_path, foresight=False)
     components = runtime.components
-    slots = components.generation_slots
-    assert components.foresight is None and components.generation is not None
-    assert isinstance(slots, ForesightWorker) and components.slot_worker is slots
-    assert slots.tick is None and slots.generation is components.generation
-    assert slots.lease is not None and slots.lease.key.startswith("foresight:root:")
+    slots = components.slot_worker
+    assert not components.foresights and len(components.pipelines) == 2
+    assert isinstance(slots, ForesightWorker)
+    for pipeline, slot in zip(components.pipelines, slots.branches, strict=True):
+        assert slot.tick is None and slot.generation is pipeline.generation
+        assert slot.lease is not None and slot.lease.key.startswith("foresight:root:")
+    assert slots.branches[0].lease.key != slots.branches[1].lease.key  # type: ignore[union-attr]
     assert slots.interval_seconds == runtime.config.temporal.slot_minutes * 60
-    with pytest.raises(ValueError, match="the slot worker must drive this generation"):
-        replace(components, generation_slots=None)
+    with pytest.raises(ValueError, match="the slot worker must drive every pipeline"):
+        replace(components, slot_worker=None)
 
     async def scenario() -> None:
-        assert (await slots.slot()).skipped == NO_TICK  # 一槽：只看换代（一天都还没定稿，不做）
+        reports, failures = await slots.slot()  # 一槽：两支都只看换代（一天都还没定稿，不做）
+        assert not failures and {lane: item.skipped for lane, item in reports.items()} == {
+            "session": NO_TICK,
+            "physical": NO_TICK,
+        }
         await runtime.start()
         await asyncio.sleep(0.05)
         assert slots.running
@@ -953,27 +973,35 @@ def test_an_enabled_foresight_layer_that_is_not_attached_to_the_generation_is_re
 
     runtime = _fully_enabled_runtime(tmp_path)
     components = runtime.components
-    assert components.generation is not None
-    components.generation.generation.settlement = None  # type: ignore[assignment]
+    pipeline = components.pipeline("physical")
+    assert pipeline is not None and pipeline.foresight is not None
+    generation = pipeline.generation.generation
+    generation.settlement = None  # type: ignore[assignment]
 
     with pytest.raises(ValueError, match="settlement stage must be a step of the generation"):
-        replace(components)
-    with pytest.raises(ValueError, match="the generation must be enabled"):
-        replace(components, generation=None, model_queue=None)
+        replace(pipeline)
     # A1：模型队列随换代一起有、一起没有
-    with pytest.raises(ValueError, match="the model queue and the generation come together"):
+    with pytest.raises(ValueError, match="come with the pipelines"):
+        replace(components, pipelines=())
+    with pytest.raises(ValueError, match="model queue worker must drive every pipeline"):
         replace(components, model_queue=None)
-    components.generation.generation.settlement = runtime.components.foresight.settlement  # type: ignore[union-attr]
-    components.generation.generation.foresight = None
+    generation.settlement = pipeline.foresight.settlement
+    generation.foresight = None
     with pytest.raises(ValueError, match="opportunity table the foresight layer reads"):
-        replace(components)
-    # A2：换代没有自己的循环，驱动它的必须是预测层部件里的那个每槽的 worker；语义树写锁换代与队列必须是同一把
-    assert components.foresight is not None
-    with pytest.raises(ValueError, match="the slot worker must drive this generation"):
-        replace(components, foresight=replace(components.foresight, worker=None))
-    components.generation.generation.scene_lock = None
+        replace(pipeline)
+    # A2：换代没有自己的循环，驱动它的必须是那个每槽的 worker；语义树写锁换代与队列必须是同一把
+    with pytest.raises(ValueError, match="the slot worker must drive every pipeline"):
+        replace(components, slot_worker=None)
+    generation.scene_lock = None
     with pytest.raises(ValueError, match="share one scene write lock"):
-        replace(components)
+        replace(pipeline)
+    # 一支的管线的部件必须读那一支（接反了：物理的换代读会话的树）；两个 worker 按支的先后驱动各支的管线
+    session = components.pipeline("session")
+    assert session is not None
+    with pytest.raises(ValueError, match="the physical generation must read the physical behaviour tree"):
+        replace(session, behavior=pipeline.behavior)
+    with pytest.raises(ValueError, match="drive every pipeline in order"):
+        replace(components, pipelines=(pipeline, session))
 
 
 def test_the_runtime_starts_and_stops_the_generation_worker_and_reports_how_old_the_opportunity_table_is(
@@ -988,12 +1016,11 @@ def test_the_runtime_starts_and_stops_the_generation_worker_and_reports_how_old_
     from habitus.foresight.opportunities import OpportunityTable
 
     runtime = _fully_enabled_runtime(tmp_path)
-    worker = runtime.components.generation
-    foresight = runtime.components.foresight
-    queue_worker = runtime.components.model_queue
-    assert worker is not None and foresight is not None and queue_worker is not None
-    slots = foresight.worker
-    assert slots is not None
+    pipeline = runtime.components.pipeline("session")
+    assert pipeline is not None
+    worker, foresight = pipeline.generation, pipeline.foresight
+    queue_worker, slots = runtime.components.model_queue, runtime.components.slot_worker
+    assert foresight is not None and queue_worker is not None and slots is not None
 
     def check(report, name):  # type: ignore[no-untyped-def]
         return next(item for item in report.checks if item.name == name)
@@ -1039,8 +1066,9 @@ def test_every_derived_store_keeps_the_configured_number_of_fallback_generations
     与各存储自己的默认相等，接线断了测试也看不出来——这里配一个不同于默认的数）。"""
 
     runtime = _fully_enabled_runtime(tmp_path, lifecycle={"fallback_generations": 4})
-    foresight = runtime.components.foresight
-    scene = runtime.components.generation.generation.scene  # type: ignore[union-attr]
+    pipeline = runtime.components.pipeline("session")
+    assert pipeline is not None
+    foresight, scene = pipeline.foresight, pipeline.scene
     assert foresight is not None
     assert scene.relations.fallback_generations == 4
     assert foresight.opportunities._files.retained_nights == 5
@@ -1167,9 +1195,11 @@ def test_a_daily_reminder_is_not_held_back_as_a_return_after_absence_by_the_sett
     from habitus.runtime.foresight_delivery import JudgeMaterials
 
     runtime = _fully_enabled_runtime(tmp_path)
-    foresight = runtime.components.foresight
-    assert foresight is not None and foresight.worker is not None
-    delivery = foresight.worker.tick.delivery
+    pipeline = runtime.components.pipeline("session")
+    assert pipeline is not None and pipeline.tick is not None
+    foresight = pipeline.foresight
+    assert foresight is not None
+    delivery = pipeline.tick.delivery
     assert delivery is not None
     ledger = foresight.ledger
     zone = runtime.config.locale.zone()

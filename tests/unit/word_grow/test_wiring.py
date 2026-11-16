@@ -31,7 +31,7 @@ def test_the_model_queue_series_reader_reads_deleted_nodes_as_their_parent(tmp_p
         site.session.kind_store.update(lambda vocabulary: vocabulary.without(vocabulary.named("写需求书").id, on=D13))  # type: ignore[union-attr]
         queue = site.runtime.components.model_queue
         assert queue is not None
-        reader = queue.queue.sealed.reader
+        reader = queue.queues[0].sealed.reader
         series = reader.read(cutoff=date(2026, 4, 14))
         assert [record.kind_token for record in series.records] == [WRITE_DOC]
     finally:

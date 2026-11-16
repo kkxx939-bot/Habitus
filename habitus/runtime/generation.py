@@ -128,6 +128,7 @@ class Generation:
         generating: Callable[[bool], None] | None = None,
         closed_at: Callable[[date], datetime | None] | None = None,
         unreduced_gaps: Callable[[date], int] | None = None,
+        lane: str = "",
     ) -> None:
         if scene.behavior_tree is not behavior_tree:
             raise ValueError("the scene run must read the same behaviour tree")
@@ -138,12 +139,14 @@ class Generation:
         if margin < timedelta(0):
             raise ValueError("margin must not be negative")
         self.behavior_tree = behavior_tree
+        #: 这一代是哪一支的（span、报告、健康面读；两支各一个 ``Generation``，裁定 42）。
+        self.lane = lane
         #: 常驻的序列读者：按天缓存行为树文档，跨代复用（26 号清单 6.7）。
         self.series = series if series is not None else SeriesReader(behavior_tree, name="generation")
         self.scene = scene
         self.zone = zone
         self.closed_days = closed_days
-        self.vocabulary = vocabulary  # 数在用的词、读在用状态（会话一支）
+        self.vocabulary = vocabulary  # 数在用的词、读在用状态（这一支）
         self.marks = marks
         self.retry = retry
         self.foresight = foresight
@@ -224,7 +227,7 @@ class Generation:
         if self.generating is not None:
             self.generating(True)
         try:
-            with span(GENERATION_SPAN, {"day": day.isoformat()}) as attributes:
+            with span(GENERATION_SPAN, {"day": day.isoformat(), "lane": self.lane}) as attributes:
                 try:
                     await self._run(result)
                 except MustFailed:

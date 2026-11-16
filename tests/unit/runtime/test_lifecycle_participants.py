@@ -81,7 +81,7 @@ def test_the_scene_participant_releases_nothing_on_an_empty_root(tmp_path) -> No
     from habitus.scene.relations.store import RelationStore
 
     relations = RelationStore(tmp_path / "scene")
-    report = asyncio.run(SceneParticipant(relations).maintain(_Context(datetime.now(UTC))))  # type: ignore[arg-type]
+    report = asyncio.run(SceneParticipant(relations, lane="session").maintain(_Context(datetime.now(UTC))))  # type: ignore[arg-type]
     assert report.released == 0
 
 

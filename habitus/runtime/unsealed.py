@@ -13,7 +13,9 @@
   提前选、按节点身份缓存。归约封口时照常再选一次，这里的结果只给此刻场景用，不写回任何地方。
 
 选词要调模型，所以分两步：``prepare``（异步，每拍装配之前调一次）选新出现的没带结果的判断；``rows``（同步，装配时调）只读
-判断与缓存。模型此刻用不了就留着下一拍再选（实时化方案第 2 节：模型调不通不停一天）。换代里没有模型调用（实时化阶段 2）：
+判断与缓存。模型此刻用不了就留着下一拍再选（实时化方案第 2 节：模型调不通不停一天）。这一份被内容安全拦下、输入超长
+（``KindModelOutputError``）同一份再问也一样：按错误处理，记进缓存为"选不出"、不再问、不算欠，这一行不带词（丙二 D7；
+二甲验证 F4 原来每拍重问）。缓存只在进程里，重启后会再问一次。换代里没有模型调用（实时化阶段 2）：
 换代里的日子预期读 ``cache_only`` 那一份——只读缓存，不问模型；换代之前由模型队列把还没选的选好（``unclassified`` 是它认
 欠账的数），没选上的按未归类进场景。
 判断上的编号与行为树上的一样过同一个换算口（``series.model.KindResolution``：删掉的节点换成最近的活着的上级）。
@@ -38,6 +40,9 @@ from habitus.foresight import UnsealedRow
 from habitus.model_client import MODEL_UNAVAILABLE
 from habitus.series.model import KindResolution
 
+#: 缓存里"选不出"（被拦、超长）的记法：不是任何 lane 的编号。
+_UNPICKABLE = ""
+
 
 class UnsealedFromJudgements:
     """``UnsealedReader`` 的生产实现：判断存储 + 消费账本 + 归约的选词器。"""
@@ -54,7 +59,7 @@ class UnsealedFromJudgements:
         self.kinds = kinds
         self.ledger = ledger
         self.stamping = stamping
-        #: 节点身份 → 选词结果（只缓存判断上没带结果的；只留还没封口的）。
+        #: 节点身份 → 选词结果（只缓存判断上没带结果的；只留还没封口的）。被拦、超长的记 ``_UNPICKABLE``。
         self._picked: dict[str, str] = {}
         #: 最近一次 ``prepare`` 因模型此刻用不了没选成时的那个异常（选成了、或没有要选的是 None）：模型队列读它，
         #: 好分清是整体性的故障还是这一项自己没做成。
@@ -75,12 +80,13 @@ class UnsealedFromJudgements:
             if material is None:
                 continue
             try:
-                self._picked[record.chain_digest] = await picker.pick_record(material)
+                self._picked[record.chain_digest] = await picker.pick_record(material, at=record.started_at)
             except MODEL_UNAVAILABLE as exc:
                 self.unavailable = exc
                 return
             except KindModelOutputError:
-                continue  # 这一份被拦、输入超长：此刻场景里按未归类，归约封口时照常处理
+                # 这一份被拦、输入超长：按错误处理，不再问（同一份再问也一样）；此刻场景里这一行不带词，归约封口时照常处理
+                self._picked[record.chain_digest] = _UNPICKABLE
 
     def _unpicked(self) -> list[ReducibleJudgement]:
         """还没选过词的未封口判断（判断上没带结果、缓存里也没有）；已封口的从缓存里清掉。不问模型。"""
@@ -114,6 +120,8 @@ class UnsealedFromJudgements:
         rows: list[UnsealedRow] = []
         for record in pending.occurrences:
             token = record.kind_token if record.kind_token is not None else self._picked.get(record.chain_digest)
+            if token == _UNPICKABLE:
+                token = None
             if token in uncounted:
                 continue
             if token is not None and resolve is not None:

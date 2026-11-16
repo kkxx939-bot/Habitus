@@ -186,8 +186,9 @@ class Router:
         else:
             raise AssertionError(f"unknown scripted pick {scripted!r}")
         if RECORDS_HEADER not in text:
-            # 阶段 C 改：物理 lane 的选词提示词没有【最近的记录】，输出只有 pick 一个字段（共享说明 3.2 去掉 continue）
-            body = {"pick": body["pick"]}
+            # 阶段 C 改：物理 lane 的选词提示词没有【最近的记录】，输出没有 continues（共享说明 3.2 去掉 continue）；
+            # 丙二起物理 lane 也写新节点，输出多了 new（这里的替身从不写新节点）
+            body = {"pick": body["pick"], "new": None}
         else:
             body["new"] = None  # 二乙：会话 lane 的输出形状多了 new（这里的替身从不写新节点）
         return json.dumps(body, ensure_ascii=False)
@@ -463,7 +464,7 @@ class Site:
         return turn
 
     def generate(self, day: date) -> Any:
-        generation = self.runtime.components.generation
+        generation = self.runtime.components.pipelines[0].generation
         assert generation is not None, "the scene must be enabled for a generation"
         return asyncio.run(generation.generation.run(day))
 

@@ -3,7 +3,7 @@
 用法：``python generation_mp_worker.py <root> <mode> <worker_id> <looks> <scene_seconds>``；开跑前等 ``<root>/go`` 出现（几个进程
 同时起跑），每个事件追加一行 JSON 到 ``<root>/events.log``。
 
-- ``gen``：生产的预测 worker 的一槽（``ForesightWorker.slot()``：持预测根租约 → ``GenerationRunner`` 看一眼；这里不接预测拍）
+- ``gen``：生产的预测 worker 的一槽（``ForesightWorker.branch_slot()``：持预测根租约 → ``GenerationRunner`` 看一眼；这里不接预测拍）
   + ``SQLiteLockStore``（``<root>/locks.sqlite3``）；阶段 2 第二小步起没有换代租约，"同一天只换一次"靠预测根租约加完成标记。各步是 ``test_generation.wired`` 的
   替身（自己的树在 ``<root>/<worker_id>/``），完成标记共用 ``<root>/generation``；语义树那一步睡 ``scene_seconds`` 秒，让几个进程的
   那一眼重叠、也给"做到一半被杀"留出时间。看 ``looks`` 眼，眼与眼之间隔 0.3 秒。
@@ -38,7 +38,7 @@ def main(root: Path, mode: str, worker_id: str, looks: int, scene_seconds: float
         from zoneinfo import ZoneInfo
 
         from habitus.infrastructure.store.sqlite import SQLiteLockStore
-        from habitus.runtime.foresight_worker import ForesightWorker
+        from habitus.runtime.foresight_worker import ForesightWorker, SlotBranch
         from habitus.runtime.generation_lease import Lease
         from habitus.runtime.generation_marks import GenerationMarks
         from habitus.runtime.generation_runner import GenerationRunner
@@ -56,16 +56,15 @@ def main(root: Path, mode: str, worker_id: str, looks: int, scene_seconds: float
 
         run.scene.generate = slow_scene  # type: ignore[method-assign]
         runner = GenerationRunner(run, worker_id=worker_id)
+        lease = Lease(
+            SQLiteLockStore(root / "locks.sqlite3"),
+            "foresight:root:mp",
+            ttl_seconds=TTL_SECONDS,
+            heartbeat_seconds=HEARTBEAT_SECONDS,
+            poll_seconds=0.05,
+        )
         worker = ForesightWorker(
-            None,
-            generation=runner,
-            lease=Lease(
-                SQLiteLockStore(root / "locks.sqlite3"),
-                "foresight:root:mp",
-                ttl_seconds=TTL_SECONDS,
-                heartbeat_seconds=HEARTBEAT_SECONDS,
-                poll_seconds=0.05,
-            ),
+            (SlotBranch("session", generation=runner, lease=lease),),
             interval_seconds=900.0,
             shutdown_timeout_seconds=5.0,
             zone=ZoneInfo("Asia/Shanghai"),
@@ -74,7 +73,7 @@ def main(root: Path, mode: str, worker_id: str, looks: int, scene_seconds: float
         log(ev="go")
         for _ in range(looks):
             before = runner.last_result
-            report = await worker.slot()
+            report = await worker.branch_slot(worker.branches[0])
             result = runner.last_result if runner.last_result is not before else None
             log(
                 ev="look",

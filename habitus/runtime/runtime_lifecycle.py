@@ -17,6 +17,25 @@ from habitus.infrastructure.observability import MetricRegistry
 from habitus.runtime.components import RuntimeComponents
 from habitus.runtime.runtime_jobs import Observe
 
+#: 语义树按支分根之前直接写在 ``<scene_root>/`` 下的目录（概念集、命中记录、关系表、先验缓存、完成标记与报告、模型队列流水、
+#: 模型队列的重试账）。
+_SINGLE_BRANCH_SCENE = ("concepts", "occurrences", "relations", "advice", "generation", "model_queue", "lifecycle")
+
+
+class SingleBranchLayoutError(RuntimeError):
+    """盘上还有两支分根之前的语义树目录（不迁移，丙二 2026-11-16）。"""
+
+
+def refuse_single_branch_layout(config: HabitusConfig) -> None:
+    """语义树直接写在 ``<scene_root>/`` 下的旧布局：明确报错、点出目录，不迁移。"""
+
+    found = [config.scene_root / name for name in _SINGLE_BRANCH_SCENE if (config.scene_root / name).exists()]
+    if found:
+        raise SingleBranchLayoutError(
+            "the semantic tree is kept per branch now (scene/<lane>/); "
+            f"old layout is not migrated, remove: {', '.join(str(path) for path in found)}"
+        )
+
 
 class RuntimeLifecycle:
     """``observe`` 是 Runtime 的观测出口；本类不持有也不改变 Runtime 状态。"""
@@ -44,9 +63,12 @@ class RuntimeLifecycle:
                 branch.tree.initialize()
                 # 旧词表（变更日志、待定池、迁移计划……）不迁移、不兼容：盘上还有就在启动时报错、点出文件（词表方案 2026-11-14）
                 branch.kind_store.check()
-        if self.components.model_queue is not None:
+        if self.components.pipelines:
+            # 语义树按支分根（裁定 42：``scene/<lane>/``）之前的旧布局不迁移：盘上还有就在启动时报错、点出目录
+            refuse_single_branch_layout(self.config)
+        for item in self.components.pipelines:
             # 已删的候选条件提议簿（2026-11-15）同样不迁移：盘上还有就在启动时报错、点出文件
-            advice = self.components.model_queue.queue.scene.advice
+            advice = item.scene.advice
             if advice is not None:
                 advice.store.refuse_proposal_books()
         oldest_job = self.components.workflow.jobs.oldest_uncommitted()

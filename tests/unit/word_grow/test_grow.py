@@ -324,7 +324,7 @@ def test_d2_a_step_a_state_file_is_refused_and_names_the_file(site: GrowSite) ->
 def test_d3_a_generation_that_only_saw_new_candidates_keeps_the_vocabulary_version(site: GrowSite) -> None:
     site.record("conv-d3", at(D13, 9), "帮我写一份本周周报", Word(WEEKLY))
     site.generate(D14)
-    generation = site.runtime.components.generation.generation
+    generation = site.runtime.components.pipelines[0].generation.generation
     before = generation.marks.read(D14)
     assert before is not None
     site.record("conv-d3", at(D14, 9), "帮我写一份产品需求文档", Grow("写文档", node("写需求书")))

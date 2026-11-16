@@ -40,11 +40,11 @@ def _concept_world(tmp_path: Path) -> World:
 def _rewrite_classes(world: World, identity: str, classes: list[str]) -> Path:
     """把盘上 ``identity`` 那份概念文件管的编号改成 ``classes``（正文"类："一行与结构注释一起改）。"""
 
-    path = world.config.scene_root / "concepts" / f"{identity}.md"
+    path = world.config.scene_root / "session" / "concepts" / f"{identity}.md"
     text = path.read_text(encoding="utf-8")
     text = re.sub(r"^类：.*$", "类：" + " / ".join(classes), text, count=1, flags=re.MULTILINE)
     text = re.sub(r'"classes":\[[^\]]*\]', '"classes":' + json.dumps(classes, separators=(",", ":")), text, count=1)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="")  # 原样写回：Windows 不把换行改成 \r\n
     return path
 
 
@@ -99,7 +99,9 @@ def _table(night: date) -> OpportunityTable:
 def _tamper(path: Path, change: Any) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
     change(payload["relations"][0])
-    path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")), encoding="utf-8", newline=""
+    )
 
 
 @pytest.mark.parametrize(

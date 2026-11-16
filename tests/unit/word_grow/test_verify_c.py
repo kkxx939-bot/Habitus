@@ -207,7 +207,7 @@ def test_c35_the_day_index_reads_a_deleted_nodes_record_as_its_parent_like_the_s
     site = GrowSite(tmp_path, edit=_with_foresight)
     try:
         site.record("conv-x", at(date(2026, 4, 13), 9), "帮我写一份产品需求文档", Grow("写文档", node("写需求书")))
-        foresight = site.runtime.components.foresight
+        foresight = site.runtime.components.pipelines[0].foresight
         assert foresight is not None
         before = day_cache(foresight.read_side).day(date(2026, 4, 13))
         assert [row.kind_token for row in before.rows] == [grown(1)]

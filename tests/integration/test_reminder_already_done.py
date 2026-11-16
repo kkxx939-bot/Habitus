@@ -46,6 +46,7 @@ from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_outlet import OPTIONS, ReminderOutlet
 from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
+from habitus.runtime.foresight_outlet_ledgers import BranchOutlet
 from habitus.runtime.foresight_outlet_store import OutletStore
 from habitus.runtime.foresight_responses import ReminderResponses
 from habitus.runtime.foresight_settlement import SettlementStage
@@ -167,14 +168,14 @@ def test_an_already_done_reply_is_neutral_on_both_sides(  # noqa: PLR0913 - 四�
     seeded = Seeded(tmp_path / "foresight", ledger)
     seeded.earn(kind=HOTEL)  # 这条边攒够了把握：提醒档
     outlet = ReminderOutlet(
-        OutletStore(ledger.root / "outlet"),
-        ledger,
+        {"session": OutletStore(ledger.root / "outlet")},
+        {"session": ledger},
         liveness=timedelta(hours=48),
         lease=timedelta(minutes=30),
         max_attempts=3,
         claim_limit=3,
         similarity=0.6,
-        kind_label=lambda token: "订酒店" if token == HOTEL else None,
+        kind_labels={"session": lambda token: "订酒店" if token == HOTEL else None},
     )
     tick = DeliveryStage(
         ledger,
@@ -182,7 +183,7 @@ def test_an_already_done_reply_is_neutral_on_both_sides(  # noqa: PLR0913 - 四�
         evidence=Evidence(alpha=0.05, half_life=8.0),
         daily_cap=3,
         tick_seconds=900.0,
-        outlet=outlet,
+        outlet=BranchOutlet(outlet, "session"),
         history=seeded.store,
     )
     item = expectation()

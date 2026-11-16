@@ -43,8 +43,10 @@ from habitus.runtime.foresight import (
     build_foresight_days,
     build_foresight_nightly,
     build_foresight_tick,
+    build_outlet,
+    foresight_ledger,
 )
-from habitus.runtime.scene import build_scene_nightly
+from habitus.runtime.scene import build_scene_nightly, scene_branch_root
 from habitus.runtime.scene_night import NightReport, SceneNightlyRun
 from habitus.series.reader import read_series
 from tests.unit.foresight.scripted_model import model_config
@@ -118,6 +120,7 @@ class World:
         self.calendar = LocalCalendar()
         run = build_scene_nightly(
             self.config,
+            root=scene_branch_root(self.config, "session"),
             behavior_tree=self.tree,
             kind_store=self.store,
             structured_chat=self.client,
@@ -229,8 +232,12 @@ class World:
     def foresight(self) -> Any:
         if self._foresight is None:
             evidence = evidence_of(self.config)
+            ledger = foresight_ledger(self.config, "session")
             self._foresight = build_foresight_components(
                 self.config,
+                lane="session",
+                ledger=ledger,
+                outlet=build_outlet(self.config, {"session": ledger}, kind_stores={"session": self.store}),
                 behavior_tree=self.tree,
                 closed_days=lambda: tuple(self.closed),
                 evidence=evidence,

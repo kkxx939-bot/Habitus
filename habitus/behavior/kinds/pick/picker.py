@@ -8,9 +8,9 @@
 | ``missing``             | 「表外」                                |
 | 重问之后仍不合格         | 「待定」                                |
 
-会话 lane 的答复还可以带一个新节点（``new``，词表方案第 4 节）：代码按 ``grow.settle`` 收它，节点在这一刻写进词表状态，
-记录挂在最终那个节点上（``kind_token`` 仍是一个编号）。会话 lane 每轮按此刻的词表状态拼提示词，后面的轮马上能选到新节点。
-物理 lane 不写新节点：用构造时给的初始词表、原提示词、原形状。
+答复还可以带一个新节点（``new``，词表方案第 4 节；物理 lane 自丙二 2026-11-16 起也写）：代码按 ``grow.settle`` 收它，节点在
+这一刻写进这条 lane 的词表状态，记录挂在最终那个节点上（``kind_token`` 仍是一个编号）。每一条按此刻的词表状态拼提示词，后面的
+记录马上能选到新节点。两条 lane 收节点、生命周期是同一套代码、同一组配置；物理 lane 没有 ``none``、``continue`` 与上文。
 
 答复结构不合格（不是 JSON、字段不对、编号不在表里、标题当词、续的记录不在列表里）由结构化客户端带着错误重问，
 次数是 ``pick_retries``；用尽记「待定」，不硬归。这一份内容被拦、输入超长抛 ``KindModelOutputError``（调用方按错误处理），
@@ -27,12 +27,13 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from habitus.behavior.kinds.calls import CallFailure, KindModelCaller, KindModelOutputError, call_failure
 from habitus.behavior.kinds.grow import Proposal, settle
 from habitus.behavior.kinds.ids import (
     ClassId,
+    Lane,
     continued_token,
     is_word,
     missing_token,
@@ -50,9 +51,19 @@ from habitus.behavior.kinds.pick.prompt import (
     session_system,
     session_user,
 )
-from habitus.behavior.kinds.store import BehaviorKindStore
 
 T = TypeVar("T")
+
+
+class VocabularyState(Protocol):
+    """选词器用到的词表状态（生产里是这条 lane 的 ``BehaviorKindStore``）：此刻的词表、读改写回。"""
+
+    @property
+    def lane(self) -> Lane: ...
+
+    def read(self) -> Vocabulary: ...
+
+    def update(self, change: Callable[[Vocabulary], Vocabulary]) -> Vocabulary: ...
 
 
 @dataclass(frozen=True)
@@ -74,22 +85,22 @@ _SLOT: dict[str, Any] = {
 
 
 def _schema(fixed: Sequence[str], *, continues: bool) -> dict[str, Any]:
-    """``continues`` 只有会话 lane 有，它的 ``new`` 也只有会话 lane 有。"""
+    """``continues`` 只有会话 lane 有；``new`` 两条 lane 都有。"""
 
     properties: dict[str, Any] = {"pick": {"anyOf": [{"type": "integer"}, {"type": "string", "enum": list(fixed)}]}}
     if continues:
         properties["continues"] = {"type": ["integer", "null"]}
-        properties["new"] = {
-            "anyOf": [
-                {"type": "null"},
-                {
-                    "type": "object",
-                    "properties": {"first": _SLOT, "second": {"anyOf": [{"type": "null"}, _SLOT]}},
-                    "required": ["first", "second"],
-                    "additionalProperties": False,
-                },
-            ]
-        }
+    properties["new"] = {
+        "anyOf": [
+            {"type": "null"},
+            {
+                "type": "object",
+                "properties": {"first": _SLOT, "second": {"anyOf": [{"type": "null"}, _SLOT]}},
+                "required": ["first", "second"],
+                "additionalProperties": False,
+            },
+        ]
+    }
     return {
         "type": "object",
         "properties": properties,
@@ -133,11 +144,11 @@ def _word_token(vocabulary: Vocabulary, pick: object) -> str:
 
 
 class WordPicker:
-    """一条 lane 的选词器。``vocabulary`` 是这条 lane 的初始词表（物理 lane 选词用它，构造时拼好提示词）；``state`` 是词表
-    状态的存储（会话 lane 每轮从它读此刻的词表、把新节点写进去；物理 lane 不给）。"""
+    """一条 lane 的选词器。``vocabulary`` 是这条 lane 的初始词表（定 lane 用）；``state`` 是词表状态的存储（每一条从它读此刻的
+    词表、把新节点写进去；两条 lane 都给）。"""
 
     def __init__(
-        self, caller: KindModelCaller, vocabulary: Vocabulary, *, state: BehaviorKindStore | None = None
+        self, caller: KindModelCaller, vocabulary: Vocabulary, *, state: VocabularyState | None = None
     ) -> None:
         if state is not None and state.lane is not vocabulary.lane:
             raise ValueError("the vocabulary state belongs to another lane")
@@ -146,7 +157,6 @@ class WordPicker:
         self.state = state
         self.config = caller.config
         lane = vocabulary.lane
-        self._physical_system = physical_system(vocabulary)
         self._not_event, self._continued = not_event_token(lane), continued_token(lane)
         self._missing, self._pending = missing_token(lane), pending_token(lane)
         # 最近的若干轮（会话 lane 的上文）：只在进程里
@@ -215,27 +225,34 @@ class WordPicker:
         await asyncio.to_thread(self.state.update, change)
         return final[0]
 
-    async def pick_record(self, material: str) -> str:
-        """物理 lane 的一条记录（上游送来的一段写成的判断：名字、概要、目标、步骤）。"""
+    async def pick_record(self, material: str, *, at: datetime) -> str:
+        """物理 lane 的一条记录（上游送来的一段写成的判断：名字、概要、目标、步骤）。``at`` 是这一段开始的时刻（新节点"哪一刻写的"、
+        "最后被选中"记它；在用计数按记录的日子算，同一个口）。按此刻的词表状态拼提示词，答复带新节点时同会话 lane 一样收进词表状态。"""
 
-        def validate(parsed: object) -> str:
-            if not isinstance(parsed, Mapping) or set(parsed) != {"pick"}:
-                raise ValueError("字段必须正好是 pick")
+        if self.state is None:
+            raise ValueError("the physical picker needs the vocabulary state")
+        vocabulary = self.state.read()
+
+        def validate(parsed: object) -> str | tuple[ClassId, tuple[Proposal, ...]]:
+            if not isinstance(parsed, Mapping) or set(parsed) != {"pick", "new"}:
+                raise ValueError("字段必须正好是 pick、new")
             pick = parsed["pick"]
+            proposals = _proposals(parsed["new"])
             if isinstance(pick, str):
                 if pick not in PHYSICAL_FIXED:
                     raise ValueError(f"pick 是字符串时只能是 {list(PHYSICAL_FIXED)}，实际 {pick!r}")
+                if proposals:
+                    raise ValueError("pick 不是词编号时 new 必须是 null")
                 return self._missing
-            return _word_token(self.vocabulary, pick)
+            return ClassId.parse(_word_token(vocabulary, pick)), proposals
 
-        return str(
-            await self._ask(
-                system=self._physical_system,
-                user=physical_user(material),
-                schema=_schema(PHYSICAL_FIXED, continues=False),
-                validator=validate,
-            )
+        answer = await self._ask(
+            system=physical_system(vocabulary),
+            user=physical_user(material),
+            schema=_schema(PHYSICAL_FIXED, continues=False),
+            validator=validate,
         )
+        return answer if isinstance(answer, str) else str(await self._settle(*answer, at=at))
 
     async def _ask(
         self, *, system: str, user: str, schema: Mapping[str, Any], validator: Callable[[object], T]

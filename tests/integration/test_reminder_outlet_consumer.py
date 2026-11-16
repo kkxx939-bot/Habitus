@@ -124,8 +124,8 @@ def wired(tmp_path: Path, bodies: list[dict[str, Any]], host_of=None):  # type: 
     ledger = ForesightLedgerStore(tmp_path / "foresight")
     session.attach_reminders(ReminderResponses(ledger, limit=5))
     outlet = ReminderOutlet(
-        OutletStore(ledger.root / "outlet"),
-        ledger,
+        {"session": OutletStore(ledger.root / "outlet")},
+        {"session": ledger},
         liveness=timedelta(hours=48),
         lease=timedelta(minutes=30),
         max_attempts=3,
@@ -135,7 +135,7 @@ def wired(tmp_path: Path, bodies: list[dict[str, Any]], host_of=None):  # type: 
     item = expectation()
     ledger.record_expectation(item)
     ledger.record_delivery(DAY, Delivery("e1", AWAITING_AT, 1, False, "待取", 1.0, TEXT))
-    outlet.publish([OpenRequest("e1", item.kind_token, TEXT, item.deadline, item.formed_at, 1, DAY)], now=AWAITING_AT)
+    outlet.publish("session", [OpenRequest("e1", item.kind_token, TEXT, item.deadline, item.formed_at, 1, DAY, "session")], now=AWAITING_AT)
     assert [r.request_id for r in outlet.claim("claude-code", SESSION, CLAIMED_AT, 3)] == ["e1"]
     consumer = OutletObservingConsumer(BehaviorSessionConsumer(session, behavior_outputs), outlet, host_of=host_of)
     service, _memory, _behavior = delivery(conversation_root, behavior=consumer)  # type: ignore[arg-type]

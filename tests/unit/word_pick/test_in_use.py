@@ -23,7 +23,7 @@ OLD_STEPS = ("migrate", "calendar", "retry", "settle", "series", "scene", "oppor
 
 
 def behaviours(site: Site) -> dict[str, Any]:
-    concepts = ConceptStore(site.runtime.config.scene_root).read_all()
+    concepts = ConceptStore(site.runtime.config.scene_root / "session").read_all()
     return {identity: concepts[identity] for identity in concepts.behaviors()}
 
 
@@ -128,8 +128,8 @@ def test_d5_the_generation_counts_words_in_use_after_the_series_and_before_the_s
 def test_d8b_the_vocabulary_version_is_the_in_use_revision_and_stays_when_the_set_does_not_change(site: Site) -> None:
     site.record("conv-a", at(D13, 9), "帮我写一份本周周报", Word("s-k0002"))
     site.record("conv-a", at(D14, 9), "这周的周报也帮我写一下", Word("s-k0002"))
-    generation = site.runtime.components.generation.generation
-    concepts = ConceptStore(site.runtime.config.scene_root)
+    generation = site.runtime.components.pipelines[0].generation.generation
+    concepts = ConceptStore(site.runtime.config.scene_root / "session")
 
     site.generate(D15)
     assert set(behaviours(site)) == {"s-k0002"}

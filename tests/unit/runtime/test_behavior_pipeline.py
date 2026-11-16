@@ -140,7 +140,7 @@ def physical_delivery() -> dict:
 
 
 #: 物理 lane 在归约里选词：这一条答"表里没有"。
-PICK_BODY = {"pick": "missing"}
+PICK_BODY = {"pick": "missing", "new": None}
 
 
 def test_behavior_stays_dark_until_a_subject_is_configured(tmp_path: Path) -> None:

@@ -6,7 +6,7 @@
     会话那一支：会话源的交付 → ``runtime/session_lane.py`` 的桥 → 一轮一条判断（LLM 描述 + 选词）
     物理那一支：上游的一份交付（Runtime 正门）→ 一段一条判断（不调模型）
     每一支各自：判断 / 回执存储 → 归约 sweep（封口 → 落 kind_token（物理一支在这里选词）→ 行为树 + L0/L1 → 定稿日记账）
-    → 换代（会话那一支；见 runtime/generation.py）
+    → 换代、语义树、预测层（两支各一条管线；见 runtime/pipeline.py）
 
 两支不共用任何存储、词表、归约或 Worker：一支上的记录、空白、词表的词，另一支看不到（裁定 35）。
 
@@ -270,8 +270,8 @@ class BehaviorReductionWorker(ResidentWorker):
             await self._wait(self.interval_seconds)
 
 
-class _LaneObserver:
-    """给一支发出的观测事件都标上 lane。"""
+class LaneObserver:
+    """给一支发出的观测事件都标上 lane（行为侧一支、下游一条管线各包一层：两支的事件、指标同名，不带就分不出、还会互相盖掉）。"""
 
     def __init__(self, observer: Observer, lane: Lane) -> None:
         self._observer = observer
@@ -370,7 +370,7 @@ def _build_branch(
     domain = behavior_domain_configs(behavior_config)
     root = config.behavior_root / lane.value
     # 这一支发出的每条观测事件都带上是哪一支：两支的事件、指标同名，不带就分不出、还会互相盖掉。
-    observer = None if observer is None else _LaneObserver(observer, lane)
+    observer = None if observer is None else LaneObserver(observer, lane)
     context_lookback = (
         float(behavior_config.context_lookback_seconds)
         if behavior_config.context_lookback_seconds is not None
@@ -416,8 +416,8 @@ def _build_branch(
                 deterministic=MODEL_DETERMINISTIC,
             )
         ),
-        # 脏日日志只有换代读序列时读（只接会话一支）：别的支不记
-        dirty_days=DirtyDayLog(root / "reduction") if lane is Lane.SESSION and config.scene.enabled else None,
+        # 脏日日志只有换代、模型队列读序列时读（语义树开着才有换代；两支各一条管线、各记各的）
+        dirty_days=DirtyDayLog(root / "reduction") if config.scene.enabled else None,
         failed_chains=FailedChains(judgements, ledger=reduction_ledger, clock=clock or _utc_now, backlog=backlog),
         clock=clock,
         context_lookback_seconds=context_lookback,
@@ -590,6 +590,7 @@ __all__ = [
     "BehaviorBranches",
     "BehaviorDomainConfigs",
     "BehaviorRuntimeComponents",
+    "LaneObserver",
     "UnitOutcome",
     "behavior_domain_configs",
     "build_behavior_components",

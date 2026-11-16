@@ -25,7 +25,7 @@ def vocabulary_parts(
     chat: StructuredChatClient, lane: Lane, root: Path, domain: BehaviorDomainConfigs, lock_store: LockStore
 ) -> tuple[BehaviorKindStore, WordPicker]:
     """这一支的词表状态（``root`` 是行为树根）与选词器。选词器答复结构不合格时带着错误重问 ``pick_retries`` 次（另起一个结构化
-    客户端，只换重问次数）；会话一支的选词器拿词表状态（每轮现读、写新节点），物理一支只用初始词表。"""
+    客户端，只换重问次数）；两支的选词器都拿这一支的词表状态（每一条现读、写新节点）。"""
 
     kinds = domain.kinds
     store = BehaviorKindStore(
@@ -34,9 +34,7 @@ def vocabulary_parts(
     picking = StructuredChatClient(
         chat.client, allow_json_repair=chat.allow_json_repair, validation_retries=kinds.pick_retries
     )
-    picker = WordPicker(
-        KindModelCaller(picking, config=kinds), initial_words(lane), state=store if lane is Lane.SESSION else None
-    )
+    picker = WordPicker(KindModelCaller(picking, config=kinds), initial_words(lane), state=store)
     return store, picker
 
 

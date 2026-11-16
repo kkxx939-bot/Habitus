@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from habitus.runtime.foresight_tick import TickReport
-from habitus.runtime.foresight_worker import ForesightWorker
+from habitus.runtime.foresight_worker import ForesightWorker, SlotBranch
 from habitus.runtime.generation_watermark import TickTrack, TickWatermarkStore
 
 LONDON = ZoneInfo("Europe/London")
@@ -30,6 +30,8 @@ def day_of_ticks(tmp_path, day: datetime) -> tuple[list[datetime], list[tuple[da
     ticks: list[datetime] = []
 
     class Tick:
+        lane = "session"
+
         async def run_once(self, *, scheduled: datetime | None = None) -> TickReport:
             now = clock[0].astimezone(LONDON)
             mark, _gap = await track.begin(now)
@@ -40,7 +42,7 @@ def day_of_ticks(tmp_path, day: datetime) -> tuple[list[datetime], list[tuple[da
             return TickReport(now, 0, 0)
 
     worker = ForesightWorker(
-        Tick(),  # type: ignore[arg-type]
+        (SlotBranch("session", tick=Tick()),),  # type: ignore[arg-type]
         interval_seconds=SLOT.total_seconds(),
         shutdown_timeout_seconds=1.0,
         zone=LONDON,

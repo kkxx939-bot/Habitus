@@ -6,12 +6,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 
 from habitus.foresight.ledger.model import AWAITING_HOST, HOST_NEVER_CLAIMED, SPOKEN, Delivery
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
-from habitus.runtime.foresight_outlet import Handoff, ReminderOutlet
+from habitus.runtime.foresight_outlet import ClaimTrail, Handoff, ReminderOutlet
 
 #: 「待取」之后他在被问之前自己做了（终局）。
 HAPPENED = "已发生"
@@ -21,7 +22,7 @@ _OUTLET_REASONS = frozenset({AWAITING_HOST, SPOKEN, HOST_NEVER_CLAIMED, HAPPENED
 
 @dataclass(frozen=True)
 class ReminderProgress:
-    """一条提醒：``stage`` 是此刻走到的那一步——待取 / 取走了 / 说了 / 宿主没取 / 已发生。"""
+    """一条提醒：``lane`` 是哪一支的；``stage`` 是此刻走到的那一步——待取 / 取走了 / 说了 / 宿主没取 / 已发生。"""
 
     expectation_id: str
     kind: str
@@ -36,6 +37,7 @@ class ReminderProgress:
     outcome: str | None
     attempts: int | None
     handoffs: tuple[Handoff, ...]
+    lane: str
 
 
 @dataclass(frozen=True)
@@ -51,16 +53,28 @@ class ReminderDay:
         return sum(1 for item in self.reminders if item.response is not None)
 
 
-def reminder_day(ledger: ForesightLedgerStore, outlet: ReminderOutlet | None, day: date) -> ReminderDay:
-    """拼出 ``day`` 那天进了出口的每条提醒，按开始等取的时刻排。"""
+def reminder_day(ledgers: Mapping[str, ForesightLedgerStore], outlet: ReminderOutlet | None, day: date) -> ReminderDay:
+    """拼出 ``day`` 那天进了出口的每条提醒（各支的账都看：出口两支共用），按开始等取的时刻排。"""
 
+    trails = outlet.trails() if outlet is not None else {}
+    rows = [row for lane, ledger in ledgers.items() for row in _branch_rows(lane, ledger, outlet, trails, day)]
+    rows.sort(key=lambda row: (row.awaiting_at, row.expectation_id))
+    return ReminderDay(day, tuple(rows))
+
+
+def _branch_rows(
+    lane: str,
+    ledger: ForesightLedgerStore,
+    outlet: ReminderOutlet | None,
+    trails: Mapping[str, ClaimTrail],
+    day: date,
+) -> list[ReminderProgress]:
     deliveries: dict[str, list[Delivery]] = {}
     for item in ledger.deliveries_on(day):
         if item.reason in _OUTLET_REASONS:
             deliveries.setdefault(item.expectation_id, []).append(item)
     responses = {item.expectation_id: item for item in ledger.responses_on(day)}
     outcomes = {item.expectation_id: item.outcome for item in ledger.settlements_on(day)}
-    trails = outlet.trails() if outlet is not None else {}
     rows: list[ReminderProgress] = []
     for expectation_id, items in deliveries.items():
         expectation = ledger.expectation(day, expectation_id)
@@ -84,8 +98,9 @@ def reminder_day(ledger: ForesightLedgerStore, outlet: ReminderOutlet | None, da
         response = responses.get(expectation_id)
         rows.append(
             ReminderProgress(
+                lane=lane,
                 expectation_id=expectation_id,
-                kind=outlet.kind_name(expectation.kind_token) if outlet is not None else expectation.kind_token,
+                kind=outlet.kind_name(lane, expectation.kind_token) if outlet is not None else expectation.kind_token,
                 text=first.text or "",
                 deadline=expectation.deadline,
                 stage=stage,
@@ -99,8 +114,7 @@ def reminder_day(ledger: ForesightLedgerStore, outlet: ReminderOutlet | None, da
                 handoffs=() if trail is None else trail.handoffs,
             )
         )
-    rows.sort(key=lambda row: (row.awaiting_at, row.expectation_id))
-    return ReminderDay(day, tuple(rows))
+    return rows
 
 
 __all__ = ["ReminderDay", "ReminderProgress", "reminder_day"]

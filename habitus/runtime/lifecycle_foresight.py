@@ -27,7 +27,7 @@ LEVEL_DAYS = DIAGNOSIS_REACH_DAYS
 
 
 class ForesightParticipant:
-    name = "foresight"
+    """一支预测层的参与者（两支各一个，名字带支）。"""
 
     def __init__(
         self,
@@ -45,6 +45,7 @@ class ForesightParticipant:
         self.ledger = ledger
         self.history = history
         self.lane = lane
+        self.name = f"foresight_{lane}"
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
         #: 这个进程里已经放过索引的日子：之后每轮不再读它的预期去判（索引放过一次就没了）。
         self._index_released: set[date] = set()

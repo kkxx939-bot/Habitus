@@ -313,7 +313,9 @@ def test_a_judgement_file_with_an_unknown_kind_token_is_refused_and_names_the_fi
     record = json.loads(path.read_text(encoding="utf-8"))
     record.update({key: value for key, value in payload.items() if key == "kind_token"})
     path.write_text(
-        json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
+        json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+        newline="",  # 规范编码只认 \n：Windows 文本模式会写成 \r\n
     )
     with pytest.raises(BehaviorFusionError) as caught:
         store.read(judgement.judgement_id)

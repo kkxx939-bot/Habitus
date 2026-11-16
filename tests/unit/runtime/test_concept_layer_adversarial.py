@@ -47,7 +47,7 @@ def sealed_wednesday(tmp_path: Path) -> Path:
     run = scene_run(tmp_path, site, ModelMustNotBeCalled())
     generate(run, NIGHT, at(NIGHT, 1))
     assert run.hits.days_done() == frozenset({WEDNESDAY})
-    return tmp_path / "data" / "scene"
+    return tmp_path / "data" / "scene" / "session"
 
 
 def edit_footer(path: Path, marker: str, edit: Callable[[dict[str, Any]], None]) -> None:

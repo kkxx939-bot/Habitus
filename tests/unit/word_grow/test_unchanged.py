@@ -71,23 +71,39 @@ def _physical_tokens(site: GrowSite) -> list[str]:
     return [str(tree.read(address).fields["kind_token"]) for address in tree.list_addresses(BehaviorKind.OCCURRENCE)]
 
 
-def test_s3_the_physical_pick_prompt_is_word_for_word_the_same(site: GrowSite) -> None:
+def test_s3_the_physical_pick_prompt_is_the_old_one_plus_the_new_node_section(site: GrowSite) -> None:
+    """丙二改了设计：物理 lane 也写新节点。提示词 = 二甲那一份 + 【新节点：new】一节（文字照会话那一份，"这一轮"说成"这一段"）
+    + 输出里的 ``new``；别的一字不差。"""
+
     site.router.picks.append(Word("p-k0005"))
     asyncio.run(site.runtime.deliver_physical(delivery("换衣服")))
     site.reduce(site.physical)
     (call,) = pick_calls(site)
-    assert system_prompt(call) == (HERE / "physical_system_2a.txt").read_text(encoding="utf-8")
-    assert call.schema is not None and set(call.schema["properties"]) == {"pick"}
+    text = system_prompt(call)
+    start, end = text.index("【新节点：new】"), text.index("【词表】")
+    section = text[start:end]
+    assert "这一段的事是这个词里更具体的一种" in section and "这一轮" not in section
+    old = (HERE / "physical_system_2a.txt").read_text(encoding="utf-8")
+    restored = (
+        (text[:start] + text[end:])
+        .replace("在下面选一项，并可选地写一个新节点。", "在下面选一项。")
+        .replace(
+            ', "new": null | {"first": {"name": 名字, "definition": 一句定义}, '
+            '"second": null | {"name": 名字, "definition": 一句定义}}}',
+            "}",
+        )
+    )
+    assert restored == old
+    assert call.schema is not None and set(call.schema["properties"]) == {"pick", "new"}
     assert _physical_tokens(site) == ["p-k0005"]
 
 
-def test_s3_a_physical_answer_carrying_new_is_invalid_and_asked_again(site: GrowSite) -> None:
-    answer = Raw('{"pick": 5, "new": null}')
-    site.router.picks.extend([answer, answer, answer])
+def test_s3_a_physical_answer_carrying_new_null_is_valid(site: GrowSite) -> None:
+    site.router.picks.append(Raw('{"pick": 5, "new": null}'))
     asyncio.run(site.runtime.deliver_physical(delivery("换衣服")))
     site.reduce(site.physical)
-    assert site.router.count("pick") == 3
-    assert [marker(token) for token in _physical_tokens(site)] == ["待定"]
+    assert site.router.count("pick") == 1
+    assert _physical_tokens(site) == ["p-k0005"]
 
 
 def test_s5_an_initial_word_is_in_use_after_two_different_days_and_not_after_one_day_twice(site: GrowSite) -> None:

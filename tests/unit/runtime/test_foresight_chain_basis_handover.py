@@ -21,6 +21,7 @@ from habitus.runtime.foresight_delivery import DeliveryStage
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_outlet import ReminderOutlet
+from habitus.runtime.foresight_outlet_ledgers import BranchOutlet
 from habitus.runtime.foresight_outlet_store import OutletStore
 from habitus.runtime.foresight_tick import ForesightTick
 from habitus.scene.concepts import ConceptSet
@@ -97,8 +98,8 @@ def build(tmp: Path, *, chain: bool, reading: TreeReading | None) -> W:
     if chain:
         seeded.earn(kind=w.vit, trigger=w.relation_key, hits=8, source="事件")
     w.outlet = ReminderOutlet(
-        OutletStore(root / "outlet"),
-        w.ledger,
+        {"session": OutletStore(root / "outlet")},
+        {"session": w.ledger},
         liveness=timedelta(hours=48),
         lease=timedelta(minutes=30),
         max_attempts=3,
@@ -112,7 +113,7 @@ def build(tmp: Path, *, chain: bool, reading: TreeReading | None) -> W:
         evidence=EVIDENCE,
         daily_cap=10,
         tick_seconds=TICK.total_seconds(),
-        outlet=w.outlet,
+        outlet=BranchOutlet(w.outlet, "session"),
         history=seeded.store,
     )
     return w

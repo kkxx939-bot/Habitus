@@ -349,8 +349,11 @@ def test_a_day_whose_only_session_was_not_an_event_is_still_watched(tmp_path: Pa
     assert chatted["fact"] == ("过期待决", False, 1.0) and chatted["coverage"] == 1.0
 
 
-def test_the_physical_lanes_settlement_keeps_an_empty_day_watched(tmp_path: Path) -> None:
-    """物理 lane 的上游没在看时自己报空白：结算按物理 lane 的口径，空着的一天照旧是在看、没做。"""
+def test_the_physical_lanes_settlement_reads_an_empty_day_as_not_watched_too(tmp_path: Path) -> None:
+    """两条 lane 同一个规矩（用户 2026-11-16）：物理 lane 那天上游一点数据都没送来，也是没在看，中性、不算漏。"""
 
-    physical = _one_empty_day(tmp_path, gap=False, other_session=False, lane="physical")
-    assert physical["fact"] == ("过期待决", False, 1.0)
+    physical = _one_empty_day(tmp_path / "empty", gap=False, other_session=False, lane="physical")
+    assert physical["fact"] == ("过期待决", False, 0.0)
+    # 那天有别的记录、只是没做这件事：照常是一笔坏
+    watched = _one_empty_day(tmp_path / "other", gap=False, other_session=True, lane="physical")
+    assert watched["fact"] == ("过期待决", False, 1.0)

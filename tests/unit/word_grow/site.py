@@ -5,7 +5,7 @@
 
 - 选词答复按共享说明 3.1 的会话输出形状 ``{"pick", "continues", "new"}``：这一次请求的输出形状里有 ``new`` 才带
   ``"new": null``（替身照请求的形状答，所以第二步甲的代码上也答得通）；脚本给了 ``new`` 的一律原样带上。物理 lane
-  仍只答 ``{"pick"}``。
+  答 ``{"pick", "new"}``（丙二起物理 lane 也写新节点）。
 - 词按名字在这一次提示词的词表里找行首编号（初始词与长出来的节点同一种写法）。
 - ``Hook``：答之前先在同一线程里跑一段（例如在另一个线程里整代换代），模拟"作答期间换代"。
 - ``Barrier``：两次选词互相等一下再答（有界），模拟"两轮同时写"。
@@ -181,7 +181,8 @@ class GrowRouter(Router):
         else:
             raise AssertionError(f"unknown scripted pick {scripted!r}")
         if RECORDS_HEADER not in text:
-            return json.dumps({"pick": body["pick"]}, ensure_ascii=False)  # 物理 lane：只有 pick
+            # 物理 lane：没有 continues；丙二起也带 new
+            return json.dumps({"pick": body["pick"], "new": new}, ensure_ascii=False)
         if explicit or self._asks_new():
             body["new"] = new
         return json.dumps(body, ensure_ascii=False)
@@ -241,13 +242,13 @@ class GrowSite(Site):
     def series_tokens(self, cutoff: date) -> dict[datetime, str]:
         """换代那份常驻序列读者（组合根装的）读出来的：开始时刻 → ``kind_token``。"""
 
-        generation = self.runtime.components.generation
+        generation = self.runtime.components.pipelines[0].generation
         assert generation is not None
         series = generation.generation.series.read(cutoff=cutoff)
         return {record.started_at: record.kind_token for record in series.records}
 
     def concepts(self) -> Any:
-        return ConceptStore(self.runtime.config.scene_root).read_all()
+        return ConceptStore(self.runtime.config.scene_root / "session").read_all()
 
     def in_use(self) -> set[str]:
         """语义树里没停用的行为概念（= 在用的节点编号）。"""

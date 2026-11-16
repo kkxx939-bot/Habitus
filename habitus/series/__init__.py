@@ -5,7 +5,6 @@
 """
 
 from habitus.series.model import (
-    SILENT_DAY_UNWATCHED_LANES,
     EventSeries,
     GapKind,
     KindResolution,
@@ -14,7 +13,6 @@ from habitus.series.model import (
     SeriesRecord,
     SkippedRecord,
     SkipReason,
-    silent_day_unwatched,
     standing_parts,
 )
 
@@ -26,8 +24,6 @@ __all__ = [
     "SeriesGap",
     "SeriesRecord",
     "SkipReason",
-    "SILENT_DAY_UNWATCHED_LANES",
     "SkippedRecord",
-    "silent_day_unwatched",
     "standing_parts",
 ]

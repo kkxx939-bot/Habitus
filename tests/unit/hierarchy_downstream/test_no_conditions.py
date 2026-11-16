@@ -42,7 +42,7 @@ def test_c28_d2_d3_a_generation_and_the_model_queue_never_ask_for_conditions_nor
     world.generate(BASELINE_NIGHTS[1])
     asked = [item["name"] for item in provider.requests]
     kinds = [item.detail.get("kind") for item in report.done]
-    book = sorted(path.name for path in (world.config.scene_root / "advice" / "conditions").glob("*"))
+    book = sorted(path.name for path in (world.config.scene_root / "session" / "advice" / "conditions").glob("*"))
     assert (CONDITION_CALL in asked, "conditions" in kinds, book) == (False, False, [])
     assert set(kinds) == {"priors"}  # advice 一类只剩先验
     state = world.scene.relations.read("session", BASELINE_NIGHTS[1])
@@ -50,7 +50,7 @@ def test_c28_d2_d3_a_generation_and_the_model_queue_never_ask_for_conditions_nor
 
 
 def test_c29_an_old_proposal_book_on_disk_is_refused_naming_the_file(tmp_path: Path) -> None:
-    book = tmp_path / "data" / "scene" / "advice" / "conditions" / "session.json"
+    book = tmp_path / "data" / "scene" / "session" / "advice" / "conditions" / "session.json"
     book.parent.mkdir(parents=True)
     book.write_text(OLD_BOOK, encoding="utf-8")
     with pytest.raises(Exception, match=r"conditions[/\\]session\.json"):  # noqa: PT011 - 报错类型由实现定，只要点出文件

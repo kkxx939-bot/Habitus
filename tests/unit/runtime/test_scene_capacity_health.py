@@ -81,7 +81,7 @@ def test_steady_state_retention_is_not_a_capacity_warning(tmp_path: Path, share:
     """连写 6 晚：每一晚之后关系表都只留满保留代数（_prune 正常），健康面不该报 degraded。"""
 
     relations = _relations(tmp_path)
-    participant = SceneParticipant(relations)
+    participant = SceneParticipant(relations, lane="session")
     health = _Health(tmp_path, share)
     degraded: list[tuple[date, str]] = []
     for offset in range(6):
@@ -127,7 +127,7 @@ def test_retention_overflow_is_reported(
     """真的超出保留数（_prune 没删掉 / 多放了一晚）时，健康面报 degraded，告警内容带 scene 参与者与 lane 名。"""
 
     relations = _relations(tmp_path)
-    participant = SceneParticipant(relations)
+    participant = SceneParticipant(relations, lane="session")
     health = _Health(tmp_path, share)
     for offset in range(_retained()):
         _write(relations, FIRST_NIGHT + timedelta(days=offset))

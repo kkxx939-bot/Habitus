@@ -58,13 +58,13 @@ from habitus.model_client import (
 )
 from habitus.runtime.behavior import BehaviorBranches
 from habitus.runtime.foresight import ForesightRuntimeComponents
+from habitus.runtime.foresight_outlet import ReminderOutlet
 from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
 from habitus.runtime.foresight_worker import ForesightWorker
-from habitus.runtime.generation_runner import GenerationRunner
 from habitus.runtime.lifecycle import LifecycleWorker
 from habitus.runtime.lifecycle_memory import ConversationChainParticipant
 from habitus.runtime.model_queue_worker import ModelQueueWorker
-from habitus.runtime.resident import ResidentWorker
+from habitus.runtime.pipeline import ScenePipeline
 from habitus.runtime.session_lane import BehaviorSessionConsumer
 from habitus.runtime.worker import MemoryWorker
 
@@ -282,46 +282,17 @@ class RuntimeComponents:
     workflow: RuntimeWorkflow
     # 行为管线的两支（会话、物理各一整套：融合→归约→行为树）；primary_subject 未配置时为 None（行为侧未启用）。
     behavior: BehaviorBranches | None = None
-    # 换代（重试收尾 → 结算 → 读序列 → 语义树 → 机会表 → 日子预期 → 完成标记；没有模型调用）的那一眼；语义树没启用时
-    # 为 None。它不是常驻 worker：预测 worker 每槽在预测根租约之内先调它。只接会话那一支（见 assembly 的 TODO）。
-    generation: GenerationRunner | None = None
-    # 只开语义树、没开预测层时每槽看一眼换代的那个 worker（没有预测拍）；开了预测层时它在 ``foresight.worker``，这里是 None。
-    generation_slots: ForesightWorker | None = None
-    # 模型队列（出错重试、词表、未封口判断的归类、先验的补问、记同步到的版本）的常驻 worker；随换代一起有、一起没有。
+    # 两支各一条下游管线（裁定 42）：这一支的语义树、换代的那一眼、模型队列、预测层；按做的先后（会话在前）。语义树没启用时为空。
+    pipelines: tuple[ScenePipeline, ...] = ()
+    # 每个槽边界按支依次先看一眼这一支的换代、再做这一支的预测拍的那个常驻 worker（两支共用一个）；随管线一起有、一起没有。
+    slot_worker: ForesightWorker | None = None
+    # 模型队列（出错重试、未封口判断的归类、先验的补问、记同步到的版本）的常驻 worker（两支共用一个，每一轮按支依次做）。
     model_queue: ModelQueueWorker | None = None
-    # 预测层的证据装配；foresight.enabled 为假时为 None。它现在只接会话那一支（见 assembly 的 TODO）。
-    foresight: ForesightRuntimeComponents | None = None
+    # 提醒出口（两支共用一个：出口只有宿主里的会话，账按支记）；没开预测层是 None。
+    outlet: ReminderOutlet | None = None
 
     def __post_init__(self) -> None:
-        if self.generation is not None:
-            if self.behavior is None:
-                raise ValueError("the generation reads the behaviour tree; behaviour must be enabled")
-            # 实例同一性：换代必须读**这个** Runtime 写入的会话那一支行为树——不是另开一个同路径的实例。
-            if getattr(self.generation.generation, "behavior_tree", None) is not self.behavior.session.tree:
-                raise ValueError("the generation must read the session behaviour tree")
-        self._check_model_queue()
-        self._check_slot_worker()
-        if self.foresight is not None:
-            if self.behavior is None or self.generation is None:
-                raise ValueError(
-                    "foresight reads the semantic layer's generation; behaviour and the generation must be enabled"
-                )
-            generation = self.generation.generation
-            # 接线漏了的话，进程照常启动、health 全绿、结算一代都不会跑，而配置里还开着——无处可查。结算是换代里的一步。
-            if getattr(generation, "settlement", None) is not self.foresight.settlement:
-                raise ValueError("the settlement stage must be a step of the generation")
-            # 机会表那一步漏接：进程照常、健康全绿（一代都没写过不算故障），白天永远停在"还没有机会表"（2026-10-18 四方评审）
-            step = getattr(generation, "foresight", None)
-            if step is None or getattr(step, "store", None) is not self.foresight.opportunities:
-                raise ValueError("the generation must write the opportunity table the foresight layer reads")
-            # 结算认"那天有没有这一代"读的必须是换代写的那一份完成标记
-            if self.foresight.settlement.finished != generation.marks.finished:
-                raise ValueError("the settlement must read the generation's own completion marks")
-            self.foresight.assert_attached_to(behavior=self.behavior.session)
-            # 出口漏包：提醒记了「待取」、宿主也问了，转写回来却没人认，账上永远没有「说了」——结算全按没说过处理，一处都不报错
-            consumer = self.conversation.behavior_session_consumer
-            if not isinstance(consumer, OutletObservingConsumer) or consumer.outlet is not self.foresight.outlet:
-                raise ValueError("the session lane consumer must be wrapped by the foresight reminder outlet")
+        self._check_pipelines()
         if self.workflow.enqueuer.conversations is not self.conversation.journal:
             raise ValueError("workflow enqueuer must use the shared conversation journal")
         if (
@@ -346,39 +317,54 @@ class RuntimeComponents:
         if self.workflow.jobs.path_lock is not self.infrastructure.path_lock:
             raise ValueError("workflow and Runtime must share one path lock")
 
+    def pipeline(self, lane: str) -> ScenePipeline | None:
+        """那一支的下游管线；没有是 None。"""
+
+        return next((item for item in self.pipelines if item.lane == lane), None)
+
     @property
-    def slot_worker(self) -> ResidentWorker | None:
-        """每槽先看一眼换代、再做预测拍的那个常驻 worker（没开预测层时只看换代）；两样都没有是 None。"""
+    def foresights(self) -> tuple[ForesightRuntimeComponents, ...]:
+        """各支的预测层（按支的先后）；没开预测层是空的。"""
 
-        return self.generation_slots if self.foresight is None else self.foresight.worker
+        return tuple(item.foresight for item in self.pipelines if item.foresight is not None)
 
-    def _check_slot_worker(self) -> None:
-        """换代没有自己的循环：漏接的话进程照常、健康全绿，一代都不会做。驱动它的必须是那一个每槽的 worker。"""
+    def _check_pipelines(self) -> None:
+        """各支的管线读**这个** Runtime 的那一支（实例同一性，``ScenePipeline`` 自己再核内部接线）；两个常驻 worker 驱动的正是这
+        几条管线——换代没有自己的循环，漏接的话进程照常、健康全绿，一代都不会做。"""
 
-        if self.generation_slots is not None and self.foresight is not None:
-            raise ValueError("with the foresight layer on, the slot worker lives in the foresight components")
-        if self.generation is None:
+        if not self.pipelines:
+            if self.slot_worker is not None or self.model_queue is not None or self.outlet is not None:
+                raise ValueError("the slot worker, the model queue and the outlet come with the pipelines")
             return
-        if getattr(self.slot_worker, "generation", None) is not self.generation:
-            raise ValueError("the slot worker must drive this generation")
-
-    def _check_model_queue(self) -> None:
-        """模型队列随换代一起有、一起没有，做的是换代那棵语义树的活。"""
-
-        if (self.model_queue is None) != (self.generation is None):
-            raise ValueError("the model queue and the generation come together")
-        if self.model_queue is None or self.generation is None:
+        if self.behavior is None:
+            raise ValueError("the generation reads the behaviour tree; behaviour must be enabled")
+        lanes = [item.lane for item in self.pipelines]
+        if len(lanes) != len(set(lanes)):
+            raise ValueError("each branch has one pipeline")
+        for item in self.pipelines:
+            if item.behavior is not self.behavior.of(item.lane):
+                raise ValueError(f"the {item.lane} pipeline must read this runtime's {item.lane} behaviour branch")
+        slots, queues = self.slot_worker, self.model_queue
+        if slots is None or [branch.lane for branch in slots.branches] != lanes:
+            raise ValueError("the slot worker must drive every pipeline in order")
+        for item, branch in zip(self.pipelines, slots.branches, strict=True):
+            if branch.generation is not item.generation or branch.tick is not item.tick:
+                raise ValueError(f"the slot worker must drive the {item.lane} generation and tick")
+        if queues is None or [queue.lane for queue in queues.queues] != lanes:
+            raise ValueError("the model queue worker must drive every pipeline's queue in order")
+        if any(queue is not item.queue for queue, item in zip(queues.queues, self.pipelines, strict=True)):
+            raise ValueError("the model queue worker must drive the pipelines' own queues")
+        foresights = self.foresights
+        if not foresights:
+            if self.outlet is not None:
+                raise ValueError("the reminder outlet comes with the foresight layer")
             return
-        queue, generation = self.model_queue.queue, self.generation.generation
-        # 两份存储对不上的话，换代折叠时读不到队列问来的缓存，一处都不报错
-        if queue.scene is not getattr(generation, "scene", None):
-            raise ValueError("the model queue must work on the generation's scene")
-        # 换代问"模型队列是不是在整体退避"读的必须是这个队列自己的状态（裁定 96：是就不判关系、沿用上一代）
-        if getattr(generation, "models_down", None) != queue.state.down:
-            raise ValueError("the generation must read this model queue's backoff state")
-        # 语义树写锁两边必须是同一把：各持各的话，换代读语义树时队列照写，一处都不报错
-        if queue.scene_lock is not getattr(generation, "scene_lock", None):
-            raise ValueError("the model queue and the generation must share one scene write lock")
+        if len(foresights) != len(self.pipelines) or any(item.outlet is not self.outlet for item in foresights):
+            raise ValueError("every branch's foresight layer must use the one shared reminder outlet")
+        # 出口漏包：提醒记了「待取」、宿主也问了，转写回来却没人认，账上永远没有「说了」——结算全按没说过处理，一处都不报错
+        consumer = self.conversation.behavior_session_consumer
+        if not isinstance(consumer, OutletObservingConsumer) or consumer.outlet is not self.outlet:
+            raise ValueError("the session lane consumer must be wrapped by the foresight reminder outlet")
 
 
 __all__ = [

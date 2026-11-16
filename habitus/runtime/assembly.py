@@ -48,7 +48,6 @@ PathLock + version CAS）；用户把数据目录放在 iCloud/Dropbox（SQLite 
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 from collections.abc import Mapping
 from datetime import timedelta
 
@@ -139,7 +138,10 @@ from habitus.memory.workflow import (
 )
 from habitus.model_client import ProviderFactory, StructuredChatClient
 from habitus.pre.conversation import ConversationAdapterRegistry
-from habitus.runtime.behavior import behavior_domain_configs, build_behavior_components, rereader_of
+from habitus.runtime.behavior import (
+    behavior_domain_configs,
+    build_behavior_components,
+)
 from habitus.runtime.components import (
     RuntimeComponents,
     RuntimeConversation,
@@ -152,15 +154,10 @@ from habitus.runtime.conditions import local_calendar
 from habitus.runtime.embedding_fingerprints import embedding_fingerprints
 from habitus.runtime.evidence import evidence_of
 from habitus.runtime.foresight import (
-    build_foresight_components,
-    build_foresight_days,
-    build_foresight_tick,
+    build_outlet,
     build_outlet_consumer,
-    build_reminded_lookup,
     build_reminder_responses,
-    foresight_ledger_lease,
-    unsealed_bridge,
-    with_slot_worker,
+    foresight_ledger,
 )
 from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
 from habitus.runtime.lifecycle import LifecycleWorker
@@ -171,8 +168,12 @@ from habitus.runtime.lifecycle_memory import ConversationChainParticipant, Memor
 from habitus.runtime.lifecycle_retry import retry_ledger
 from habitus.runtime.lifecycle_scene import SceneParticipant
 from habitus.runtime.lifecycle_sources import ConversationSourceParticipant, ConversationSourceRecoveryParticipant
+from habitus.runtime.pipeline_assembly import assemble_pipeline
 from habitus.runtime.runtime import Runtime
-from habitus.runtime.scene import assemble_generation, generation_marks, generation_traces, model_tracer
+from habitus.runtime.scene import (
+    build_workers,
+    model_tracer,
+)
 from habitus.runtime.scene_config import relation_thresholds
 from habitus.runtime.session_lane import (
     BehaviorSessionConsumer,
@@ -573,77 +574,63 @@ def build_runtime(
     )
     # behavior 关着而 scene / foresight 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
     # 所以这里 behavior_components 为 None 时换代与预测层必然都没开，直接跳过即可。
-    # 预测层站在语义树之上，所以排在后面组装；未启用时 build 自己返回 None。
-    # TODO(BHV-SESSION-LANE-001)：预测层按不按 lane 分还没定（用户 2026-10-11：「这个我还没有考虑好，因为预测层的
-    # 逻辑还没有写好」）。现状：换代与预测层只接会话那一支（行为树、词表、定稿日、未封口的判断都取自会话一支），
-    # 物理那一支没有语义树、没有预测层、也不结算。定了之后要么再起一份接物理一支，要么改成同时读两支。
-    session_behavior = None if behavior_components is None else behavior_components.session
-    # 当地日历只建一份：语义树与预测层读同一份，换代开头重读放假数据时两边一起换（2026-10-18 四方评审）
-    calendar = None if session_behavior is None else local_calendar(config)
+    # 两支各一条下游管线（裁定 42：两条 lane 彻底分开，三棵树各有会话、物理两支）：代码一套，按支各装一份、各用各的根；
+    # 两支只共用两个常驻 worker（每一槽 / 每一轮依次做两支，会话在前）、当地日历与提醒出口。
+    branches = () if behavior_components is None else tuple(behavior_components)
+    # 当地日历只建一份：两支的语义树与预测层读同一份，换代开头重读放假数据时一起换（2026-10-18 四方评审）
+    calendar = None if behavior_components is None else local_calendar(config)
     # 读账的两个值（裁定 49）：α 借关系检验前向验证的显著性；遗忘半衰期是几次机会（裁定 57，config.foresight 的临时值）
-    evidence = None if session_behavior is None or not config.foresight.enabled else evidence_of(config)
-    # 换代的完成标记与本地 trace 各一份（没有语义树就没有换代）：换代写标记，结算读它（裁定 94 第 9 条）；trace 换代与预测拍都写
-    generating = config.scene.enabled and session_behavior is not None
-    marks = generation_marks(config) if generating else None
-    traces = generation_traces(config, managed_observability) if generating else None
-    # 预测根租约：预测 worker 每槽持一次，在它里面先看一眼换代、再做预测拍（没开预测层时只看换代）
-    ledger_lease = foresight_ledger_lease(config, resolved_lock.lock_store) if generating else None
-    tick = None
-    foresight_components = (
+    evidence = None if behavior_components is None or not config.foresight.enabled else evidence_of(config)
+    # 各支的账本先建，提醒出口两支共用一个（出口只有宿主里的会话；「说了」与回话写回请求所属那一支的账本）
+    ledgers = (
+        {}
+        if evidence is None
+        else {branch.lane.value: foresight_ledger(config, branch.lane.value) for branch in branches}
+    )
+    outlet = (
         None
-        if session_behavior is None or evidence is None
-        else build_foresight_components(
+        if not ledgers
+        else build_outlet(
             config,
-            behavior_tree=session_behavior.tree,
-            calendar=calendar,
-            # "那天定稿了"只有归约说了算（链都落树、封口视界已过那天的本地结束），结算按它来。
-            closed_days=session_behavior.reduction_runner.closed_days,
-            evidence=evidence,
-            observer=operation_observer,
-            # 出口认提问时拿词名配题目（词表给人看的名字；编号仍是身份）
-            kind_store=session_behavior.kind_store,
+            ledgers,
+            # 出口认提问时拿词名配题目（那一支词表给人看的名字；编号仍是身份）
+            kind_stores={branch.lane.value: branch.kind_store for branch in branches},
             question_tools=adapters.question_tools(),
-            finished=None if marks is None else marks.finished,
+            observer=operation_observer,
         )
     )
-    # 未封口的判断经那座桥（判断存储 + 消费账本 + 归约的选词器）读：预测拍用它；换代里的日子预期读只读缓存的那一份
-    # （换代里没有模型调用；会话一支的判断都带着选词结果）
-    unsealed = None if session_behavior is None or evidence is None else unsealed_bridge(session_behavior)
-    if foresight_components is not None and session_behavior is not None and evidence is not None and unsealed:
-        # 预测拍（常驻 worker 在语义树那一段装：每槽先看一眼换代、再做这一拍）：词表版本记在预期上。
-        kind_store = session_behavior.kind_store
-        tick = build_foresight_tick(
-            foresight_components,
-            config=config,
-            unsealed=unsealed,
-            evidence=evidence,
-            structured_chat=structured_chat,
-            vocabulary_version=lambda: kind_store.read().revision,
-            observer=operation_observer,
-            reread=rereader_of(session_behavior),
-            trace=None if traces is None else traces.sink,
-            # 没在看的时段写成会话一支的「未观测」空判断（实时化方案第 6 节），由会话一支的归约落树
-            unwatched=unwatched_writer(None if behavior_components is None else behavior_components.session_lane),
-            lease=ledger_lease,
-        )
-        foresight_components = dataclasses.replace(
-            foresight_components,
-            # 当天的日子预期：换代必须成的一步，与预测拍读同一座未封口的桥（只读缓存）
-            days=build_foresight_days(
-                foresight_components,
-                config=config,
-                unsealed=unsealed.cache_only(),
+    pipelines = tuple(
+        pipeline
+        for branch in branches
+        if (
+            pipeline := assemble_pipeline(
+                config,
+                branch,
+                # 没在看的时段写成会话一支的「未观测」空判断（实时化方案第 6 节），由会话一支的归约落树。物理一支不写：
+                # 在没在看是上游的逻辑，融合不替上游补没报到的时间（裁定 43），这一支只推水位
+                unwatched=(
+                    unwatched_writer(behavior_components.session_lane)
+                    if behavior_components is not None and branch is behavior_components.session
+                    else None
+                ),
+                calendar=calendar,
                 evidence=evidence,
-                vocabulary_version=lambda: kind_store.read().revision,
+                ledger=ledgers.get(branch.lane.value),
+                outlet=outlet,
+                structured_chat=structured_chat,
+                lock_store=resolved_lock.lock_store,
                 observer=operation_observer,
-            ),
+                span_backend=managed_observability,
+            )
         )
-        # 第 0 步：归约封口时查预测层账本盖 reminded（归约先装、预测层后装，所以在这里接端口）
-        session_behavior.reduction_runner.attach_reminder_lookup(build_reminded_lookup(foresight_components))
-        # 说那一半（方案 30 第五节）：会话 lane 每轮带上开着的提醒、把模型判出的回应写回账本
+        is not None
+    )
+    foresights = tuple(item.foresight for item in pipelines if item.foresight is not None)
+    if foresights:
+        # 说那一半（方案 30 第五节）：会话 lane 每轮带上两支开着的提醒、把模型判出的回应写回提醒所属那一支的账本
         assert behavior_components is not None
         behavior_components.session_lane.attach_reminders(
-            build_reminder_responses(foresight_components, config=config, observer=operation_observer)
+            build_reminder_responses(foresights, config=config, observer=operation_observer)
         )
     # 行为侧没启用时消费者仍要注册（交付层要求名单里每一项都有实现），它把每份源落成"跳过"。
     behavior_session_consumer: BehaviorSessionConsumer | OutletObservingConsumer = BehaviorSessionConsumer(
@@ -651,10 +638,10 @@ def build_runtime(
         behavior_session_outputs,
         question_tools=answered_question_tools(adapters),
     )
-    if foresight_components is not None and isinstance(behavior_session_consumer, BehaviorSessionConsumer):
+    if outlet is not None and foresights and isinstance(behavior_session_consumer, BehaviorSessionConsumer):
         # 提醒出口（方案 32 第 4.2 条）：同一份会话先过出口（认出 agent 的提问、写「说了」与固定选项的回话），再进会话 lane
         behavior_session_consumer = build_outlet_consumer(
-            foresight_components, behavior_session_consumer, observer=operation_observer, host_of=adapters.host
+            outlet, behavior_session_consumer, observer=operation_observer, host_of=adapters.host
         )
     source_inspector = ConversationConsumerStateInspector(source_outcomes)
     source_fence = ConversationConsumerExecutionFence(
@@ -735,26 +722,12 @@ def build_runtime(
         ConversationSourceRecoveryParticipant(source_recovery, source_coordinator, wake_memory=worker.wake),
     ]
 
-    scene, generation, model_queue_worker, slots = (None, None, None, None)
-    if behavior_components is not None and marks is not None and traces is not None and ledger_lease is not None:
-        scene, generation, model_queue_worker, slots = assemble_generation(
-            config,
-            behavior=behavior_components,
-            calendar=calendar,
-            structured_chat=structured_chat,
-            foresight=foresight_components,
-            marks=marks,
-            traces=traces,
-            ledger_lease=ledger_lease,
-            lock_store=resolved_lock.lock_store,
-            observer=operation_observer,
-            unsealed=unsealed,
-            tick=tick,
-        )
-        foresight_components = with_slot_worker(foresight_components, slots)
-    # 行为侧、语义树、预测层的释放各一个参与者（26 号清单 6.14），挂进同一个生命周期 Worker
-    if scene is not None:
-        participants.append(SceneParticipant(scene.relations))
+    slot_worker, model_queue_worker = (
+        build_workers(config, pipelines, observer=operation_observer) if pipelines else (None, None)
+    )
+    # 行为侧、语义树、预测层的释放各一个参与者（26 号清单 6.14），挂进同一个生命周期 Worker；语义树、预测层一支一个
+    for item in pipelines:
+        participants.append(SceneParticipant(item.scene.relations, lane=item.lane))
     if behavior_components is not None:
         participants.append(
             BehaviorParticipant(
@@ -762,12 +735,12 @@ def build_runtime(
                 backfill_days=config.lifecycle.physical_max_backfill_days,
             )
         )
-    if foresight_components is not None:
+    for foresight in foresights:
         participants.append(
             ForesightParticipant(
-                foresight_components.ledger,
-                foresight_components.history.store,
-                lane="session",
+                foresight.ledger,
+                foresight.history.store,
+                lane=foresight.lane,
                 feedback_kept=config.lifecycle.feedback_kept,
                 window=evidence_of(config).window,
             )
@@ -779,7 +752,7 @@ def build_runtime(
             (
                 source_recovery.retries,
                 *(item for branch in branches for item in branch.retry_ledgers),
-                *(() if model_queue_worker is None else (model_queue_worker.queue.retries,)),
+                *(item.queue.retries for item in pipelines),
             ),
             keep_days=config.lifecycle.retry.given_up_days,
             backlogs=tuple(branch.retry_backlog for branch in branches if branch.retry_backlog is not None),
@@ -850,10 +823,10 @@ def build_runtime(
             lifecycle_worker=lifecycle_worker,
         ),
         behavior=behavior_components,
-        generation=generation,
-        generation_slots=slots if foresight_components is None else None,
+        pipelines=pipelines,
+        slot_worker=slot_worker,
         model_queue=model_queue_worker,
-        foresight=foresight_components,
+        outlet=outlet,
     )
     return Runtime(config, components, conversation_adapters=adapters)
 

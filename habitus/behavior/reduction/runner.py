@@ -414,7 +414,7 @@ class BehaviorReductionRunner:
         return self.day_ledger.closed_days()
 
     async def _classify(self, records: Sequence[ReducibleJudgement], *, guard: LeaseGuard) -> KindStamps:
-        """落 ``kind_token``——写入层唯一的 LLM 触点（只对判断上没带选词结果的，即物理 lane）。不改词表。
+        """落 ``kind_token``——写入层唯一的 LLM 触点（只对判断上没带选词结果的，即物理 lane）；带新节点的由选词器收进词表状态。
 
         结果随检查点定格：崩溃重放走检查点里的 token，不再问模型。
         """

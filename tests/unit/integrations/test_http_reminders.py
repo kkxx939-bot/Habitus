@@ -87,12 +87,8 @@ def test_the_feature_is_advertised_only_while_the_foresight_layer_carries_an_out
     runtime.conversation_protocols = lambda: ("codex_rollout",)  # type: ignore[method-assign]
     runtime.start = AsyncMock()  # type: ignore[method-assign]
     runtime.close = AsyncMock()  # type: ignore[method-assign]
-    for foresight, advertised in (
-        (None, False),
-        (SimpleNamespace(outlet=None), False),
-        (SimpleNamespace(outlet=object()), True),
-    ):
-        runtime.components = SimpleNamespace(foresight=foresight)  # type: ignore[assignment]
+    for outlet, advertised in ((None, False), (object(), True)):
+        runtime.components = SimpleNamespace(outlet=outlet)  # type: ignore[assignment]
         assert runtime.reminders_enabled() is advertised
         with TestClient(create_http_app(runtime), base_url="http://127.0.0.1:8787") as client:
             features = client.get("/api/v1/capabilities").json()["result"]["features"]
@@ -111,7 +107,7 @@ def test_the_runtime_refuses_a_non_positive_limit_and_a_naive_moment() -> None:
     runtime = object.__new__(Runtime)
     runtime._state = __import__("habitus.runtime.runtime", fromlist=["RuntimeState"]).RuntimeState.READY  # type: ignore[attr-defined]
     runtime.config = SimpleNamespace(foresight=ForesightConfig(enabled=False))  # type: ignore[assignment]
-    runtime.components = SimpleNamespace(foresight=None)  # type: ignore[assignment]
+    runtime.components = SimpleNamespace(outlet=None)  # type: ignore[assignment]
     assert asyncio.run(runtime.claim_reminders(host="codex", session="s", at=AT, limit=3)) == ()
     for bad in (0, -1):
         with pytest.raises(ValueError, match="limit"):
@@ -142,7 +138,7 @@ def test_a_limit_above_the_configured_cap_is_claimed_up_to_the_cap() -> None:
     runtime = object.__new__(Runtime)
     runtime._state = __import__("habitus.runtime.runtime", fromlist=["RuntimeState"]).RuntimeState.READY  # type: ignore[attr-defined]
     runtime.config = SimpleNamespace(foresight=ForesightConfig())  # type: ignore[assignment]
-    runtime.components = SimpleNamespace(foresight=SimpleNamespace(outlet=Outlet()))  # type: ignore[assignment]
+    runtime.components = SimpleNamespace(outlet=Outlet())  # type: ignore[assignment]
     runtime.conversation_protocols = lambda: ("codex_rollout",)  # type: ignore[method-assign]
     runtime.start = AsyncMock()  # type: ignore[method-assign]
     runtime.close = AsyncMock()  # type: ignore[method-assign]
@@ -165,10 +161,10 @@ def test_the_report_route_lists_each_reminder_stage_and_the_counts() -> None:
         AT.date(),
         (
             ReminderProgress("e1", "写周报", "周报还没写。", deadline, "说了", AT, AT + timedelta(minutes=2), "codex", "正",
-                             AT + timedelta(minutes=3), None, 0, (Handoff("codex", "codex-thread-1", AT, "spoken"),)),
-            ReminderProgress("e2", "跑备份", "备份还没跑。", deadline, "宿主没取", AT, None, None, None, None, None, None, ()),
+                             AT + timedelta(minutes=3), None, 0, (Handoff("codex", "codex-thread-1", AT, "spoken"),), "session"),
+            ReminderProgress("e2", "跑备份", "备份还没跑。", deadline, "宿主没取", AT, None, None, None, None, None, None, (), "session"),
             # 段 6 Q15：等取的时候他先做了——「已发生」照样能报出来
-            ReminderProgress("e3", "交报销", "报销还没交。", deadline, "已发生", AT, None, None, None, None, "准时", 0, ()),
+            ReminderProgress("e3", "交报销", "报销还没交。", deadline, "已发生", AT, None, None, None, None, "准时", 0, (), "session"),
         ),
     )
     runtime = _runtime(())

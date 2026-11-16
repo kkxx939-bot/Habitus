@@ -351,10 +351,9 @@ class Runtime:
         )
 
     def reminders_enabled(self) -> bool:
-        """提醒出口开着没有：预测层装上了、带着出口。没开时取口恒为空，服务不公布 ``reminders_v1``。"""
+        """提醒出口开着没有：预测层装上了、带着出口（两支共用一个）。没开时取口恒为空，服务不公布 ``reminders_v1``。"""
 
-        foresight = self.components.foresight
-        return foresight is not None and foresight.outlet is not None
+        return self.components.outlet is not None
 
     async def claim_reminders(
         self, *, host: str, session: str, at: datetime, limit: int
@@ -368,24 +367,25 @@ class Runtime:
             raise ValueError("at must be a timezone-aware datetime")
         if limit < 1:
             raise ValueError("limit must be a positive integer")
-        foresight = self.components.foresight
-        if foresight is None or foresight.outlet is None:
+        outlet = self.components.outlet
+        if outlet is None:
             return ()
         return await asyncio.to_thread(
-            foresight.outlet.claim, host, session, at, min(limit, self.config.foresight.outlet_claim_limit)
+            outlet.claim, host, session, at, min(limit, self.config.foresight.outlet_claim_limit)
         )
 
     async def reminders(self, day: date | None = None) -> ReminderDay:
-        """``day``（省略是本地今天）进了提醒出口的每条提醒走到了哪一步（方案 36 第 2 步）。预测层没开就是空。只读。"""
+        """``day``（省略是本地今天）进了提醒出口的每条提醒（两支的都在）走到了哪一步（方案 36 第 2 步）。没开预测层是空。只读。"""
 
         self._require_initialized("reminder report")
         resolved = day if day is not None else datetime.now(self.config.locale.zone()).date()
         if isinstance(resolved, datetime):
             raise ValueError("day must be a date")
-        foresight = self.components.foresight
-        if foresight is None:
+        foresights = self.components.foresights
+        if not foresights:
             return ReminderDay(resolved, ())
-        return await asyncio.to_thread(reminder_day, foresight.ledger, foresight.outlet, resolved)
+        ledgers = {item.lane: item.ledger for item in foresights}
+        return await asyncio.to_thread(reminder_day, ledgers, self.components.outlet, resolved)
 
     def _require_behavior(self) -> BehaviorBranches:
         behavior = self.components.behavior

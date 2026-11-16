@@ -12,7 +12,7 @@
 - **保证**：一条预期最多一条「说了」（写前查账本已有的 spoken，重放、换会话再问都挡住）；提问出现在最晚时限之后的不算；
   租约过期只让别的会话能取（不算放回：问可能早就问了、转写只是还没回来）；历任持有者都认得出自己那次提问。
 
-传输状态（可取清单、取走记录、问过的提问、宿主活性）在 ``runtime/foresight_outlet_store.py``，不进账本。
+传输状态（可取清单、取走记录、问过的提问、宿主活性）在 ``runtime/foresight_outlet_store.py``，不进账本。两支共用这一个出口、账按支记（丙二 D4；``runtime/foresight_outlet_ledgers.py``），两支之间不仲裁。
 宿主 → 提问工具 / 题目字段 / 作答怎么回来 由各会话协议的适配器声明（``ConversationAdapterRegistry.question_tools``），组合根传进来。
 
 TODO(裁定 64 第 8 条)：自由作答现在走会话 lane 的模型判正 / 中 / 负 / 已做（``runtime/foresight_responses.py`` 那座桥）；推式宿主（第六节
@@ -40,6 +40,7 @@ from habitus.foundation.observability import (
 )
 from habitus.pre.conversation import ConversationAdapterRegistry, QuestionTool, parse_question_replies
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
+from habitus.runtime.foresight_outlet_ledgers import OutletLedgers, OutletStores
 from habitus.runtime.foresight_outlet_store import OutletStore
 
 #: 四个固定选项（产品定措辞，所有宿主一样；第三个不叫"稍后再说"——不再问第二次，裁定 64 第 8 条；第四个"已经做过了"记「已做」：
@@ -63,9 +64,11 @@ class OpenRequest:
     formed_at: datetime
     level: int
     day: date
+    #: 这条请求是哪一支的（「说了」与回话写回那一支的账本）。
+    lane: str
 
     def __post_init__(self) -> None:
-        for label in ("request_id", "kind_token", "text"):
+        for label in ("request_id", "kind_token", "text", "lane"):
             if not getattr(self, label):
                 raise ForesightError(f"open request {label} must be non-empty text")
         for label in ("deadline", "formed_at"):
@@ -155,7 +158,7 @@ class ObserveReport:
 
 
 class OutletPort(Protocol):
-    """递送那一拍看到的出口：有没有宿主活着、每拍重写可取清单。"""
+    """递送那一拍看到的出口（一支的视图，``ReminderOutlet.branch``）：有没有宿主活着、每拍重写这一支的可取请求。"""
 
     def alive(self, now: datetime) -> bool: ...
 
@@ -202,8 +205,8 @@ class _Claim:
 class ReminderOutlet:
     def __init__(
         self,
-        store: OutletStore,
-        ledger: ForesightLedgerStore,
+        stores: Mapping[str, OutletStore],
+        ledgers: Mapping[str, ForesightLedgerStore],
         *,
         liveness: timedelta,
         lease: timedelta,
@@ -211,7 +214,7 @@ class ReminderOutlet:
         claim_limit: int,
         similarity: float,
         tools: Sequence[QuestionTool] | None = None,
-        kind_label: Callable[[str], str | None] | None = None,
+        kind_labels: Mapping[str, Callable[[str], str | None]] | None = None,
         observer: Observer | None = None,
     ) -> None:
         for label, value in (("liveness", liveness), ("lease", lease)):
@@ -222,8 +225,12 @@ class ReminderOutlet:
                 raise ValueError(f"{label} must be a positive integer")
         if not 0.0 < similarity <= 1.0:
             raise ValueError("similarity must lie in (0, 1]")
-        self.store = store
-        self.ledger = ledger
+        if set(stores) != set(ledgers):
+            raise ValueError("the reminder outlet keeps transport state and a ledger for the same branches")
+        #: 各支的传输状态（``<foresight_root>/<lane>/outlet``），合成一份读、按支写。
+        self.store = OutletStores(stores)
+        #: 各支的账本（「说了」与回话按请求所属的支写回）。
+        self.ledgers = OutletLedgers(ledgers)
         self.liveness = liveness
         self.lease = lease
         self.max_attempts = max_attempts
@@ -231,7 +238,7 @@ class ReminderOutlet:
         self.similarity = float(similarity)
         # 不给就是内置协议适配器声明的那些（组合根按实际注册的协议传）
         self.tools = tuple(tools) if tools is not None else ConversationAdapterRegistry.with_builtins().question_tools()
-        self.kind_label = kind_label
+        self.kind_labels = dict(kind_labels or {})
         self.observer: Observer = observer if observer is not None else NullObserver()
         #: 取（HTTP 线程）、认（消费者线程）、每拍重写清单（worker）三方都读-改-写同一批小文件：进程内一把锁串起来
         #: （单进程服务够用；与 ``ForesightLedgerStore._lock`` 同一做法）。
@@ -245,14 +252,17 @@ class ReminderOutlet:
         since = now - self.liveness
         return any(seen >= since for seen in self.store.hosts().values())
 
-    def publish(self, rows: Sequence[OpenRequest], *, now: datetime) -> int:
-        """递送那一拍每拍重写可取清单（按最晚时限升序），顺手清掉过了时限的取走记录与问过的提问、放掉过期的租约。"""
+    def publish(self, lane: str, rows: Sequence[OpenRequest], *, now: datetime) -> int:
+        """一支的递送那一拍每拍重写这一支的可取请求（按最晚时限升序；另一支的不碰），顺手清掉过了时限的取走记录与问过的提问、
+        放掉过期的租约。"""
 
+        if any(row.lane != lane for row in rows):
+            raise ForesightError(f"the {lane} branch publishes only its own requests")
         with self._lock:
             ordered = sorted(rows, key=lambda row: (row.deadline, row.request_id))
-            self.store.write_open([_encode_request(row) for row in ordered])
+            self.store.of(lane).write_open([_encode_request(row) for row in ordered])
             self.sweep(now)
-            return len(ordered)
+            return len(rows)
 
     def sweep(self, now: datetime) -> int:
         """租约过期的放给别的会话（不算放回）；过了最晚时限的取走记录与问过的提问删掉（那时账上已记「宿主没取」）。
@@ -315,7 +325,7 @@ class ReminderOutlet:
             for request in rows:
                 if request.deadline <= at or len(given) >= limit:
                     continue
-                claim = claims.get(request.request_id) or _Claim(request, self._label(request.kind_token))
+                claim = claims.get(request.request_id) or _Claim(request, self._label(request.lane, request.kind_token))
                 if claim.spoken:
                     continue
                 holder = claim.holder
@@ -376,16 +386,17 @@ class ReminderOutlet:
                 )
             return found
 
-    def kind_name(self, kind_token: str) -> str:
-        """类编号 → 给人看的类名（词表里没有就是编号）。"""
+    def kind_name(self, lane: str, kind_token: str) -> str:
+        """那一支的类编号 → 给人看的类名（词表里没有就是编号）。"""
 
-        return self._label(kind_token)
+        return self._label(lane, kind_token)
 
-    def _label(self, kind_token: str) -> str:
-        if self.kind_label is None:
+    def _label(self, lane: str, kind_token: str) -> str:
+        kind_label = self.kind_labels.get(lane)
+        if kind_label is None:
             return kind_token
         try:
-            label = self.kind_label(kind_token)
+            label = kind_label(kind_token)
         except Exception:  # noqa: BLE001 - 类名只是配对的辅助，词表读不出来不拦取
             return kind_token
         return label if isinstance(label, str) and label.strip() else kind_token
@@ -500,14 +511,14 @@ class ReminderOutlet:
                 "already_spoken" if claim.spoken else "released"
             )  # 时限后才问的不算「说了」：那时账上已记「宿主没取」
         via = host or tool.host
-        if not claim.spoken and self._ledger_latest_reason(claim) == "已发生":
+        if not claim.spoken and self.ledgers.latest_reason(*_where(claim)) == "已发生":
             # 他在被问之前已经做了（取走到提问之间几分钟，行为识别又有滞后）：这次提问不算「说了」，账上不记、取走记录删掉——
             # 否则结算把"做了"记成提醒的功劳（裁定 65）
             self.store.remove_claim(claim.request.request_id)
             self._drop_open(claim.request.request_id)
             return "already_done"
         if claim.spoken or not self._record_spoken(claim, call, question.title, via):
-            if not claim.spoken and self._ledger_has_spoken(claim):
+            if not claim.spoken and self.ledgers.has_spoken(*_where(claim)):
                 self._mark_spoken(claim)
             return "already_spoken"
         self._mark_spoken(claim)
@@ -539,27 +550,6 @@ class ReminderOutlet:
             claim.holder = None
         self.store.write_claim(claim.request.request_id, _encode_claim(claim))
 
-    def _ledger_latest_reason(self, claim: _Claim) -> str | None:
-        """这条预期账上最晚一条递送的原因（按决定时刻）；读不到当没有。"""
-
-        try:
-            mine = [
-                d for d in self.ledger.deliveries_on(claim.request.day) if d.expectation_id == claim.request.request_id
-            ]
-        except (ForesightError, OSError):
-            return None
-        return max(mine, key=lambda d: d.decided_at).reason if mine else None
-
-    def _ledger_has_spoken(self, claim: _Claim) -> bool:
-        try:
-            return any(
-                d.spoken
-                for d in self.ledger.deliveries_on(claim.request.day)
-                if d.expectation_id == claim.request.request_id
-            )
-        except (ForesightError, OSError):
-            return False
-
     def _observe_replies(self, session: str, messages: Sequence[HostMessage]) -> int:
         """Codex Desktop 的作答是一条用户消息：按 (call_id, 题序) 找到问过的那一题（本份转写里刚问的也算），固定选项直接写回话。"""
 
@@ -580,12 +570,13 @@ class ReminderOutlet:
                 if polarity is None:
                     continue  # 自己填的话：交给会话 lane 的模型判
                 try:
+                    lane = str(raw["lane"])
                     day = date.fromisoformat(str(raw["day"]))
                     response = Response(str(raw["request_id"]), item.occurred_at, polarity, reply.call_id)
                 except (KeyError, ValueError):  # 问过的记录读不懂：这条作答写不回去（记录已删），留观测信号
                     self._observe(ObservationStatus.FAILURE, "reply", {"session": session, "error": "asked_unreadable"})
                     continue
-                written += int(self._write_response(day, response))
+                written += int(self._write_response(lane, day, response))
         return written
 
     def _record_spoken(self, claim: _Claim, call: HostMessage, title: str, via: str) -> bool:
@@ -593,7 +584,7 @@ class ReminderOutlet:
 
         day = claim.request.day
         try:
-            if any(d.spoken for d in self.ledger.deliveries_on(day) if d.expectation_id == claim.request.request_id):
+            if any(d.spoken for d in self.ledgers.deliveries(*_where(claim))):
                 return False
             delivery = Delivery(
                 claim.request.request_id,
@@ -606,7 +597,7 @@ class ReminderOutlet:
                 via=via,
                 turn=call.tool_call_id or None,
             )
-            self.ledger.record_delivery(day, delivery)
+            self.ledgers.of(claim.request.lane).record_delivery(day, delivery)
         except (ForesightError, OSError) as exc:
             self._observe(ObservationStatus.FAILURE, "spoken", {"error": type(exc).__name__})
             return False
@@ -614,12 +605,12 @@ class ReminderOutlet:
 
     def _record_response(self, claim: _Claim, at: datetime, polarity: str, turn: str) -> bool:
         return self._write_response(
-            claim.request.day, Response(claim.request.request_id, at, polarity, turn or "unknown")
+            claim.request.lane, claim.request.day, Response(claim.request.request_id, at, polarity, turn or "unknown")
         )
 
-    def _write_response(self, day: date, response: Response) -> bool:
+    def _write_response(self, lane: str, day: date, response: Response) -> bool:
         try:
-            self.ledger.record_response(day, response)
+            self.ledgers.of(lane).record_response(day, response)
         except (ForesightError, OSError) as exc:
             self._observe(ObservationStatus.FAILURE, "response", {"error": type(exc).__name__})
             return False
@@ -644,8 +635,7 @@ class ReminderOutlet:
         return released
 
     def _drop_open(self, request_id: str) -> None:
-        rows = [row for row in self.store.read_open() if row.get("request_id") != request_id]
-        self.store.write_open(rows)
+        self.store.drop_open(request_id)
 
     def _observe(self, status: ObservationStatus, operation: str, attributes: Mapping[str, Any]) -> None:
         record_observation(
@@ -776,6 +766,7 @@ def _encode_request(row: OpenRequest) -> dict[str, Any]:
         "formed_at": row.formed_at.isoformat(),
         "level": row.level,
         "day": row.day.isoformat(),
+        "lane": row.lane,
     }
 
 
@@ -789,6 +780,7 @@ def _decode_request(raw: Mapping[str, Any]) -> OpenRequest:
             datetime.fromisoformat(str(raw["formed_at"])),
             int(raw["level"]),
             date.fromisoformat(str(raw["day"])),
+            str(raw["lane"]),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ForesightError(f"open request row is malformed: {exc}") from exc
@@ -849,6 +841,7 @@ def _encode_asked(claim: _Claim, question: _Question, *, host: str, session: str
     return {
         "record": "asked",
         "request_id": claim.request.request_id,
+        "lane": claim.request.lane,
         "day": claim.request.day.isoformat(),
         "deadline": claim.request.deadline.isoformat(),
         "host": host,
@@ -858,6 +851,12 @@ def _encode_asked(claim: _Claim, question: _Question, *, host: str, session: str
         "title": question.title,
         "asked_at": question.call.occurred_at.isoformat(),
     }
+
+
+def _where(claim: _Claim) -> tuple[str, date, str]:
+    """这条请求在账上哪儿：哪一支、哪一天、哪条预期。"""
+
+    return claim.request.lane, claim.request.day, claim.request.request_id
 
 
 __all__ = [

@@ -4,9 +4,9 @@
 空白（"没读懂"与"未观测"两种都扣；被证伪的"没读懂"已在读序列时作废）；按槽、按比例扣（一个槽被盖住一半，就算半槽在看；
 几段空白重叠时按并集扣）。不按周几分桶。
 
-一整天没记录：会话 lane 算那天没在看（整天覆盖 0，等同上游报了全天「未观测」；裁定 89 第 2 条，规则在
-``series.model.silent_day_unwatched``）——会话 lane 只在有会话时才有记录，没开会话不会报成空白；物理 lane 的上游没在看时自己报
-空白，空着的一天照旧算在看（那天就是没做）。
+一整天没记录（``EventSeries.active_days`` 里没有的日子）：算那天没在看（整天覆盖 0，等同上游报了全天「未观测」；裁定 89
+第 2 条）。两条 lane 同一个规矩（用户 2026-11-16）：会话 lane 那天没开会话，物理 lane 那天上游一点数据都没送来，都是没在看，
+不能猜他做了没做。
 
 这和语义树的"人在场"（当天有记录的日子里，第一条开始到最后一条结束）不是同一个问题，各用各的名字、不并；只在"一整天没会话"
 这一点上两边同口径（那天不在场 / 没在看）。
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from types import MappingProxyType
 
-from habitus.series.model import EventSeries, SeriesGap, silent_day_unwatched
+from habitus.series.model import EventSeries, SeriesGap
 from habitus.temporal.episodes import OccurrenceDay
 from habitus.temporal.slots import slots_per_day
 
@@ -61,19 +61,19 @@ class Coverage:
 
 
 def coverage_of(series: EventSeries, lane: str, *, slot_minutes: int) -> Coverage:
-    """``lane`` 从第一条记录那天到序列最后一个已封口的日子，每天每槽在看的比例（会话 lane 一整天没记录的那天是 0）。"""
+    """``lane`` 从第一条记录那天到序列最后一个已封口的日子，每天每槽在看的比例（一整天没记录的那天是 0）。"""
 
     # 记录按时刻排，偏移不同时时刻最早的那条不一定是日期最早的：起点取日期最早的那一天
     first = min((record.day for record in series.records if record.lane == lane), default=None)
     if first is None or first > series.last_day:
         return Coverage(slot_minutes=slot_minutes, days={})
     by_day = _gaps_by_day(series.gaps)
-    active = series.active_days() if silent_day_unwatched(lane) else None
+    active = series.active_days()
     unwatched = tuple(0.0 for _ in range(slots_per_day(slot_minutes)))
     days = {}
     day = first
     while day <= series.last_day:
-        if active is not None and day not in active:
+        if day not in active:
             days[day] = unwatched
         else:
             days[day] = day_coverage(day, by_day.get(day, ()), slot_minutes=slot_minutes)

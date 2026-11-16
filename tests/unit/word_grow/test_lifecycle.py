@@ -110,7 +110,7 @@ def test_c23_a_grown_node_in_use_not_picked_for_twenty_days_is_deleted_and_its_c
     site.record("conv-x", at(d(4, 14), 9), "再写一份需求书", Named(X))
     site.generate(d(4, 15))
     assert grown(1) in site.in_use()
-    generation = site.runtime.components.generation.generation
+    generation = site.runtime.components.pipelines[0].generation.generation
     site.generate(d(5, 3))
     kept = generation.marks.read(d(5, 3))
     assert kept is not None and X in names(site.probe(d(5, 3)))
@@ -296,7 +296,7 @@ def test_c36_a_node_deleted_while_the_model_answers_sends_the_record_to_its_pare
 
 
 def _hit_files(site: GrowSite, day: date) -> dict[str, bytes]:
-    folder = Path(site.runtime.config.scene_root) / "occurrences" / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}"
+    folder = Path(site.runtime.config.scene_root) / "session" / "occurrences" / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}"
     if not folder.is_dir():
         return {}
     return {path.name: path.read_bytes() for path in sorted(folder.iterdir()) if path.is_file()}

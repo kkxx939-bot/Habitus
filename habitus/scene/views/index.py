@@ -61,7 +61,8 @@ class DayIndex:
         self.day_note = day_note
         self.occurrences: dict[str, BehaviorDocument] = {}
         documents = behavior_tree.read_day(BehaviorKind.OCCURRENCE, day)
-        #: 这一天一条记录都没有（算不算数的都没有）：这棵树那条 lane 那天没来过东西（会话 lane 就是没开会话，裁定 89 第 2 条）。
+        #: 这一天一条记录都没有（算不算数的都没有）：这棵树那条 lane 那天没来过东西（会话 lane 没开会话、物理 lane 上游一点数据都
+        #: 没送来，裁定 89 第 2 条）。
         self.silent = not documents
         for document in documents:
             if not admits(document):
@@ -169,8 +170,8 @@ class DayIndexCache:
         return bool(self.gaps_within(start, end, kinds=kinds))
 
     def silent_within(self, start: datetime, end: datetime) -> bool:
-        """``start`` → ``end`` 这一段碰到的日子里有没有一整天一条记录都没有的（``DayIndex.silent``）。会不会因此算"没在看"
-        是 lane 的口径（``series.model.silent_day_unwatched``），由调用方判。"""
+        """``start`` → ``end`` 这一段碰到的日子里有没有一整天一条记录都没有的（``DayIndex.silent``）：那天算没在看
+        （裁定 89 第 2 条，两条 lane 同一个规矩），由结算判。"""
 
         if end <= start:
             return False

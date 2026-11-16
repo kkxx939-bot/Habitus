@@ -37,7 +37,7 @@ def tracked_files() -> list[PurePosixPath]:
     """版本库里的文件清单。用 git 而不是遍历磁盘，天然排除被 gitignore 的本地数据集与构建产物——
     它们不进 git，CI 上也不存在。按 POSIX 路径处理：git 与 wheel 里的名字都用 "/"，Windows 上 str(Path) 是反斜杠，会全部对不上。"""
     out = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True, text=True
+        ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True, text=True, encoding="utf-8"
     ).stdout
     return [PurePosixPath(name) for name in out.split("\0") if name]
 

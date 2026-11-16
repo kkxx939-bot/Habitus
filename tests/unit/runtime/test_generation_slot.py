@@ -24,7 +24,7 @@ from habitus.model_client import ChatClient
 from habitus.model_client.structured import StructuredChatClient
 from habitus.runtime.foresight import ForesightReadSide
 from habitus.runtime.foresight_tick import LEDGER_BUSY, ForesightTick
-from habitus.runtime.foresight_worker import NO_TICK, ForesightWorker
+from habitus.runtime.foresight_worker import NO_TICK, ForesightWorker, SlotBranch
 from habitus.runtime.generation_lease import Lease
 from habitus.runtime.generation_trace import GENERATION_SPAN, TraceFiles
 from habitus.runtime.generation_watermark import TickTrack, TickWatermark, TickWatermarkStore
@@ -76,16 +76,20 @@ def tick_for(tmp_path, clock: list[datetime], **options):  # type: ignore[no-unt
     return ForesightTick(ledger, opportunities, read_side, NoUnsealed(), **values), ledger  # type: ignore[arg-type]
 
 
-def slot_worker(tick, runner, clock: list[datetime], **options) -> ForesightWorker:  # type: ignore[no-untyped-def]
+def slot_worker(tick, runner, clock: list[datetime], lease=None) -> ForesightWorker:  # type: ignore[no-untyped-def]
     return ForesightWorker(
-        tick,
-        generation=runner,
+        (SlotBranch("session", generation=runner, tick=tick, lease=lease),),
         interval_seconds=900.0,
         shutdown_timeout_seconds=1.0,
         zone=SHANGHAI,
         clock=lambda: clock[0],
-        **options,
     )
+
+
+def one_slot(worker: ForesightWorker, scheduled: datetime | None = None):  # type: ignore[no-untyped-def]
+    """那一支的一槽（只有一支）。"""
+
+    return worker.branch_slot(worker.branches[0], scheduled)
 
 
 def taking(runner, clock: list[datetime], spent: timedelta) -> None:  # type: ignore[no-untyped-def]
@@ -123,7 +127,7 @@ def test_a2_4_the_generations_slot_ticks_after_it_from_midnight_and_is_late_by_t
 
     tick._run = ticked  # type: ignore[method-assign]
     taking(runner, clock, timedelta(minutes=5))
-    report = asyncio.run(slot_worker(tick, runner, clock).slot(at(TICK_DAY, 10, 10)))
+    report = asyncio.run(one_slot(slot_worker(tick, runner, clock), at(TICK_DAY, 10, 10)))
 
     assert runner.last_result is not None and runner.last_result.complete
     assert order[-2:] == ["日子", "预测拍"]  # 换代的最后一步之后才是这一拍
@@ -150,7 +154,7 @@ def test_the_time_a_generation_takes_is_not_written_as_unwatched(tmp_path) -> No
         tick.track.unwatched = lambda start, end, _written=written: _written.append((start, end))
         tick.track.store.write(TickWatermark(ticked_at=previous))
         taking(runner, clock, timedelta(minutes=40))
-        report = asyncio.run(slot_worker(tick, runner, clock).slot(at(TICK_DAY, 10, 10)))
+        report = asyncio.run(one_slot(slot_worker(tick, runner, clock), at(TICK_DAY, 10, 10)))
 
         assert runner.last_result is not None and runner.last_result.complete
         mark = TickWatermarkStore(ledger.root).read()
@@ -187,17 +191,17 @@ def test_a2_9_a_failed_must_step_does_not_stop_the_tick_and_is_retried_in_a_late
     tick, _ledger = tick_for(tmp_path, clock, finished=lambda _day: run.marks.finished(run.today()))
     worker = slot_worker(tick, runner, clock)
 
-    first = asyncio.run(worker.slot())
+    first = asyncio.run(one_slot(worker))
     assert runner.last_result is not None and runner.last_result.failed == "opportunities"
     assert first.skipped is not None and first.recorded == 0 and first.unwatched is None  # 这一拍做了，只是不建
     checks = {item.name: item for item in _generation_state_checks(runner)}
     assert checks["generation"].status.value == "degraded" and "next retry at" in checks["generation"].detail
 
     broken[0] = False
-    asyncio.run(worker.slot())  # 还在退避里：不重做
+    asyncio.run(one_slot(worker))  # 还在退避里：不重做
     assert order.count("语义树") == 1 and run.marks.finished(run.today()) is not True
     wall[0] = NOW + timedelta(hours=2)
-    again = asyncio.run(worker.slot())  # 退避到点的那一槽
+    again = asyncio.run(one_slot(worker))  # 退避到点的那一槽
     assert order.count("语义树") == 2 and run.marks.finished(run.today()) is True
     assert again.skipped is None and again.recorded == 1
     assert "generation" not in {item.name for item in _generation_state_checks(runner)}
@@ -221,14 +225,14 @@ def test_a_look_that_raises_does_not_stop_the_tick_and_is_reported_until_a_look_
     tick, _ledger = tick_for(tmp_path, clock)
     worker = slot_worker(tick, runner, clock)
 
-    report = asyncio.run(worker.slot())
+    report = asyncio.run(one_slot(worker))
     assert report.skipped is None and report.recorded == 1
     assert isinstance(runner.look_error, OSError)
     checks = {item.name: item for item in _generation_state_checks(runner)}
     assert checks["generation_look"].detail == "last_error:OSError" and not checks["generation_look"].critical
 
     broken[0] = False
-    asyncio.run(worker.slot())
+    asyncio.run(one_slot(worker))
     assert runner.look_error is None and runner.last_error is None
     assert runner.last_result is not None and runner.last_result.complete
     assert "generation_look" not in {item.name for item in _generation_state_checks(runner)}
@@ -440,10 +444,10 @@ def test_without_the_foresight_layer_the_same_worker_only_looks_at_the_generatio
 
     async def while_another_process_holds_it():  # type: ignore[no-untyped-def]
         async with lease(store).held():
-            return await worker.slot()
+            return await one_slot(worker)
 
     busy = asyncio.run(while_another_process_holds_it())
     assert busy.skipped == LEDGER_BUSY and order == []  # 拿不到预测根租约：这一槽不换代
-    report = asyncio.run(worker.slot())
+    report = asyncio.run(one_slot(worker))
     assert report.skipped == NO_TICK and runner.last_result is not None and runner.last_result.complete
     assert held == [True]  # 整代在预测根租约之内

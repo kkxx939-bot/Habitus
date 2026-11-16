@@ -61,20 +61,6 @@ def standing_parts(gap: SeriesGap, starts_on: Callable[[date], Sequence[datetime
     )
 
 
-#: 哪几条 lane 一整天一条记录都没有，那天就算没在看（裁定 89 第 2 条）。会话 lane 只在有会话时才有东西进来，"那天没开会话"
-#: 不会被上游报成空白：一整天一条都没有（连「非事件」、撞车重复都没有），对预测账就等同于上游报了全天「未观测」——中性、
-#: 不算机会，跨这天的间隔按漏看算；与语义树"人不在场"（``scene.relations.timeline``：那天没有记录就不在场）同口径。
-#: 物理 lane 不在里面：它的上游没在看时自己报「未观测」，空着的一天照旧算在看（那天就是没做）。
-#: 取值是 ``behavior.kinds.Lane`` 的 value（本模块零依赖、不 import 它；架构测试钉住两边一致）。
-SILENT_DAY_UNWATCHED_LANES = frozenset({"session"})
-
-
-def silent_day_unwatched(lane: str) -> bool:
-    """这条 lane 一整天没有记录是不是就算那天没在看（``SILENT_DAY_UNWATCHED_LANES``）。"""
-
-    return lane in SILENT_DAY_UNWATCHED_LANES
-
-
 class SkipReason(str, Enum):
     """行为树上有、却不进序列的记录为什么不进。"""
 
@@ -220,7 +206,8 @@ class EventSeries:
         return tuple(record for record in self.records if record.day == day)
 
     def active_days(self) -> frozenset[date]:
-        """有记录的日子：进了序列的、没进的（「非事件」、撞车重复）都算——那天有过会话（``silent_day_unwatched``）。"""
+        """有记录的日子：进了序列的、没进的（「非事件」、撞车重复）都算。不在里面的日子一整天一条记录都没有，算那天没在看
+        （裁定 89 第 2 条；两条 lane 同一个规矩，用户 2026-11-16：上游一点数据都没送来，就是上游没在看，不能猜他做了没做）。"""
 
         return frozenset(record.day for record in self.records) | frozenset(item.day for item in self.skipped)
 
@@ -267,8 +254,6 @@ __all__ = [
     "SeriesGap",
     "SeriesRecord",
     "SkipReason",
-    "SILENT_DAY_UNWATCHED_LANES",
     "SkippedRecord",
-    "silent_day_unwatched",
     "standing_parts",
 ]
