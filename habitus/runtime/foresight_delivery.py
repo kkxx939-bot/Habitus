@@ -126,7 +126,7 @@ class JudgeMaterials:
     #: （与结算同一个找法，``ledger.settle.event_antecedent_holds``）。
     seen: Sequence[Seen] = ()
     since: datetime | None = None  # 区间起点（``foresight_tick.delivery_since``）；None 是此刻 − 1 拍
-    #: 这一拍开头取的上下级（丙一 2026-11-15）：节点在不在用、"上下级已说"、同一拍里细的先处理都按它。
+    #: 这一拍开头取的上下级（裁定 101 第 8 条）：节点在不在用、"上下级已说"、同一拍里细的先处理都按它。
     kinds: KindHierarchy = FLAT
 
 

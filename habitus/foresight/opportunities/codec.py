@@ -135,7 +135,7 @@ def _relation(item: RelationOpportunities) -> dict[str, Any]:
 
 
 def _relation_from(raw: Mapping[str, Any]) -> RelationOpportunities:
-    # 管的编号第一个是那一头的节点自己，其余是它的下级（丙一 2026-11-15）：预期与触发记第一个，盘上读回来时核一遍
+    # 管的编号第一个是那一头的节点自己，其余是它的下级（裁定 101 第 8 条）：预期与触发记第一个，盘上读回来时核一遍
     for side in ("antecedent", "consequent"):
         classes = raw[f"{side}_classes"]
         if not isinstance(classes, list) or not classes or classes[0] != raw[side]:

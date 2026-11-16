@@ -253,7 +253,8 @@ def test_yesterdays_miss_does_not_take_todays_ordinary_time_as_a_catch_up(tmp_pa
     w = run(tmp_path, "吃维生素", done, (missed, today), start=start)
     (yesterday,) = interval_items(w, missed)
     (item,) = interval_items(w, today)
-    assert item.formed_at > yesterday.deadline  # 形成晚于前一条的最晚时限：只有一个来源
+    # 今天零点那一拍就用昨天那一代的表建上（10-13 起这件事没再出现过，旧表与今天的表算出同一个身份，用户 2026-11-16）
+    assert item.formed_at >= yesterday.deadline and item.night == missed
     assert item.observed_from == yesterday.deadline
     assert outcome_of(w, yesterday) == "过期待决" and rulings_of(w, yesterday) == []
     assert outcome_of(w, item) == "准时"
@@ -268,7 +269,10 @@ def test_a_day_whose_line_stopped_is_unseen_and_does_not_feed_a_catch_up(tmp_pat
     done[missed] = []
     w = run(tmp_path, "吃维生素", done, (missed, dark, after), start=start, stopped=(dark,))
     (yesterday,) = interval_items(w, missed)
-    assert interval_items(w, dark) == [] and dark not in w.opportunities.nights("session")
+    assert dark not in w.opportunities.nights("session")
+    # 停掉那天预测拍不等换代：用上一张做完了的表（10-12 那一代）把它建上（10-12 起没再做过，与今天的表算出同一个身份）
+    (stopped_day,) = interval_items(w, dark)
+    assert stopped_day.night == missed and outcome_of(w, stopped_day) == "准时"
     assert outcome_of(w, yesterday) == "过期待决" and rulings_of(w, yesterday) == []
     (item,) = interval_items(w, after)
     assert outcome_of(w, item) == "准时"
@@ -284,7 +288,10 @@ def test_a_day_whose_line_stopped_after_writing_the_table_is_unseen_too(tmp_path
     done[missed] = []
     w = run(tmp_path, "吃维生素", done, (missed, dark, after), start=start, stopped_after_table=(dark,))
     (yesterday,) = interval_items(w, missed)
-    assert interval_items(w, dark) == [] and dark in w.opportunities.nights("session")
+    assert dark in w.opportunities.nights("session")
+    # 那天的表写出了、没有完成标记：不用它，用上一张做完了的（10-12 那一代）
+    (stopped_day,) = interval_items(w, dark)
+    assert stopped_day.night == missed and outcome_of(w, stopped_day) == "准时"
     assert outcome_of(w, yesterday) == "过期待决" and rulings_of(w, yesterday) == []
 
 

@@ -306,8 +306,8 @@ def is_ascii_digits(value: object) -> bool:
 #   started_at 的本地日；canonicalize 折 UTC 的旧坑由"序列化一律保留偏移的字符串"挡住）。
 # - 数字面（经 ``series`` 读成每晚的事件序列，``temporal`` 与语义树用；机器类型白名单、全部必填）：
 #     kind_token         词编号（s-k0007 / p-k0003）或占位标记（s-非事件 / s-续话 / s-表外 / s-待定）；schema 只收
-#                        这两种形状（裁定 19）。归约发布时由选词结果给出，落树之后不改（词表没有迁移，词表方案
-#                        2026-11-14）；不渲染进正文——它是统计用的机器字段
+#                        这两种形状（裁定 19）。归约发布时由选词结果给出，落树之后不改（词表没有迁移，裁定
+#                        101）；不渲染进正文——它是统计用的机器字段
 #     status             ongoing|completed|interrupted|abandoned  ← 判断逐字，零发明
 #     status_basis       observed|inferred|observation_lost       ← 同上；interrupted 与
 #                        observation_lost 之分是删失纪律的根
@@ -353,7 +353,7 @@ def is_ascii_digits(value: object) -> bool:
 #     的输入全部发生在 stage 之前；stage 之后只有确定性落盘——否则崩溃重试间词表/账本已变，
 #     同地址不同字节，add-only 撞车卡死串行队列。
 # - 其余规则：summary/basis/goal 逐字取判断、不再调模型（原封不动保留，语义关联层要用，不许置空丢失）；
-#   选词是写入层唯一的 LLM 触点（只给判断上没带选词结果的，即物理 lane；词表方案 2026-11-14）；
+#   选词是写入层唯一的 LLM 触点（只给判断上没带选词结果的，即物理 lane；裁定 101）；
 #   behavior=空的判断不进树，但在释放前转成
 #   带起止的"没读懂"gap 节点（语义关联要用：「没发生」与「发生了但没读懂」是两种空白）。
 #

@@ -23,7 +23,7 @@ _SINGLE_BRANCH_SCENE = ("concepts", "occurrences", "relations", "advice", "gener
 
 
 class SingleBranchLayoutError(RuntimeError):
-    """盘上还有两支分根之前的语义树目录（不迁移，丙二 2026-11-16）。"""
+    """盘上还有两支分根之前的语义树目录（不迁移，裁定 102 第 8 条）。"""
 
 
 def refuse_single_branch_layout(config: HabitusConfig) -> None:
@@ -61,7 +61,7 @@ class RuntimeLifecycle:
             # 静默跳过反而会让 RUNNING 状态掩盖一个坏掉的存储根。
             for branch in self.components.behavior:
                 branch.tree.initialize()
-                # 旧词表（变更日志、待定池、迁移计划……）不迁移、不兼容：盘上还有就在启动时报错、点出文件（词表方案 2026-11-14）
+                # 旧词表（变更日志、待定池、迁移计划……）不迁移、不兼容：盘上还有就在启动时报错、点出文件（裁定 101）
                 branch.kind_store.check()
         if self.components.pipelines:
             # 语义树按支分根（裁定 42：``scene/<lane>/``）之前的旧布局不迁移：盘上还有就在启动时报错、点出目录

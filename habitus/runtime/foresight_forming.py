@@ -6,20 +6,22 @@
 同一个身份已经在账上的不再写（身份不含槽号、时刻与日子，账本按身份索引，跨天重算得到同一条）；人说过「以后别提了」的行为不再建
 （裁定 50、61）。进程不留内存状态：重启后重扫得到的都是已有的身份。
 
-两处共用的闸也在这里一份：表是不是今天这一代的（``tonight_table``，实时化方案
-第 3 节"白天那道闸"），以及观测怎么记（``observe_foresight``）。
+预测拍用哪张表也在这里（``usable_tables``，用户 2026-11-16「预测不要被换代卡住」）：建预期用盘上最晚一张那一代做完了的表，
+多旧都用；递送照用盘上最晚那张。旧表下的日子预期只建表那一晚之后一次都没再出现过的类（``days_unchanged``）。观测怎么记
+（``observe_foresight``）两处共用。
 """
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from datetime import time as clock_time
 from typing import Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
+from habitus.behavior.kinds.ids import Lane, pending_token
 from habitus.foresight import Batch, Moment, Seen, UnsealedReader, UnsealedRow, form_expectations
 from habitus.foresight.hierarchy import FLAT, KindHierarchy
 from habitus.foresight.ladder import Tolerance, silenced
@@ -47,7 +49,7 @@ class FormingReadSide(BehaviorReadSide, Protocol):
 @dataclass(frozen=True)
 class Recent:
     """这一刻读到的最近几天：此刻、行为树的按天索引、还没封口的判断、两者合起来按开始时刻排好的行，以及此刻的上下级（读的时候
-    取一份，这一拍建预期与递送都用这一份，丙一 2026-11-15）。"""
+    取一份，这一拍建预期与递送都用这一份，裁定 101 第 8 条）。"""
 
     now: datetime
     cache: DayIndexCache
@@ -147,37 +149,109 @@ class ExpectationForming:
                 recorded_by_source[item.source] = recorded_by_source.get(item.source, 0) + 1
         return Formed(len(expectations), recorded, by_source, recorded_by_source)
 
+    def days_unchanged(self, recent: Recent, table: OpportunityTable) -> OpportunityTable | None:
+        """旧表下能建日子预期的那几类（用户 2026-11-16）：日子预期的身份与时窗全从表里"上次是哪天、哪条"算，旧表与今天的表
+        对这一类读到的历史不同，就会算出不同的身份、把做过的当成久没做（说错）。所以只留历史没变的类：
+
+        - 表那一晚到昨天，行为树与还没封口的判断里一次都没出现过（连上级一起算）；
+        - 表那一晚之前的 ``LOOKBACK_DAYS`` 天里，此刻树上出现的日子与表里记的相同——表写成之后才落进这几天的记录（就近重试写回、
+          物理一支的映射）会让它对不上（阶段 C 问题 1）。
+
+        这几天里有还没定下是哪一类的（「待定」、还没选上词）就认不出，返回 None、这一拍不建日子预期。词表换算口变了（删词后旧记录
+        改读成上级）由调用方比词表版本挡（``ForesightTick``）。"""
+
+        now = recent.now
+        today = now.date()
+        since = table.night - timedelta(days=LOOKBACK_DAYS)
+        after: list[str] = []
+        before: dict[str, set[date]] = {}
+        pending = {pending_token(lane) for lane in Lane}
+        undecided = False
+
+        def saw(day: date, tokens: list[str]) -> None:
+            nonlocal undecided
+            undecided = undecided or not pending.isdisjoint(tokens)
+            if day >= table.night:
+                after.extend(tokens)
+            else:
+                for kind in recent.kinds.done(tokens):
+                    before.setdefault(kind, set()).add(day)
+
+        day = since
+        while day < today:
+            saw(day, [row.kind_token for row in recent.cache.day(day).rows])
+            day += timedelta(days=1)
+        for row in self.unsealed.rows(
+            since=datetime.combine(since, clock_time(0), tzinfo=now.tzinfo),
+            until=datetime.combine(today, clock_time(0), tzinfo=now.tzinfo),
+        ):
+            if row.name is not None and row.kind_token is None:
+                return None
+            if row.kind_token is not None:
+                saw(row.started_at.astimezone(now.tzinfo).date(), [row.kind_token])
+        if undecided:
+            return None
+        seen = recent.kinds.done(after)
+        return replace(
+            table,
+            kinds=tuple(
+                kind
+                for kind in table.kinds
+                if kind.kind_token not in seen
+                and {item.day for item in kind.days if item.day >= since} == before.get(kind.kind_token, set())
+            ),
+        )
+
 
 NO_TABLE = "还没有机会表"
-STALE_TABLE = "今天这一代的机会表还没有"
-UNFINISHED = "今天这一代还没完成"
-MARK_UNREADABLE = "今天的完成标记读不了"
+NO_FINISHED_TABLE = "还没有做完的那一代的机会表"
+MARK_UNREADABLE = "完成标记读不了"
+AHEAD_TABLE = "最晚那张机会表在今天之后"
 
 
-def tonight_table(
+@dataclass(frozen=True)
+class Tables:
+    """这一拍用的表（用户 2026-11-16「预测不要被换代卡住」）：``latest`` 是盘上最晚那张，递送照用它；``forming`` 是建预期用的
+    那张——盘上最晚一张读得出来、那一代做完了（有完成标记）的，多旧都用；没有时是 None，``skipped`` 说为什么。"""
+
+    latest: OpportunityTable | None
+    forming: OpportunityTable | None
+    skipped: str | None = None
+
+
+def usable_tables(
     store: OpportunityStore,
     lane: str,
     today: date,
     *,
     finished: Callable[[date], bool | None] | None = None,
-) -> tuple[OpportunityTable | None, str | None]:
-    """盘上最晚那张表与"能不能用它建预期"（白天那道闸，实时化方案第 3 节）：没有表 → (None, 原因)；表不是今天这一代的，或给了
-    ``finished``（预测拍）而今天这一代还没完成（机会表写出了、日子预期或完成标记没成——下一眼重做整代会重写这张表，已建的预期
-    可能对不上新表）、完成标记读不了 → (那张表, 原因)——递送照用它，建预期等今天这一代完成；否则 → (表, None)。换代里的日子
-    预期那一步在写完成标记之前直接用这张表，不给 ``finished``。"""
+) -> Tables:
+    """递送用的表与建预期用的表（``Tables``）。建预期只认那一代做完了的：今天的表写出了、日子预期或完成标记没成（下一眼重做
+    整代会重写它）不用，往前找上一张；某一晚的完成标记坏了也不用那一张、往前找（坏标记健康面另报）。最晚那张在今天之后（往西
+    改了时区，裁定 96 第 11 条）不建。没给 ``finished``（没接换代）就用最晚那张。"""
 
-    table = store.latest(lane)
-    if table is None:
-        return None, NO_TABLE
-    if table.night != today:
-        return table, STALE_TABLE
+    latest = store.latest(lane)
+    if latest is None:
+        return Tables(None, None, NO_TABLE)
+    if latest.night > today:
+        return Tables(latest, None, AHEAD_TABLE)
     if finished is None:
-        return table, None
-    try:
-        done = finished(today)
-    except GenerationMarkError:
-        return table, MARK_UNREADABLE  # 标记坏了：不当完成、也不当没做，不建、报出原因
-    return (table, None) if done is True else (table, UNFINISHED)
+        return Tables(latest, latest)
+    unreadable = False
+
+    def done(night: date) -> bool:
+        nonlocal unreadable
+        try:
+            return finished(night) is True
+        except GenerationMarkError:
+            unreadable = True  # 标记坏了：不当做完、也不当没做，这一张不用
+            return False
+
+    newest = latest.night
+    forming = latest if done(newest) else store.latest(lane, accept=lambda night: night < newest and done(night))
+    if forming is None:
+        return Tables(latest, None, MARK_UNREADABLE if unreadable else NO_FINISHED_TABLE)
+    return Tables(latest, forming)
 
 
 def observe_foresight(
@@ -204,14 +278,15 @@ def observe_foresight(
 
 
 __all__ = [
-    "NO_TABLE",
+    "AHEAD_TABLE",
     "MARK_UNREADABLE",
-    "STALE_TABLE",
-    "UNFINISHED",
+    "NO_FINISHED_TABLE",
+    "NO_TABLE",
     "ExpectationForming",
     "Formed",
     "FormingReadSide",
     "Recent",
+    "Tables",
     "observe_foresight",
-    "tonight_table",
+    "usable_tables",
 ]

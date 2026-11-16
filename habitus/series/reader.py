@@ -7,7 +7,7 @@
 - 只读不写；只读**截止日之前**的日子（第 N 晚读 N 之前，已封口）；
 - ``original_name`` 非空的 occurrence 是撞车消歧的已知重复，**机械跳过**——标记在写入时由归约层打好，这里只认标记、
   不做判重（判重只在融合层解决）；
-- ``kind_token`` 先过组合根注入的换算口（``KindResolution``：删掉的节点换成最近的活着的上级，词表方案二乙），再在这里分流（裁定 18、19）：类编号进序列（``classified``）；「待定」进序列但不是类（只占先后顺序）；
+- ``kind_token`` 先过组合根注入的换算口（``KindResolution``：删掉的节点换成最近的活着的上级，裁定 101 第 7 条），再在这里分流（裁定 18、19）：类编号进序列（``classified``）；「待定」进序列但不是类（只占先后顺序）；
   「非事件」不进序列，连顺序里也当它不存在；既不是编号也不是占位标记的硬拒；lane 取编号前缀；
 - 观测空白两种都进（``GapKind``），按本地日切开、只留截止日之前那几天的段；空白的类型在这里翻译一次，上游改名时以未知取值硬失败；
 - ``reminded`` 原样带着：被提醒过的发生要不要算进自然率，是消费方的事（``temporal`` 算它做了、但不是自然发生，见 ``temporal.episodes``）。
@@ -198,7 +198,7 @@ def _record(document: BehaviorDocument, uri: str, token: str, lane: Lane) -> Ser
         last_observed_at=_local(fields.get("last_observed_at"), "last_observed_at").astimezone(started_at.tzinfo),
         kind_token=token,
         lane=lane.value,
-        # 是一个词的编号才算归了类；「表外」「待定」是一件没有归类的事（词表方案 2026-11-14）
+        # 是一个词的编号才算归了类；「表外」「待定」是一件没有归类的事（裁定 101）
         classified=is_word(token),
         reminded=_flag(fields.get("reminded")),
         summary=_text(fields.get("summary"), "summary"),

@@ -162,7 +162,7 @@ async def active_step(
     gen: Generation, report: dict[str, object], series: EventSeries, day: date, result: GenerationResult,
     holder: list[Counted],
 ) -> None:  # fmt: skip
-    """数词表（词表方案 2026-11-14 第 5、7 节）：按这一代的序列先退出、删掉久没被选中的，再转在用，词表状态落盘，在用的集合
+    """数词表（裁定 101 第 7 条）：按这一代的序列先退出、删掉久没被选中的，再转在用，词表状态落盘，在用的集合
     交给这一代的语义树。纯计数、不调模型。没做成走退路：语义树按盘上已有的在用状态（下一代重数补上）。"""
 
     try:

@@ -33,7 +33,7 @@ def _judge(line: LaneTimeline, spec: ConditionSpec, window: int) -> Callable[[Ch
     if condition.template is Template.CONCEPT and spec.calendar_key is None:
         raise ValueError(f"concept condition {spec.text!r} is not a calendar situation")
     if condition.template is Template.TIMELINE:
-        # 白天的时间线按每一行自己的编号挂记号；条件的概念管着下级（丙一 2026-11-15），判它时把它管的那几类的记号合成一份，
+        # 白天的时间线按每一行自己的编号挂记号；条件的概念管着下级（裁定 101 第 8 条），判它时把它管的那几类的记号合成一份，
         # 挂在条件的名下另给判法——不改时间线本身：条件概念的身份就是上级自己的编号，混进去会和上级自己的行重复
         merged = sorted(
             {mark.uri: mark for token in spec.classes for mark in line.marks.get(token, [])}.values(),

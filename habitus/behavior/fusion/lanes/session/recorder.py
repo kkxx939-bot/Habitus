@@ -38,7 +38,7 @@ from habitus.behavior.observation import (
     BehaviorObservationStore,
 )
 
-# v2：判断带选词结果（词表方案 2026-11-14）；版本里带上选词提示词的版本，判断上看得出是哪版选词写的。
+# v2：判断带选词结果（裁定 101）；版本里带上选词提示词的版本，判断上看得出是哪版选词写的。
 SESSION_FUSION_VERSION = f"behavior_session_fusion_v2+{SESSION_PROMPT_VERSION}+{PICK_PROMPT_VERSION}"
 _OBSERVER_PREFIX = "session/"
 

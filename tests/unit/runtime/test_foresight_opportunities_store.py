@@ -91,3 +91,32 @@ def test_a_corrupt_latest_table_falls_back_to_the_night_before_and_is_counted(tm
     assert store.take_unreadable() == (str(latest),) and store.take_unreadable() == ()
     (store.root / "opportunities" / "session" / f"{NIGHT.isoformat()}.json").write_text("[]", encoding="utf-8")
     assert store.latest("session") is None and len(store.take_unreadable()) == 2
+
+
+def test_pruning_keeps_the_newest_table_whose_generation_finished(tmp_path) -> None:
+    """用户 2026-11-16：连着几天表写出了、那一代没写成完成标记时，删旧表留下最晚那张做完了的——预测拍还有它可用
+    （``usable_tables`` 只认做完了的）。平时最近几晚都做完了，删法与原来一样；标记坏了的不算做完了。"""
+
+    from habitus.runtime.foresight_forming import usable_tables
+    from habitus.runtime.generation_marks import GenerationMarkError
+
+    finished_nights = {NIGHT}
+    broken = NIGHT + timedelta(days=2)
+
+    def finished(night: date) -> bool:
+        if night == broken:
+            raise GenerationMarkError("generation mark is corrupt")
+        return night in finished_nights
+
+    store = OpportunityStore(tmp_path / "foresight", retained_nights=2, finished=finished)
+    for offset in range(5):  # NIGHT 做完了；之后四天都只写出了表
+        store.write(table(NIGHT + timedelta(days=offset)))
+    assert store.nights("session") == (NIGHT, NIGHT + timedelta(days=3), NIGHT + timedelta(days=4))
+    today = NIGHT + timedelta(days=4)
+    forming = usable_tables(store, "session", today, finished=finished).forming
+    assert forming is not None and forming.night == NIGHT
+
+    finished_nights.add(NIGHT + timedelta(days=5))  # 这一代做完了：上一张做完了的不再多留
+    store.write(table(NIGHT + timedelta(days=5)))
+    store.write(table(NIGHT + timedelta(days=6)))
+    assert store.nights("session") == (NIGHT + timedelta(days=5), NIGHT + timedelta(days=6))

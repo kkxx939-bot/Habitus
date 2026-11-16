@@ -12,7 +12,7 @@
 - **保证**：一条预期最多一条「说了」（写前查账本已有的 spoken，重放、换会话再问都挡住）；提问出现在最晚时限之后的不算；
   租约过期只让别的会话能取（不算放回：问可能早就问了、转写只是还没回来）；历任持有者都认得出自己那次提问。
 
-传输状态（可取清单、取走记录、问过的提问、宿主活性）在 ``runtime/foresight_outlet_store.py``，不进账本。两支共用这一个出口、账按支记（丙二 D4；``runtime/foresight_outlet_ledgers.py``），两支之间不仲裁。
+传输状态（可取清单、取走记录、问过的提问、宿主活性）在 ``runtime/foresight_outlet_store.py``，不进账本。两支共用这一个出口、账按支记（裁定 102 第 3 条；``runtime/foresight_outlet_ledgers.py``），两支之间不仲裁。
 宿主 → 提问工具 / 题目字段 / 作答怎么回来 由各会话协议的适配器声明（``ConversationAdapterRegistry.question_tools``），组合根传进来。
 
 TODO(裁定 64 第 8 条)：自由作答现在走会话 lane 的模型判正 / 中 / 负 / 已做（``runtime/foresight_responses.py`` 那座桥）；推式宿主（第六节

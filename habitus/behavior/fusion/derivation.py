@@ -166,7 +166,7 @@ def _identity(
             ],
             "status": judgement.status,
             "status_basis": judgement.status_basis,
-            # 选词结果是判断内容的一部分：中断后接着写完不能把旧描述配上新选的词（词表方案 2026-11-14）
+            # 选词结果是判断内容的一部分：中断后接着写完不能把旧描述配上新选的词（裁定 101）
             "kind_token": claim.kind_token,
         }
     )

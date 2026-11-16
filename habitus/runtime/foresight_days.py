@@ -1,9 +1,9 @@
 """当天的日子预期：换代的必须成的最后几步之一（实时化方案第 3 节；裁定 94 第 1 条）。
 
 连续定稿到昨天 → 重试收尾 → 结算 → 词表 → 读序列 → 语义树 → 机会表 → 单元历史 → 这一步 → 完成标记（``runtime.generation``）。
-「离上次够久」一天只建一次，用的就是这一代刚写的、含昨天的那张机会表：间隔、簇、命中、时窗只有这一个来源。盘上最晚那张表不是
-今天这一代的（这一代的表没写成）就不建——拿缺昨天的表建出来的时窗缺昨天，同一个身份全账本只建一次，算对的那条就再也进不了账；
-换代据此判今天没有这一代。
+这一步用的就是这一代刚写的、含昨天的那张机会表：间隔、簇、命中、时窗只有这一个来源。盘上最晚那张表不是今天这一代的（这一代
+的表没写成）就不建，换代据此判今天没有这一代。今天这一代做成之前，预测拍已经用旧表把"表那一晚之后一次都没再出现过"的类建上
+（``ExpectationForming.days_unchanged``）：那几类旧表与这张表算出同一个身份，这里按身份查重、不再写一份；别的类在这里第一次建。
 
 每天都建、从当天零点起算（裁定 94 第 2 条）：这一步看的是零点以来的整段（``looked_since`` = 零点），所以时窗在换代做完之前
 就已关掉的也照建——做了照常结，没做结过期待决（时窗已过，递送本来不说）；不许只建做了的一侧（裁定 49 第 1 条）。
@@ -22,14 +22,16 @@ from habitus.foresight import Batch, UnsealedReader
 from habitus.foresight.ladder import Tolerance
 from habitus.foundation.observability import NullObserver, ObservationStatus, Observer
 from habitus.runtime.foresight_forming import (
+    NO_TABLE,
     ExpectationForming,
     Formed,
     FormingReadSide,
     observe_foresight,
-    tonight_table,
 )
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
+
+STALE_TABLE = "今天这一代的机会表还没有"
 
 
 @dataclass(frozen=True)
@@ -98,9 +100,9 @@ class DayExpectationStage:
 
     async def _run(self) -> DayReport:
         now = self._clock().astimezone(self.forming.read_side.zone)
-        table, skipped = tonight_table(self.opportunities, self.lane, now.date())
-        if table is None or skipped is not None:
-            return DayReport(now, Formed(), skipped)
+        table = self.opportunities.latest(self.lane)
+        if table is None or table.night != now.date():
+            return DayReport(now, Formed(), NO_TABLE if table is None else STALE_TABLE)
         recent = await self.forming.read(now)
         # 从零点起看：零点到这一步之间关掉的时窗也算赶上了，没做的那次照样进账（裁定 94 第 2 条）
         midnight = datetime.combine(now.date(), clock_time(0), tzinfo=now.tzinfo)

@@ -262,7 +262,7 @@ def _cleared(before: Relation, measured: bool, tests: LaneTests, night: date) ->
 def _retire(
     before: Relation, after: Relation, tests: LaneTests, night: date, away: Callable[[str], Absence | None]
 ) -> tuple[Relation, str | None]:
-    """这一代没迁移的行判不判退休、退不退（共享说明 3.3）。只判上一代带进来、这一代之后仍是候选 / 失效 / 前向未复现的；
+    """这一代没迁移的行判不判退休、退不退（裁定 98 第 1、3 条）。只判上一代带进来、这一代之后仍是候选 / 失效 / 前向未复现的；
     发现日是这一代的不判（一条键一代只迁移一次），下一代才判。"""
 
     if before.status not in _RETIRABLE or after.status not in _RETIRABLE or before.discovered_on == night:
@@ -323,7 +323,7 @@ def _step(
     """一条关系这一晚怎么走；返回（新样子, 迁移原因——不迁移是 None）。"""
 
     if _retired(test.key if test is not None else before.key if before is not None else None, tests):
-        # 前因或后果的行为概念停用了（它的词退出在用或被删，词表方案二乙）：这条关系随之停用（裁定 27 第 9 条）——不是"效应没了"
+        # 前因或后果的行为概念停用了（它的词退出在用或被删，裁定 101 第 7 条）：这条关系随之停用（裁定 27 第 9 条）——不是"效应没了"
         if before is not None and before.status in (Status.CANDIDATE, Status.ESTABLISHED):
             return replace(
                 before, status=Status.EXPIRED, expired_on=night, maintenance=None

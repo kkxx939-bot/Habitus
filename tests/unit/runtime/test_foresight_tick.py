@@ -31,9 +31,7 @@ from tests.unit.scene.fixtures import DAY1, SUBJECT, Site, at, publish
 TODAY = DAY1 + timedelta(days=3)  # 2026-08-18
 DISCUSS, CODE = kind_id("讨论方案"), kind_id("修改代码")
 CONCEPTS = ConceptSet([base("讨论方案"), base("修改代码")])
-CONFIG = RelationConfig(
-    slot_minutes=15, transition_window_slots=3, absence_typical_multiple=8.0, absence_min_gaps=2
-)
+CONFIG = RelationConfig(slot_minutes=15, transition_window_slots=3, absence_typical_multiple=8.0, absence_min_gaps=2)
 RULERS = Rulers(15, 2700, 3, 5.0, 5.0, 35)
 TOLERANCE = Tolerance(line=1.0 - ForesightConfig().false_alarm_rate)  # 产品默认的线
 
@@ -449,15 +447,18 @@ def _minute_tick(site: Site, ledger, opportunities, clock: list[datetime]) -> Fo
     )
 
 
-def test_before_tonights_table_the_tick_builds_no_expectation(tmp_path) -> None:
-    """盘上最晚那张表是昨晚的（夜里那条线还没跑完）：事件、情境预期一条也不建，只报原因。"""
+def test_before_todays_table_the_tick_builds_from_yesterdays(tmp_path) -> None:
+    """盘上最晚那张表是昨天那一代的（今天这一代还没做成）：不等换代，照用它建事件预期（用户 2026-11-16「预测不要被换代
+    卡住」），预期与这一拍都记着表是哪一天那一代的。"""
 
+    yesterday = TODAY - timedelta(days=1)
     site, _codes = site_with_three_mornings(tmp_path)
-    ledger, opportunities = stores(tmp_path, site, night=TODAY - timedelta(days=1))
+    ledger, opportunities = stores(tmp_path, site, night=yesterday)
     publish(site.behavior_tree, TODAY, "讨论方案", 10, 0)
     report = asyncio.run(tick(tmp_path, site, ledger, opportunities, at(TODAY, 10, 15)).run_once())
-    assert report.skipped == "今天这一代的机会表还没有" and report.recorded == 0
-    assert ledger.expectations_on(TODAY) == ()
+    assert report.skipped is None and report.table_night == yesterday
+    events = [item for item in ledger.expectations_on(TODAY) if item.source == "事件"]
+    assert [item.kind_token for item in events] == [CODE] and {item.night for item in events} == {yesterday}
 
 
 def test_the_first_tick_after_tonights_table_catches_up_from_midnight(tmp_path) -> None:
@@ -525,6 +526,7 @@ def test_a_gap_between_ticks_is_written_as_unwatched_and_the_watermark_drives_th
     assert written == [(at(TODAY, 10, 15), at(TODAY, 13, 45))] and late.unwatched == written[0]
     assert looked[-1] == at(TODAY, 10, 15)  # 从上一次建预期看到的那一刻起看
     assert store.read().unwatched_until == at(TODAY, 13, 45)
+    assert store.read().overnight_until is None  # 白天合盖：不跨零点
 
     def broken(_start, _end) -> None:  # type: ignore[no-untyped-def]
         raise OSError("judgement store")
@@ -536,11 +538,11 @@ def test_a_gap_between_ticks_is_written_as_unwatched_and_the_watermark_drives_th
     assert store.read().ticked_at == at(TODAY, 13, 45)  # 写不成：水位不推，下一拍再写
 
 
-def test_the_daytime_gate_waits_for_todays_generation_to_be_complete(tmp_path) -> None:
-    """F5：表是今天的、可今天这一代还没完成（机会表写出了、日子预期或完成标记没成；下一眼重做整代会重写这张表）——预测拍不建
-    预期，只报原因；完成标记读不了也不建。今天的完成标记在了才建。"""
+def test_an_unfinished_table_is_not_used_to_form(tmp_path) -> None:
+    """F5：表是今天的、可今天这一代还没完成（机会表写出了、日子预期或完成标记没成；下一眼重做整代会重写这张表）——不用它；盘上
+    没有别的做完了的表就不建、报原因；完成标记读不了也不用它。今天的完成标记在了才用。"""
 
-    from habitus.runtime.foresight_forming import MARK_UNREADABLE, UNFINISHED
+    from habitus.runtime.foresight_forming import MARK_UNREADABLE, NO_FINISHED_TABLE
     from habitus.runtime.generation_marks import GenerationMarkError
 
     site, _codes = site_with_three_mornings(tmp_path)
@@ -549,9 +551,9 @@ def test_the_daytime_gate_waits_for_todays_generation_to_be_complete(tmp_path) -
     run = tick(tmp_path, site, ledger, opportunities, at(TODAY, 10, 15))
     done: list[bool | None] = [None]
     run.finished = lambda _day: done[0]
-    assert asyncio.run(run.run_once()).skipped == UNFINISHED and ledger.expectations_on(TODAY) == ()
+    assert asyncio.run(run.run_once()).skipped == NO_FINISHED_TABLE and ledger.expectations_on(TODAY) == ()
     done[0] = False
-    assert asyncio.run(run.run_once()).skipped == UNFINISHED
+    assert asyncio.run(run.run_once()).skipped == NO_FINISHED_TABLE
 
     def broken(_day):  # type: ignore[no-untyped-def]
         raise GenerationMarkError("generation mark is corrupt")
@@ -647,3 +649,25 @@ def test_the_look_back_follows_the_unwatched_tolerance(tmp_path) -> None:
         clock[0] = at(TODAY, hour, minute)
         asyncio.run(run.run_once())
     assert handed == [None, at(TODAY, 10, 0), None]
+
+
+def test_only_a_gap_reaching_back_before_midnight_is_kept_as_the_overnight_one(tmp_path) -> None:
+    """用户 2026-11-16：换代只等伸进昨天的那段「未观测」落树。醒来写的空白从零点之前开始就记成跨夜的那一段；之后白天合盖写的
+    空白只推 ``unwatched_until``，不动跨夜的那一段。"""
+
+    from habitus.runtime.generation_watermark import TickTrack, TickWatermark, TickWatermarkStore
+
+    store = TickWatermarkStore(tmp_path)
+    store.write(TickWatermark(ticked_at=at(TODAY - timedelta(days=1), 22, 0)))
+    written: list[tuple[datetime, datetime]] = []
+    track = TickTrack(
+        store, slot=timedelta(minutes=15), tolerance_slots=2, unwatched=lambda start, end: written.append((start, end))
+    )
+    morning = at(TODAY, 9, 0)
+    asyncio.run(track.begin(morning))
+    asyncio.run(track.write(store.read().ticked(morning)))
+    assert store.read().overnight_until == morning and store.read().unwatched_until == morning
+    afternoon = at(TODAY, 14, 0)
+    asyncio.run(track.begin(afternoon))
+    assert written[-1] == (morning, afternoon)
+    assert store.read().unwatched_until == afternoon and store.read().overnight_until == morning

@@ -96,7 +96,7 @@ class ReducibleJudgement:
     status: str | None
     status_basis: str | None
     fusion_version: str
-    #: 判断上带着的选词结果（会话 lane 带、物理 lane 不带）：带着的归约直接落，没带的在归约里选（词表方案 2026-11-14）。
+    #: 判断上带着的选词结果（会话 lane 带、物理 lane 不带）：带着的归约直接落，没带的在归约里选（裁定 101）。
     kind_token: str | None = None
 
     @property

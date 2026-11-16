@@ -170,7 +170,7 @@ def test_the_time_a_generation_takes_is_not_written_as_unwatched(tmp_path) -> No
 
 
 def test_a2_9_a_failed_must_step_does_not_stop_the_tick_and_is_retried_in_a_later_slot(tmp_path) -> None:
-    """机会表那一步（必须成）失败：今天没有这一代，这一拍照做、不建预期（白天那道闸读完成标记）；退避期内的槽不重做，
+    """机会表那一步（必须成）失败：今天没有这一代，这一拍照做、不建预期（盘上没有做完了的那一代的表，预测拍只用做完了的）；退避期内的槽不重做，
     退避到点的那一槽再试、做成，那一槽的预测拍就建了；期间健康面报出没写成与下一次重试的时刻。"""
 
     order: list[str] = []

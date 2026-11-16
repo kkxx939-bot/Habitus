@@ -32,7 +32,7 @@
     "habitus/runtime/foresight_ledger.py::ForesightLedgerStore": 540,
     "habitus/runtime/foresight_outlet.py::ReminderOutlet": 443,
     "habitus/runtime/foresight_settlement.py::SettlementStage": 408,
-    "habitus/runtime/health.py::RuntimeHealthService": 361,
+    "habitus/runtime/health.py::RuntimeHealthService": 357,
     "habitus/runtime/lifecycle.py::LifecycleWorker": 281,
     "habitus/runtime/runtime.py::Runtime": 613,
     "habitus/runtime/worker.py::MemoryWorker": 306,

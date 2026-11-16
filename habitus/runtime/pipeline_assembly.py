@@ -1,4 +1,4 @@
-"""一支的下游管线在组合根的组装（丙二 2026-11-16，裁定 42 两条独立管线）：``build_runtime`` 对行为侧的每一支调一次
+"""一支的下游管线在组合根的组装（裁定 102，裁定 42 两条独立管线）：``build_runtime`` 对行为侧的每一支调一次
 ``assemble_pipeline``——这一支的完成标记、trace、预测根租约、预测层、未封口的桥、预测拍，再交 ``runtime.scene.assemble_branch``
 装语义树、换代与模型队列。代码一套，按支各装一份、各用各的根；这一支发出的观测事件都带上 lane。"""
 
@@ -29,6 +29,7 @@ from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_outlet import ReminderOutlet
 from habitus.runtime.foresight_tick import ForesightTick
 from habitus.runtime.generation_lease import Lease
+from habitus.runtime.generation_marks import GenerationMarks
 from habitus.runtime.generation_trace import SpanBackend
 from habitus.runtime.pipeline import ScenePipeline
 from habitus.runtime.scene import assemble_branch, generation_marks, generation_traces, scene_branch_root
@@ -71,7 +72,7 @@ def assemble_pipeline(
             ledger=ledger,
             outlet=outlet,
             calendar=calendar,
-            finished=marks.finished,
+            marks=marks,
             structured_chat=structured_chat,
             observer=observer,
             trace=traces.sink,
@@ -103,7 +104,7 @@ def branch_foresight(
     ledger: ForesightLedgerStore,
     outlet: ReminderOutlet | None,
     calendar: DayTypeCalendar | None,
-    finished: Callable[[date], bool | None],
+    marks: GenerationMarks,
     structured_chat: StructuredChatClient,
     observer: Observer,
     trace: Callable[[date], TraceSink],
@@ -123,25 +124,25 @@ def branch_foresight(
         observer=observer,
         kind_store=branch.kind_store,
         outlet=outlet,
-        finished=finished,
+        finished=marks.finished,
     )
     assert built is not None  # 有 evidence 就是开了预测层
     # 未封口的判断经那座桥（判断存储 + 消费账本 + 归约的选词器）读：预测拍用它；换代里的日子预期读只读缓存的那一份
     # （换代里没有模型调用；会话一支的判断都带着选词结果，物理一支的由模型队列先选好）
     unsealed = unsealed_bridge(branch)
-    kind_store = branch.kind_store
     tick = build_foresight_tick(
         built,
         config=config,
         unsealed=unsealed,
         evidence=evidence,
         structured_chat=structured_chat,
-        vocabulary_version=lambda: kind_store.read().revision,  # 词表版本记在预期上
+        vocabulary_version=lambda: branch.kind_store.read().revision,  # 词表版本记在预期上
         observer=observer,
         reread=rereader_of(branch),
         trace=trace,
         unwatched=unwatched,
         lease=lease,
+        vocabulary_of=_counted_version(marks),
     )
     # 当天的日子预期：换代必须成的一步，与预测拍读同一座未封口的桥（只读缓存）
     days = build_foresight_days(
@@ -149,12 +150,22 @@ def branch_foresight(
         config=config,
         unsealed=unsealed.cache_only(),
         evidence=evidence,
-        vocabulary_version=lambda: kind_store.read().revision,
+        vocabulary_version=lambda: branch.kind_store.read().revision,
         observer=observer,
     )
     # 第 0 步：这一支的归约封口时查这一支的预测层账本盖 reminded（归约先装、预测层后装，所以在这里接端口）
     branch.reduction_runner.attach_reminder_lookup(build_reminded_lookup(built))
     return dataclasses.replace(built, days=days), unsealed, tick
+
+
+def _counted_version(marks: GenerationMarks) -> Callable[[date], int | None]:
+    """某一天那一代数词时的词表版本（这一支自己的完成标记；没有标记是 None）：旧表下的日子预期要它与此刻的词表版本相同才建。"""
+
+    def of(night: date) -> int | None:
+        mark = marks.read(night)
+        return None if mark is None else mark.vocabulary_version
+
+    return of
 
 
 __all__ = ["assemble_pipeline", "branch_foresight"]

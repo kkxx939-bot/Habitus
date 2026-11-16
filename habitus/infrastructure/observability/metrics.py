@@ -254,7 +254,7 @@ def _generation_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, .
         gaps = _non_negative_number(attributes.get("unreduced_gaps"))
         if gaps is not None:
             updates.append(MetricUpdate("generation_unreduced_gaps", "gauge", gaps))
-        # 在用、等着、这一代删掉、退出在用、此刻候选的词数（词表方案 2026-11-14），记成 generation_<读数名>；没数是 -1，不记
+        # 在用、等着、这一代删掉、退出在用、此刻候选的词数（裁定 101），记成 generation_<读数名>；没数是 -1，不记
         for attribute in ("active_words", "waiting_words", "deleted_words", "exited_words", "candidate_words"):
             value = _non_negative_number(attributes.get(attribute))
             if value is not None:

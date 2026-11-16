@@ -38,7 +38,7 @@ def awaiting_outcome(
     now: datetime,
 ) -> Delivery | None:
     """这条「待取」这一拍追加哪一条递送（不追加是 None）。``claimed`` 是出口上这条请求被宿主取走过没有；节点此刻已不在用、
-    宿主还没取走的撤下，记「已停用」（丙一 2026-11-15）。"""
+    宿主还没取走的撤下，记「已停用」（裁定 101 第 8 条）。"""
 
     happened = materials is not None and materials.happened(item)
     ended = on_awaiting(item, pending, now=now, happened=happened)

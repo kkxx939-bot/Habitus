@@ -477,7 +477,7 @@ workflow:
 #   physical_max_device_chars: 120     # 设备名最多多少字
 #   physical_max_segment_id_chars: 200  # 段编号最多多少字
 #   physical_max_future_seconds: 300   # 段的结束最多比交付的送出时刻晚多少秒（留给时钟不齐）
-#   # 基础词表（裁定 6：门槛全部是配置；词表方案 2026-11-14）；留空取 behavior/kinds/config.py 的默认值
+#   # 基础词表（裁定 6：门槛全部是配置；裁定 101）；留空取 behavior/kinds/config.py 的默认值
 #   kinds_pick_retries: 2              # 选词答复结构不合格时带着错误重问几次，用尽记「待定」
 #   kinds_transient_retries: 5         # 模型调用对超时/断连的有界重试
 #   kinds_transient_retry_delay_seconds: 5
@@ -582,7 +582,7 @@ workflow:
 #   tick_interval_seconds: 900       # 多久一拍（建预期、到时窗的决定说不说）；一拍一槽、对齐槽边界，必须等于 temporal.slot_minutes × 60
 #   worker_shutdown_timeout_seconds: 30
 #   unwatched_tolerance_slots: 2     # 两拍之间隔了超过这么多槽，那一段记成会话一支的「未观测」空白（关机、合盖、进程没跑）
-#   generation_margin_slots: 3       # 换代要等预测拍水位过了 max(昨天日终, 最后一段「未观测」结尾) 再这么多槽（给归约留时间把空白落树）
+#   generation_margin_slots: 2       # 换代要等预测拍水位过了 max(今天零点, 最后一段跨过零点的「未观测」结尾) 再这么多槽（给归约留时间把空白落树）
 #   half_life_opportunities: 8       # 证据遗忘的半衰期：几次机会（账、行为单元、时段读数共用；裁定 57，回放后定）；账的久别也要空白 ≥ H 个典型间隔（裁定 88）
 #   outlet_liveness_hours: 48        # 提醒出口：最近几小时有宿主来取过才算活着（活着才问模型写话、记「待取」；否则记「不可达」）
 #   outlet_lease_minutes: 30         # 一条请求被一个会话取走后多久内别的会话取不到（不超过最晚时限）

@@ -108,7 +108,7 @@ class RelationCandidates:
 
         line = self.tests.line
         if self.tests.concepts.related(key.antecedent, key.consequent):
-            # 上下级之间不量关系（丙一 2026-11-15）：之前一代留下的这一对的行不再带着，由状态折叠清掉
+            # 上下级之间不量关系（裁定 101 第 8 条）：之前一代留下的这一对的行不再带着，由状态折叠清掉
             return False
         if key.segment in (Segment.HIGH_STATE, Segment.LOW_STATE) and key.antecedent in line.concepts():
             if not self.tests.episodes(key.antecedent, key.segment):

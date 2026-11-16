@@ -1,15 +1,17 @@
 """预测拍（方案第四节；实时化方案第 5、6 节），三步：读材料 → 此刻对得上历史的事件、情境预期建好、落账（不管说不说）→ 到了
 时窗的按账的级决定说不说（``runtime.foresight_delivery``，没接时只建不递）。
 
-预测拍只走事实（裁定 94 第 1 条）：结算、回话、账的读数，事件与情境在换代定下的关系与日历上实例化；**不建日子预期**——
-当天的日子预期一天只建一次，是换代的最后几步之一（``runtime.foresight_days``），这里不按"日期变了"自己再建一份。读材料与落账
-的那一段与换代共用（``runtime.foresight_forming``）。
+预测拍只走事实（裁定 94 第 1 条）：结算、回话、账的读数，事件与情境在换代定下的关系与日历上实例化。读材料与落账的那一段与换代
+共用（``runtime.foresight_forming``）。
 
-**今天这一代的表写出之前不建任何预期**（白天那道闸，实时化方案第 3 节）：盘上最晚那张表不是今天这一代的，这一拍只递已经建好的、
-不建新的（拿缺昨天的表会算出错的身份）。
+**不等今天这一代**（用户 2026-11-16「预测不要被换代卡住」，取代原来的白天那道闸）：建预期用盘上最晚一张那一代做完了的表
+（``usable_tables``），今天这一代没做成就用上一张，多旧都用；今天这一代一做完，下一拍起换用今天的表。递送照用盘上最晚那张。
+用的是旧表时，这一拍还把今天的日子预期建上——只建表那一晚之后一次都没再出现过的类（``days_unchanged``：旧表算出的身份与时窗
+与今天的表相同，别的类旧表会把做过的当成久没做）；今天的表下日子预期仍由换代那一步建（``runtime.foresight_days``）。旧表下建
+的不撤不改：说过的照旧，没说的照它自己的时窗走；同一身份只建一次，换表以后不会再建一份。
 
-**往回看的起点是落盘的水位**（``runtime.generation_watermark``，实时化缺陷 1；取代原来只在内存里的 ``now - 一拍``）：今天这一代
-第一次建预期的那一拍从今天零点起看（补建，裁定 94 第 2 条、裁定 49：零点到这一拍之间关掉的时窗也算赶上了，做了的和没做的都建），
+**往回看的起点是落盘的水位**（``runtime.generation_watermark``，实时化缺陷 1；取代原来只在内存里的 ``now - 一拍``）：用的表换了
+一代（含今天第一次用旧表、换到今天的表）的那一拍从今天零点起看（补建，裁定 94 第 2 条、裁定 49：零点到这一拍之间关掉的时窗也算赶上了，做了的和没做的都建），
 之后从上一次建预期看到的那一刻（``formed_through``）起看——中间合盖、关机几个小时，醒来那一拍照样把那几个小时里关掉的时窗
 两边都建上。补建抓不回来的：「同一条链」那一段的事件预期只认此刻离前因做完不超过转移窗口的链（``triggers.events``），零点后
 做完、到补建那一拍已经过了转移窗口的前因，那一段的预期补不回来（这条链此刻落在「当天剩下的」那一段：那一段另有成立的关系才建，
@@ -41,7 +43,6 @@ from habitus.foresight import Batch, Seen, UnsealedReader, UnsealedRow
 from habitus.foresight.delivery import done_since
 from habitus.foresight.ladder import Tolerance
 from habitus.foresight.ledger import Expectation
-from habitus.foresight.opportunities import OpportunityTable
 from habitus.foresight.triggers.assemble import LOOKBACK_DAYS
 from habitus.foundation.intervals import standing_pieces
 from habitus.foundation.observability import NullObserver, ObservationStatus, Observer
@@ -52,12 +53,14 @@ from habitus.runtime.foresight_forming import (
     Formed,
     FormingReadSide,
     Recent,
+    Tables,
     observe_foresight,
-    tonight_table,
+    usable_tables,
 )
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.generation_lease import Lease, LeaseBusyError
+from habitus.runtime.generation_marks import GenerationMarkError
 from habitus.runtime.generation_watermark import TickTrack, TickWatermark
 from habitus.scene.views import DayIndexCache
 
@@ -91,15 +94,17 @@ class TickReport:
     #: 这一拍离上一拍（落盘的系统确知在看到的那一刻）隔了几拍：正常 1，上一拍拖过了槽边界、被挤掉一拍是 2；不知道（第一次
     #: 启动、没接水位）是 None。被挤掉的拍在 ``lateness_seconds`` 里看不到（常驻循环不补跑拖过的边界）。
     ticks_since_previous: int | None = None
+    #: 这一拍建预期用的表是哪一天那一代的（没建是 None）；旧表下日子预期被挡下的类数，认不出（那几天里有还没定类的）是 None。
+    table_night: date | None = None
+    days_held: int | None = 0
 
 
 @dataclass(frozen=True)
 class _Materials:
-    """这一拍读到的东西：最近几天、机会表（没有时为 None，原因在 ``skipped``）。"""
+    """这一拍读到的东西：最近几天、递送与建预期各用的表（``Tables``）。"""
 
     recent: Recent
-    table: OpportunityTable | None
-    skipped: str | None
+    tables: Tables
 
     @property
     def now(self) -> datetime:
@@ -128,6 +133,7 @@ class ForesightTick:
         track: TickTrack | None = None,
         lease: Lease | None = None,
         finished: Callable[[date], bool | None] | None = None,
+        vocabulary_of: Callable[[date], int | None] | None = None,
     ) -> None:
         self.forming = ExpectationForming(
             ledger,
@@ -159,8 +165,11 @@ class ForesightTick:
         self.trace = trace
         #: 落盘的水位与没在看的时段（``TickTrack``）；没接就按一拍的宽度往回看、不写没在看的时段。预测根租约整拍持有。
         self.track, self.lease = track, lease
-        #: 今天这一代完成了没有（完成标记）：白天那道闸要它为真才建预期（F5）；没接就只看表是不是今天的。
+        #: 某一天那一代完成了没有（完成标记）：建预期只用做完了的那一代的表（F5）；没接就用盘上最晚那张。
         self.finished = finished
+        #: 某一天那一代数词时的词表版本（完成标记里记的）：旧表下的日子预期要它与此刻的词表版本相同才建（词表换算口变了，
+        #: 旧记录会改读成别的类，旧表的历史就与今天的表不同）；没接就不比。
+        self.vocabulary_of = vocabulary_of
 
     async def run_once(
         self, *, scheduled: datetime | None = None, before: Callable[[], Awaitable[object]] | None = None
@@ -196,7 +205,7 @@ class ForesightTick:
                     self.observer, "tick", ObservationStatus.FAILURE, {"error_type": type(exc).__name__}, started
                 )
                 raise
-            # 白天那道闸放没放行、为什么，以及建了几条、按种类、递了几条、这一拍用了多久
+            # 建没建、没建为什么，以及建了几条、按种类、递了几条、这一拍用了多久
             readings = {
                 **_attributes(report),
                 **{key: attributes[key] for key in ("lateness_seconds",) if key in attributes},
@@ -216,9 +225,10 @@ class ForesightTick:
         previous = gap[0] if gap is not None else mark.watched_until  # 刚写了「未观测」：``begin`` 已把水位推到此刻
         ticks = None if previous is None or self.track is None else round((now - previous) / self.track.slot)
         materials = await self._read(now)
-        formed, looked_since = self._form(materials, mark)
-        if looked_since is not None:
-            mark = mark.formed(now, now.date())
+        formed, looked_since, held = self._form(materials, mark)
+        forming = materials.tables.forming
+        if looked_since is not None and forming is not None:
+            mark = mark.formed(now, forming.night)
             await self._advance(mark)
         delivered = await self._deliver(materials, None if gap is not None else previous)
         await self._advance(mark.ticked(now))
@@ -227,7 +237,7 @@ class ForesightTick:
             formed.formed,
             formed.recorded,
             formed.by_source,
-            materials.skipped,
+            materials.tables.skipped,
             delivered.decided if delivered is not None else 0,
             delivered.spoken if delivered is not None else 0,
             delivered,
@@ -238,6 +248,8 @@ class ForesightTick:
             catch_up=looked_since is not None and self.tick is not None and looked_since < now - self.tick,
             unwatched=gap,
             ticks_since_previous=ticks,
+            table_night=None if looked_since is None or forming is None else forming.night,
+            days_held=held,
         )
 
     async def _advance(self, mark: TickWatermark) -> None:
@@ -248,27 +260,53 @@ class ForesightTick:
 
     async def _read(self, now: datetime) -> _Materials:
         recent = await self.forming.read(now)
-        # 今天这一代的表还没出来：递送照常用盘上最晚那张，建预期等表出来（白天那道闸）
-        table, skipped = tonight_table(self.opportunities, self.lane, now.date(), finished=self.finished)
-        return _Materials(recent, table, skipped)
+        # 递送用盘上最晚那张；建预期用最晚一张那一代做完了的，今天这一代没做成就用上一张（不等换代）
+        return _Materials(recent, usable_tables(self.opportunities, self.lane, now.date(), finished=self.finished))
 
     # ── 第二步：建预期 ──────────────────────────────────────────────────────
 
-    def _form(self, materials: _Materials, mark: TickWatermark) -> tuple[Formed, datetime | None]:
-        """建预期；返回建的结果与这一拍从哪一刻起看（没建是 None）。"""
+    def _form(self, materials: _Materials, mark: TickWatermark) -> tuple[Formed, datetime | None, int | None]:
+        """建预期；返回建的结果、这一拍从哪一刻起看（没建是 None）与旧表下日子预期挡下了几类（``TickReport.days_held``）。"""
 
-        if materials.table is None or materials.skipped is not None:
-            return Formed(), None
+        table = materials.tables.forming
+        if table is None:
+            return Formed(), None, 0
         now = materials.now
-        looked_since = self._looked_since(now, mark, materials.table.night)
+        looked_since = self._looked_since(now, mark, table.night)
         formed = self.forming.form(
             materials.recent,
-            materials.table,
+            table,
             batch=Batch.MOMENT,
             looked_since=looked_since,
             known_instances=self._known_instances(now),
         )
-        return formed, looked_since
+        if table.night == now.date():
+            return formed, looked_since, 0  # 今天的表：日子预期由换代那一步建
+        days = self.forming.days_unchanged(materials.recent, table) if self._same_vocabulary(table.night) else None
+        if days is None:
+            return formed, looked_since, None
+        # 旧表下今天的日子预期：同换代那一步，从零点起看（裁定 94 第 2 条），同一身份只建一次
+        midnight = datetime.combine(now.date(), clock_time(0), now.tzinfo)
+        built = self.forming.form(materials.recent, days, batch=Batch.DAYS, looked_since=midnight)
+        merged = Formed(
+            formed.formed + built.formed,
+            formed.recorded + built.recorded,
+            _summed(formed.by_source, built.by_source),
+            _summed(formed.recorded_by_source, built.recorded_by_source),
+        )
+        return merged, looked_since, len(table.kinds) - len(days.kinds)
+
+    def _same_vocabulary(self, night: date) -> bool:
+        """``night`` 那一代数词时的词表版本与此刻相同（``vocabulary_of``）；读不出那一代的版本就当不同。没接任一边就不比。"""
+
+        current = self.forming.vocabulary_version
+        if self.vocabulary_of is None or current is None:
+            return True
+        try:
+            then = self.vocabulary_of(night)
+        except GenerationMarkError:
+            return False
+        return then is not None and then == current()
 
     def _looked_since(self, now: datetime, mark: TickWatermark, generation: date) -> datetime:
         """这一拍从哪一刻起看（``TickTrack.looked_since``）；没接水位（不知道上一次看到哪儿）就每拍都从零点起看——同一身份只建一次，
@@ -310,7 +348,7 @@ class ForesightTick:
         return await self.delivery.run_once(
             now,
             JudgeMaterials(
-                materials.table,
+                materials.tables.latest,
                 lambda uris: _rows_for(uris, materials.recent.cache, materials.recent.unsealed, seen, now),
                 lambda item: done_since(item, seen, now=now, kinds=materials.recent.kinds),
                 lambda day: day_note(self.read_side.calendar, day),
@@ -323,6 +361,10 @@ class ForesightTick:
                 materials.recent.kinds,
             ),
         )
+
+
+def _summed(first: dict[str, int], second: dict[str, int]) -> dict[str, int]:
+    return {key: first.get(key, 0) + second.get(key, 0) for key in first.keys() | second.keys()}
 
 
 def _rows_for(
@@ -432,6 +474,10 @@ def _attributes(report: TickReport) -> dict[str, str | int | float | bool]:
         "unwatched_minutes": 0.0 if gap is None else round((gap[1] - gap[0]).total_seconds() / 60, 3),
         # 离上一拍隔了几拍（被挤掉一拍是 2；不知道是 -1）
         "ticks_since_previous": -1 if report.ticks_since_previous is None else report.ticks_since_previous,
+        # 这一拍建预期用的表：哪一天那一代的、比今天旧几天（没建是空 / -1）；旧表下日子预期挡下几类（认不出是 -1）
+        "table_night": "" if report.table_night is None else report.table_night.isoformat(),
+        "table_age_days": -1 if report.table_night is None else (report.at.date() - report.table_night).days,
+        "days_held": -1 if report.days_held is None else report.days_held,
         **{f"source_{key}": value for key, value in report.by_source.items()},
         **{f"recorded_{key}": value for key, value in report.recorded_by_source.items()},
     }

@@ -13,12 +13,14 @@ from habitus.foresight import ForesightError
 from habitus.memory.workflow import MemoryJobStatus
 from habitus.runtime.components import RuntimeComponents
 from habitus.runtime.foresight_opportunities import OpportunityStore
+from habitus.runtime.generation import Generation
 from habitus.runtime.generation_marks import GenerationMarkError
 from habitus.runtime.generation_result import REWOUND
 from habitus.runtime.generation_runner import GenerationRunner
 from habitus.runtime.lifecycle import LifecycleWorkerState
 from habitus.runtime.model_queue import ModelQueue
 from habitus.runtime.model_queue_health import queue_pending, queue_problems
+from habitus.runtime.reminder_basis import REPORT_AFTER_DAYS, basis_age, told
 from habitus.runtime.resident import ResidentWorker
 from habitus.runtime.worker import MemoryWorkerState
 
@@ -165,11 +167,7 @@ class RuntimeHealthService:
         for item in pipelines:
             found = [*_generation_state_checks(item.generation), *_model_queue_checks(item.queue)]
             if item.foresight is not None:
-                found.append(
-                    self._opportunity_freshness_check(
-                        item.foresight.opportunities, item.lane, item.generation.generation.closed_days
-                    )
-                )
+                found.extend(_table_checks(item.foresight.opportunities, item.lane, item.generation.generation))
             checks.extend(_branch_named(found, item.lane))
         calendar = getattr(pipelines[0].scene, "calendar", None)
         problems = tuple(getattr(calendar, "problems", ()))
@@ -467,6 +465,18 @@ def _system_zone_name(moment: datetime) -> str:
     except Exception:  # noqa: BLE001 - tzlocal 在各平台抛的异常不一，名字只是给人看的
         name = None
     return name or moment.tzname() or "local"
+
+
+def _table_checks(store: OpportunityStore, lane: str, generation: Generation) -> list[RuntimeHealthCheck]:
+    """一支的表有多旧（``opportunities``）与建预期用的表旧了几天（``reminder_basis``，见 ``runtime.reminder_basis``）。"""
+
+    found = [RuntimeHealthService._opportunity_freshness_check(store, lane, generation.closed_days)]
+    days = basis_age(store, lane, generation.today(), generation.marks.finished)
+    if days is not None:
+        status = RuntimeHealthStatus.DEGRADED if days >= REPORT_AFTER_DAYS else RuntimeHealthStatus.HEALTHY
+        detail = told(lane, days) if status is RuntimeHealthStatus.DEGRADED else f"age:{days}"
+        found.append(RuntimeHealthCheck("reminder_basis", status, detail, False))
+    return found
 
 
 def _generation_state_checks(worker: GenerationRunner) -> list[RuntimeHealthCheck]:

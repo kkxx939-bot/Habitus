@@ -99,7 +99,7 @@ class ForesightRuntimeComponents:
     outlet: ReminderOutlet | None = None
     #: 换代里建当天日子预期的那一步（必须成）；与 ``worker`` 一起在未封口的桥装好之后接上。
     days: DayExpectationStage | None = None
-    #: 预测拍的水位（``ticked_at``、``unwatched_until``、``formed_through``、``formed_generation``）。
+    #: 预测拍的水位（``ticked_at``、``unwatched_until``、``overnight_until``、``formed_through``、``formed_generation``）。
     watermark: TickWatermarkStore | None = None
 
     def __post_init__(self) -> None:
@@ -147,7 +147,7 @@ def build_outlet(
     question_tools: Sequence[QuestionTool] | None = None,
     observer: Observer | None = None,
 ) -> ReminderOutlet:
-    """提醒出口（方案 32）：两支共用一个（出口只有宿主里的会话，丙二 D4），传输状态按支存在 ``<foresight_root>/<lane>/outlet``；
+    """提醒出口（方案 32）：两支共用一个（出口只有宿主里的会话，裁定 102 第 3 条），传输状态按支存在 ``<foresight_root>/<lane>/outlet``；
     每条请求带是哪一支，「说了」与回话写回那一支的账本，类名按那一支的词表（``kind_stores``）取。"""
 
     foresight = config.foresight
@@ -202,7 +202,7 @@ def build_foresight_components(
     )
     limits = config.foresight.store
     generations = 1 + config.lifecycle.fallback_generations  # 派生物留当前一代与几代备用（26 号清单 6.12）
-    opportunities = OpportunityStore(root, retained_nights=generations, limits=limits)
+    opportunities = OpportunityStore(root, retained_nights=generations, limits=limits, finished=finished)
     history_store = HistoryStore(root, retained_nights=generations, limits=limits)
     settlement = SettlementStage(
         ledger,
@@ -276,6 +276,7 @@ def build_foresight_tick(
     trace: Callable[[date], TraceSink] | None = None,
     unwatched: Callable[[datetime, datetime], object] | None = None,
     lease: Lease | None = None,
+    vocabulary_of: Callable[[date], int | None] | None = None,
 ) -> ForesightTick:
     """预测拍：读这一支的机会表、今天的日历条件、行为树今天与前 7 天、还没封口的判断（``unsealed``），把此刻对得上历史的预期写进
     这一支的账本；再把到了时窗的按账的级决定说不说（``structured_chat`` 给了就带模型四问，不给就按算法与模板）。``shadow_uses_unestablished``
@@ -317,7 +318,8 @@ def build_foresight_tick(
         trace=trace,
         track=_track(components, config, unwatched),
         lease=lease,
-        finished=components.settlement.finished,  # 白天那道闸：今天这一代完成了才建（完成标记，与结算同一个判断）
+        finished=components.settlement.finished,  # 建预期只用那一代做完了的表（完成标记，与结算同一个判断）
+        vocabulary_of=vocabulary_of,
     )
 
 
@@ -390,7 +392,7 @@ def build_reminder_responses(
     branches: Sequence[ForesightRuntimeComponents], *, config: HabitusConfig, observer: Observer | None = None
 ) -> BranchReminders:
     """会话 lane 每轮带开着的提醒、写回回应的那座桥（方案 30 第五节）：交给 ``SessionLane.attach_reminders``。两支的提醒都从
-    宿主里的会话说出口，所以会话 lane 看两支的账；回应写回提醒所属的那一支（丙二 D4，共用的是出口不是数据）。"""
+    宿主里的会话说出口，所以会话 lane 看两支的账；回应写回提醒所属的那一支（裁定 102 第 3 条，共用的是出口不是数据）。"""
 
     return BranchReminders(
         tuple(

@@ -871,7 +871,7 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert queue.sealed.reader.tree is behavior.tree and queue.sealed.reader.name == "model_queue"
     # 完成标记只有一份：换代写，结算读同一个"这一天的换代做完了没有"（裁定 94 第 9 条）
     assert foresight.settlement.finished == generation.marks.finished
-    # 白天那道闸读同一份完成标记（F5）；换代数的是会话一支的在用状态（词表方案 2026-11-14）
+    # 预测拍取表（只用那一代做完了的）读同一份完成标记（F5）；换代数的是会话一支的在用状态（词表方案 2026-11-14）
     assert tick.finished == generation.marks.finished
     assert generation.vocabulary.store is branches.session.kind_store
     assert worker.settings.retry_base_seconds == runtime.config.scene.generation_retry_base_seconds
@@ -879,7 +879,7 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert tick.track is not None and tick.track.store is foresight.watermark
     assert tick.track.store.root == foresight.ledger.root and tick.track.unwatched is not None
     assert tick.track.slot.total_seconds() == runtime.config.foresight.tick_interval_seconds
-    assert generation.watermark is not None and generation.margin.total_seconds() == 45 * 60
+    assert generation.watermark is not None and generation.margin.total_seconds() == 30 * 60
     # 序列读者按名字记脏日水位（实时化缺陷 5）
     assert generation.series.name == "generation" and generation.series.logs == (behavior.reduction_runner.dirty_days,)
     # 单元历史：夜里那一拍重标、白天的单元读同一份（裁定 55 新版第 2 条）

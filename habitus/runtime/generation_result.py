@@ -15,7 +15,7 @@ from habitus.runtime.generation_summary import UNREACHABLE, reason_code
 
 CALENDAR, RETRY, SETTLE = "calendar", "retry", "settle"
 SERIES, ACTIVE, SCENE, OPPORTUNITIES, DAYS, MARK = "series", "active", "scene", "opportunities", "days", "mark"
-#: 换代的各步，按先后。"数在用的词"在读序列之后、语义树之前（词表方案 2026-11-14 第 7 节：要按日子数就得先有序列；
+#: 换代的各步，按先后。"数在用的词"在读序列之后、语义树之前（裁定 101 第 7 条：要按日子数就得先有序列；
 #: 数出来的集合显式交给这一代的语义树）。单元历史与压实在机会表那一步里、跟在表后面（各自一个 ``foresight.*`` 子 span）。
 STEPS = (CALENDAR, RETRY, SETTLE, SERIES, ACTIVE, SCENE, OPPORTUNITIES, DAYS, MARK)
 #: 必须成的几步：失败 = 今天没有这一代。

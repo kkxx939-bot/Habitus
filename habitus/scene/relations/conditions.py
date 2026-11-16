@@ -128,7 +128,7 @@ def mechanical(
                 Condition(Template.FIELD, name, Field.WITH) for name in record.subjects if CONDITION_JOIN not in name
             )
     for identity in concepts.behaviors():
-        # 前因自己、它的上级与下级不当它的时间线条件：读的是同一批记录（丙一 2026-11-15）
+        # 前因自己、它的上级与下级不当它的时间线条件：读的是同一批记录（裁定 101 第 8 条）
         if (
             identity != antecedent
             and not concepts.related(identity, antecedent)

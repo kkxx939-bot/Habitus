@@ -2,10 +2,13 @@
 
 - ``ticked_at``：上一拍跑到哪一刻（每拍跑完推进）。下一拍离它超过容差，中间那段就是
   没在看的时段（写成会话一支的「未观测」）；
-- ``unwatched_until``：最后一段写成「未观测」的空白的结尾。换代要等水位过了 max(昨天日终, 它) 再留几槽余量（用户 11-10）；
-  "上次看到哪一刻"取 ``ticked_at`` 与它里面晚的那个（写了空白、这一拍又没跑完时，空白之后到下一拍之间系统是在看的）；
-- ``formed_through`` 与 ``formed_generation``：上一次建预期看到了哪一刻、用的是哪一天那一代的表。这一拍从哪一刻起看：今天这一代
-  第一次建预期时从零点起（补建，裁定 94 第 2 条），否则从 ``formed_through`` 起——取代原来只在内存里的 ``now - 一拍``。
+- ``unwatched_until``：最后一段写成「未观测」的空白的结尾。"上次看到哪一刻"取 ``ticked_at`` 与它里面晚的那个（写了空白、这一拍
+  又没跑完时，空白之后到下一拍之间系统是在看的）；
+- ``overnight_until``：最后一段跨过当地零点（从零点之前开始）的空白的结尾。换代要等水位过了 max(今天零点, 它) 再留几槽余量
+  （用户 11-10「按槽留余量」）：换代只读到昨天，只有伸进昨天的那段空白要等归约落树；今天白天合盖写的空白与昨天无关，不再让
+  等待重来（用户 2026-11-16）；
+- ``formed_through`` 与 ``formed_generation``：上一次建预期看到了哪一刻、用的是哪一天那一代的表。这一拍从哪一刻起看：用的表换了
+  一代时从今天零点起（补建，裁定 94 第 2 条），否则从 ``formed_through`` 起——取代原来只在内存里的 ``now - 一拍``。
 
 进程不留这几样的内存副本：重启后照盘上的接着看。
 """
@@ -27,9 +30,9 @@ from habitus.infrastructure.store.filesystem import (
     read_regular_bytes,
 )
 
-_SCHEMA = "tick_watermark_v1"
+_SCHEMA = "tick_watermark_v2"
 _MAX_BYTES = 64 * 1024
-_KEYS = frozenset({"schema", "ticked_at", "unwatched_until", "formed_through", "formed_generation"})
+_KEYS = frozenset({"schema", "ticked_at", "unwatched_until", "overnight_until", "formed_through", "formed_generation"})
 WATERMARK_FILENAME = "tick_watermark.json"
 
 
@@ -43,9 +46,10 @@ class TickWatermark:
     unwatched_until: datetime | None = None
     formed_through: datetime | None = None
     formed_generation: date | None = None
+    overnight_until: datetime | None = None
 
     def __post_init__(self) -> None:
-        for value in (self.ticked_at, self.unwatched_until, self.formed_through):
+        for value in (self.ticked_at, self.unwatched_until, self.overnight_until, self.formed_through):
             if value is not None and value.utcoffset() is None:
                 raise TickWatermarkError("tick watermark times must be timezone-aware")
 
@@ -59,8 +63,12 @@ class TickWatermark:
     def ticked(self, at: datetime) -> TickWatermark:
         return replace(self, ticked_at=at)
 
-    def unwatched(self, until: datetime) -> TickWatermark:
-        return replace(self, unwatched_until=until)
+    def unwatched(self, since: datetime, until: datetime) -> TickWatermark:
+        """写了一段 ``since`` → ``until`` 的空白：它从 ``until`` 那天的零点之前开始（跨过零点），也记成跨夜的那一段。"""
+
+        midnight = datetime.combine(until.date(), clock_time(0), tzinfo=until.tzinfo)
+        overnight = until if since < midnight else self.overnight_until
+        return replace(self, unwatched_until=until, overnight_until=overnight)
 
     def formed(self, through: datetime, generation: date) -> TickWatermark:
         return replace(self, formed_through=through, formed_generation=generation)
@@ -79,8 +87,12 @@ class TickWatermarkStore:
         except FileNotFoundError:
             return TickWatermark()
         except (OSError, DurablePathIntegrityError) as exc:
-            raise TickWatermarkError(f"tick watermark is unreadable: {type(exc).__name__}") from exc
-        return decode_watermark(raw)
+            raise TickWatermarkError(f"tick watermark {self.path} is unreadable: {type(exc).__name__}") from exc
+        try:
+            return decode_watermark(raw)
+        except TickWatermarkError as exc:
+            # 点出是哪个文件：升级后留着上一个版本形状的水位时，人要知道删哪一个（裁定 99 第 4 条）
+            raise TickWatermarkError(f"{self.path}: {exc}") from exc
 
     def write(self, watermark: TickWatermark) -> None:
         payload = encode_watermark(watermark)
@@ -127,7 +139,7 @@ class TickTrack:
             return mark, None
         if self.unwatched is not None:
             await asyncio.to_thread(self.unwatched, since, edge)
-        mark = mark.unwatched(edge)
+        mark = mark.unwatched(since, edge)
         await self.write(mark)
         return mark, (since, edge)
 
@@ -136,8 +148,8 @@ class TickTrack:
 
     @staticmethod
     def looked_since(now: datetime, mark: TickWatermark, generation: date) -> datetime:
-        """这一拍从哪一刻起看：今天这一代第一次建预期从零点起（补建，裁定 94 第 2 条），之后从上一次建预期看到的那一刻起
-        （落盘的 ``formed_through``，中间关机、合盖几个小时也接得上）。"""
+        """这一拍从哪一刻起看：用的表（``generation`` 那一天那一代）与上一次建预期时不是同一张时从零点起（补建，裁定 94 第 2 条；
+        旧表下建过的同一身份不再建），之后从上一次建预期看到的那一刻起（落盘的 ``formed_through``，中间关机、合盖几个小时也接得上）。"""
 
         midnight = datetime.combine(now.date(), clock_time(0), tzinfo=now.tzinfo)
         if mark.formed_generation != generation or mark.formed_through is None:
@@ -153,6 +165,7 @@ def encode_watermark(watermark: TickWatermark) -> bytes:
         "schema": _SCHEMA,
         "ticked_at": stamp(watermark.ticked_at),
         "unwatched_until": stamp(watermark.unwatched_until),
+        "overnight_until": stamp(watermark.overnight_until),
         "formed_through": stamp(watermark.formed_through),
         "formed_generation": stamp(watermark.formed_generation),
     }
@@ -179,6 +192,7 @@ def decode_watermark(raw: bytes) -> TickWatermark:
         return TickWatermark(
             ticked_at=moment("ticked_at"),
             unwatched_until=moment("unwatched_until"),
+            overnight_until=moment("overnight_until"),
             formed_through=moment("formed_through"),
             formed_generation=None if generation is None else date.fromisoformat(generation),
         )

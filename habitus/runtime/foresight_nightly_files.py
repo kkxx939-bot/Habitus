@@ -53,7 +53,7 @@ class NightlyFiles:
         self._unreadable: list[str] = []
         self._lock = threading.Lock()
 
-    def write(self, lane: str, night: date, payload: bytes) -> Path:
+    def write(self, lane: str, night: date, payload: bytes, *, keep: Callable[[date], bool] | None = None) -> Path:
         latest = self.latest_night(lane)
         if latest is not None and night < latest:
             raise ForesightError(f"night {night} comes before the stored night {latest}; history is not rewritten")
@@ -68,7 +68,7 @@ class NightlyFiles:
             raise ForesightError(f"{self.label} cannot be written: {exc}") from exc
         if self._read_bytes(path) != payload:
             raise ForesightError(f"{self.label} failed read-back verification")
-        self._prune(lane)
+        self._prune(lane, keep)
         return path
 
     def lanes(self) -> tuple[str, ...]:
@@ -101,11 +101,15 @@ class NightlyFiles:
         nights = self.nights(lane)
         return nights[-1] if nights else None
 
-    def latest[T](self, lane: str, decode: Callable[[str, date], T]) -> T | None:
+    def latest[T](
+        self, lane: str, decode: Callable[[str, date], T], *, accept: Callable[[date], bool] | None = None
+    ) -> T | None:
         """最晚一晚读得出来的那一份（``decode`` 把一晚的文本解码，坏的抛 ``ForesightError``）：最晚那一份坏了就往前退一晚，
-        坏的计入观测；一晚都读不出来是 None。"""
+        坏的计入观测；一晚都读不出来是 None。给了 ``accept`` 就只看它认的那几晚（不认的不读）。"""
 
         for night in reversed(self.nights(lane)):
+            if accept is not None and not accept(night):
+                continue
             try:
                 return decode(self.read(lane, night), night)
             except ForesightError:
@@ -141,9 +145,14 @@ class NightlyFiles:
             raise ForesightError(f"lane {lane!r} is not a canonical directory name")
         return self.directory / lane
 
-    def _prune(self, lane: str) -> None:
+    def _prune(self, lane: str, keep: Callable[[date], bool] | None = None) -> None:
+        """删到只剩最近 ``retained_nights`` 晚；给了 ``keep`` 就另外留下它认的最晚那一晚（不在最近几晚里时多留这一份）。"""
+
         nights = self.nights(lane)
+        kept = next((night for night in reversed(nights) if keep(night)), None) if keep is not None else None
         for night in nights[: max(0, len(nights) - self.retained_nights)]:
+            if night == kept:
+                continue
             try:
                 durable_unlink(self.lane_directory(lane) / f"{night.isoformat()}.json", artifact_root=self.root)
             except DurablePathIntegrityError as exc:

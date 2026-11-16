@@ -143,7 +143,7 @@ def gap_kind(value: Any, label: str) -> str:
 
 
 def kind_token(value: Any, label: str) -> str:
-    """词编号或四个占位标记之一（「非事件」「续话」「表外」「待定」，裁定 19、词表方案 2026-11-14）；形状由词表定义，树只核对、
+    """词编号或四个占位标记之一（「非事件」「续话」「表外」「待定」，裁定 19、裁定 101）；形状由词表定义，树只核对、
     不解释。"""
 
     resolved = text(value, label)

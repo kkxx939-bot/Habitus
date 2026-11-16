@@ -59,7 +59,7 @@ def sealed_through(last):  # type: ignore[no-untyped-def]
 
 
 class StubVocabulary:
-    """"数在用的词"那一步的替身：在用的词就是语义树那份假词表口给的（这里不数，数法在 ``test_kinds_vocabulary``）。"""
+    """ "数在用的词"那一步的替身：在用的词就是语义树那份假词表口给的（这里不数，数法在 ``test_kinds_vocabulary``）。"""
 
     def __init__(self, catalog: ClassCatalog) -> None:
         self.catalog = catalog
@@ -272,7 +272,8 @@ def test_a_generation_waits_for_contiguous_closed_days_through_yesterday(tmp_pat
 
 
 def test_a_generation_waits_until_the_tick_watermark_passes_the_margin(tmp_path) -> None:
-    """用户 11-10「按槽留余量」：预测拍水位过了 max(昨天日终, 最后一段「未观测」结尾) + 余量才换代。"""
+    """用户 11-10「按槽留余量」：预测拍水位过了 max(今天零点, 最后一段跨过零点的「未观测」结尾) + 余量才换代；今天白天合盖
+    写的空白（不跨零点）不让等待重来（用户 2026-11-16）。"""
 
     mark = [TickWatermark()]
     _site, run = assembled(tmp_path, watermark=lambda: mark[0], margin=timedelta(minutes=45))
@@ -282,10 +283,18 @@ def test_a_generation_waits_until_the_tick_watermark_passes_the_margin(tmp_path)
     assert run.ready().day is None
     mark[0] = TickWatermark(ticked_at=midnight + timedelta(minutes=45))
     assert run.ready().day == TODAY
-    mark[0] = TickWatermark(ticked_at=midnight + timedelta(hours=2), unwatched_until=midnight + timedelta(hours=1, minutes=30))
-    assert run.ready().day is None  # 空白刚写下：再等余量
-    mark[0] = TickWatermark(ticked_at=midnight + timedelta(hours=2, minutes=15), unwatched_until=midnight + timedelta(hours=1, minutes=30))
+    woke = midnight + timedelta(hours=1, minutes=30)
+    mark[0] = TickWatermark(ticked_at=midnight + timedelta(hours=2), unwatched_until=woke, overnight_until=woke)
+    assert run.ready().day is None  # 跨夜的空白刚写下：再等余量
+    mark[0] = TickWatermark(
+        ticked_at=midnight + timedelta(hours=2, minutes=15), unwatched_until=woke, overnight_until=woke
+    )
     assert run.ready().day == TODAY
+    daytime = midnight + timedelta(hours=2, minutes=10)
+    mark[0] = TickWatermark(
+        ticked_at=midnight + timedelta(hours=2, minutes=15), unwatched_until=daytime, overnight_until=woke
+    )
+    assert run.ready().day == TODAY  # 白天合盖的空白不跨零点：不再等
 
 
 def test_the_calendar_is_refreshed_first_and_a_failing_refresh_is_a_fallback(tmp_path) -> None:
@@ -461,7 +470,7 @@ def test_a_corrupt_mark_is_reported_not_taken_for_done(tmp_path) -> None:
     with pytest.raises(GenerationMarkError):
         marks.finished(day)
     good = marks.path(day - timedelta(days=1)).read_text(encoding="utf-8")
-    marks.path(day).write_text(good.replace('{\n', '{\n  "day": "x",\n', 1), encoding="utf-8")
+    marks.path(day).write_text(good.replace("{\n", '{\n  "day": "x",\n', 1), encoding="utf-8")
     with pytest.raises(GenerationMarkError, match="repeats"):
         marks.read(day)
     _site, run = assembled(tmp_path / "run")
@@ -506,5 +515,3 @@ def test_a_backing_off_model_queue_holds_the_relations_to_the_previous_generatio
         assert scene.outcome == DEGRADED and "b4: 关系沿用上一代" in str(scene.reason), name
         assert "模型调不通" in str(scene.report["relations_held"]), name
         assert any("关系沿用上一代" in item for item in result.problems), name
-
-
