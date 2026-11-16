@@ -378,7 +378,8 @@ def test_relation_thresholds_come_from_config_and_the_clock_from_temporal(tmp_pa
     for bad, match in (
         ({"fdr": "0.1"}, "scene.relations.fdr must be a number"),
         ({"min_absolute_lift": True}, "scene.relations.min_absolute_lift must be a number"),
-        ({"condition_ask_min_antecedents": 4.0}, "scene.relations.condition_ask_min_antecedents must be an integer"),
+        ({"max_combined_conditions": 4.0}, "scene.relations.max_combined_conditions must be an integer"),
+        ({"condition_ask_min_antecedents": 40}, "unknown"),  # 候选条件那一路 2026-11-15 删了：旧键出现即报错
         ({"slot_minutes": 15}, "unknown"),  # 时间的数不在这一组
     ):
         with pytest.raises(ConfigError, match=match):

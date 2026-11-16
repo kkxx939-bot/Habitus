@@ -53,7 +53,7 @@ def table(
         relation_night=series.cutoff,
         slot_minutes=CONFIG.slot_minutes,
         window_slots=CONFIG.transition_window_slots,
-        recurrences=recurrences_of(series, RULERS),
+        recurrences=recurrences_of(series, RULERS, concepts),
         coverage=coverage_by_lane(series, RULERS)["session"],
         calendar=calendar,
     )

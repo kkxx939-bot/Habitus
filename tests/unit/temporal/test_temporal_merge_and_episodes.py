@@ -70,8 +70,8 @@ def test_series_gives_one_kinds_timeline_without_pending_records() -> None:
 
     pending = replace(record(at(WED, 9), "s-待定"), classified=False)
     found = series([record(at(WED, 17)), record(at(WED, 18), "s-k0002"), pending], cutoff=date(2026, 1, 8))
-    assert [item.kind_token for item in found.records_of("s-k0001")] == ["s-k0001"]
-    assert found.records_of("s-待定") == ()
+    assert [item.kind_token for item in found.records_of({"s-k0001"})] == ["s-k0001"]
+    assert found.records_of({"s-待定"}) == ()
 
 
 def test_starts_exactly_one_window_apart_are_one_occurrence() -> None:

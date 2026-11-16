@@ -21,6 +21,7 @@ from typing import Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from habitus.foresight import Batch, Moment, Seen, UnsealedReader, UnsealedRow, form_expectations
+from habitus.foresight.hierarchy import FLAT, KindHierarchy
 from habitus.foresight.ladder import Tolerance, silenced
 from habitus.foresight.opportunities import OpportunityTable
 from habitus.foresight.triggers.assemble import LOOKBACK_DAYS, seen_rows
@@ -29,7 +30,7 @@ from habitus.runtime.foresight_implementation import IMPLEMENTATION
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement import BehaviorReadSide
-from habitus.runtime.foresight_tree_rows import day_cache
+from habitus.runtime.foresight_tree_rows import day_cache, hierarchy_of
 from habitus.runtime.generation_marks import GenerationMarkError
 from habitus.scene.views import DayIndexCache
 from habitus.temporal.slots import slot_index
@@ -45,12 +46,14 @@ class FormingReadSide(BehaviorReadSide, Protocol):
 
 @dataclass(frozen=True)
 class Recent:
-    """这一刻读到的最近几天：此刻、行为树的按天索引、还没封口的判断、两者合起来按开始时刻排好的行。"""
+    """这一刻读到的最近几天：此刻、行为树的按天索引、还没封口的判断、两者合起来按开始时刻排好的行，以及此刻的上下级（读的时候
+    取一份，这一拍建预期与递送都用这一份，丙一 2026-11-15）。"""
 
     now: datetime
     cache: DayIndexCache
     unsealed: tuple[UnsealedRow, ...]
     seen: tuple[Seen, ...]
+    kinds: KindHierarchy = FLAT
 
 
 @dataclass(frozen=True)
@@ -90,11 +93,12 @@ class ExpectationForming:
         """此刻往回看的几天。还没封口的判断读到与行为树同一个回看窗（今天与前 7 天）：过了零点、归约又落后时，昨晚还没封口的
         「没读懂」与可读的前因也在里面（``rows`` 本来就把全部未封口判断读进来，按窗过滤不省开销）。"""
 
+        kinds = hierarchy_of(self.read_side)  # 这一拍开头取一份，之后长出来的候选这一拍不认（C27）
         cache = day_cache(self.read_side)
         since = datetime.combine(now.date() - timedelta(days=LOOKBACK_DAYS), clock_time(0), tzinfo=now.tzinfo)
         await self.unsealed.prepare(until=now)
         unsealed = self.unsealed.rows(since=since, until=now)
-        return Recent(now, cache, unsealed, seen_rows(Moment(at=now, slot=0), cache, unsealed))
+        return Recent(now, cache, unsealed, seen_rows(Moment(at=now, slot=0), cache, unsealed), kinds)
 
     def form(
         self,
@@ -114,6 +118,7 @@ class ExpectationForming:
                 slot=slot_index(now, slot_minutes=table.slot_minutes),
                 calendar=dict(self.read_side.calendar.for_expectations(now.date())),
                 looked_since=looked_since,
+                kinds=recent.kinds,
             ),
             table=table,
             rows=recent.seen,

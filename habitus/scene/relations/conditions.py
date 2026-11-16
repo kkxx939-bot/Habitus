@@ -6,9 +6,9 @@
 3. **情境概念**（``CONCEPT``）——前因那一条那一天某个日历情境成立（只按那一天的日历机械判：答不出的那天、没给日历的时间线
    都判不了）。
 
-条件的来源有两处：机械列举的（每个够样本的前因：出现过的地点 / 同在的人、出现在它之前的每一类、
-每个日历情境），以及大模型提的（只有结构字段与时间线两种，第 7 步：读 A 那一条与它之前的概要、不看 B，提出"可能被什么左右"，
-经 ``compile_proposal`` 编译，落不成模板的进已拒清单，不每晚换个说法反复试）。第 N 晚提的只在 N 之后的数据上检验。
+条件只有机械列举的一个来源（每个够样本的前因：出现过的地点 / 同在的人、出现在它之前的每一类——它自己和它的上下级除外、
+每个日历情境）。原来还问大模型提条件，它能提的两种（结构字段、时间线）里分得出两边的机械列举都已经列了，撞上的不算新条件，
+加不进任何东西，已删（2026-11-15）。
 
 **几个条件合起来**（裁定 61 第 6 条、62 第 1 条）：关系键里的条件是一个集合——各条件的文本排序后用 ``CONDITION_JOIN``
 拼成一个键（``join_conditions`` / ``parse_conditions``；``+`` 是概念身份预留的分隔符，地点 / 同在的人取值里含它的不当条件）。
@@ -39,12 +39,12 @@ from __future__ import annotations
 
 import math
 import random
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 
-from habitus.scene.concepts.model import ConceptRole, ConceptSet
+from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.relations import stats
 from habitus.scene.relations.measures import ChainMeasure, PairedMeasure
 from habitus.scene.relations.spans import Chain, Stratum
@@ -55,10 +55,6 @@ class Template(str, Enum):
     FIELD = "field"
     TIMELINE = "timeline"
     CONCEPT = "concept"
-
-
-#: 模型能提的模板（``compile_proposal``）：情境概念只剩日历情境，日历条件由 ``mechanical`` 机械列举，不由模型提。
-PROPOSABLE = (Template.FIELD, Template.TIMELINE)
 
 
 # TODO(FORESIGHT-EVENT-FIRST-001)：天气等外部事实接进外部条件包（habitus/conditions），在这里注册成新字段（要有历史），
@@ -82,10 +78,6 @@ class Condition:
             assert self.field is not None
             return f"field:{self.field.value}" + (f"={self.value}" if self.value else "")
         return f"{self.template.value}:{self.value}"
-
-
-class ConditionError(ValueError):
-    """提议落不成能提的模板（``PROPOSABLE``）之一。"""
 
 
 #: 条件集合的键里各条件之间的分隔符（``concepts/model.py`` 的 ``IDENTITY_SEPARATORS`` 预留，概念身份里不会出现）。
@@ -116,42 +108,6 @@ def parse(text: str) -> Condition:
     return Condition(Template(template), rest)
 
 
-def compile_proposal(proposal: Mapping[str, object], concepts: ConceptSet, *, lane: str) -> Condition:
-    """把一条提议编译成模板；落不成的抛 ``ConditionError``，说清是哪一条不对（进已拒清单）。
-
-    提议的形状：``{"template": "field", "field": "place" | "with", "value": "..."}``、
-    ``{"template": "timeline", "concept": "<类名或概念名>"}``。情境概念模板不收（``PROPOSABLE``）：日历条件机械列举。
-    """
-
-    try:
-        template = Template(str(proposal.get("template")))
-    except ValueError as exc:
-        raise ConditionError(f"unknown template: {proposal.get('template')!r}") from exc
-    if template not in PROPOSABLE:
-        raise ConditionError(
-            f"the {template.value} template is not proposable: calendar conditions are enumerated mechanically"
-        )
-    if template is Template.FIELD:
-        try:
-            field = Field(str(proposal.get("field")))
-        except ValueError as exc:
-            raise ConditionError(f"unknown field: {proposal.get('field')!r}") from exc
-        value = str(proposal.get("value") or "").strip()
-        if not value or not value.isprintable() or "=" in value or "|" in value or CONDITION_JOIN in value:
-            raise ConditionError(f"field {field.value} needs a plain value")
-        return Condition(Template.FIELD, value, field)
-    name = str(proposal.get("concept") or "").strip()
-    identity = _resolve(concepts, name)
-    if identity is None:
-        raise ConditionError(f"no concept named {name!r}")
-    item = concepts[identity]
-    if concepts.lane_of(identity) not in (lane, None):
-        raise ConditionError(f"concept {name!r} belongs to another lane")
-    if item.role is not ConceptRole.BEHAVIOR:
-        raise ConditionError(f"the timeline template needs a behaviour concept, {name!r} is not one")
-    return Condition(template, identity)
-
-
 def mechanical(
     line: LaneTimeline,
     concepts: ConceptSet,
@@ -172,7 +128,13 @@ def mechanical(
                 Condition(Template.FIELD, name, Field.WITH) for name in record.subjects if CONDITION_JOIN not in name
             )
     for identity in concepts.behaviors():
-        if identity != antecedent and concepts.lane_of(identity) == line.lane and line.marks.get(identity):
+        # 前因自己、它的上级与下级不当它的时间线条件：读的是同一批记录（丙一 2026-11-15）
+        if (
+            identity != antecedent
+            and not concepts.related(identity, antecedent)
+            and concepts.lane_of(identity) == line.lane
+            and line.marks.get(identity)
+        ):
             candidates.add(Condition(Template.TIMELINE, identity))
     for identity in concepts.situations():
         if concepts.lane_of(identity) in (line.lane, None) and identity in line.situations:
@@ -494,16 +456,6 @@ def ready_to_test(measure: ModeratedMeasure | PairedMeasure, *, alpha: float) ->
     return all(isinstance(part, ModeratedMeasure) and part.enough for part in parts) and measure.minimum_p() <= alpha
 
 
-def _resolve(concepts: ConceptSet, name: str) -> str | None:
-    if name in concepts:
-        return concepts[name].identity
-    # 名字只在在用的概念里唯一（停用的可以与在用的同名），按名字找只找在用的
-    matches = [
-        identity for identity in concepts if concepts.label_of(identity) == name and not concepts[identity].retired
-    ]
-    return matches[0] if len(matches) == 1 else None
-
-
 def _side_minimum(items: Sequence[Stratum]) -> float:
     """条件外的次数门（双侧，开测门用）：一组对照自己全中或全不中时最小的双侧精确 p。L10.17 的"条件外也要攒到全中能显著"。"""
 
@@ -524,12 +476,9 @@ def _mean_lift(items: Sequence[Stratum]) -> float:
 __all__ = [
     "CONDITION_JOIN",
     "Condition",
-    "ConditionError",
     "Field",
     "ModeratedMeasure",
-    "PROPOSABLE",
     "Template",
-    "compile_proposal",
     "evaluator",
     "all_hold",
     "evaluator_all",

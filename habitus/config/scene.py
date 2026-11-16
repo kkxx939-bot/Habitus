@@ -34,7 +34,6 @@ class SceneRelationsConfig:
     exact_strata_limit: int | None = None
     first_seen_min_days: int | None = None
     first_seen_min_blocks: int | None = None
-    condition_ask_min_antecedents: int | None = None
     max_combined_conditions: int | None = None
 
     def __post_init__(self) -> None:

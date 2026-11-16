@@ -106,7 +106,7 @@ def test_a_night_without_a_relation_table_falls_back_and_says_so(tmp_path) -> No
     run = ForesightNightlyRun(store, relations, CONFIG)
     series = planted(days=5)
     lines = build_timelines(series, CONCEPTS, {}, CONFIG)
-    recurrences = recurrences_of(series, Rulers(15, 2700, 3, 5.0, 5.0, 35))
+    recurrences = recurrences_of(series, Rulers(15, 2700, 3, 5.0, 5.0, 35), CONCEPTS)
     report = run.run(night=series.cutoff, concepts=CONCEPTS, timelines=lines, recurrences=recurrences)
     assert report.lanes["session"].relation_night is None and report.lanes["session"].kinds == 5
     assert any("还没有关系表" in signal for signal in report.signals)

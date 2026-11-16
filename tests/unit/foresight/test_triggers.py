@@ -60,7 +60,7 @@ def table_of(
         relation_night=series.cutoff,
         slot_minutes=CONFIG.slot_minutes,
         window_slots=CONFIG.transition_window_slots,
-        recurrences=recurrences_of(series, RULERS),
+        recurrences=recurrences_of(series, RULERS, concepts),
     )
 
 

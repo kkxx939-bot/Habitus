@@ -65,12 +65,14 @@ def test_a_behaviour_concept_is_its_class_titled_with_the_class_name() -> None:
         "就寝",
     )
     assert BEDTIME.label == "就寝" and WEEKEND.label == "周末"  # 显示名：行为概念是类名，日历情境是自己的名字
-    with pytest.raises(ConceptError, match="named by its one class id"):
+    with pytest.raises(ConceptError, match="named by its own class id"):
         replace(BEDTIME, name="就寝")  # 身份必须是类编号
-    with pytest.raises(ConceptError, match="named by its one class id"):
+    with pytest.raises(ConceptError, match="named by its own class id"):
         replace(BEDTIME, title=None)
-    with pytest.raises(ConceptError, match="named by its one class id"):
-        replace(BEDTIME, classes=(kind_id("就寝"), kind_id("早餐")))
+    # 管的编号第一个是自己，后面是下级（丙一 2026-11-15，原来要求恰好一个）
+    assert replace(BEDTIME, classes=(kind_id("就寝"), kind_id("早餐"))).classes == (kind_id("就寝"), kind_id("早餐"))
+    with pytest.raises(ConceptError, match="named by its own class id"):
+        replace(BEDTIME, classes=(kind_id("早餐"), kind_id("就寝")))
     with pytest.raises(ConceptError, match="carries no situation"):
         replace(BEDTIME, situation=WEEKEND.situation)
     with pytest.raises(ConceptError, match="carries no situation"):
@@ -98,7 +100,7 @@ def test_a_concept_set_answers_the_class_questions() -> None:
     assert set(concepts.behaviors()) == {cid("就寝"), cid("早餐"), cid("修改代码"), cid("打球"), cid("跑步")}
     assert set(concepts.situations()) == {"周末"}
     assert concepts.base_for(kind_id("就寝")) == BEDTIME.identity and concepts.base_for(kind_id("吃药")) is None
-    assert concepts.classes_of(cid("打球")) == (kind_id("打球"),) and concepts.classes_of("周末") == ()
+    assert concepts[cid("打球")].classes == (kind_id("打球"),) and concepts["周末"].classes == ()
     assert concepts.class_label(kind_id("就寝")) == "就寝" and concepts.class_label(kind_id("吃药")) == kind_id("吃药")
     assert concepts.label_of(cid("早餐")) == "早餐" and concepts.label_of("周末") == "周末"
     assert concepts.label_of("咖啡") == "咖啡"

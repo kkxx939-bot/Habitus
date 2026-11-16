@@ -10,7 +10,7 @@
 ```
 
 两条 lane 各成一个检验族（裁定 21：两条 lane 相互独立、不干扰）。不比的对（机械排除）：自己对自己（那是复现节律，
-归 ``scene.recurrence``）。一条记录只算它那个类的行为概念，两个不同的概念不会读同一批记录。
+归 ``scene.recurrence``），以及上下级（一条下级的记录也记在在用的上级账上，两个读的是同一批记录；丙一 2026-11-15）。
 
 本模块只算"今晚的数据说什么"。候选要在之后的新数据上复现才成立（前向验证）、成立后按段看新数据（维持检验，从上一次判过起不重叠地攒满一段）——
 这两步要跨夜的状态，由状态折叠（第 5 步）调 ``evaluate`` 在对应的子集上做。先验权重由第 7 步给，这里只收。
@@ -26,6 +26,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
 
+from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.relations import stats
 from habitus.scene.relations.conditions import (
     Condition,
@@ -196,10 +197,11 @@ def gone(
     return far_relative < config.thresholds.min_relative_lift
 
 
-def comparable(antecedent: str, consequent: str) -> bool:
-    """这一对要不要比：不比自己（一条记录只算它那个类的行为概念，两个不同的概念不会读同一批记录）。"""
+def comparable(concepts: ConceptSet, antecedent: str, consequent: str) -> bool:
+    """这一对要不要比：不比自己，也不比上下级（下级的记录也记在上级的账上，两个读的是同一批记录，丙一 2026-11-15）。
+    兄弟、不相干的照常比。"""
 
-    return antecedent != consequent
+    return antecedent != consequent and not concepts.related(antecedent, consequent)
 
 
 __all__ = [

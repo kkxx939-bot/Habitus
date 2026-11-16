@@ -252,7 +252,10 @@ def _cleared(before: Relation, measured: bool, tests: LaneTests, night: date) ->
         return None
     if before.status not in (Status.CANDIDATE, Status.ESTABLISHED):
         return ()
-    reason = "它依赖的段或条件已经不在了（变点重算后整段没了、条件被拒或消失），这一行清掉"
+    if tests.concepts.related(before.key.antecedent, before.key.consequent):
+        reason = "前因与后果是上下级（下级的记录也记在上级的账上，两个读的是同一批记录），不再量这一对，这一行清掉"
+    else:
+        reason = "它依赖的段或条件已经不在了（变点重算后整段没了、条件被拒或消失），这一行清掉"
     return (Transition(night=night, key=before.key, before=before.status, after=Status.EXPIRED, reason=reason),)
 
 

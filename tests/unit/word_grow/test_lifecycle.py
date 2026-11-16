@@ -219,7 +219,9 @@ def test_c31_a_deleted_nodes_day_counts_for_its_parent_turning_in_use(site: Grow
     _grow_x(site, at(d(4, 13), 9))
     site.record("conv-w", at(d(4, 20), 9), "帮我新写一份文档", Named(NAMES[WRITE_DOC]))
     site.generate(d(5, 2))
-    assert WRITE_DOC not in site.in_use()
+    # 丙一 3.5（用户 2026-11-15 定）：X 还是候选时 04-13 那条也算给写文档的日子，04-13 + 04-20 两天，这一代就转了在用
+    # （原来要等 X 删掉、那条换算过来才够）
+    assert WRITE_DOC in site.in_use()
     site.generate(d(5, 3))  # X 删掉
     site.generate(d(5, 4))
     assert WRITE_DOC in site.in_use()  # 04-13（换算过来的）+ 04-20

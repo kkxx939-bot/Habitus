@@ -11,6 +11,7 @@ from datetime import date
 from pathlib import Path
 
 from habitus.config.foresight import ForesightStoreConfig
+from habitus.foresight.errors import ForesightError
 from habitus.foresight.opportunities import OpportunityTable, decode_table, encode_table
 from habitus.runtime.foresight_nightly_files import NightlyFiles
 
@@ -47,7 +48,12 @@ class OpportunityStore:
         return self._files.latest_night(lane)
 
     def read(self, lane: str, night: date) -> OpportunityTable:
-        return decode_table(self._files.read(lane, night), lane=lane, night=night)
+        """读一晚的表；坏了明确报错、点出是哪个文件。"""
+
+        try:
+            return decode_table(self._files.read(lane, night), lane=lane, night=night)
+        except ForesightError as exc:
+            raise type(exc)(f"{self._files.lane_directory(lane) / f'{night.isoformat()}.json'}: {exc}") from exc
 
     def latest(self, lane: str) -> OpportunityTable | None:
         """盘上最晚一晚读得出来的表（最晚那一份坏了往前退一晚，坏的计入观测）；没有是 None。"""

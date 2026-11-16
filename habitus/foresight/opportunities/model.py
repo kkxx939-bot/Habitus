@@ -121,7 +121,7 @@ def _official(day_types: Iterable[str]) -> set[str]:
 @dataclass(frozen=True)
 class ConditionSpec:
     """一条关系挂的一个条件，预测层白天判"此刻成不成立"要的东西（语义树的条件文本 + 能在白天判它的材料）：
-    时间线条件（"之前出现过某一类"）带那个行为概念的类编号（就是它自己）；日历情境条件带日历键与成立的取值；地点 / 同在的人
+    时间线条件（"之前出现过某一类"）带那个行为概念管的编号（自己 + 全部下级，丙一）；日历情境条件带日历键与成立的取值；地点 / 同在的人
     直接读记录的字段。"""
 
     text: str
@@ -142,7 +142,8 @@ class ConditionSpec:
 @dataclass(frozen=True)
 class RelationOpportunities:
     """一条关系的全部历史机会。``key`` 是语义树的关系身份；前因、后果是概念身份（行为概念 = 类编号，日历情境是自己的名字），
-    ``antecedent_classes`` / ``consequent_classes`` 是两头概念对应的类编号（预期与触发都记类编号）。
+    ``antecedent_classes`` / ``consequent_classes`` 是两头概念管的编号：第一个是那一头的节点自己，其余是它全部活着的下级
+    （丙一 2026-11-15：下级的记录也算上级的；预期与触发记第一个）。
     ``conditions`` 是这条关系挂的条件（裁定 61 第 6 条：成立的带条件关系各是单元的一个输入）；机会只列条件全成立的链。"""
 
     key: str
@@ -184,6 +185,8 @@ class RelationOpportunities:
                 raise ForesightError(f"relation {label} must be a non-empty tuple")
             for token in classes:
                 _text(token, f"relation {label} entry")
+            if len(set(classes)) != len(classes):
+                raise ForesightError(f"relation {label} must not repeat a class")
         if self.segment not in SEGMENTS:
             raise ForesightError(f"unknown relation segment: {self.segment!r}")
         if self.within_day_types and (self.segment != "situation" or self.calendar_key == DAY_TYPE_KEY):
@@ -341,9 +344,9 @@ class OpportunityTable:
         return next((item for item in self.relations if item.key == key), None)
 
     def by_consequent(self, kind_token: str) -> tuple[RelationOpportunities, ...]:
-        """以这个类为后果的全部关系（反向看前因用）。"""
+        """以这个节点为后果的全部关系（反向看前因用）。只认后果是它自己的：上级的关系管着它，却不是它的前因。"""
 
-        return tuple(item for item in self.relations if kind_token in item.consequent_classes)
+        return tuple(item for item in self.relations if item.consequent_classes[0] == kind_token)
 
     def kind(self, kind_token: str) -> KindDays | None:
         return next((item for item in self.kinds if item.kind_token == kind_token), None)

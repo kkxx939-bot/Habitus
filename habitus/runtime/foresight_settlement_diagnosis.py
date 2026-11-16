@@ -22,13 +22,14 @@ from habitus.foresight.diagnosis import (
     diagnose,
     miss_facts,
 )
+from habitus.foresight.hierarchy import KindHierarchy
 from habitus.foresight.history import UnitHistory
 from habitus.foresight.ledger import AccountFact, Expectation
 from habitus.foresight.units import UNIT
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
-from habitus.runtime.foresight_tree_rows import basis_row, day_cache, rows_between
+from habitus.runtime.foresight_tree_rows import basis_row, day_cache, hierarchy_of, rows_between
 from habitus.scene.views import DayIndexCache
 
 if TYPE_CHECKING:  # 只给类型检查看：结算模块在运行时导入本模块
@@ -61,6 +62,7 @@ class SettlementDiagnosis:
         if days < 1:
             raise ValueError("days must be a positive integer")
         cache = day_cache(self.read_side)
+        kinds = hierarchy_of(self.read_side)
         table = self.opportunities.latest(self.lane) if self.opportunities is not None else None
         listed = {relation.key for relation in table.relations} if table is not None else None
         start = now.date() - timedelta(days=days)
@@ -102,6 +104,7 @@ class SettlementDiagnosis:
                         standing=self._standing_at(item, history, tolerance),
                         cache=cache,
                         listed=listed,
+                        kinds=kinds,
                     )
                 )
         return diagnose(misses, settled_rows, alpha=self.evidence.alpha)
@@ -132,6 +135,7 @@ class SettlementDiagnosis:
         standing: Standing,
         cache: DayIndexCache,
         listed: set[str] | None,
+        kinds: KindHierarchy,
     ) -> MissFacts:
         """一次落空的材料从树上取（窗里的行、那一天与依据那几次的日历说法、依据是谁先发起的），标志怎么读在 ``foresight.diagnosis.miss_facts``。"""
 
@@ -145,6 +149,7 @@ class SettlementDiagnosis:
             today_note=cache.day(item.day).day_note,
             basis=[BasisSeen(cache.day(row.at.date()).day_note, row.prompted_by) for row in basis],
             listed=listed,
+            kinds=kinds,
         )
 
 

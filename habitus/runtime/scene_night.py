@@ -15,7 +15,7 @@ B4  关系   候选调节条件补问、先验补问（都按输入摘要缓存�
 **调模型的归模型队列，换代里没有模型调用**：
 
 - 模型队列（``runtime.model_queue``）一项一项做，今天这一代完成之后：``relation_stage.ask``（B4 的补问：先验对着"概念集 +
-  同步词表将要写的"问，候选条件对着今天这一代的时间线问）→ ``syncing.run``（记下同步到的版本，读盘上的在用状态）。
+  同步词表将要写的"问）→ ``syncing.run``（记下同步到的版本，读盘上的在用状态）。
 - 换代调 ``generate``：同步词表（概念落盘，幂等）→ 封口 → 按缓存折叠关系 → 时间线与材料交给机会表。
 
 B4 读的是盘上**全部**已封好的命中（不只今天）：关系每晚全量重算，不做增量统计。
@@ -171,7 +171,7 @@ class SceneNightlyRun:
         return NightMaterials(
             concepts=concepts,
             timelines=lines,
-            recurrences=recurrences_of(series, self.rulers, coverage),
+            recurrences=recurrences_of(series, self.rulers, concepts, coverage),
             coverage=coverage,
         )
 

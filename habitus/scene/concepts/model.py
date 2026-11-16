@@ -1,7 +1,9 @@
 """概念定义：语义树的词汇层，一个概念一份。只有两种概念（2026-11-14 用户定："节点来做行为事件来预测"）：
 
-- **行为概念**：词表里一个行为类原样对应的概念（裁定 20 第 2 条），身份 = 类编号（``s-k0004``），显示名是类名，判据是类判据；
-  同步词表时自动生成，不调模型。一条记录算哪个行为概念只看它的类编号（读时现读，不存命中）。
+- **行为概念**：词表里一个在用的节点原样对应的概念（裁定 20 第 2 条），身份 = 节点编号（``s-k0004``），显示名是节点名，判据是
+  节点判据；同步词表时自动生成，不调模型。它**管的编号**（``classes``）是自己加词表里它全部活着的下级（第一个是自己；词表方案
+  第 7 节、丙一 2026-11-15）：下级的记录也记在它的账上。一条记录算哪些行为概念只看它的编号（读时现读，不存命中）：它自己的
+  概念，加每一个在用上级的概念（``concepts_for``）。上下级之间不量关系（``related``）。
 - **日历情境**：周几、几号、月末、日型这类外部条件（裁定 59 第 7 条），由日历机械生成（``calendar_situations``），不由模型写；
   只当前因或调节条件，不当后果。
 
@@ -93,7 +95,7 @@ class ConceptDefinition:
     role: ConceptRole
     source: ConceptSource
     created_at: datetime
-    #: 行为概念：它自己那一个类；日历情境为空。
+    #: 行为概念管的编号：第一个是它自己，其余是词表里它全部活着的下级；日历情境为空。
     classes: tuple[str, ...] = ()
     #: 行为概念所在的 lane；日历情境为 None（每条 lane 都看得见日历）。
     lane: str | None = None
@@ -126,8 +128,15 @@ class ConceptDefinition:
         if self.situation is not None or self.source.origin is not ConceptOrigin.VOCABULARY:
             raise ConceptError("a behaviour concept is generated from its vocabulary class and carries no situation")
         object.__setattr__(self, "lane", _single_line(self.lane, "concept lane", MAX_NOTE_CHARS))
-        if len(classes) != 1 or identity != concept_identity(classes[0]) or self.title is None:
-            raise ConceptError("a behaviour concept is named by its one class id and titled with the class name")
+        if not classes or identity != concept_identity(classes[0]) or self.title is None:
+            raise ConceptError(
+                "a behaviour concept is named by its own class id (its first class) and titled with its name"
+            )
+        if len(set(classes)) != len(classes):
+            raise ConceptError(f"behaviour concept {self.name!r} manages a class twice")
+        prefix = _lane_prefix(classes[0])
+        if any(_lane_prefix(item) != prefix for item in classes[1:]):
+            raise ConceptError(f"behaviour concept {self.name!r} manages a class of another lane")
 
     @cached_property
     def identity(self) -> str:
@@ -158,7 +167,8 @@ class ConceptDefinition:
 
 
 class ConceptSet(Mapping[str, ConceptDefinition]):
-    """一组自洽的概念：身份不重、一个类最多一个行为概念、同一条 lane 能一起出现的在用概念显示名不重。键是规范身份。"""
+    """一组自洽的概念：身份不重、一个类最多一个行为概念（以它为自己）、两个行为概念管同一个编号时一个必是另一个的上级、
+    同一条 lane 能一起出现的在用概念显示名不重。键是规范身份。"""
 
     def __init__(self, definitions: Iterable[ConceptDefinition]) -> None:
         resolved: dict[str, ConceptDefinition] = {}
@@ -167,8 +177,26 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
                 raise ConceptError(f"concept {definition.name!r} appears twice in the set")
             resolved[definition.identity] = definition
         base = {definition.classes[0]: identity for identity, definition in resolved.items() if definition.classes}
+        counted: dict[str, list[str]] = {}
+        managers: dict[str, list[str]] = {}
+        for identity, definition in sorted(resolved.items()):
+            for index, item in enumerate(definition.classes):
+                managers.setdefault(item, []).append(identity)
+                # 自己的那个类照旧算给自己（停用了也算，历史记号留着读）；下级的只算给在用的上级
+                if index == 0 or not definition.retired:
+                    counted.setdefault(item, []).append(identity)
+        for item, names in managers.items():
+            for index, first in enumerate(names):
+                for second in names[index + 1 :]:
+                    if not _nested(resolved[first], resolved[second]):
+                        raise ConceptError(
+                            f"concepts {first!r} and {second!r} both manage class {item!r} but neither is above the other"
+                        )
         self._items: Mapping[str, ConceptDefinition] = MappingProxyType(resolved)
         self._base: Mapping[str, str] = MappingProxyType(base)
+        self._counted: Mapping[str, tuple[str, ...]] = MappingProxyType(
+            {item: tuple(names) for item, names in counted.items()}
+        )
         for lane in {item.lane for item in resolved.values() if item.lane is not None}:
             self._require_unique_labels(lane)
 
@@ -225,9 +253,21 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
         return tuple(identity for identity, item in self._items.items() if item.role.is_situation)
 
     def base_for(self, class_id: str) -> str | None:
-        """一个类的行为概念的身份；这个类还没有行为概念时为 None。"""
+        """以这个类为自己的行为概念的身份；这个类还没有行为概念时为 None。"""
 
         return self._base.get(class_id)
+
+    def concepts_for(self, class_id: str) -> tuple[str, ...]:
+        """一条挂在这个类上的记录算给哪些行为概念：它自己的（停用了也算），加每一个管着它的在用上级的（按身份排）。"""
+
+        return self._counted.get(class_id, ())
+
+    def related(self, first: str, second: str) -> bool:
+        """两个行为概念一个是另一个的上级（它们读的是同一批记录，不量关系、不互为时间线条件）。同一个概念不算。"""
+
+        if first == second or first not in self or second not in self:
+            return False
+        return _nested(self[first], self[second])
 
     def lane_of(self, name: str) -> str | None:
         """概念属于哪条 lane：行为概念是自己的 lane；日历情境不属于任何一条 lane（None，两边都能用）。不在集里的也给 None。"""
@@ -257,10 +297,19 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
         base = self._base.get(class_id)
         return class_id if base is None else self._items[base].label
 
-    def classes_of(self, name: str) -> tuple[str, ...]:
-        """概念 → 它的类（行为概念是它自己那一个类）；日历情境为空。"""
 
-        return self[name].classes
+def _nested(first: ConceptDefinition, second: ConceptDefinition) -> bool:
+    """两个不同的行为概念一个管着另一个（它自己的编号在另一个管的编号里）。"""
+
+    if not first.classes or not second.classes or first.identity == second.identity:
+        return False
+    return first.classes[0] in second.classes or second.classes[0] in first.classes
+
+
+def _lane_prefix(class_id: str) -> str:
+    """编号里 lane 那一段（``s-k0004`` 的 ``s``）：一个概念管的编号必须同一段。编号怎么写归词表包，这里只认第一个 ``-`` 之前。"""
+
+    return class_id.partition("-")[0]
 
 
 def _single_line(value: object, label: str, limit: int) -> str:

@@ -97,7 +97,7 @@ def nightly(w: World, night: date) -> None:
             relation_night=night,
             slot_minutes=15,
             window_slots=3,
-            recurrences=recurrences_of(series, RULERS),
+            recurrences=recurrences_of(series, RULERS, w.concepts),
         )
     )
 

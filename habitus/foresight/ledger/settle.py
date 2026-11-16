@@ -6,14 +6,15 @@
 - 时窗开始之前：「早到」（记早了几分钟，负数）；时窗之内：「准时」；时窗之后、最晚时限之前：「晚了但做了」（记晚了几分钟）；
 - 到最晚时限没发生：「过期待决」，不是终态——之后在这本账的下一次机会之前补做了就是「后补」，回话另记。
 
-"该行为"按编号完全相等认：词表没有拆分、合并、迁移（词表方案 2026-11-14），预期记的编号就是结算时树上的编号。
+"该行为"认预期的节点自己和它全部活着的下级（``KindHierarchy.family``，丙一 2026-11-15）：一条"写文档"的预期，他写了周报也算
+做到；反过来不认——"写周报"的预期，他写了别的文档不算。词表没有拆分、合并、迁移，预期记的编号就是结算时树上的编号。
 只认真做成的：occurrence 的 status 是 abandoned（放弃了）的那一行不算这件事发生了（裁定 54：假命中）；interrupted 算——他做了，
 只是没做完。
 
 事件触发可能在前因还没封口时就建了（实例是前因的开始时刻）；封口之后前因归成了别的类、或成了非事件（不进行），这次机会就不存在
 ——``antecedent_holds`` 判它（裁定 54：前因不成立 → 作废）。结算与递送开口前对"前因还成立吗"读同一份：前因那一行按实例找、
-类按编号相等认（``event_antecedent_holds``）；对"做了没"也是同一个口径（``counts_as_done``：说中的范围里、
-这一类编号相等、没放弃）。只有一处两边不同：情境要不要按最新的日历重核——结算重核（``antecedent_holds_when_settling``），
+类按机会表上前因管的编号认（``event_antecedent_holds``）；对"做了没"也是同一个口径（``counts_as_done``：说中的范围里、
+这个节点或它的下级、没放弃）。只有一处两边不同：情境要不要按最新的日历重核——结算重核（``antecedent_holds_when_settling``），
 递送开口前不重核（``antecedent_holds_when_delivering``）。
 """
 
@@ -23,6 +24,7 @@ from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import NamedTuple
 
+from habitus.foresight.hierarchy import FLAT, KindHierarchy
 from habitus.foresight.ledger.model import Expectation, Omission, Ruling, Settlement
 from habitus.foresight.opportunities.model import RelationOpportunities
 from habitus.scene.views import FlowRow
@@ -45,9 +47,10 @@ def settle(
     *,
     spoken_at: datetime | None,
     settled_at: datetime,
+    kinds: KindHierarchy = FLAT,
 ) -> Settlement:
     """``rows`` 是从起算那天（``observed_from``；晚形成的预期，起算可能早于形成那天）到最晚时限那天的全部行（按时刻排）；
-    ``spoken_at`` 是这条预期第一次被说出的时刻（没说过是 None）。"""
+    ``spoken_at`` 是这条预期第一次被说出的时刻（没说过是 None）；``kinds`` 是此刻的上下级。"""
 
     def record(outcome: str, uri: str | None = None, offset: int | None = None) -> Settlement:
         return Settlement(
@@ -60,7 +63,7 @@ def settle(
             offset_minutes=offset,
         )
 
-    first = first_occurrence(expectation, rows)
+    first = first_occurrence(expectation, rows, kinds=kinds)
     if first is None:
         return record("过期待决")
     at = _utc(first.at)
@@ -74,11 +77,13 @@ def settle(
     return record("晚了但做了", first.uri, _minutes(at - _utc(end)))
 
 
-def first_occurrence(expectation: Expectation, rows: Sequence[FlowRow]) -> FlowRow | None:
-    """``observed_from`` 之后、最晚时限之前这一类第一次发生的那一行。"""
+def first_occurrence(
+    expectation: Expectation, rows: Sequence[FlowRow], *, kinds: KindHierarchy = FLAT
+) -> FlowRow | None:
+    """``observed_from`` 之后、最晚时限之前这个节点（或它的下级）第一次发生的那一行。"""
 
     for row in sorted(rows, key=_row_at):
-        if counts_as_done(expectation, row.kind_token, row.at, abandoned=row.status in NOT_DONE):
+        if counts_as_done(expectation, row.kind_token, row.at, abandoned=row.status in NOT_DONE, kinds=kinds):
             return row
     return None
 
@@ -89,12 +94,13 @@ def counts_as_done(
     started_at: datetime,
     *,
     abandoned: bool,
+    kinds: KindHierarchy = FLAT,
 ) -> bool:
     """一条 ``started_at`` 开始、类为 ``kind_token`` 的记录算不算这条预期说的那件事做了：落在说中的范围里（起算之后、最晚时限之前）、
-    这一类编号相等、没放弃。结算（``first_occurrence``）与递送判
+    编号是这条预期的节点或它的下级、没放弃。结算（``first_occurrence``）与递送判
     "这回已经做了"（``foresight.delivery.done_since``）同一个口径。"""
 
-    return kind_token in {expectation.kind_token} and expectation.covers(_utc(started_at)) and not abandoned
+    return kind_token in kinds.family(expectation.kind_token) and expectation.covers(_utc(started_at)) and not abandoned
 
 
 def antecedent_holds(
@@ -181,18 +187,19 @@ def rule_overdue(
     *,
     before: datetime | None,
     ruled_at: datetime,
+    kinds: KindHierarchy = FLAT,
 ) -> Ruling | None:
     """过期待决之后：最晚时限之后、``before``（这本账下一条预期开始看的时刻；没有就是看到的尽头）之前补做了 → 「后补」。
     下一次机会按账找、不按类找（裁定 48、49）：周四漏跑、周二照常跑，周二是周二那本账的机会，对周四这本账是"下一次之前"
     的补做——是不是真补，交给强度（补做延迟在这类历史间隔里的位置，裁定 51），这里只认方向。
     没补做不裁（等回话或下一次机会）；回话的裁决由调用方按回话记，不经这里。"""
 
-    kinds = {expectation.kind_token}
+    family = kinds.family(expectation.kind_token)
     deadline = _utc(expectation.deadline)
     horizon = _utc(before) if before is not None else None
     for row in sorted(rows, key=_row_at):
         at = _utc(row.at)
-        if row.kind_token not in kinds or at <= deadline or row.status in NOT_DONE:
+        if row.kind_token not in family or at <= deadline or row.status in NOT_DONE:
             continue
         if horizon is not None and at >= horizon:
             return None
@@ -211,13 +218,15 @@ def omissions(
     expectations: Sequence[Expectation],
     *,
     noticed_at: datetime,
+    kinds: KindHierarchy = FLAT,
 ) -> tuple[Omission, ...]:
-    """这一天的行里，发生时没有任何一条在时的预期的那些（只看成了类的行：占位标记不是预测对象）。"""
+    """这一天的行里，发生时没有任何一条在时的预期的那些（只看成了类的行：占位标记不是预测对象）。一条挂在下级上的行，它的
+    上级在时的预期也算预期到了它（与结算同一个口径）。"""
 
     found: list[Omission] = []
     by_kind: dict[str, list[Expectation]] = {}
     for item in expectations:
-        for token in {item.kind_token}:
+        for token in kinds.family(item.kind_token):
             by_kind.setdefault(token, []).append(item)
     for row in rows:
         if row.status in NOT_DONE:

@@ -3,8 +3,9 @@
 纯规划，不落盘：输入是现有概念集与这一代在用的词（词表方案 2026-11-14）；输出是要写的概念（行为概念与新出现的日历情境）。
 落盘由换代按这份计划做。
 
-- **每个在用的词恰好一个在用的行为概念**：身份 = 词编号，显示名 = 词名，定义 = 词的定义。没有的生成；名字、定义变了的跟着改
-  （身份是编号，引用它的命中不动）；停用过、又在用了的改回来。不在用的词（从没在用过的没有概念，它的记录在关系时间线上
+- **每个在用的词恰好一个在用的行为概念**：身份 = 词编号，显示名 = 词名，定义 = 词的定义，管的编号 = 自己 + 全部活着的下级。
+  没有的生成；名字、定义、下级变了的跟着改（身份是编号，引用它的命中不动；下级增减不用重封，时间线每代从序列现算）；
+  停用过、又在用了的改回来。不在用的词（从没在用过的没有概念，它的记录在关系时间线上
   不留记号）：退出在用、被删掉的那些，它的行为概念标成停用（词表方案二乙），历史命中留着读。这一条按全部在用的词核对，
   所以中途丢了一次同步也会被补上。
 - **日历情境按数据补**：周几、几号、月末、日型由外部条件的日历机械生成（裁定 59），数据里出现过、概念集里没有的就补上。
@@ -50,7 +51,7 @@ def base_concept(item: CatalogWord, *, now: datetime) -> ConceptDefinition:
         role=ConceptRole.BEHAVIOR,
         source=ConceptSource(ConceptOrigin.VOCABULARY),
         created_at=now,
-        classes=(item.id,),
+        classes=(item.id, *item.below),
         lane=item.lane,
         title=item.name,
     )
@@ -119,7 +120,7 @@ def _calendar(
 
 
 def _reconcile(existing: ConceptSet, item: CatalogWord, *, now: datetime) -> ConceptDefinition | None:
-    """这个词的行为概念要不要写：没有就生成；名字、定义变了、或盘上标着停用就更新（保留出处与生成时刻）。"""
+    """这个词的行为概念要不要写：没有就生成；名字、定义、下级变了、或盘上标着停用就更新（保留出处与生成时刻）。"""
 
     identity = existing.base_for(item.id)
     if identity is None:
@@ -127,9 +128,15 @@ def _reconcile(existing: ConceptSet, item: CatalogWord, *, now: datetime) -> Con
             raise ValueError(f"concept {item.id!r} is not the behaviour concept of word {item.id!r}")
         return base_concept(item, now=now)
     current = existing[identity]
-    if (current.title, current.definition, current.retired) == (item.name, item.definition, False):
+    classes = (item.id, *item.below)
+    if (current.title, current.definition, current.classes, current.retired) == (
+        item.name,
+        item.definition,
+        classes,
+        False,
+    ):
         return None
-    return replace(current, title=item.name, definition=item.definition, retired=False)
+    return replace(current, title=item.name, definition=item.definition, classes=classes, retired=False)
 
 
 def _retire(existing: ConceptSet, words: CatalogWords) -> tuple[ConceptDefinition, ...]:

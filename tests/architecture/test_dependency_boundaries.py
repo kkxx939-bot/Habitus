@@ -706,14 +706,11 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
     assert _scene_modules_reaching(graph, "habitus.foresight") == []
     # 语义树读事件序列的纯值（``habitus.series``），不读行为树的那一半（``series.reader`` 只给组合根）。
     assert _scene_modules_reaching(graph, "habitus.series.reader") == []
-    # 模型触点一个都不许多：先验、候选调节条件（概念层只留词表节点与日历之后没有写概念、映射这两个触点，2026-11-14）。
-    # **都不从包根导出**——包根一 import 它们，任何 ``from habitus.scene.advice import ...`` 都把 model_client 拖进来，
+    # 模型触点一个都不许多：只剩先验（概念层只留词表节点与日历之后没有写概念、映射这两个触点，2026-11-14；
+    # 候选调节条件 2026-11-15 删了）。**不从包根导出**——包根一 import 它们，任何 ``from habitus.scene.advice import ...`` 都把 model_client 拖进来，
     # 这条边界就只剩一句注释了。命中记录由封口直接生成（``occurrences.daily``），不碰模型客户端。
-    assert _scene_modules_reaching(graph, "habitus.model_client") == [
-        "habitus.scene.advice.conditions",
-        "habitus.scene.advice.prior",
-    ]
-    # 建议（先验、候选条件）只引用概念与关系检验里纯的那几块：看不到命中、看不到关系表，也碰不到行为树
+    assert _scene_modules_reaching(graph, "habitus.model_client") == ["habitus.scene.advice.prior"]
+    # 建议（先验）只引用概念与关系检验里纯的那几块：看不到命中、看不到关系表，也碰不到行为树
     assert scene_reach_of(graph, "advice") <= {
         name
         for name in graph
@@ -722,7 +719,6 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
         in {"habitus.scene.storage", "habitus.scene.codec", "habitus.scene.occurrences.model"}
     } - {"habitus.scene.relations.store"}
     assert "habitus.scene.advice.prior" not in imported_modules(scene_root / "advice" / "__init__.py")
-    assert "habitus.scene.advice.conditions" not in imported_modules(scene_root / "advice" / "__init__.py")
     # 同步词表、词表口是纯算法（裁定 20）：它们在图里、却不在上面之列。
     for pure in ("habitus.scene.concepts.sync", "habitus.scene.concepts.catalog"):
         assert pure in graph, pure

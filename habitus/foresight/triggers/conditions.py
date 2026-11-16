@@ -1,7 +1,7 @@
 """白天判带条件的关系"此刻条件成不成立"，与同一族里取最具体的那一条（裁定 61 第 6 条、62 第 4 条）。
 
 判法借语义树的 ``evaluator``（同一份规则，``scene/relations/conditions.py``）在 ``triggers.marks`` 排出的时间线上判。
-条件只有两种形状：时间线条件指向一个词表类、概念条件指向一个日历情境；机会表里出现别的形状（时间线条件没有类、概念条件
+条件只有两种形状：时间线条件指向一个词表节点（连同它管的下级，``ConditionSpec.classes``）、概念条件指向一个日历情境；机会表里出现别的形状（时间线条件没有类、概念条件
 不是日历）是表本身错了，明确报错，不当成"判不了"。
 
 **一族**：同一（前因, 后果, 段）的不带条件的那条与它的各个带条件版本。这一刻只取**条件全成立、挂的条件最多**的那一条
@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import replace
 
 from habitus.foresight.opportunities.model import ConditionSpec, RelationOpportunities
 from habitus.scene.relations import Chain, LaneTimeline, Template, all_hold, evaluator
@@ -31,6 +32,14 @@ def _judge(line: LaneTimeline, spec: ConditionSpec, window: int) -> Callable[[Ch
         raise ValueError(f"timeline condition {spec.text!r} names no vocabulary class")
     if condition.template is Template.CONCEPT and spec.calendar_key is None:
         raise ValueError(f"concept condition {spec.text!r} is not a calendar situation")
+    if condition.template is Template.TIMELINE:
+        # 白天的时间线按每一行自己的编号挂记号；条件的概念管着下级（丙一 2026-11-15），判它时把它管的那几类的记号合成一份，
+        # 挂在条件的名下另给判法——不改时间线本身：条件概念的身份就是上级自己的编号，混进去会和上级自己的行重复
+        merged = sorted(
+            {mark.uri: mark for token in spec.classes for mark in line.marks.get(token, [])}.values(),
+            key=lambda item: (item.slot, item.started_at, item.uri),
+        )
+        line = replace(line, marks={**line.marks, condition.value: merged})
     return evaluator(line, condition, window=window)
 
 

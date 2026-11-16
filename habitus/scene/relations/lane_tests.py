@@ -35,18 +35,14 @@ class LaneTests:
         config: RelationConfig,
         cutoff: date,
         *,
-        proposals: Mapping[str, tuple[tuple[Condition, date], ...]] | None = None,
         established: Iterable[RelationKey] = (),
     ) -> None:
-        """``proposals``：前因 → 大模型提过的条件
-        与提出的那一晚（第 7 步；只在那晚之后的数据上检验）。``established``：接的那一晚已成立的关系——第二个条件起只在
-        已成立的带条件关系上加一个（裁定 62 第 1 条）。"""
+        """``established``：接的那一晚已成立的关系——第二个条件起只在已成立的带条件关系上加一个（裁定 62 第 1 条）。"""
 
         self.line = line
         self.concepts = concepts
         self.config = config
         self.cutoff = cutoff
-        self.proposals = dict(proposals or {})
         self.established = frozenset(established)
         self.controls = Controls(line, config.transition_window_slots)
         self._chains: dict[str, tuple[Chain, ...]] = {}
@@ -57,7 +53,7 @@ class LaneTests:
         self._reachable: dict[tuple[str, str, Segment], bool] = {}
         #: 量哪些（枚举与冻住的行的寿命）与怎么量（读数、检验族、子集上的读数）。
         self.candidates = RelationCandidates(self)
-        self.evaluator = RelationEvaluator(self, self.candidates)
+        self.evaluator = RelationEvaluator(self)
         #: 最近一次 ``night`` 的结果（还没算过是 None）：换代里关系那一步的观测（``scene.b4.lane`` span）从这里读各族的分解，
         #: 不再算第二遍。
         self.last_night: LaneNight | None = None

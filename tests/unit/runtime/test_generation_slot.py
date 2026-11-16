@@ -274,7 +274,6 @@ def advised(tmp_path, client=None):  # type: ignore[no-untyped-def]
     scene.advice = RelationAdvice(
         store=AdviceStore(tmp_path / "scene"),
         prior=PriorAdvisor(chat, config=PriorConfig(transient_retry_delay_seconds=0.0)),
-        conditions=None,
     )
     return site, scene, advisor
 

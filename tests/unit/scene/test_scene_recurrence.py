@@ -7,6 +7,7 @@ from datetime import date, timedelta
 
 from habitus.scene.recurrence import recurrences_of
 from habitus.temporal import Rulers
+from tests.unit.scene.concept_fixtures import every_kind
 from tests.unit.temporal.fixtures import at, record, series, with_sessions
 
 RULERS = Rulers(15, 2700, 3, 5.0, 5.0, 35)
@@ -17,7 +18,8 @@ def test_each_classified_kind_gets_its_days_and_intervals() -> None:
     weekly = [record(at(START + timedelta(days=7 * week), 17), "s-k0001") for week in range(5)]
     pending = replace(record(at(START, 9), "s-待定"), classified=False)
     cutoff = START + timedelta(days=30)
-    found = recurrences_of(series(with_sessions([*weekly, pending], cutoff=cutoff), cutoff=cutoff), RULERS)
+    read = series(with_sessions([*weekly, pending], cutoff=cutoff), cutoff=cutoff)
+    found = recurrences_of(read, RULERS, every_kind(read))
     assert set(found) == {"s-k0001"}
     meeting = found["s-k0001"]
     assert len(meeting.days) == 5 and [item.days for item in meeting.intervals] == [7, 7, 7, 7]

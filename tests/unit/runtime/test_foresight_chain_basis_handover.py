@@ -85,7 +85,7 @@ def build(tmp: Path, *, chain: bool, reading: TreeReading | None) -> W:
         relation_night=TODAY,
         slot_minutes=15,
         window_slots=3,
-        recurrences=recurrences_of(series, RULERS),
+        recurrences=recurrences_of(series, RULERS, w.concepts),
     )
     if chain:
         (relation,) = table.relations

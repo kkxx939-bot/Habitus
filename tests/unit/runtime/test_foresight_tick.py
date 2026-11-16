@@ -76,7 +76,7 @@ def stores(tmp_path, site: Site, night=TODAY):  # type: ignore[no-untyped-def]
             relation_night=night,
             slot_minutes=15,
             window_slots=3,
-            recurrences=recurrences_of(series, RULERS),
+            recurrences=recurrences_of(series, RULERS, CONCEPTS),
         )
     )
     return ledger, opportunities
@@ -124,8 +124,9 @@ def test_a_tick_records_the_expectations_once_and_the_next_tick_adds_nothing(tmp
     assert report.skipped is None and report.formed == report.recorded == 1 and report.by_source == {"事件": 1}
     nightly = days(site, ledger, opportunities, at(TODAY, 10, 15), recorder)
     built = asyncio.run(nightly.run_once())
-    assert built.skipped is None and built.formed.formed == built.formed.recorded == 3
-    assert built.formed.by_source == {"日子": 3}
+    # 「写文档」没有行为概念（不在用）：没有复现，也就没有日子预期（丙一 2026-11-15：复现只按在用节点算）
+    assert built.skipped is None and built.formed.formed == built.formed.recorded == 2
+    assert built.formed.by_source == {"日子": 2}
     stored = {(item.source, item.kind_token): item for item in ledger.expectations_on(TODAY)}
     event = stored[("事件", CODE)]
     assert event.kind_token == CODE and event.basis == tuple(codes)
@@ -138,7 +139,7 @@ def test_a_tick_records_the_expectations_once_and_the_next_tick_adds_nothing(tmp
     assert event.formed_at == at(TODAY, 10, 15) and event.window[0] >= event.formed_at
     assert event.observed_from == at(TODAY, 10, 0)  # 从前因做完那一槽起算
     assert event.antecedents[0].present and event.antecedents[0].source == discussion
-    # 讨论方案今天 10:00 已经做了：它的"离上次够久"照建（裁定 49），从今天零点起算，结算会给准时；写文档的复现也登记了
+    # 讨论方案今天 10:00 已经做了：它的"离上次够久"照建（裁定 49），从今天零点起算，结算会给准时；写文档不在用，没有复现
     done = stored[("日子", DISCUSS)]
     assert done.observed_from == at(TODAY, 0, 0) and done.window[0] <= at(TODAY, 10, 0) < done.window[1]
     assert done.version == "7" and done.implementation == IMPLEMENTATION
@@ -149,7 +150,7 @@ def test_a_tick_records_the_expectations_once_and_the_next_tick_adds_nothing(tmp
     assert again.formed == 1 and again.recorded == 0
     assert asyncio.run(nightly.run_once()).formed.recorded == 0
     assert [event.operation for event in recorder.events] == ["tick", "days", "tick", "days"]
-    assert recorder.events[0].attributes["recorded"] == 1 and recorder.events[1].attributes["recorded"] == 3
+    assert recorder.events[0].attributes["recorded"] == 1 and recorder.events[1].attributes["recorded"] == 2
     assert recorder.events[2].attributes["recorded"] == 0 and recorder.events[3].attributes["recorded"] == 0
 
 

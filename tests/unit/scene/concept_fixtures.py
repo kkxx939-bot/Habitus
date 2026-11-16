@@ -17,6 +17,7 @@ from habitus.scene.concepts import (
     ConceptSource,
 )
 from habitus.scene.concepts.situation import SituationRule
+from habitus.series import EventSeries
 from tests.unit.kind_ids import kind_id
 
 CREATED = datetime(2026, 9, 26, 0, 0, tzinfo=UTC)
@@ -78,6 +79,25 @@ def concept_set() -> ConceptSet:
     return ConceptSet(ALL_CONCEPTS)
 
 
+def every_kind(series: EventSeries) -> ConceptSet:
+    """序列里每个已转正的编号各一个在用的行为概念（名字就是编号）：只关心复现、不关心词表的测试拿它当"全都在用"。"""
+
+    lanes = {record.kind_token: record.lane for record in series.records if record.classified}
+    return ConceptSet(
+        ConceptDefinition(
+            name=token,
+            definition=f"{token}这件事",
+            role=ConceptRole.BEHAVIOR,
+            source=VOCABULARY,
+            created_at=CREATED,
+            classes=(token,),
+            lane=lane,
+            title=token,
+        )
+        for token, lane in sorted(lanes.items())
+    )
+
+
 __all__ = [
     "ALL_CONCEPTS",
     "BALL",
@@ -94,4 +114,5 @@ __all__ = [
     "calendar",
     "cid",
     "concept_set",
+    "every_kind",
 ]

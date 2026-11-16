@@ -95,7 +95,7 @@ def test_forward_validation_waits_when_its_own_side_cannot_reach_alpha(upward: b
 
     measure = ChainMeasure(strata)
     stub = SimpleNamespace(config=CONFIG, measure=lambda key: measure, seed=lambda key, purpose: 0)
-    forward = RelationEvaluator(stub, None).evaluate(KEY, upward=upward, since=None, purpose="forward")  # type: ignore[arg-type]
+    forward = RelationEvaluator(stub).evaluate(KEY, upward=upward, since=None, purpose="forward")  # type: ignore[arg-type]
     assert forward.p_value >= CONFIG.thresholds.forward_alpha
     before = Relation(KEY, Status.CANDIDATE, upward, discovered_on=date(2026, 10, 1), forward_needed=len(strata))
     tests = SimpleNamespace(config=CONFIG, assess=lambda item, measure=None: item, evaluate=lambda *a, **k: forward)

@@ -112,7 +112,6 @@ def scene_on(root: Path, site, *, catalog=None, advice: bool = False):  # type: 
         scene.advice = RelationAdvice(
             store=AdviceStore(root / "scene"),
             prior=PriorAdvisor(client, config=PriorConfig(transient_retry_delay_seconds=0.0)),
-            conditions=None,
         )
     return scene, provider, advisor
 
@@ -1068,27 +1067,27 @@ def test_g5_a_category_whose_backlog_cannot_be_read_does_not_stop_the_ones_after
     assert health_module._model_queue_checks(worker) == []
 
 
-def test_g5_a_corrupt_completion_marker_is_reported_per_category_and_the_earlier_ones_are_done(tmp_path) -> None:
-    """G5 用真的坏文件：一天的完成章坏了，补问一类读不了命中——记下这一类的失败；``drain()`` 抛的是这个读盘的错；不改写
-    坏文件。"""
+def test_g5_a_corrupt_prior_cache_is_reported_per_category_and_the_earlier_ones_are_done(tmp_path) -> None:
+    """G5 用真的坏文件：一份先验缓存坏了，补问一类读不了它——记下这一类的失败；``drain()`` 抛的是这个读盘的错；不改写
+    坏文件。（原来坏的是日完成章、靠候选条件那一问读命中触发；候选条件 2026-11-15 删了，补问一类只剩先验。）"""
 
-    from habitus.scene.occurrences.store import ConceptHitStoreError
+    from habitus.scene.advice.store import AdviceStoreError
 
     site, scene, _provider, _advisor = fresh(tmp_path, advice=True)
-    marker = tmp_path / "scene" / "occurrences" / f"{TONIGHT:%Y/%m/%d}" / ".done.json"
     asyncio.run(queue_on(tmp_path, scene, site).drain())
-    seal(scene)  # 章由换代封口时盖
-    good = marker.read_bytes()
-    publish_tonight(site, day=TODAY)  # 第二天又封口一天，同步词表有活（新的日历取值）
-    marker.write_bytes(b"{broken")
+    seal(scene)
+    cache = sorted((tmp_path / "scene" / "advice").rglob("*.json"))[0]
+    good = cache.read_bytes()
+    publish_tonight(site, day=TODAY)
+    cache.write_bytes(b"{broken")
     later = NOW + timedelta(days=1)
     reopened, _provider, _advisor = scene_on(tmp_path, site, advice=True)
     queue = queue_on(tmp_path, reopened, site, clock=lambda: later, sealed=lambda: later.date())
-    with pytest.raises(ConceptHitStoreError):
+    with pytest.raises(AdviceStoreError):
         asyncio.run(queue.drain())
-    assert queue.state.errors == {ADVICE: "ConceptHitStoreError"}
-    assert marker.read_bytes() == b"{broken"
-    marker.write_bytes(good)
+    assert queue.state.errors == {ADVICE: "AdviceStoreError"}
+    assert cache.read_bytes() == b"{broken"
+    cache.write_bytes(good)
     assert asyncio.run(queue.drain()).clear and queue.state.errors == {}
 
 

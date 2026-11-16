@@ -616,34 +616,25 @@ GOLDEN_MAY_ENTER: tuple[int, int, dict[str, int], str] = (
 )
 
 
-# ── 模型提的结构字段条件在门 1 边缘：能两边都量出来的，必然也是机械列举的，照全部历史量 ─────────────────
+# ── 机械列举的结构字段条件在门 1 边缘：门 1 数的链与量的链是同一批全部历史 ─────────────────
 
 
 @pytest.mark.parametrize("name", ["3-3", "3-2", "2-3"])
-def test_a_proposed_place_condition_on_the_gate_edge_keeps_the_full_history(name: str) -> None:
-    """模型只能提结构字段与时间线（``conditions.PROPOSABLE``）。在可判的链恰好卡在门 1 边上（3 / 2 条）的组上，模型很晚才提
-    "在公司"：它与机械列举撞上（链上公司、家里两面都有），不算新条件，不进"只在提出之后量"（``candidates.proposed``），
-    门 1 数的链与量的链是同一批全部历史。整份关系表与迁移与不提时逐字相同。
-    （原来这一族用模型提的非日历情境条件守"提出之后才量"的门边；那种条件已经没有了。）"""
+def test_a_mechanical_place_condition_on_the_gate_edge_keeps_the_full_history(name: str) -> None:
+    """可判的链恰好卡在门 1 边上（3 / 2 条）的组上，"在公司"是机械列举的条件（链上公司、家里两面都有），门 1 数的链与量的链
+    是同一批全部历史。整份关系表与迁移与冻住的金样逐字相同。（原来这一族守"模型很晚才提、与机械列举撞上的条件不截成提出之后"，
+    问模型提条件那一路 2026-11-15 删了，这里只留机械列举那一半。）"""
 
     plan = PLACE_PLANS[name]
     series = _series(plan)
     concepts = _concepts(plan)
-    late = workdays(40)[30]
 
-    def make(*, proposed: bool) -> Callable[[], LaneTests]:
-        def build() -> LaneTests:
-            line = build_timelines(series, concepts, {}, CONFIG)["session"]
-            proposals = {DISCUSS: ((OFFICE, late),)} if proposed else None
-            return LaneTests(line, concepts, CONFIG, series.cutoff, proposals=proposals)
+    def build() -> LaneTests:
+        line = build_timelines(series, concepts, {}, CONFIG)["session"]
+        return LaneTests(line, concepts, CONFIG, series.cutoff)
 
-        return build
-
-    tests = make(proposed=True)()
+    tests = build()
     group = {item for item in tests.keys() if item.condition == OFFICE.text}
     assert group and all(item.antecedent == DISCUSS for item in group)
-    assert not (tests.candidates.proposed.keys() & group)
     assert _sides(tests, (OFFICE,), Segment.CHAIN) == PLACE_EDGES[name][0]
-    with_proposal = _outcome(make(proposed=True), series=series)
-    assert with_proposal == _outcome(make(proposed=False), series=series)
-    assert with_proposal == GOLDEN_PLACE[name]
+    assert _outcome(build, series=series) == GOLDEN_PLACE[name]

@@ -80,14 +80,11 @@ def test_a_log_line_with_a_unicode_line_separator_reads_back(tmp_path, separator
     assert [item.reason for item in store.transitions("session")] == [reason]
 
 
-def test_a_relation_key_and_a_proposed_value_refuse_unprintable_text() -> None:
-    """键要写进关系表与日志的一行：不可打印的字符（换行、行分隔符）在构造键、编译模型提的条件时就拒。"""
+def test_a_relation_key_refuses_unprintable_text() -> None:
+    """键要写进关系表与日志的一行：不可打印的字符（换行、行分隔符）在构造键时就拒。"""
 
     from habitus.scene.relations import RelationKey, Segment
-    from habitus.scene.relations.conditions import ConditionError, compile_proposal
 
     for text in ("老 王", "老\n王", "老\u0085王"):
         with pytest.raises(ValueError, match="printable"):
             RelationKey("session", DISCUSS, CODE, Segment.CHAIN, condition=f"with={text}")
-        with pytest.raises(ConditionError):
-            compile_proposal({"template": "field", "field": "with", "value": text}, CONCEPTS, lane="session")

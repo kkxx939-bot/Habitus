@@ -369,8 +369,8 @@ def test_an_event_expectation_whose_antecedent_is_now_another_class_is_voided_no
     store = OpportunityStore(tmp_path / "ledger")
     relation = RelationOpportunities(
         key="session|flight|hotel|chain",
-        antecedent="flight",
-        consequent="hotel",
+        antecedent=FLIGHT,
+        consequent=HOTEL,
         antecedent_label="订机票",
         consequent_label="订酒店",
         antecedent_classes=(FLIGHT,),
@@ -422,7 +422,7 @@ def test_a_situation_expectation_is_rechecked_against_the_latest_calendar(tmp_pa
     relation = RelationOpportunities(
         key="session|工作日|hotel|situation",
         antecedent="工作日",
-        consequent="hotel",
+        consequent=HOTEL,
         antecedent_label="工作日",
         consequent_label="订酒店",
         antecedent_classes=("工作日",),
@@ -709,8 +709,8 @@ def test_an_antecedent_whose_start_was_corrected_still_holds(tmp_path) -> None:
     store = OpportunityStore(tmp_path / "ledger")
     relation = RelationOpportunities(
         key="session|flight|hotel|chain",
-        antecedent="flight",
-        consequent="hotel",
+        antecedent=FLIGHT,
+        consequent=HOTEL,
         antecedent_label="订机票",
         consequent_label="订酒店",
         antecedent_classes=(FLIGHT,),
@@ -922,8 +922,8 @@ def test_a_spoken_expectation_whose_chance_is_void_writes_no_feedback(tmp_path) 
     store = OpportunityStore(tmp_path / "ledger")
     relation = RelationOpportunities(
         key="session|flight|hotel|chain",
-        antecedent="flight",
-        consequent="hotel",
+        antecedent=FLIGHT,
+        consequent=HOTEL,
         antecedent_label="订机票",
         consequent_label="订酒店",
         antecedent_classes=(FLIGHT,),

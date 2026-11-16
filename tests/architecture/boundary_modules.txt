@@ -68,7 +68,6 @@ model_client/contracts.py
 model_client/json_parser.py
 model_client/schema_validation.py
 model_client/structured.py
-scene/advice/conditions.py
 scene/advice/prior.py
 
 # E 外部服务的响应

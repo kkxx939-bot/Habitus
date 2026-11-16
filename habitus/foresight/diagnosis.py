@@ -28,6 +28,7 @@ from typing import Protocol
 
 from habitus.foresight.clock import is_opportunity
 from habitus.foresight.facts import slice_of
+from habitus.foresight.hierarchy import FLAT, KindHierarchy
 from habitus.foresight.ladder import Standing
 from habitus.foresight.ledger.model import NATURAL_HITS, VOID, AccountFact, Expectation, relation_backed
 from habitus.foresight.ledger.settle import NOT_DONE
@@ -213,10 +214,11 @@ def miss_facts(
     today_note: str | None,
     basis: Iterable[BasisSeen],
     listed: set[str] | None,
+    kinds: KindHierarchy = FLAT,
 ) -> MissFacts:
     """一次落空身上的事实。``fact`` 是账上现在算数的那笔；``standing`` 是落空那一刻（最晚时限）这条边的位置；``window`` 是起算
     那天到最晚时限那天树上的行；``today_note`` 是预期那一天日历的说法，``basis`` 是依据里树上还找得到的那几次；``listed`` 是
-    机会表里现在还有的关系（没有机会表是 None：说不清，不判关系没了）。"""
+    机会表里现在还有的关系（没有机会表是 None：说不清，不判关系没了）；``kinds`` 是此刻的上下级（放弃了的认节点自己和下级）。"""
 
     voided = fact.kind == VOID
     seen = tuple(basis)
@@ -232,7 +234,9 @@ def miss_facts(
         # 观测空白结出的强度 0 的过期待决：与「一次机会」同一口径（``clock.is_opportunity``），作废另算
         unseen=not voided and not is_opportunity(fact),
         abandoned=any(
-            row.kind_token == item.kind_token and row.status in NOT_DONE and item.covers(row.at.astimezone(UTC))
+            row.kind_token in kinds.family(item.kind_token)
+            and row.status in NOT_DONE
+            and item.covers(row.at.astimezone(UTC))
             for row in window
         ),
         broken=standing.break_at is not None and item.formed_at >= standing.break_at,

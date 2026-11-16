@@ -48,9 +48,6 @@ class RelationThresholds:
     #: 长跨度"新类第一次出现"：记录开始后至少过了 max(这么多天, 这一类的这么多个块长) 才算第一次（保护闸，乘的是行为自己的节奏）。
     first_seen_min_days: int = 14
     first_seen_min_blocks: int = 3
-    #: 问模型"这个前因在什么条件下更常接着做"的门槛：前因攒到这么多次才问（用户 10-19 定，保留 40）。机械列举的调节条件
-    #: 不用它：每条带条件的关系按自己的最小可达 p 定开不开检验（``conditions.ready_to_test``，裁定 60 第 9 条）。
-    condition_ask_min_antecedents: int = 40
     #: 一条关系最多挂几个条件（裁定 61 第 6 条、62 第 1 条：第二个条件起只长在已成立的带条件关系上；保护闸，启动值 3，
     #: 以后从回放定）。
     max_combined_conditions: int = 3
@@ -70,7 +67,6 @@ class RelationThresholds:
             "exact_strata_limit",
             "first_seen_min_days",
             "first_seen_min_blocks",
-            "condition_ask_min_antecedents",
             "max_combined_conditions",
         ):
             if not _positive_int(getattr(self, label)):

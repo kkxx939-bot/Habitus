@@ -107,8 +107,7 @@ class Night:
 
 
 async def queue_then_generate(run: SceneNightlyRun, series, now):  # type: ignore[no-untyped-def]
-    """一晚 = 模型队列的补问 + 换代的语义树一步：先验对着"概念集 + 同步词表将要写的"问、候选条件对着这一代的概念集问
-    （提议记成这一代的日子）；``generate``：同步 → 封口 → 折叠。"""
+    """一晚 = 模型队列的补问 + 换代的语义树一步：先验对着"概念集 + 同步词表将要写的"问；``generate``：同步 → 封口 → 折叠。"""
 
     signals: list[str] = []
     if run.advice is not None:
@@ -119,9 +118,6 @@ async def queue_then_generate(run: SceneNightlyRun, series, now):  # type: ignor
         lanes = sorted({lane for name in prospect.behaviors() if (lane := prospect.lane_of(name)) is not None})
         for lane in lanes:
             await run.advice.ask_priors(prospect, lane, signals, frozenset(settled))
-        lines = await run.relation_stage.timelines(series, settled)
-        for lane, line in sorted(lines.items()):
-            await run.relation_stage.ask_conditions(lane, line, series, settled, signals, proposed_on=series.cutoff)
     report = await run.generate(series=series, words=run.syncing.catalog.current(), now=now)
     return Night(report=report, signals=tuple(dict.fromkeys((*signals, *report.signals))))
 
@@ -201,7 +197,6 @@ def test_with_model_advice_the_night_asks_priors_once_and_reads_them_from_the_ca
     run.advice = RelationAdvice(
         store=AdviceStore(tmp_path / "scene"),
         prior=PriorAdvisor(client, config=PriorConfig(transient_retry_delay_seconds=0.0)),
-        conditions=None,
     )
     report = night(run, TONIGHT, NOW)
     first = advisor_model.calls
@@ -478,37 +473,3 @@ def test_the_coverage_is_computed_once_a_night(tmp_path, monkeypatch) -> None:
         )
     )
     assert calls == ["lanes"] and report.materials is not None and report.materials.coverage
-
-
-def test_a_proposal_book_that_cannot_be_written_or_read_does_not_stall_the_night(tmp_path, monkeypatch) -> None:
-    """提议簿写不出（超了单份上限）：这一晚用盘上那份，关系表照常落盘；读不了：这条 lane 这一晚沿用上一晚，整晚照样跑完。"""
-
-    from datetime import date
-
-    from habitus.runtime.scene_advice import RelationAdvice
-    from habitus.scene.advice.model import Proposal, ProposalBook
-    from habitus.scene.advice.store import AdviceStore, AdviceStoreError
-
-    site, hits = site_with_three_bedtimes(tmp_path)
-    publish_tonight(site)
-    run, _provider = nightly(tmp_path, hits, site)
-    store = AdviceStore(tmp_path / "scene")
-    gone = Proposal(antecedent="s-k999999", proposed_on=date(2026, 8, 1), why="前因已删", refused="unknown template")
-    store.write_book(ProposalBook(lane="session", proposals=(gone,), asked={}))
-    run.advice = RelationAdvice(store=store, prior=None, conditions=None)
-
-    def too_big(book):  # type: ignore[no-untyped-def]
-        raise AdviceStoreError("scene record exceeds its byte budget")
-
-    monkeypatch.setattr(store, "write_book", too_big)
-    report = night(run, TONIGHT, NOW)
-    assert run.relations.nights("session") == (NOW.date(),)
-    assert any("提议簿写不出" in signal for signal in report.signals)
-
-    def unreadable(lane):  # type: ignore[no-untyped-def]
-        raise AdviceStoreError("proposal book is corrupt")
-
-    monkeypatch.setattr(store, "book", unreadable)
-    later = night(run, TONIGHT + timedelta(days=1), NOW + timedelta(days=1))
-    assert run.relations.nights("session") == (NOW.date(),)
-    assert any("提议簿读不了" in signal for signal in later.signals) and later.materials is not None

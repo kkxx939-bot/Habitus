@@ -237,7 +237,7 @@ def test_s7_a_daily_habit_gives_interval_day_expectations_from_its_own_recurrenc
             relation_night=today,
             slot_minutes=15,
             window_slots=3,
-            recurrences=recurrences_of(series, RULERS),
+            recurrences=recurrences_of(series, RULERS, concepts),
         )
         moment = Moment(at=datetime.combine(today, time(8, 0), tzinfo=ZONE), slot=32)
         drafts = [

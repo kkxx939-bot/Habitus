@@ -42,6 +42,7 @@ from habitus.foresight.facts import (
     short_circuit_fact,
 )
 from habitus.foresight.feedback import reminder_feedback, said_done
+from habitus.foresight.hierarchy import FLAT, KindHierarchy, KindHierarchyPort
 from habitus.foresight.ledger import (
     AccountFact,
     AntecedentRow,
@@ -67,7 +68,7 @@ from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement_diagnosis import SettlementDiagnosis
-from habitus.runtime.foresight_tree_rows import basis_row, day_cache, rows_between
+from habitus.runtime.foresight_tree_rows import basis_row, day_cache, hierarchy_of, rows_between
 from habitus.scene.views import DayIndexCache
 from habitus.series.model import KindResolution, silent_day_unwatched
 
@@ -130,6 +131,9 @@ class BehaviorReadSide(Protocol):
     @property
     def kinds(self) -> KindResolution | None: ...
 
+    @property
+    def hierarchy(self) -> KindHierarchyPort | None: ...
+
 
 @dataclass(frozen=True)
 class SettlementReport:
@@ -176,6 +180,7 @@ class SettlementStage:
         #: 那天后补只看到它开始为止（裁定 94 第 9 条）；没给就不认那天。
         self.finished = finished
         self._facts_cache: dict[str, list[AccountFact]] | None = None
+        self._kinds: KindHierarchy = FLAT  # 这一次结算的上下级（开头取一份）
         #: 只读诊断（裁定 54）：结算观测与运维读它；每本账的线每次从 ``tolerance`` 现读。
         self.diagnosis = SettlementDiagnosis(
             ledger,
@@ -214,6 +219,7 @@ class SettlementStage:
         days = self.ledger.open_days()
         closed = frozenset(self.closed_days())
         cache = day_cache(self.read_side)
+        self._kinds = hierarchy_of(self.read_side)  # 这一次结算用同一份上下级
         now = self._clock()
         outcomes: dict[str, int] = {}
         rulings = feedback_written = 0
@@ -229,12 +235,7 @@ class SettlementStage:
                         pending.append(day)
                     continue
                 asked = Asked.of(self.ledger.deliveries_on(day), item.expectation_id, of_basis=self._deliveries_of)
-                result = settle(
-                    item,
-                    rows_between(cache, item.observed_from.date(), item.deadline.date()),
-                    spoken_at=asked.spoken_at,
-                    settled_at=now,
-                )
+                result = self._settle(item, cache, asked, now)
                 # 先写事实再写结算：中间断了，重来时这条还没结、照结一遍，事实的身份由预期与形成时刻定、重写幂等；
                 # 反过来的顺序会让结过的这条再也不被看到，事实永远补不上。前因不成立的这次机会不存在：只记作废（权重 0）
                 # 断在两次写之间、重来时：上次写下的那一笔不再算一遍（这期间账上又多了别的事实，重算出的强度可能不同，
@@ -315,6 +316,7 @@ class SettlementStage:
                 rows_between(cache, item.deadline.date(), last_closed),
                 before=before,
                 ruled_at=now,
+                kinds=self._kinds,
             )
             if ruling is not None:
                 self._append(catch_up_fact(item, ruling, table))
@@ -383,6 +385,10 @@ class SettlementStage:
     def _feedback_written(self, item: Expectation) -> bool:
         return any(found.expectation_id == item.expectation_id for found in self.ledger.feedback_of(item.kind_token))
 
+    def _settle(self, item: Expectation, cache: DayIndexCache, asked: Asked, now: datetime) -> Settlement:
+        rows = rows_between(cache, item.observed_from.date(), item.deadline.date())
+        return settle(item, rows, spoken_at=asked.spoken_at, settled_at=now, kinds=self._kinds)
+
     def resettle(self, days: Iterable[date]) -> int:
         """修了 bug 之后：用当前代码把这些日子里已结的预期重结一遍，和账上现有的不一样的追加改判（机会的时刻不变，写下的时刻取
         此刻，后写的覆盖先写的；旧记录不改，裁定 54）。只碰结算事实，不碰后补这类之后才有的改判，也不碰单元的提醒反馈。
@@ -391,6 +397,7 @@ class SettlementStage:
         cache = day_cache(self.read_side)
         table = self.opportunities.latest(self.lane) if self.opportunities is not None else None
         now = self._clock()
+        self._kinds = hierarchy_of(self.read_side)
         with self._caching_facts():
             return self._resettle(days, cache, table, now)
 
@@ -406,12 +413,7 @@ class SettlementStage:
                 if item.expectation_id not in settled or self._compacted(item):
                     continue  # 重结只作用于没压实的窗口：压实的那一段已经并进累计值，不会再变
                 asked = Asked.of(deliveries, item.expectation_id, of_basis=self._deliveries_of)
-                result = settle(
-                    item,
-                    rows_between(cache, item.observed_from.date(), item.deadline.date()),
-                    spoken_at=asked.spoken_at,
-                    settled_at=now,
-                )
+                result = self._settle(item, cache, asked, now)
                 fresh = self._fact_for(item, result, asked=asked, cache=cache, table=table, known_by=now)
                 old = self._current_fact(item)
                 if old is not None and (old.kind in _LATER_RULINGS or same_fact(old, fresh)):
@@ -519,7 +521,7 @@ class SettlementStage:
                 for item in self.ledger.expectations_on(earlier)
                 if item.deadline.date() >= day
             ]
-            items = omissions(rows, covering, noticed_at=now)
+            items = omissions(rows, covering, noticed_at=now, kinds=self._kinds)
             for omission in items:
                 self.ledger.record_omission(omission)
             watermark = self.ledger.mark_scanned(day, start=start)

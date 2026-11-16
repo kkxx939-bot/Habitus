@@ -29,7 +29,6 @@ def advice_on(root):  # type: ignore[no-untyped-def]
     advice = RelationAdvice(
         store=AdviceStore(root / "scene"),
         prior=PriorAdvisor(client, config=PriorConfig(transient_retry_delay_seconds=0.0)),
-        conditions=None,
     )
     return advice, provider
 

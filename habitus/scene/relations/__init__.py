@@ -12,7 +12,6 @@
 
 from habitus.scene.relations.conditions import (
     Condition,
-    ConditionError,
     Field,
     Template,
     all_hold,
@@ -41,7 +40,6 @@ __all__ = [
     "Arrival",
     "Chain",
     "Condition",
-    "ConditionError",
     "Controls",
     "Field",
     "LaneNight",

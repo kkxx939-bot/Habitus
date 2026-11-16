@@ -1,6 +1,6 @@
 """模型队列各类活的欠账（``runtime.model_queue``）：每一类从盘上现读"还欠不欠"，给出这一轮能做的项，顺带把还欠几项记到
 ``ModelQueueState``。``DayWork`` 是不读序列的三类（出错重试、词表、未封口判断的归类），``SceneWork`` 是语义树的两类
-（同步词表、候选条件与先验的补问），读同一份序列、概念集从盘上现取。
+（同步词表、先验的补问），读同一份序列、概念集从盘上现取。
 """
 
 from __future__ import annotations
@@ -119,7 +119,7 @@ class SceneWork:
         self.marks = marks
         #: 队列自己的序列读者（按天缓存行为树文档；读者名与换代的不同，各记各的脏日水位）。
         self.reader = reader
-        #: 候选条件与先验"没有要补问的"时的输入摘要（只在进程里）：输入没变就不重算时间线。
+        #: 先验的补问（"没有要补问的"时的输入摘要只在进程里）。
         self.asking = AdviceWork(state=state, scene=scene, vocabulary=vocabulary)
 
     async def series(self, current: Round, night: date) -> EventSeries:
@@ -130,7 +130,7 @@ class SceneWork:
         return current.series
 
     def generated(self, current: Round) -> bool:
-        """今天这一代做完了没有（没接完成标记就不等）。"昨天及以前"的候选条件与先验的补问、记同步到的版本，
+        """今天这一代做完了没有（没接完成标记就不等）。"昨天及以前"的先验补问、记同步到的版本，
         都在今天这一代完成之后才算欠着（实时化阶段 2「生效时点」）。"""
 
         if current.generated is None:
@@ -138,7 +138,7 @@ class SceneWork:
         return current.generated
 
     def settled(self, *categories: str) -> bool:
-        """排在前面的这几类这一轮都没有欠着的：后一类要用前一类的结果（先验 → 候选条件 → 记同步到的版本），前面的没做完
+        """排在前面的这几类这一轮都没有欠着的：后一类要用前一类的结果（先验 → 记同步到的版本），前面的没做完
         后面的先不做——补做的与准时做的才是同一份材料。"""
 
         return not any(self.state.owed.get(category) for category in categories)
@@ -156,7 +156,6 @@ class SceneWork:
 
         async def run(detail: dict[str, object], signals: list[str]) -> str:
             synced = await syncing.run(series, current.now, signals)
-            current.forget()
             detail.update({"version": synced.version, "concepts": len(synced.concepts)})
             return UNFINISHED if syncing.owed(await syncing.plan(series, current.now)) else DONE
 
@@ -171,11 +170,9 @@ class SceneWork:
             return False
 
     async def advice(self, current: Round, night: date, series: EventSeries) -> list[Item]:
-        """盘上现有的概念集（一轮里没变就不重取）上的补问。"""
+        """先验的补问。"""
 
-        if current._concepts is None:
-            current._concepts = await asyncio.to_thread(self.scene.concepts.read_all)
-        return await self.asking.items(current, night, series, current._concepts)
+        return await self.asking.items(current, night, series)
 
 
 def _retry_name(identity: str) -> str:
@@ -193,7 +190,7 @@ async def owed(daily: DayWork, sealed: SceneWork, category: str, current: Round)
     assert night is not None
     if category == UNSEALED:
         return await daily.unsealed(current, night)
-    # 其余几类都是今天这一代完成之后的活（先后固定：先验 → 候选条件 → 记同步到的版本）；
+    # 其余几类都是今天这一代完成之后的活（先后固定：先验 → 记同步到的版本）；
     # 这一代还没做完就不看，原来的数留着
     if not sealed.generated(current):
         return []

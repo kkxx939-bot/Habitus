@@ -14,8 +14,17 @@ from habitus.foresight import Evidence, Tolerance
 from habitus.foresight.edges import PastMoment
 from habitus.foresight.history import Moment, UnitHistory
 from habitus.foresight.judge import Judge
-from habitus.foresight.ledger import AccountFact, Delivery, Expectation, Omission, account_key
+from habitus.foresight.ledger import (
+    AWAITING_HOST,
+    NODE_RETIRED,
+    AccountFact,
+    Delivery,
+    Expectation,
+    Omission,
+    account_key,
+)
 from habitus.runtime.foresight_delivery import DeliveryStage, JudgeMaterials
+from habitus.runtime.foresight_delivery_tally import spoken_today
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_outlet import OpenRequest
@@ -1080,7 +1089,7 @@ def _past_deadline_shape(tmp_path, crowded: bool):  # type: ignore[no-untyped-de
     for minutes in ticks:
         now = start + timedelta(minutes=minutes)
         reports.append((now, asyncio.run(run.run_once(now, after(previous, now)))))
-        assert "short" not in run._spoken_today(now)  # 不占名额
+        assert "short" not in spoken_today(run.ledger, now)  # 不占名额
         previous = now
     return reports, ledger, run.outlet, provider, item
 
@@ -1118,3 +1127,19 @@ def test_a_member_takes_over_when_its_basis_is_past_its_deadline(tmp_path) -> No
     for minutes in (42, 71):
         asyncio.run(run.run_once(at(minutes)))
     assert reasons(ledger, "later") == ["单元已选", "待取"]
+
+
+def test_a_waiting_request_withdrawn_because_its_node_left_use_no_longer_counts_as_said_today(tmp_path) -> None:
+    """丙一阶段 D：「待取」之后节点退出在用、请求撤下（「已停用」），话没对人说出口——不再算今天说过，不替还在用的上级压
+    "上下级已说"。说出口的照算。"""
+
+    ledger = ForesightLedgerStore(tmp_path / "ledger")
+    now = DAY0.replace(hour=12)
+    for identity, reasons in (("withdrawn", (AWAITING_HOST, NODE_RETIRED)), ("waiting", (AWAITING_HOST,))):
+        item = expectation(identity, DAY0.replace(hour=9))
+        ledger.record_expectation(item)
+        for minute, reason in enumerate(reasons):
+            ledger.record_delivery(
+                item.day, Delivery(identity, DAY0.replace(hour=10, minute=minute), 1, False, reason, 0.0)
+            )
+    assert set(spoken_today(ledger, now)) == {"waiting"}

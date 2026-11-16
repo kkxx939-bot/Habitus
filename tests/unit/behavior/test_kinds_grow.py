@@ -66,13 +66,28 @@ def test_a_child_deleted_this_generation_lends_its_days_to_its_parent_in_the_sam
     vocabulary = vocabulary.with_word(
         Word(y, 3, "写验收段", x, "写验收段这一种", "文档", WordOrigin.GROWN, created_at=at(4, 1), last_picked=at(4, 2))
     )
-    # X 自己最近还被选过（不到 20 天），Y 的两天都在 20 天前：这一代 Y 删掉，它的两天换算到 X 上，X 同一代转在用
+    # X 自己最近还被选过（不到 20 天），Y 的两天都在 20 天前：这一代 Y 删掉，它的两天换算到 X 上，X 同一代转在用；
+    # X 那时还是候选，这两天也算给它最近的不是候选的上级写文档（丙一 3.5），写文档同一代也转在用
     vocabulary = vocabulary.with_word(Word(**{**vars(vocabulary.get(x)), "last_picked": at(4, 20)}))
     picks = [(str(y), date(2026, 4, 1)), (str(y), date(2026, 4, 2))]
     counted = count_active(vocabulary, picks, today=date(2026, 4, 25), min_days=2, cap=100, retire_days=20)
-    assert counted.deleted == (y,) and counted.added == (x,)
-    assert dict(counted.vocabulary.active) == {x: date(2026, 4, 25)}
+    assert counted.deleted == (y,) and counted.added == tuple(sorted((x, WRITE_DOC)))
+    assert dict(counted.vocabulary.active) == {x: date(2026, 4, 25), WRITE_DOC: date(2026, 4, 25)}
     assert counted.vocabulary.revision == vocabulary.revision + 1
+
+
+def test_a_candidate_back_from_use_lends_its_parent_only_the_days_after_it_exited() -> None:
+    """丙一 3.5 没写到的一种：自己长的节点退出在用、回到候选以后，只把退出那天之后的日子借给上级（在用那一段、退出之前的不借）。"""
+
+    vocabulary, x = grown(initial_words(Lane.SESSION), "写需求书", WRITE_DOC, at(4, 1))
+    vocabulary = vocabulary.with_word(Word(**{**vars(vocabulary.get(x)), "last_picked": at(4, 20)}))
+    vocabulary = vocabulary.with_active({}, {x: date(2026, 4, 10)})  # 04-10 退出在用
+    before = [(str(x), date(2026, 4, 5)), (str(x), date(2026, 4, 8))]
+    counted = count_active(vocabulary, before, today=date(2026, 4, 21), min_days=2, cap=100, retire_days=20)
+    assert WRITE_DOC not in counted.vocabulary.active  # 退出之前的两天不借
+    after = [(str(x), date(2026, 4, 12)), (str(x), date(2026, 4, 15))]
+    counted = count_active(vocabulary, after, today=date(2026, 4, 21), min_days=2, cap=100, retire_days=20)
+    assert WRITE_DOC in counted.vocabulary.active and x in counted.vocabulary.active
 
 
 def test_the_generation_word_counts_become_metrics() -> None:

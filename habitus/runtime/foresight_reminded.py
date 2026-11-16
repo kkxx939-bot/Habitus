@@ -1,7 +1,7 @@
 """「开始前有没有被提醒过」——归约封口时盖 ``reminded`` 的查法（方案第九节第 0 步）。
 
-一条记录这一类在它开始之前被提醒过 = 账本里有一条**说出口的**递送（话已经带给他了），它的预期认的类与这条记录的类编号相等
-（与结算同一个口径）、决定在这条记录开始之前、而且这条记录落在那条预期说中的
+一条记录这一类在它开始之前被提醒过 = 账本里有一条**说出口的**递送（话已经带给他了），这条记录的编号是它的预期的节点或那个节点的
+下级（与结算同一个口径，丙一 2026-11-15：说了"写文档"之后他写了周报，这条记录算被带出来的）、决定在这条记录开始之前、而且这条记录落在那条预期说中的
 范围里（形成之后、最晚时限之前）——判法在 ``foresight.delivery.reminded_before``，这里只读账。只看账本里还没结完的日子（``open_days``：说中的范围还没过完的预期都在那里）。
 端口由组合根注入归约 runner（``BehaviorReductionRunner.attach_reminder_lookup``），behavior 对 foresight 零知识。
 
@@ -17,13 +17,16 @@ from datetime import date, datetime
 
 from habitus.foresight import ForesightError
 from habitus.foresight.delivery import reminded_before
+from habitus.foresight.hierarchy import FLAT, KindHierarchy, KindHierarchyPort
 from habitus.foresight.ledger import Expectation
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 
 
 class RemindedLookup:
-    def __init__(self, ledger: ForesightLedgerStore) -> None:
+    def __init__(self, ledger: ForesightLedgerStore, hierarchy: KindHierarchyPort | None = None) -> None:
         self.ledger = ledger
+        #: 上下级口（组合根从词表状态装）；只在有说出口的、类不相同的预期要比时才读一次。
+        self.hierarchy = hierarchy
         #: 日子 → (递送目录的文件名, 那天说出口的 [(预期, 决定时刻)])。
         self._spoken: dict[date, tuple[frozenset[str], tuple[tuple[Expectation, datetime], ...]]] = {}
 
@@ -33,6 +36,7 @@ class RemindedLookup:
         if started_at.utcoffset() is None:
             raise ForesightError("started_at must be a timezone-aware datetime")
         open_days = self.ledger.open_days()
+        kinds: KindHierarchy | None = None
         # 结完的日子不会再被问到：它们的缓存淘汰掉（26 号清单 6.13）
         for stale in [day for day in self._spoken if day not in open_days]:
             del self._spoken[stale]
@@ -40,7 +44,9 @@ class RemindedLookup:
             if day > started_at.date():
                 continue
             for item, decided_at in self._spoken_on(day):
-                if reminded_before(item, decided_at, kind_token=kind_token, started_at=started_at):
+                if item.kind_token != kind_token and kinds is None:
+                    kinds = FLAT if self.hierarchy is None else self.hierarchy()
+                if reminded_before(item, decided_at, kind_token=kind_token, started_at=started_at, kinds=kinds or FLAT):
                     return True
         return False
 

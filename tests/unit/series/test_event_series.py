@@ -28,7 +28,7 @@ from habitus.series import (
 )
 from habitus.series.reader import read_series
 from habitus.temporal import Rulers
-from tests.unit.scene.concept_fixtures import BEDTIME, BREAKFAST, CODING
+from tests.unit.scene.concept_fixtures import BEDTIME, BREAKFAST, CODING, every_kind
 from tests.unit.scene.fixtures import DAY1, Site, at, publish, publish_gap
 
 NOW = datetime(2026, 9, 1, 3, 0, tzinfo=UTC)
@@ -100,7 +100,7 @@ def test_appending_data_from_the_cutoff_on_changes_nothing_on_night_n(tmp_path) 
 
     def night_n() -> tuple[EventSeries, dict]:  # type: ignore[type-arg]
         series = read_series(site.behavior_tree, cutoff=tonight)
-        return series, dict(recurrences_of(series, RULERS))
+        return series, dict(recurrences_of(series, RULERS, every_kind(series)))
 
     before = night_n()
     publish(site.behavior_tree, tonight, "又改代码", 0, 10, kind="修改代码")
@@ -132,7 +132,7 @@ def test_the_semantic_layer_and_the_recurrences_read_the_same_records(tmp_path) 
         kind="修改代码",
     )
     series = read_series(site.behavior_tree, cutoff=day(7))
-    recurrences = recurrences_of(series, RULERS)
+    recurrences = recurrences_of(series, RULERS, every_kind(series))
 
     hits = ConceptHitStore(tmp_path / "scene")
     concepts = ConceptSet([BEDTIME, BREAKFAST, CODING])
@@ -158,7 +158,7 @@ def test_a_reminded_record_is_carried_and_the_recurrence_counts_it_as_done_but_n
     publish(site.behavior_tree, day(0), "吃早饭", 8, 0, kind="早餐", reminded=True)
     series = read_series(site.behavior_tree, cutoff=day(1))
     assert series.records[0].reminded
-    (breakfast,) = recurrences_of(series, RULERS).values()
+    (breakfast,) = recurrences_of(series, RULERS, every_kind(series)).values()
     (only,) = breakfast.days
     assert (only.count, only.natural, only.natural_uri) == (1, 0, None)
 

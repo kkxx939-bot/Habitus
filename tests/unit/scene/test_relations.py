@@ -145,11 +145,18 @@ def test_only_present_time_counts_gaps_and_the_cutoff_make_the_outcome_unknown()
     assert len(morning) == 1 and morning[0].treated == 0 and morning[0].controls == 1
 
 
-def test_a_concept_is_never_compared_with_itself() -> None:
-    """一条记录只算它那个类的行为概念：两个不同的概念不会读同一批记录，只有自己与自己不比。"""
+def test_a_concept_is_never_compared_with_itself_nor_with_its_parent_or_child() -> None:
+    """自己与自己不比；上下级也不比（下级的记录也记在上级的账上，读的是同一批记录，丙一 2026-11-15）；兄弟、不相干的照常比。"""
 
-    assert not comparable(cid("修改代码"), cid("修改代码"))
-    assert comparable(cid("打球"), cid("跑步")) and comparable("周末", cid("打球"))
+    from dataclasses import replace
+
+    from habitus.scene.concepts import ConceptSet
+    from tests.unit.scene.concept_fixtures import BALL, RUNNING
+
+    nested = ConceptSet([replace(BALL, classes=(BALL.name, RUNNING.name)), RUNNING])
+    assert not comparable(CONCEPTS, cid("修改代码"), cid("修改代码"))
+    assert comparable(CONCEPTS, cid("打球"), cid("跑步")) and comparable(CONCEPTS, "周末", cid("打球"))
+    assert not comparable(nested, cid("打球"), cid("跑步")) and not comparable(nested, cid("跑步"), cid("打球"))
 
 
 def test_the_configuration_refuses_contradictions() -> None:

@@ -12,15 +12,12 @@ from habitus.scene.concepts import ConceptSet
 from habitus.scene.relations import LaneTests, RelationKey, Segment, Verdict, build_timelines, examine_night
 from habitus.scene.relations.conditions import (
     Condition,
-    ConditionError,
     Field,
     ModeratedMeasure,
     Template,
-    compile_proposal,
     parse,
 )
 from habitus.scene.relations.longspan import Episode, EpisodeMeasure, episodes, measure_of, unit_length
-from habitus.scene.relations.measures import PairedMeasure
 from habitus.scene.relations.spans import chains_of
 from habitus.series import EventSeries, GapKind, SeriesGap, SeriesRecord
 from habitus.temporal.absence import Visit
@@ -365,31 +362,6 @@ def test_a_real_relation_without_a_condition_is_seldom_read_as_moderated() -> No
     assert flagged / rounds < 0.09
 
 
-def test_proposals_compile_into_one_of_two_templates_or_are_refused() -> None:
-    concepts = ConceptSet([*CONCEPTS.values(), calendar("周末", "日历.周几", "周六", "周日")])
-    assert compile_proposal(
-        {"template": "field", "field": "place", "value": "公司"}, concepts, lane="session"
-    ).text == ("field:place=公司")
-    assert compile_proposal({"template": "timeline", "concept": "调研"}, concepts, lane="session") == Condition(
-        Template.TIMELINE, RESEARCH
-    )
-    for bad, reason in (
-        ({"template": "vibes"}, "unknown template"),
-        ({"template": "field", "field": "mood"}, "unknown field"),
-        ({"template": "field", "field": "weekend"}, "unknown field"),
-        ({"template": "field", "field": "place"}, "plain value"),
-        ({"template": "timeline", "concept": "不存在"}, "no concept"),
-        ({"template": "timeline", "concept": "周末"}, "behaviour concept"),
-        # 日历条件由系统机械列举（情境概念模板），模型提不了
-        ({"template": "concept", "concept": "周末"}, "not proposable"),
-        ({"template": "concept", "concept": "调研"}, "not proposable"),
-    ):
-        with pytest.raises(ConditionError, match=reason):
-            compile_proposal(bad, concepts, lane="session")
-    with pytest.raises(ConditionError, match="another lane"):
-        compile_proposal({"template": "timeline", "concept": "调研"}, concepts, lane="physical")
-
-
 def test_condition_text_round_trips() -> None:
     for condition in (
         Condition(Template.FIELD, "公司", Field.PLACE),
@@ -397,40 +369,6 @@ def test_condition_text_round_trips() -> None:
         Condition(Template.CONCEPT, "出差中"),
     ):
         assert parse(condition.text) == condition
-
-
-def test_a_proposal_that_repeats_a_mechanical_condition_keeps_its_full_history() -> None:
-    """模型提的条件与机械列举撞上（「之前出现过调研」机械列举里本来就有）：照旧在全部历史上量，不被截成"提出之后"（裁定 27 第 10 条，E5）。"""
-
-    series = planted(80, moderated=True)
-    proposed_on = series.cutoff - timedelta(days=10)
-    condition = Condition(Template.TIMELINE, RESEARCH)
-    line = line_of(series)
-    mechanical_only = LaneTests(line, CONCEPTS, CONFIG, series.cutoff)
-    proposed = LaneTests(line, CONCEPTS, CONFIG, series.cutoff, proposals={DISCUSS: ((condition, proposed_on),)})
-    key = RelationKey("session", DISCUSS, CODE, Segment.CHAIN, condition.text)
-    full = next(test for test in mechanical_only.night().tests if test.key == key)
-    repeated = next(test for test in proposed.night().tests if test.key == key)
-    assert repeated.antecedents == full.antecedents
-
-
-def test_a_new_proposed_condition_is_measured_only_after_it_was_proposed() -> None:
-    """机械列举里没有的条件（地点：记录上本来没有这个字段）才是模型新提的：只量提出之后的数据。"""
-
-    series = planted(80, moderated=True)
-    proposed_on = series.cutoff - timedelta(days=10)
-    condition = Condition(Template.FIELD, "家里", Field.PLACE)
-    line = line_of(series)
-    proposed = LaneTests(line, CONCEPTS, CONFIG, series.cutoff, proposals={DISCUSS: ((condition, proposed_on),)})
-    key = RelationKey("session", DISCUSS, CODE, Segment.CHAIN, condition.text)
-    assert key in proposed.keys()
-    assert key not in LaneTests(line, CONCEPTS, CONFIG, series.cutoff).keys()
-    late = proposed.measure(key, since=proposed_on)
-    # 同一条链的带条件关系两道对照各分一次组（裁定 95 第 4 条）：两道都只量提出之后的
-    assert isinstance(late, PairedMeasure)
-    for part in late.parts:
-        assert isinstance(part, ModeratedMeasure)
-        assert all(item.chain.day >= proposed_on for item in (*part.inside, *part.outsides[0]))
 
 
 def test_a_calendar_situation_is_an_antecedent_of_the_situation_segment() -> None:

@@ -44,6 +44,11 @@ class RuntimeLifecycle:
                 branch.tree.initialize()
                 # 旧词表（变更日志、待定池、迁移计划……）不迁移、不兼容：盘上还有就在启动时报错、点出文件（词表方案 2026-11-14）
                 branch.kind_store.check()
+        if self.components.model_queue is not None:
+            # 已删的候选条件提议簿（2026-11-15）同样不迁移：盘上还有就在启动时报错、点出文件
+            advice = self.components.model_queue.queue.scene.advice
+            if advice is not None:
+                advice.store.refuse_proposal_books()
         oldest_job = self.components.workflow.jobs.oldest_uncommitted()
         recovered = self.components.workflow.runner.transaction_recovery.recover_pending() if oldest_job is None else ()
         return memory_root, recovered

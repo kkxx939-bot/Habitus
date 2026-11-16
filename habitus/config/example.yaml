@@ -539,7 +539,6 @@ workflow:
 #     exact_strata_limit: 400          # 有信息的层不超过这么多时 p 值精确算，超过用正态近似
 #     first_seen_min_days: 14          # 长跨度"新类第一次出现"：记录开始后至少过这么多天
 #     first_seen_min_blocks: 3         #   ……并且至少这么多个这一类自己的块长
-#     condition_ask_min_antecedents: 40  # 前因攒到这么多次才问模型要调节条件（机械列举的条件按最小可达 p 开检验，不看它）
 #     max_combined_conditions: 3       # 一条关系最多挂几个条件（第二个起只长在已成立的带条件关系上；保护闸）
 
 # 读行为记录时间用的尺子（裁定 59）：语义树与预测层都经 habitus.temporal 用它们，全系统只此一处。

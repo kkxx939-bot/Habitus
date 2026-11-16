@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 
 from habitus.foundation.observability import ObservationStatus
-from habitus.scene.concepts.model import ConceptSet
 from habitus.series import EventSeries
 
 RETRY, UNSEALED, SYNC, ADVICE = "retry", "unsealed", "sync", "advice"
@@ -169,7 +168,7 @@ class Item:
 
 @dataclass
 class Round:
-    """一轮里各类之间共用的：今天、已封口的活可以做的那一天、这一轮的时刻、读好的序列与盘上的概念集。"""
+    """一轮里各类之间共用的：今天、已封口的活可以做的那一天、这一轮的时刻、读好的序列。"""
 
     now: datetime
     today: date
@@ -177,12 +176,6 @@ class Round:
     series: EventSeries | None = None
     #: 今天这一代做完了没有（这一轮第一次问到时读一次完成标记）。
     generated: bool | None = None
-    _concepts: ConceptSet | None = None
-
-    def forget(self) -> None:
-        """概念集变了（同步词表之后）：下一项重新从盘上取。"""
-
-        self._concepts = None
 
 
 __all__ = [

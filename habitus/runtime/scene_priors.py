@@ -91,7 +91,7 @@ class LanePriors:
 
         return assign(
             self.names,
-            comparable=comparable,
+            comparable=lambda antecedent, consequent: comparable(self.concepts, antecedent, consequent),
             seen=self.seen,
             answered=lambda antecedent, consequent: self.level(antecedent, consequent) is not None,
         )
@@ -103,7 +103,7 @@ class LanePriors:
             1
             for consequent in self.names
             if any(
-                comparable(antecedent, consequent) and self.level(antecedent, consequent) is None
+                comparable(self.concepts, antecedent, consequent) and self.level(antecedent, consequent) is None
                 for antecedent in self.names
             )
         )
@@ -112,7 +112,7 @@ class LanePriors:
         found: dict[tuple[str, str], PriorLevel] = {}
         for consequent in self.names:
             for antecedent in self.names:
-                if comparable(antecedent, consequent):
+                if comparable(self.concepts, antecedent, consequent):
                     level = self.level(antecedent, consequent)
                     if level is not None:
                         found[(antecedent, consequent)] = level

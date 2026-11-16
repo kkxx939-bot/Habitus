@@ -1,0 +1,942 @@
+{
+ "parent_idle": {
+  "2026-04-11": {
+   "s-k0002->s-k0004|chain|": {
+    "antecedents": 44,
+    "block_days": 1.0,
+    "blocks": 30,
+    "effect": {
+     "antecedents": 44,
+     "control_rate": 0.2579545455,
+     "treated_rate": 0.4318181818
+    },
+    "excess_share": 0.3642857143,
+    "heterogeneity_p": 0.9999966826,
+    "interval": [
+     0.1002850529,
+     0.2667291667
+    ],
+    "large_enough": true,
+    "leave_one_out": true,
+    "minimum_p": 7.990976985e-09,
+    "more_needed": null,
+    "p_value": 0.0125539105,
+    "relative_interval": [
+     0.416448556,
+     0.9657262555
+    ],
+    "same_event_share": 0.0,
+    "stable": true,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|concept:周一": {
+    "antecedents": 44,
+    "block_days": 1.0,
+    "blocks": 30,
+    "effect": {
+     "antecedents": 9,
+     "control_rate": 0.337037037,
+     "treated_rate": 0.5555555556
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.01137777778,
+    "more_needed": null,
+    "p_value": 0.7591943469,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|concept:周五": {
+    "antecedents": 44,
+    "block_days": 1.0,
+    "blocks": 30,
+    "effect": {
+     "antecedents": 9,
+     "control_rate": 0.3648148148,
+     "treated_rate": 0.5555555556
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.01,
+    "more_needed": null,
+    "p_value": 0.9071100631,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|field:place=书房": {
+    "antecedents": 44,
+    "block_days": 1.0,
+    "blocks": 30,
+    "effect": {
+     "antecedents": 21,
+     "control_rate": 0.3658730159,
+     "treated_rate": 0.8571428571
+    },
+    "excess_share": 0.4912698413,
+    "heterogeneity_p": null,
+    "interval": [
+     0.4077786378,
+     0.8263318671
+    ],
+    "large_enough": true,
+    "leave_one_out": true,
+    "minimum_p": 1.111111111e-06,
+    "more_needed": null,
+    "p_value": 9.598536808e-05,
+    "relative_interval": null,
+    "same_event_share": 0.0,
+    "stable": true,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|field:with=同事B": {
+    "antecedents": 44,
+    "block_days": 1.0,
+    "blocks": 30,
+    "effect": {
+     "antecedents": 21,
+     "control_rate": 0.346031746,
+     "treated_rate": 0.5238095238
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 1.185185185e-05,
+    "more_needed": null,
+    "p_value": 0.9584868649,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|timeline:s-k0046": {
+    "antecedents": 44,
+    "block_days": 1.0,
+    "blocks": 30,
+    "effect": {
+     "antecedents": 21,
+     "control_rate": 0.3658730159,
+     "treated_rate": 0.8571428571
+    },
+    "excess_share": 0.4912698413,
+    "heterogeneity_p": null,
+    "interval": [
+     0.3813288904,
+     0.7895492705
+    ],
+    "large_enough": true,
+    "leave_one_out": true,
+    "minimum_p": 1.111111111e-06,
+    "more_needed": null,
+    "p_value": 9.598536808e-05,
+    "relative_interval": null,
+    "same_event_share": 0.0,
+    "stable": true,
+    "upward": true
+   },
+   "s-k0004->s-k0002|chain|": {
+    "antecedents": 20,
+    "block_days": 1.0,
+    "blocks": 17,
+    "effect": {
+     "antecedents": 20,
+     "control_rate": 0.43,
+     "treated_rate": 0.05
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 3.858024691e-10,
+    "more_needed": null,
+    "p_value": 0.9998331451,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0004->s-k0002|rest_of_day|": {
+    "antecedents": 17,
+    "block_days": 1.0,
+    "blocks": 17,
+    "effect": {
+     "antecedents": 17,
+     "control_rate": 0.4019607843,
+     "treated_rate": 0.2352941176
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.004938271605,
+    "more_needed": null,
+    "p_value": 0.2679012346,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": false
+   }
+  },
+  "2026-05-23": {
+   "s-k0002->s-k0004|chain|": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 86,
+     "control_rate": 0.2868217054,
+     "treated_rate": 0.4651162791
+    },
+    "excess_share": 0.3650793651,
+    "heterogeneity_p": 1.0,
+    "interval": [
+     0.1227554668,
+     0.241970758
+    ],
+    "large_enough": true,
+    "leave_one_out": true,
+    "minimum_p": 6.206775321e-16,
+    "more_needed": null,
+    "p_value": 0.0004855354821,
+    "relative_interval": [
+     0.4642645222,
+     0.8463451394
+    ],
+    "same_event_share": 0.0,
+    "stable": true,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|concept:周一": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 17,
+     "control_rate": 0.381372549,
+     "treated_rate": 0.6470588235
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 2.4e-05,
+    "more_needed": null,
+    "p_value": 0.4143389868,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|concept:周三": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 17,
+     "control_rate": 0.2470588235,
+     "treated_rate": 0.3529411765
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.002133333333,
+    "more_needed": null,
+    "p_value": 1.0,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|concept:周五": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 18,
+     "control_rate": 0.2935185185,
+     "treated_rate": 0.4444444444
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.0001333333333,
+    "more_needed": null,
+    "p_value": 1.0,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|concept:周四": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 18,
+     "control_rate": 0.3009259259,
+     "treated_rate": 0.4444444444
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.000324,
+    "more_needed": null,
+    "p_value": 1.0,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|field:place=书房": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 42,
+     "control_rate": 0.4186507937,
+     "treated_rate": 0.9285714286
+    },
+    "excess_share": 0.5099206349,
+    "heterogeneity_p": null,
+    "interval": [
+     0.5259668036,
+     0.7762811184
+    ],
+    "large_enough": true,
+    "leave_one_out": true,
+    "minimum_p": 2.057613169e-15,
+    "more_needed": null,
+    "p_value": 1.744203372e-09,
+    "relative_interval": null,
+    "same_event_share": 0.0,
+    "stable": true,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|field:with=同事B": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 37,
+     "control_rate": 0.3216216216,
+     "treated_rate": 0.4864864865
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 4.21399177e-09,
+    "more_needed": null,
+    "p_value": 1.0,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|timeline:s-k0019": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 11,
+     "control_rate": 0.3954545455,
+     "treated_rate": 0.7272727273
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.00048,
+    "more_needed": null,
+    "p_value": 0.2636472663,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|timeline:s-k0043": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 11,
+     "control_rate": 0.3409090909,
+     "treated_rate": 0.4545454545
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.002,
+    "more_needed": null,
+    "p_value": 1.0,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|timeline:s-k0046": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 42,
+     "control_rate": 0.4186507937,
+     "treated_rate": 0.9285714286
+    },
+    "excess_share": 0.5099206349,
+    "heterogeneity_p": null,
+    "interval": [
+     0.5341236779,
+     0.7756480123
+    ],
+    "large_enough": true,
+    "leave_one_out": true,
+    "minimum_p": 2.057613169e-15,
+    "more_needed": null,
+    "p_value": 1.744203372e-09,
+    "relative_interval": null,
+    "same_event_share": 0.0,
+    "stable": true,
+    "upward": true
+   },
+   "s-k0004->s-k0002|chain|": {
+    "antecedents": 41,
+    "block_days": 2.0,
+    "blocks": 28,
+    "effect": {
+     "antecedents": 41,
+     "control_rate": 0.5024390244,
+     "treated_rate": 0.0487804878
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 1.684249448e-18,
+    "more_needed": null,
+    "p_value": 0.999999994,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0004->s-k0002|rest_of_day|": {
+    "antecedents": 35,
+    "block_days": 2.0,
+    "blocks": 28,
+    "effect": {
+     "antecedents": 35,
+     "control_rate": 0.3857142857,
+     "treated_rate": 0.2571428571
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 7.802742507e-09,
+    "more_needed": null,
+    "p_value": 0.1361921623,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": false
+   }
+  }
+ },
+ "parent_in_use": {
+  "2026-04-11": {
+   "s-k0002->s-k0004|chain|": {
+    "antecedents": 44,
+    "block_days": 1.0,
+    "blocks": 30,
+    "effect": {
+     "antecedents": 44,
+     "control_rate": 0.2579545455,
+     "treated_rate": 0.4318181818
+    },
+    "excess_share": 0.3642857143,
+    "heterogeneity_p": 0.9999966826,
+    "interval": [
+     0.1002850529,
+     0.2667291667
+    ],
+    "large_enough": true,
+    "leave_one_out": true,
+    "minimum_p": 7.990976985e-09,
+    "more_needed": null,
+    "p_value": 0.0125539105,
+    "relative_interval": [
+     0.416448556,
+     0.9657262555
+    ],
+    "same_event_share": 0.0,
+    "stable": true,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|concept:周一": {
+    "antecedents": 44,
+    "block_days": 1.0,
+    "blocks": 30,
+    "effect": {
+     "antecedents": 9,
+     "control_rate": 0.337037037,
+     "treated_rate": 0.5555555556
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.01137777778,
+    "more_needed": null,
+    "p_value": 0.7591943469,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|concept:周五": {
+    "antecedents": 44,
+    "block_days": 1.0,
+    "blocks": 30,
+    "effect": {
+     "antecedents": 9,
+     "control_rate": 0.3648148148,
+     "treated_rate": 0.5555555556
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.01,
+    "more_needed": null,
+    "p_value": 0.9071100631,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|field:place=书房": {
+    "antecedents": 44,
+    "block_days": 1.0,
+    "blocks": 30,
+    "effect": {
+     "antecedents": 21,
+     "control_rate": 0.3658730159,
+     "treated_rate": 0.8571428571
+    },
+    "excess_share": 0.4912698413,
+    "heterogeneity_p": null,
+    "interval": [
+     0.4077786378,
+     0.8263318671
+    ],
+    "large_enough": true,
+    "leave_one_out": true,
+    "minimum_p": 1.111111111e-06,
+    "more_needed": null,
+    "p_value": 9.598536808e-05,
+    "relative_interval": null,
+    "same_event_share": 0.0,
+    "stable": true,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|field:with=同事B": {
+    "antecedents": 44,
+    "block_days": 1.0,
+    "blocks": 30,
+    "effect": {
+     "antecedents": 21,
+     "control_rate": 0.346031746,
+     "treated_rate": 0.5238095238
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 1.185185185e-05,
+    "more_needed": null,
+    "p_value": 0.9584868649,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|timeline:s-k0046": {
+    "antecedents": 44,
+    "block_days": 1.0,
+    "blocks": 30,
+    "effect": {
+     "antecedents": 21,
+     "control_rate": 0.3658730159,
+     "treated_rate": 0.8571428571
+    },
+    "excess_share": 0.4912698413,
+    "heterogeneity_p": null,
+    "interval": [
+     0.3813288904,
+     0.7895492705
+    ],
+    "large_enough": true,
+    "leave_one_out": true,
+    "minimum_p": 1.111111111e-06,
+    "more_needed": null,
+    "p_value": 9.598536808e-05,
+    "relative_interval": null,
+    "same_event_share": 0.0,
+    "stable": true,
+    "upward": true
+   },
+   "s-k0004->s-k0002|chain|": {
+    "antecedents": 20,
+    "block_days": 1.0,
+    "blocks": 17,
+    "effect": {
+     "antecedents": 20,
+     "control_rate": 0.43,
+     "treated_rate": 0.05
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 3.858024691e-10,
+    "more_needed": null,
+    "p_value": 0.9998331451,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0004->s-k0002|rest_of_day|": {
+    "antecedents": 17,
+    "block_days": 1.0,
+    "blocks": 17,
+    "effect": {
+     "antecedents": 17,
+     "control_rate": 0.4019607843,
+     "treated_rate": 0.2352941176
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.004938271605,
+    "more_needed": null,
+    "p_value": 0.2679012346,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": false
+   }
+  },
+  "2026-05-23": {
+   "s-k0002->s-k0004|chain|": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 86,
+     "control_rate": 0.2868217054,
+     "treated_rate": 0.4651162791
+    },
+    "excess_share": 0.3650793651,
+    "heterogeneity_p": 1.0,
+    "interval": [
+     0.1227554668,
+     0.241970758
+    ],
+    "large_enough": true,
+    "leave_one_out": true,
+    "minimum_p": 6.206775321e-16,
+    "more_needed": null,
+    "p_value": 0.0004855354821,
+    "relative_interval": [
+     0.4642645222,
+     0.8463451394
+    ],
+    "same_event_share": 0.0,
+    "stable": true,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|concept:周一": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 17,
+     "control_rate": 0.381372549,
+     "treated_rate": 0.6470588235
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 2.4e-05,
+    "more_needed": null,
+    "p_value": 0.4143389868,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|concept:周三": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 17,
+     "control_rate": 0.2470588235,
+     "treated_rate": 0.3529411765
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.002133333333,
+    "more_needed": null,
+    "p_value": 1.0,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|concept:周五": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 18,
+     "control_rate": 0.2935185185,
+     "treated_rate": 0.4444444444
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.0001333333333,
+    "more_needed": null,
+    "p_value": 1.0,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|concept:周四": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 18,
+     "control_rate": 0.3009259259,
+     "treated_rate": 0.4444444444
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.000324,
+    "more_needed": null,
+    "p_value": 1.0,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|field:place=书房": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 42,
+     "control_rate": 0.4186507937,
+     "treated_rate": 0.9285714286
+    },
+    "excess_share": 0.5099206349,
+    "heterogeneity_p": null,
+    "interval": [
+     0.5259668036,
+     0.7762811184
+    ],
+    "large_enough": true,
+    "leave_one_out": true,
+    "minimum_p": 2.057613169e-15,
+    "more_needed": null,
+    "p_value": 1.744203372e-09,
+    "relative_interval": null,
+    "same_event_share": 0.0,
+    "stable": true,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|field:with=同事B": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 37,
+     "control_rate": 0.3216216216,
+     "treated_rate": 0.4864864865
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 4.21399177e-09,
+    "more_needed": null,
+    "p_value": 1.0,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|timeline:s-k0019": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 11,
+     "control_rate": 0.3954545455,
+     "treated_rate": 0.7272727273
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.00048,
+    "more_needed": null,
+    "p_value": 0.2636472663,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|timeline:s-k0043": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 11,
+     "control_rate": 0.3409090909,
+     "treated_rate": 0.4545454545
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 0.002,
+    "more_needed": null,
+    "p_value": 1.0,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0002->s-k0004|chain|timeline:s-k0046": {
+    "antecedents": 86,
+    "block_days": 1.0,
+    "blocks": 60,
+    "effect": {
+     "antecedents": 42,
+     "control_rate": 0.4186507937,
+     "treated_rate": 0.9285714286
+    },
+    "excess_share": 0.5099206349,
+    "heterogeneity_p": null,
+    "interval": [
+     0.5341236779,
+     0.7756480123
+    ],
+    "large_enough": true,
+    "leave_one_out": true,
+    "minimum_p": 2.057613169e-15,
+    "more_needed": null,
+    "p_value": 1.744203372e-09,
+    "relative_interval": null,
+    "same_event_share": 0.0,
+    "stable": true,
+    "upward": true
+   },
+   "s-k0004->s-k0002|chain|": {
+    "antecedents": 41,
+    "block_days": 2.0,
+    "blocks": 28,
+    "effect": {
+     "antecedents": 41,
+     "control_rate": 0.5024390244,
+     "treated_rate": 0.0487804878
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 1.684249448e-18,
+    "more_needed": null,
+    "p_value": 0.999999994,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": true
+   },
+   "s-k0004->s-k0002|rest_of_day|": {
+    "antecedents": 35,
+    "block_days": 2.0,
+    "blocks": 28,
+    "effect": {
+     "antecedents": 35,
+     "control_rate": 0.3857142857,
+     "treated_rate": 0.2571428571
+    },
+    "excess_share": null,
+    "heterogeneity_p": null,
+    "interval": null,
+    "large_enough": null,
+    "leave_one_out": null,
+    "minimum_p": 7.802742507e-09,
+    "more_needed": null,
+    "p_value": 0.1361921623,
+    "relative_interval": null,
+    "same_event_share": null,
+    "stable": null,
+    "upward": false
+   }
+  }
+ }
+}

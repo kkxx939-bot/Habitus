@@ -9,7 +9,7 @@
 （``runtime.generation_runner.GenerationRunner``：连续定稿到昨天、预测拍水位过了余量后做今天这一代），交给预测 worker
 每槽先调（``runtime.foresight_worker``，同一次预测根租约之内先换代、再做预测拍）。完成标记、每代报告与
 trace 都在 ``<scene_root>/generation`` 下。换代里没有模型调用：调模型的活（出错重试、物理 lane 未封口判断的选词、
-候选条件与先验的补问）由模型队列做（``runtime.model_queue``，``build_model_queue``
+先验的补问）由模型队列做（``runtime.model_queue``，``build_model_queue``
 装好、交给 ``ModelQueueWorker``）；两边共用一份 ``ModelQueueState``——换代读"队列是不是在整体退避""各类还欠着几项"，
 队列读"换代是不是在做"——与一把语义树写锁（``runtime.scene_lock``）。
 """
@@ -51,7 +51,6 @@ from habitus.runtime.scene_lock import SceneWriteLock, unlocked
 from habitus.runtime.scene_night import SceneNightlyRun
 from habitus.runtime.scene_vocabulary import VocabularyCatalog, kind_resolution
 from habitus.runtime.unsealed import UnsealedFromJudgements, unreduced_gaps
-from habitus.scene.advice.conditions import ConditionProposer
 from habitus.scene.advice.prior import PriorAdvisor
 from habitus.scene.advice.store import AdviceStore
 from habitus.scene.concepts.store import ConceptStore
@@ -90,7 +89,6 @@ def build_scene_nightly(
         advice=RelationAdvice(
             store=AdviceStore(scene_root),
             prior=PriorAdvisor(structured_chat),
-            conditions=ConditionProposer(structured_chat),
             zone=config.locale.zone(),
         ),
         rulers=rhythm_rulers(config),

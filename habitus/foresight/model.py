@@ -8,6 +8,7 @@ from datetime import date, datetime
 from typing import Protocol
 
 from habitus.foresight.errors import ForesightError
+from habitus.foresight.hierarchy import FLAT, KindHierarchy
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,8 @@ class Moment:
     #: 上一次看的时刻（上一拍）。时窗在那之后才关的，这一拍还算赶上了：拍点晚了一点不让没做的那次机会从账上消失。
     #: None = 只看此刻。
     looked_since: datetime | None = None
+    #: 此刻的上下级（丙一 2026-11-15）："今天做过没有"认节点自己和它的下级。
+    kinds: KindHierarchy = FLAT
 
     def __post_init__(self) -> None:
         if self.at.utcoffset() is None:

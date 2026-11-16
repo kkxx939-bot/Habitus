@@ -106,7 +106,7 @@ def form_expectations(
         return ()
     if moment.slot != slot_index(moment.at, slot_minutes=table.slot_minutes):
         raise ForesightError("moment.slot must be mapped with the opportunity table's slot width")
-    done_today = frozenset(row.kind_token for row in rows if row.day == moment.day and not row.abandoned)
+    done_today = moment.kinds.done(row.kind_token for row in rows if row.day == moment.day and not row.abandoned)
     statuses = relation_statuses(shadow_unestablished)
     # TODO(FORESIGHT-EVENT-FIRST-001)：触发以行为事件与语义树的关系为主、时间与天气等是外部条件（裁定 53）。本 TODO 是
     # 代码侧唯一规格来源，另两处只引用它。

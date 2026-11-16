@@ -287,7 +287,7 @@ class RuntimeComponents:
     generation: GenerationRunner | None = None
     # 只开语义树、没开预测层时每槽看一眼换代的那个 worker（没有预测拍）；开了预测层时它在 ``foresight.worker``，这里是 None。
     generation_slots: ForesightWorker | None = None
-    # 模型队列（出错重试、词表、未封口判断的归类、候选条件与先验的补问、记同步到的版本）的常驻 worker；随换代一起有、一起没有。
+    # 模型队列（出错重试、词表、未封口判断的归类、先验的补问、记同步到的版本）的常驻 worker；随换代一起有、一起没有。
     model_queue: ModelQueueWorker | None = None
     # 预测层的证据装配；foresight.enabled 为假时为 None。它现在只接会话那一支（见 assembly 的 TODO）。
     foresight: ForesightRuntimeComponents | None = None

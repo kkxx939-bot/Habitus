@@ -47,12 +47,14 @@ from habitus.foresight.absence import returned_after_absence
 from habitus.foresight.delivery import (
     PENDING,
     Circumstances,
+    finer_first,
     hand_over,
     on_closing,
     on_opening,
     quiet_after_absence,
 )
 from habitus.foresight.feedback import feedback_reading
+from habitus.foresight.hierarchy import FLAT, KindHierarchy
 from habitus.foresight.judge import (
     Judge,
     Judgement,
@@ -66,7 +68,6 @@ from habitus.foresight.judge import (
 from habitus.foresight.ladder import effective_setting
 from habitus.foresight.ledger import (
     AWAITING_HOST,
-    BASIS_WITHDRAWN,
     AccountLevel,
     AntecedentRow,
     Delivery,
@@ -77,6 +78,7 @@ from habitus.foresight.ledger import (
 from habitus.foresight.opportunities import OpportunityTable
 from habitus.foresight.reliability import Reliability
 from habitus.foresight.units import UNIT, UNIT_CITE, joinable, meets, voiced
+from habitus.runtime.foresight_delivery_tally import Tally, spoken_today
 from habitus.runtime.foresight_delivery_views import AccountView, DeliveryViews, OmissionView
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
@@ -124,6 +126,8 @@ class JudgeMaterials:
     #: （与结算同一个找法，``ledger.settle.event_antecedent_holds``）。
     seen: Sequence[Seen] = ()
     since: datetime | None = None  # 区间起点（``foresight_tick.delivery_since``）；None 是此刻 − 1 拍
+    #: 这一拍开头取的上下级（丙一 2026-11-15）：节点在不在用、"上下级已说"、同一拍里细的先处理都按它。
+    kinds: KindHierarchy = FLAT
 
 
 class DeliveryStage:
@@ -236,9 +240,9 @@ class DeliveryStage:
         every = (*units, *closing_units.values())
         standings = {unit.basis.expectation_id: unit.standing for unit in every}
         inputs: dict[str, tuple[UnitInput, ...]] = {unit.basis.expectation_id: _unit_inputs(unit) for unit in every}
-        tally = _Tally(
+        tally = Tally(
             now,
-            self._spoken_today(now),
+            spoken_today(self.ledger, now),
             alive=self.outlet is not None and self.outlet.alive(now),
             same_moment=moment_of,
         )
@@ -254,7 +258,7 @@ class DeliveryStage:
         closing = tuple((item, pending) for item, pending in due_closing if item.expectation_id not in deferred)
         speaking = tuple(item for item, _pending in closing if now <= item.deadline)  # 过了时限的不说、不问模型
         judgement = await self._judge(speaking, standings, materials, now, tally, inputs)
-        for item, pending in self._ordered_closing(closing, judgement):
+        for item, pending in self._ordered_closing(closing, judgement, materials):
             verdict = judgement.verdicts.get(item.expectation_id) if judgement is not None else None
             self._record(
                 tally,
@@ -289,7 +293,7 @@ class DeliveryStage:
             open_requests=open_requests,
         )
 
-    def _publish(self, found: _Due, tally: _Tally, materials: JudgeMaterials | None, now: datetime) -> int:
+    def _publish(self, found: _Due, tally: Tally, materials: JudgeMaterials | None, now: datetime) -> int:
         """这一拍末尾把可取的请求清单交给出口：之前「待取」还没终局的，加上这一拍刚记「待取」的。"""
 
         if self.outlet is None:
@@ -313,7 +317,7 @@ class DeliveryStage:
     # ── 一条预期的决定（原因的先后在 ``foresight.delivery``，这里只取材料）────────────────
 
     def _opening(
-        self, item: Expectation, standing: Standing, materials: JudgeMaterials | None, tally: _Tally
+        self, item: Expectation, standing: Standing, materials: JudgeMaterials | None, tally: Tally
     ) -> Delivery:
         return on_opening(item, standing, now=tally.now, facts=self._circumstances(item, materials))
 
@@ -324,10 +328,10 @@ class DeliveryStage:
         standing: Standing,
         verdict: Verdict | None,
         materials: JudgeMaterials | None,
-        tally: _Tally,
+        tally: Tally,
         inputs: Mapping[str, Sequence[UnitInput]],
     ) -> Delivery:
-        spoken_today, spoken_kinds = tally.spoken_for(item.expectation_id)
+        spoken_today, spoken_kinds, spoken = tally.spoken_for(item.expectation_id)
         return on_closing(
             item,
             pending,
@@ -337,6 +341,8 @@ class DeliveryStage:
             kept=verdict.kept if verdict is not None else None,
             evidence=verdict.evidence if verdict is not None else (),
             spoken_kinds=spoken_kinds,
+            spoken=spoken,
+            kinds=_kinds(materials),
             alive=tally.alive,
             spoken_today=spoken_today,
             daily_cap=self.daily_cap,
@@ -364,6 +370,7 @@ class DeliveryStage:
 
         table = materials.table if materials is not None else None
         return Circumstances(
+            active=lambda: _kinds(materials).active(item.kind_token),
             happened=lambda: materials is not None and materials.happened(item),
             absent=lambda: returned_after_absence(
                 self.ledger.facts_of(item.account),
@@ -411,7 +418,7 @@ class DeliveryStage:
             rows_on=rows_on,
         )
 
-    def _subsume(self, tally: _Tally, item: Expectation, basis_id: str, level: int) -> None:
+    def _subsume(self, tally: Tally, item: Expectation, basis_id: str, level: int) -> None:
         """同一刻同一个行为的另一个输入：单元替它一并决定，记「单元已选」并引依据。"""
 
         self._record(
@@ -420,10 +427,10 @@ class DeliveryStage:
             Delivery(item.expectation_id, tally.now, level, False, UNIT, 0.0, evidence=(f"{UNIT_CITE}{basis_id}",)),
         )
 
-    def _record(self, tally: _Tally, item: Expectation, delivery: Delivery | None) -> None:
+    def _record(self, tally: Tally, item: Expectation, delivery: Delivery | None) -> None:
         if delivery is None or not self.ledger.record_delivery(item.day, delivery):
             return
-        tally.count(delivery, item.kind_token)
+        tally.count(delivery, item)
         if delivery.reason == AWAITING_HOST:
             tally.awaiting.append((item, delivery))
 
@@ -515,7 +522,7 @@ class DeliveryStage:
         standings: Mapping[str, Standing],
         materials: JudgeMaterials | None,
         now: datetime,
-        tally: _Tally,
+        tally: Tally,
         inputs: Mapping[str, Sequence[UnitInput]],
     ) -> Judgement | None:
         """这一拍真要开口的那几个交模型（提醒档、还没做、同一类今天还没说过、名额没满）；没有模型、没有材料、没有宿主活着就不问。"""
@@ -526,7 +533,7 @@ class DeliveryStage:
             item
             for item in due
             if standings[item.expectation_id].level >= 1
-            and tally.room_for(item, self.daily_cap)
+            and tally.room_for(item, self.daily_cap, materials.kinds)
             and not materials.happened(item)
             and not self._returned(item, standings[item.expectation_id], materials)
         )
@@ -550,16 +557,16 @@ class DeliveryStage:
 
     @staticmethod
     def _ordered_closing(
-        closing: tuple[tuple[Expectation, Delivery], ...], judgement: Judgement | None
+        closing: tuple[tuple[Expectation, Delivery], ...], judgement: Judgement | None, materials: JudgeMaterials | None
     ) -> tuple[tuple[Expectation, Delivery], ...]:
-        """模型排的先后在前（名额先给它们），其余按时窗。"""
+        """模型排的先后在前（名额先给它们），其余按时窗；有上下级关系的那几条再把细的挪到前面（``delivery.finer_first``）。"""
 
-        if judgement is None:
-            return closing
-        by_id = {item.expectation_id: (item, pending) for item, pending in closing}
-        first = [by_id[identity] for identity in judgement.order if identity in by_id]
-        rest = [pair for pair in closing if pair[0].expectation_id not in judgement.order]
-        return tuple(first + rest)
+        if judgement is not None:
+            by_id = {item.expectation_id: (item, pending) for item, pending in closing}
+            first = [by_id[identity] for identity in judgement.order if identity in by_id]
+            rest = [pair for pair in closing if pair[0].expectation_id not in judgement.order]
+            closing = tuple(first + rest)
+        return finer_first(closing, _kinds(materials))
 
     @staticmethod
     def _text(
@@ -653,28 +660,6 @@ class DeliveryStage:
             subsumed,
         )
 
-    def _spoken_today(self, now: datetime) -> dict[str, str]:
-        """今天（按决定的日子）说过的那几条预期与它们的类（条数就是说过几次）——「待取」也算（话已经写好、等着问出口），同一条预期「待取」之后又来
-        「说了」只算一次。说出口的递送挂在预期所在的日子下：今天决定的，那条预期还没结（结算在它最晚时限那天定稿之后），所以只看
-        还没结完的日子。"""
-
-        today = now.date()
-        counted: dict[str, str] = {}
-        for day in self.ledger.open_days():
-            deliveries = [
-                item for item in self.ledger.deliveries_on(day) if item.spoken or item.reason == AWAITING_HOST
-            ]
-            if not deliveries:
-                continue
-            by_id = {item.expectation_id: item.kind_token for item in self.ledger.expectations_on(day)}
-            for delivery in deliveries:
-                if (
-                    delivery.decided_at.astimezone(now.tzinfo).date() == today
-                    and delivery.expectation_id not in counted
-                ):
-                    counted[delivery.expectation_id] = by_id.get(delivery.expectation_id, "")
-        return counted
-
 
 @dataclass(frozen=True)
 class _Due:
@@ -691,6 +676,10 @@ class _Due:
     handovers: tuple[tuple[tuple[Expectation, ...], tuple[str, ...]], ...] = ()
     #: 能接手的成员 → 它那条「单元已选」（接手后当时窗末的「等时窗末」用：档与决定时刻）。
     subsumed: Mapping[str, Delivery] = field(default_factory=dict)
+
+
+def _kinds(materials: JudgeMaterials | None) -> KindHierarchy:
+    return materials.kinds if materials is not None else FLAT
 
 
 def _closes(item: Expectation, pending: Delivery, since: datetime, instant: datetime) -> bool:
@@ -710,63 +699,6 @@ def _unit_inputs(unit: Unit) -> tuple[UnitInput, ...]:
     return tuple(
         UnitInput(item.expectation, item.standing.prediction.k, item.standing.prediction.n) for item in unit.inputs
     )
-
-
-class _Tally:
-    """这一拍的计数：决定了几条、说了几条、今天说过几次、今天说过哪些类。"""
-
-    def __init__(
-        self,
-        now: datetime,
-        spoken: Mapping[str, str],
-        *,
-        alive: bool = False,
-        same_moment: Mapping[str, frozenset[str]] | None = None,
-    ) -> None:
-        self.now: datetime = now
-        #: 今天说过（含「待取」）的预期 → 类。
-        self.counted: dict[str, str] = dict(spoken)
-        self.spoken_today: int = len(self.counted)
-        self.spoken_kinds: set[str] = set(self.counted.values())
-        #: 接手的成员 → 它那一刻的全部输入：算「同类已说」与名额时，同一刻里没说成的那几条不算。
-        self.same_moment: dict[str, frozenset[str]] = dict(same_moment or {})
-        #: 有没有宿主活着（这一拍开头看一次）。
-        self.alive: bool = alive
-        self.decided: int = 0
-        self.spoken: int = 0
-        self.by_reason: dict[str, int] = {}
-        self.by_level: dict[int, int] = {}
-        #: 这一拍刚记「待取」的（拍末交给出口）。
-        self.awaiting: list[tuple[Expectation, Delivery]] = []
-        self.withdrawn: set[str] = set()  # 这一拍撤下的「待取」（依据失效）：不再交给出口
-
-    def count(self, delivery: Delivery, kind_token: str) -> None:
-        if delivery.reason == BASIS_WITHDRAWN:
-            self.withdrawn.add(delivery.expectation_id)
-        self.decided += 1
-        self.by_reason[delivery.reason] = self.by_reason.get(delivery.reason, 0) + 1
-        self.by_level[delivery.level] = self.by_level.get(delivery.level, 0) + 1
-        if delivery.spoken:
-            self.spoken += 1
-        if delivery.spoken or delivery.reason == AWAITING_HOST:
-            self.spoken_today += 1  # 「待取」也占名额、也算"同类已说"
-            self.spoken_kinds.add(kind_token)
-            self.counted[delivery.expectation_id] = kind_token
-
-    def spoken_for(self, expectation_id: str) -> tuple[int, frozenset[str]]:
-        """这一条决定时看到的「今天说过几次、说过哪些类」：接手的成员不算它那一刻里没说成的几条（它们一句也没说出口）。"""
-
-        skip = self.same_moment.get(expectation_id)
-        if not skip:
-            return self.spoken_today, frozenset(self.spoken_kinds)
-        rest = {key: kind for key, kind in self.counted.items() if key not in skip}
-        return self.spoken_today - (len(self.counted) - len(rest)), frozenset(rest.values())
-
-    def room_for(self, item: Expectation, daily_cap: int) -> bool:
-        """名额没满、同一类今天还没说过（模型只问这一拍真要开口的）。"""
-
-        spoken_today, spoken_kinds = self.spoken_for(item.expectation_id)
-        return spoken_today < daily_cap and item.kind_token not in spoken_kinds
 
 
 __all__ = ["AccountView", "DeliveryReport", "DeliveryStage", "JudgeMaterials", "OmissionView"]

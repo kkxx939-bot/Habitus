@@ -18,7 +18,6 @@ from habitus.foundation.integrity import canonical_digest
 from habitus.scene.concepts.calendar_situations import calendar_key
 from habitus.scene.relations import longspan, stats
 from habitus.scene.relations.calendar import calendar_measure
-from habitus.scene.relations.candidates import RelationCandidates
 from habitus.scene.relations.conditions import ModeratedMeasure, ready_to_test, split
 from habitus.scene.relations.engine import (
     LaneNight,
@@ -43,9 +42,8 @@ class RelationEvaluator:
     """读数、检验族与子集读数。互相调用（量、种子、要量哪些、上下界、第 2/3 道）都经 ``LaneTests`` 门面，与拆前同一条分派
     （门面上的方法可以按实例替换）。"""
 
-    def __init__(self, tests: LaneTests, candidates: RelationCandidates) -> None:
+    def __init__(self, tests: LaneTests) -> None:
         self.tests = tests
-        self.candidates = candidates
 
     def night(
         self,
@@ -68,7 +66,7 @@ class RelationEvaluator:
         q = config.thresholds.fdr
         weights = weights or {}
         keys = self.tests.keys()
-        since = {**self.candidates.proposed, **(since or {})}
+        since = since or {}
         readings, skipped = self._readings(keys, since, keep | outside)
         inside = [key for key in readings if key not in outside]
         # 带条件的权重恒为 1 时（先验只给不带条件的），带条件那一族的归一系数就是 1，跳过的键既不改归一、也进不了族

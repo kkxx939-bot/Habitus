@@ -312,7 +312,7 @@ class ForesightTick:
             JudgeMaterials(
                 materials.table,
                 lambda uris: _rows_for(uris, materials.recent.cache, materials.recent.unsealed, seen, now),
-                lambda item: done_since(item, seen, now=now),
+                lambda item: done_since(item, seen, now=now, kinds=materials.recent.kinds),
                 lambda day: day_note(self.read_side.calendar, day),
                 lambda item: _unobserved(item, materials.recent, now),
                 None if self.reread is None else _reread_for(self.reread, now),
@@ -320,6 +320,7 @@ class ForesightTick:
                 delivery_since(
                     now, previous, None if self.track is None else self.track.slot * self.track.tolerance_slots
                 ),
+                materials.recent.kinds,
             ),
         )
 

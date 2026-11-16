@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import Enum
@@ -210,10 +210,11 @@ class EventSeries:
 
         return datetime.combine(self.cutoff, time(), tzinfo=moment.tzinfo)
 
-    def records_of(self, kind_token: str) -> tuple[SeriesRecord, ...]:
-        """一类的时间线：这一类（已转正的类编号）按开始时刻排好的每一条记录。待定的不在任何一类里（裁定 59）。"""
+    def records_of(self, kind_tokens: Collection[str]) -> tuple[SeriesRecord, ...]:
+        """几类合起来的时间线：编号在 ``kind_tokens`` 里（已转正的类编号）的记录按开始时刻排好。一个在用节点的记录范围是它自己
+        加全部下级（丙一 2026-11-15）。待定的不在任何一类里（裁定 59）。"""
 
-        return tuple(record for record in self.records if record.classified and record.kind_token == kind_token)
+        return tuple(record for record in self.records if record.classified and record.kind_token in kind_tokens)
 
     def on(self, day: date) -> tuple[SeriesRecord, ...]:
         return tuple(record for record in self.records if record.day == day)

@@ -1,0 +1,1064 @@
+[
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n写周报：写周期性的工作汇报，含日报、月报\n\n## 后果（每个答一档）\n- 写方案：写计划书、提案\n- 写摘要：把一份材料缩成要点\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 回邮件：回复收到的邮件\n- 记账：记下一笔收入或支出"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "写方案",
+         "写摘要",
+         "看邮件",
+         "回邮件",
+         "记账"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n写周报：写周期性的工作汇报，含日报、月报\n\n## 后果（每个答一档）\n- 记账：记下一笔收入或支出\n- 回邮件：回复收到的邮件\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 写摘要：把一份材料缩成要点\n- 写方案：写计划书、提案"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "记账",
+         "回邮件",
+         "看邮件",
+         "写摘要",
+         "写方案"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n写周报：写周期性的工作汇报，含日报、月报\n\n## 后果（每个答一档）\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 回邮件：回复收到的邮件\n- 记账：记下一笔收入或支出\n- 写方案：写计划书、提案\n- 写摘要：把一份材料缩成要点"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "看邮件",
+         "回邮件",
+         "记账",
+         "写方案",
+         "写摘要"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n写方案：写计划书、提案\n\n## 后果（每个答一档）\n- 写周报：写周期性的工作汇报，含日报、月报\n- 写摘要：把一份材料缩成要点\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 回邮件：回复收到的邮件\n- 记账：记下一笔收入或支出"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "写周报",
+         "写摘要",
+         "看邮件",
+         "回邮件",
+         "记账"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n写方案：写计划书、提案\n\n## 后果（每个答一档）\n- 记账：记下一笔收入或支出\n- 回邮件：回复收到的邮件\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 写摘要：把一份材料缩成要点\n- 写周报：写周期性的工作汇报，含日报、月报"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "记账",
+         "回邮件",
+         "看邮件",
+         "写摘要",
+         "写周报"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n写方案：写计划书、提案\n\n## 后果（每个答一档）\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 回邮件：回复收到的邮件\n- 记账：记下一笔收入或支出\n- 写周报：写周期性的工作汇报，含日报、月报\n- 写摘要：把一份材料缩成要点"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "看邮件",
+         "回邮件",
+         "记账",
+         "写周报",
+         "写摘要"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n写摘要：把一份材料缩成要点\n\n## 后果（每个答一档）\n- 写周报：写周期性的工作汇报，含日报、月报\n- 写方案：写计划书、提案\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 回邮件：回复收到的邮件\n- 记账：记下一笔收入或支出"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "写周报",
+         "写方案",
+         "看邮件",
+         "回邮件",
+         "记账"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n写摘要：把一份材料缩成要点\n\n## 后果（每个答一档）\n- 记账：记下一笔收入或支出\n- 回邮件：回复收到的邮件\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 写方案：写计划书、提案\n- 写周报：写周期性的工作汇报，含日报、月报"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "记账",
+         "回邮件",
+         "看邮件",
+         "写方案",
+         "写周报"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n写摘要：把一份材料缩成要点\n\n## 后果（每个答一档）\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 回邮件：回复收到的邮件\n- 记账：记下一笔收入或支出\n- 写周报：写周期性的工作汇报，含日报、月报\n- 写方案：写计划书、提案"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "看邮件",
+         "回邮件",
+         "记账",
+         "写周报",
+         "写方案"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n看邮件：看收到了什么邮件，或找某一封旧邮件\n\n## 后果（每个答一档）\n- 写周报：写周期性的工作汇报，含日报、月报\n- 写方案：写计划书、提案\n- 写摘要：把一份材料缩成要点\n- 回邮件：回复收到的邮件\n- 记账：记下一笔收入或支出"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "写周报",
+         "写方案",
+         "写摘要",
+         "回邮件",
+         "记账"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n看邮件：看收到了什么邮件，或找某一封旧邮件\n\n## 后果（每个答一档）\n- 记账：记下一笔收入或支出\n- 回邮件：回复收到的邮件\n- 写摘要：把一份材料缩成要点\n- 写方案：写计划书、提案\n- 写周报：写周期性的工作汇报，含日报、月报"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "记账",
+         "回邮件",
+         "写摘要",
+         "写方案",
+         "写周报"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n看邮件：看收到了什么邮件，或找某一封旧邮件\n\n## 后果（每个答一档）\n- 写摘要：把一份材料缩成要点\n- 回邮件：回复收到的邮件\n- 记账：记下一笔收入或支出\n- 写周报：写周期性的工作汇报，含日报、月报\n- 写方案：写计划书、提案"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "写摘要",
+         "回邮件",
+         "记账",
+         "写周报",
+         "写方案"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n回邮件：回复收到的邮件\n\n## 后果（每个答一档）\n- 写周报：写周期性的工作汇报，含日报、月报\n- 写方案：写计划书、提案\n- 写摘要：把一份材料缩成要点\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 记账：记下一笔收入或支出"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "写周报",
+         "写方案",
+         "写摘要",
+         "看邮件",
+         "记账"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n回邮件：回复收到的邮件\n\n## 后果（每个答一档）\n- 记账：记下一笔收入或支出\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 写摘要：把一份材料缩成要点\n- 写方案：写计划书、提案\n- 写周报：写周期性的工作汇报，含日报、月报"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "记账",
+         "看邮件",
+         "写摘要",
+         "写方案",
+         "写周报"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n回邮件：回复收到的邮件\n\n## 后果（每个答一档）\n- 写摘要：把一份材料缩成要点\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 记账：记下一笔收入或支出\n- 写周报：写周期性的工作汇报，含日报、月报\n- 写方案：写计划书、提案"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "写摘要",
+         "看邮件",
+         "记账",
+         "写周报",
+         "写方案"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n记账：记下一笔收入或支出\n\n## 后果（每个答一档）\n- 写周报：写周期性的工作汇报，含日报、月报\n- 写方案：写计划书、提案\n- 写摘要：把一份材料缩成要点\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 回邮件：回复收到的邮件"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "写周报",
+         "写方案",
+         "写摘要",
+         "看邮件",
+         "回邮件"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n记账：记下一笔收入或支出\n\n## 后果（每个答一档）\n- 回邮件：回复收到的邮件\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 写摘要：把一份材料缩成要点\n- 写方案：写计划书、提案\n- 写周报：写周期性的工作汇报，含日报、月报"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "回邮件",
+         "看邮件",
+         "写摘要",
+         "写方案",
+         "写周报"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "messages": [
+   [
+    "system",
+    "Return exactly one JSON value that satisfies the supplied native JSON Schema. Do not add Markdown fences, commentary, or undeclared fields."
+   ],
+   [
+    "system",
+    "你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。\n\n给你一个\"前因\"行为和一组\"后果\"行为（都是这个人自己记录里的行为类别，附判据）。对每个后果判断：\n这个人做了前因之后（几分钟到几周之内），这个后果会不会因此**明显更容易或更难**发生——方向不论，只问有没有关联。\n\n三档：\n- likely：按常识很可能有关联（例如做完饭之后吃饭、收到快递之后拆包装）；\n- unsure：说不准，可能有也可能没有；\n- unlikely：按常识不太可能有关联。\n\n规则：\n- 只按常识与类别本身的意思判断，不要假设这个人的具体习惯；\n- 不知道就答 unsure，不要因为想不到就答 unlikely；\n- 每个后果恰好答一次，不多不少，照抄名字。"
+   ],
+   [
+    "user",
+    "## 前因\n记账：记下一笔收入或支出\n\n## 后果（每个答一档）\n- 写摘要：把一份材料缩成要点\n- 看邮件：看收到了什么邮件，或找某一封旧邮件\n- 回邮件：回复收到的邮件\n- 写周报：写周期性的工作汇报，含日报、月报\n- 写方案：写计划书、提案"
+   ]
+  ],
+  "name": "scene_relation_prior_by_antecedent",
+  "schema": {
+   "additionalProperties": false,
+   "properties": {
+    "ratings": {
+     "description": "每个后果恰好一条，共 5 条。",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "concept": {
+        "description": "后果的名字，照抄。",
+        "enum": [
+         "写摘要",
+         "看邮件",
+         "回邮件",
+         "写周报",
+         "写方案"
+        ],
+        "type": "string"
+       },
+       "level": {
+        "enum": [
+         "likely",
+         "unsure",
+         "unlikely"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "concept",
+       "level"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "ratings"
+   ],
+   "type": "object"
+  }
+ }
+]

@@ -14,7 +14,9 @@
    退出在用的词记下退出那天，之前攒的日子作废，以后只数退出那天之后的日子。
 2. **转在用**：一个词在 ``min_days`` 个不同的本地日被**直接**选中（记录的 ``kind_token`` 换算以后就是它；同一天两次不算，
    不要求相邻），这一代起在用，记"哪一天转的在用"= 这一代的日子。上级不因下级被选中而在用；被删节点的旧记录换算到上级，
-   算上级的。每条 lane 在用的词最多 ``cap`` 个：满了够条件的词等着、不挤别人；等着的按"凑够天数的那一天"先后进，同一天按编号。
+   算上级的。**例外一条**（丙一 3.5，用户 2026-11-15 定）：记录挂在**候选**（自己长的、不在用；在用以前的那些日子也算）上时，
+   这一天也算给它最近的不是候选的上级（初始词，或自己长的、在用的；上级也是候选就接着往上找）——只算"转在用"的日子；退出、
+   删除、"最后被选中"仍只看直接记录。上级靠下级的日子转了在用、自己从没被直接选中过的，20 天从转在用那天算。每条 lane 在用的词最多 ``cap`` 个：满了够条件的词等着、不挤别人；等着的按"凑够天数的那一天"先后进，同一天按编号。
 """
 
 from __future__ import annotations
@@ -67,7 +69,7 @@ def count_active(
                 active = {key: value for key, value in vocabulary.active.items() if key != word.id}
                 vocabulary = vocabulary.with_active(active, {**vocabulary.exited, word.id: today})
                 exited.append(word.id)
-    days = _days(vocabulary, picks)
+    days = _entering_days(vocabulary, picks)
     left = vocabulary.exited
     ready = sorted(
         (counted[min_days - 1], word_id)
@@ -92,16 +94,48 @@ def count_active(
 
 
 def _last_seen(vocabulary: Vocabulary, word_id: ClassId, days: dict[ClassId, set[date]]) -> date | None:
-    """最后一次被直接选中的日子：序列里换算后落在它上面的记录；自己长的还看状态里记的时刻、从没被选中过从写出它的那天算；
-    在用的初始词序列里一条都没有（读不到那么早）就从转在用那天算。"""
+    """最后一次被直接选中的日子：序列里换算后落在它上面的记录；自己长的还看状态里记的时刻。从没被直接选中过的：在用的从转在用
+    那天算（初始词读不到那么早，或靠下级的日子转了在用），不在用的自己长的从写出它的那天算。"""
 
     word = vocabulary.get(word_id)
     found = [*days.get(word_id, ())]
-    if word.seen is not None:
-        found.append(word.seen.date())
+    if word.last_picked is not None:
+        found.append(word.last_picked.date())
     if not found and word_id in vocabulary.active:
+        # 从没被直接选中过、在用的（初始词读不到那么早，或靠下级的日子转了在用，3.5）：从转在用那天算
         found.append(vocabulary.active[word_id])
+    elif not found and word.created_at is not None:
+        found.append(word.created_at.date())
     return max(found, default=None)
+
+
+def _entering_days(vocabulary: Vocabulary, picks: tuple[tuple[str, date], ...]) -> dict[ClassId, set[date]]:
+    """数"转在用"用的日子：直接选中的日子，加上 3.5 那一条——落在候选上的日子也算给它最近的不是候选的上级。候选 = 自己长的、
+    此刻不在用的；在用的自己长的节点，转在用那天以前的日子仍按候选算（算过给上级的不收回）；退出在用、回到候选的，只借退出那天
+    之后的日子（3.5 没写到这一种，丙一阶段 C 指出，取与"退出之前的日子作废"同一口径，待主会话确认）。"""
+
+    days = {word_id: set(seen) for word_id, seen in _days(vocabulary, picks).items()}
+    for word_id, seen in _days(vocabulary, picks).items():
+        since, left = vocabulary.active.get(word_id), vocabulary.exited.get(word_id)
+        # 在用那一段的日子只算自己；退出在用、回到候选的，只借退出那天之后的（退出之前的日子本来就作废）
+        lent = (
+            {day for day in seen if (since is None or day < since) and (left is None or day > left)}
+            if vocabulary.get(word_id).grown
+            else set()
+        )
+        if not lent:
+            continue
+        upward = vocabulary.get(word_id).parent
+        while upward is not None and _candidate(vocabulary, upward):
+            upward = vocabulary.get(upward).parent
+        if upward is not None:
+            days.setdefault(upward, set()).update(lent)
+    return days
+
+
+def _candidate(vocabulary: Vocabulary, word_id: ClassId) -> bool:
+    word = vocabulary.get(word_id)
+    return word.grown and word_id not in vocabulary.active
 
 
 def _days(vocabulary: Vocabulary, picks: tuple[tuple[str, date], ...]) -> dict[ClassId, set[date]]:

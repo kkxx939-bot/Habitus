@@ -26,6 +26,7 @@ from habitus.behavior.tree import BehaviorTree
 from habitus.conditions import DayTypeCalendar
 from habitus.config import HabitusConfig
 from habitus.foresight import Evidence, Tolerance, UnsealedReader
+from habitus.foresight.hierarchy import KindHierarchyPort
 from habitus.foresight.judge import Judge
 from habitus.foresight.triggers.assemble import relation_statuses
 from habitus.foundation.observability import Observer
@@ -53,7 +54,7 @@ from habitus.runtime.foresight_tick import ForesightTick
 from habitus.runtime.generation_lease import Lease
 from habitus.runtime.generation_watermark import TickTrack, TickWatermarkStore
 from habitus.runtime.resident import ResidentWorker
-from habitus.runtime.scene_vocabulary import kind_label, kind_resolution
+from habitus.runtime.scene_vocabulary import kind_hierarchy, kind_label, kind_resolution
 from habitus.runtime.session_lane import BehaviorSessionConsumer
 from habitus.runtime.unsealed import UnsealedFromJudgements
 from habitus.scene.relations import RelationConfig
@@ -71,6 +72,8 @@ class ForesightReadSide:
     calendar: DayTypeCalendar
     zone: ZoneInfo
     kinds: KindResolution | None = None
+    #: 词表的上下级与在用的词（组合根从词表状态装，每拍开头取一份；不给是没有上下级、全都在用）。
+    hierarchy: KindHierarchyPort | None = None
 
     def __post_init__(self) -> None:
         if not self.subject.strip():
@@ -151,6 +154,7 @@ def build_foresight_components(
         calendar=calendar if calendar is not None else local_calendar(config),
         zone=config.locale.zone(),
         kinds=None if kind_store is None else kind_resolution(kind_store),
+        hierarchy=None if kind_store is None else kind_hierarchy(kind_store),
     )
     limits = config.foresight.store
     ledger = ForesightLedgerStore(config.foresight_root / branch, limits=limits)
@@ -160,8 +164,7 @@ def build_foresight_components(
     settlement = SettlementStage(
         ledger,
         read_side,
-        # 定稿日只有归约说了算；承诺记的是形成时的词编号，结算按编号完全相等认（词表没有迁移）
-        closed_days=closed_days,
+        closed_days=closed_days,  # 定稿日只有归约说了算
         evidence=evidence,
         opportunities=opportunities,
         lane=branch,
@@ -345,7 +348,7 @@ def foresight_ledger_lease(config: HabitusConfig, lock_store: LockStore, branch:
 def build_reminded_lookup(components: ForesightRuntimeComponents) -> RemindedLookup:
     """归约封口时盖 ``reminded`` 的查法（第 0 步）：交给 ``BehaviorReductionRunner.attach_reminder_lookup``。"""
 
-    return RemindedLookup(components.ledger)
+    return RemindedLookup(components.ledger, components.read_side.hierarchy)
 
 
 def build_outlet_consumer(

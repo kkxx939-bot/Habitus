@@ -5,7 +5,8 @@
 
 每个行为概念在时间线上有两种记号：
 
-- **命中**：记录的类编号就是那个行为概念（一条记录只算它那个类，不往别的概念上算）；
+- **命中**：记录的类编号就是那个行为概念，或在那个行为概念管的编号里（下级的记录也记在在用的上级账上，丙一 2026-11-15：
+  一条记录给它自己的概念和每一个在用上级的概念各留一个记号，``ConceptSet.concepts_for``）；
 - **看不到**：被提醒过的那一次当后果（见下）。窗口里有"看不到"、又没有命中的，这一次的结果算未知，两边都不计
   （用户 09-27"没看到就不算"）。
 
@@ -151,9 +152,6 @@ def build_timelines(
         if not record.classified:
             # 「待定」：已记进人在场与做完时刻；没有概念，不留记号
             continue
-        identity = concepts.base_for(record.kind_token)
-        if identity is None:
-            continue
         mark = Mark(
             slot=absolute,
             started_at=record.started_at,
@@ -162,9 +160,10 @@ def build_timelines(
             last_slot=ended,
             reminded=record.reminded,
         )
-        line.marks.setdefault(identity, []).append(mark)
-        if record.reminded:
-            line.unknown.setdefault(identity, []).append(absolute)
+        for identity in concepts.concepts_for(record.kind_token):  # 没有概念的类不留记号
+            line.marks.setdefault(identity, []).append(mark)
+            if record.reminded:
+                line.unknown.setdefault(identity, []).append(absolute)
     covered = _gap_slots(series, config.slot_minutes, per_day)
     # 同一类之后合并窗口内又开始了的，不是它那条链的最后一件：每一次（``temporal.merge_starts``，与 ``chains_of`` 同一把尺）里
     # 除了最后那条都算"后面还接着"（2026-10-18 四方评审：原来这里内联了一份合并规则）

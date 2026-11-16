@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 from habitus.behavior.uri import BehaviorURI
+from habitus.foresight.hierarchy import FLAT, KindHierarchy
 from habitus.scene.views import DayIndexCache, FlowRow
 from habitus.series.reader import admitted
 
@@ -42,4 +43,10 @@ def day_cache(read_side: BehaviorReadSide) -> DayIndexCache:
     )
 
 
-__all__ = ["basis_row", "day_cache", "rows_between"]
+def hierarchy_of(read_side: BehaviorReadSide) -> KindHierarchy:
+    """此刻的上下级（组合根装的口读一次；没接词表是没有上下级、全都在用）。一次结算 / 一拍开头取一份，整次用同一份。"""
+
+    return FLAT if read_side.hierarchy is None else read_side.hierarchy()
+
+
+__all__ = ["basis_row", "day_cache", "hierarchy_of", "rows_between"]
