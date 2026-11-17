@@ -655,7 +655,7 @@
    "level": 1,
    "name": "查资料",
    "parent": null,
-   "definition": "就一个具体问题找答案",
+   "definition": "为手上的一件事找材料、数据或出处",
    "domain": "资料"
   },
   {
@@ -1775,7 +1775,7 @@
    "level": 1,
    "name": "学知识",
    "parent": null,
-   "definition": "弄懂一个要学的知识点",
+   "definition": "系统地学一门课或一个专题",
    "domain": "学习"
   },
   {

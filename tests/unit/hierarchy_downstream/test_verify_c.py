@@ -56,7 +56,10 @@ def _drop(value: Any, field: str) -> Any:
 
 def test_s1_every_product_is_as_before_except_the_code_fingerprint_on_expectations(tmp_path: Path) -> None:
     """S1 按设计的口径：预期上记的 ``implementation`` 是预测层源码的指纹（``runtime.foresight_implementation``，代码一改就变），
-    不算产物；其余逐项相同。"""
+    不算产物；其余逐项相同。
+
+    2026-11-17（裁定 103）：基线的递送多了两条——依据记了影子之后才并进来的两条事件预期，到自己的时窗末各自再决定一次
+    （一条「已发生」、一条「影子」）。别的产物与原基线逐项相同。"""
 
     world = World(tmp_path)
     plant_baseline(world)

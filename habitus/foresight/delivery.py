@@ -15,6 +15,8 @@
   或依据本来就不能开口（候选关系、巧合，裁定 56 第 12 条；这回已经做了的除外）——话没对人说出口，被它「单元已选」吸收的
   成员时限还在的照常走时窗末（组合根接手）。依据能开口而自己决定不说的（已发生、单元读数定的影子、同类已说、名额已满、
   模型判不像……）不算：那是单元替这一刻做的决定。
+- **依据记了影子之后才来的输入**（``joined_after_shadow``，裁定 103）：单元记影子时只看了当时在场的那几条；之后才形成、
+  并进它的成员没被看过，到了自己的时窗末按全部输入重算一次单元（组合根接手，同一刻只接手一条）。记影子时就在场的成员不接手。
 
 材料由组合根准备成 ``Circumstances``：每一项问到才算——走到那一步才读账、读树，前面的原因成立了后面的就不读。
 """
@@ -49,6 +51,8 @@ PENDING = "等时窗末"
 UNREACHABLE = "不可达"
 #: 到了时窗时（或时窗末）这件事已经做了。
 HAPPENED = "已发生"
+#: 单元按读数（或设置、提醒反馈）决定只记下、不开口。
+SHADOW = "影子"
 #: 优先于久别的设置：人说了"以后都提醒我"，就不因为久别回来而先看一次。
 _ALWAYS = "以后都提醒我"
 
@@ -92,7 +96,7 @@ def on_opening(item: Expectation, standing: Standing, *, now: datetime, facts: C
     if facts.happened():
         return Delivery(item.expectation_id, now, level, False, HAPPENED, 0.0)
     if level == 0:
-        return Delivery(item.expectation_id, now, 0, False, "影子", 0.0)
+        return Delivery(item.expectation_id, now, 0, False, SHADOW, 0.0)
     if quiet_after_absence(standing, facts.absent):
         return Delivery(item.expectation_id, now, level, False, RETURNED, 0.0)
     if now > item.deadline:  # 补看到的拍（被挤掉的那一拍）开时窗时就已过了时限：不说
@@ -132,7 +136,7 @@ def on_closing(
     if facts.unobserved():
         return Delivery(item.expectation_id, now, pending.level, False, UNOBSERVED, 0.0)
     if standing.level == 0:
-        return Delivery(item.expectation_id, now, 0, False, "影子", 0.0)
+        return Delivery(item.expectation_id, now, 0, False, SHADOW, 0.0)
     if quiet_after_absence(standing, facts.absent):
         return Delivery(item.expectation_id, now, standing.level, False, RETURNED, 0.0)
     level = standing.level
@@ -222,6 +226,24 @@ def unsaid(
     return latest.reason in (PENDING, AWAITING_HOST) and item.deadline.astimezone(UTC) < now.astimezone(UTC)
 
 
+def joined_after_shadow(
+    made: Sequence[Delivery], members: Iterable[Expectation], decided: Mapping[str, Sequence[Delivery]]
+) -> tuple[Expectation, ...]:
+    """依据最近一条决定是「影子」时，在那之后才并进它的成员（它们第一条「单元已选」晚于依据那条影子）：单元记影子时没看过
+    这几个输入，那不是替它们做的决定（裁定 103）。依据的最近一条不是影子、或成员都是记影子那一拍一并决定的，返回空。"""
+
+    if not made:
+        return ()
+    latest = max(made, key=lambda delivery: delivery.decided_at)
+    if latest.reason != SHADOW:
+        return ()
+    return tuple(
+        item
+        for item in members
+        if (seen := decided.get(item.expectation_id)) and min(one.decided_at for one in seen) > latest.decided_at
+    )
+
+
 def hand_over(
     known: Mapping[str, Expectation],
     decided: Mapping[str, Sequence[Delivery]],
@@ -239,6 +261,9 @@ def hand_over(
     同一刻只有它先到了时窗，单元只能从它里面取、记了影子，被吸收的成员（还没到时窗时拉进来的、后来并进来的）到了自己的时窗末
     按同一组输入重算单元、依据换成能开口的那条。依据的请求已被宿主取走（``taken``）等同说出口：成员不接手。
 
+    依据能开口、单元按读数记了影子：记影子那一拍在场的成员不接手（单元看过它们）；之后才并进来的成员没被看过，只有它们能接手
+    （``joined_after_shadow``，裁定 103），到了自己的时窗末按全部输入重算单元。
+
     （原在 ``runtime.foresight_delivery._handovers``，纯规则，挪到这里与 ``unsaid`` 放在一起，判法不变。）"""
 
     found: list[tuple[tuple[Expectation, ...], tuple[str, ...]]] = []
@@ -249,9 +274,13 @@ def hand_over(
             continue
         # 依据的请求已被宿主取走（还没说出口）：取走等同说出口，成员不接手（用户 11-10，F8）
         spoken = decided.get(basis_id, ())
-        if not unsaid(basis, spoken, now=instant, voiceless=not voiced(basis), taken=taken(basis_id)):
-            continue
         group = [item for item in members[basis_id] if item.expectation_id in known]
+        # 依据记了影子之后才并进来的成员：单元没看过它们，只有它们能接手（裁定 103）
+        late: tuple[Expectation, ...] | None = None
+        if not unsaid(basis, spoken, now=instant, voiceless=not voiced(basis), taken=taken(basis_id)):
+            late = joined_after_shadow(spoken, group, decided)
+            if not late:
+                continue
         took = [item for item in group if any(made.reason != UNIT for made in decided[item.expectation_id])]
         if any(not unsaid(item, decided[item.expectation_id], now=instant) for item in took):
             continue
@@ -259,6 +288,7 @@ def hand_over(
             item
             for item in group
             if item not in took and item.deadline.astimezone(UTC) > instant and decided[item.expectation_id]
+            if late is None or item in late
         ]
         if not free:
             continue

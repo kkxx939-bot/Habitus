@@ -1,7 +1,8 @@
 """第二步乙：会话选词的提示词（预期表 D1、C17；共享说明 3.1）。旧代码上应当失败。
 
 - D1：和实验 ``s2-v1`` 的提示词（``session_system_s2v1.txt``：实验 ``prompt.py`` 的 ``head``，词表是初始会话词表）比，只差
-  定义写法那一句（"写成'选中的词那件事 + 一个限定'" → "只写一句，只说这一种是什么"）。
+  定义写法那一句（"写成'选中的词那件事 + 一个限定'" → "只写一句，只说这一种是什么"）；另有选词提示词 v3（2026-11-16，"单独问
+  一个问题不算一件事"）的两处：``"none"`` 下面加的一行、"学知识""查资料"两个词收窄的定义（``site.with_pick_v3``，夹具保持实验原文）。
 - C17：上一轮长出来的节点下一轮就在词表里：缩进一级（第 3 层两级），紧跟在它上级的初始下级后面，同一上级下按编号排。
 """
 
@@ -27,6 +28,7 @@ from tests.unit.word_grow.site import (
     node,
     pick_calls,
     system_prompt,
+    with_pick_v3,
 )
 from tests.unit.word_pick.site import Word
 
@@ -50,7 +52,7 @@ def test_d1_the_session_prompt_differs_from_the_experiment_s2_v1_only_in_how_a_d
     site.record("conv-d1", at(D13, 9), "帮我写一份本周周报", Word(WEEKLY))
     (call,) = pick_calls(site)
     actual = system_prompt(call).splitlines()
-    expected = (HERE / "session_system_s2v1.txt").read_text(encoding="utf-8").splitlines()
+    expected = with_pick_v3((HERE / "session_system_s2v1.txt").read_text(encoding="utf-8")).splitlines()
     assert len(actual) == len(expected)
     differing = [(old, new) for old, new in zip(expected, actual, strict=True) if old != new]
     assert len(differing) == 1, differing

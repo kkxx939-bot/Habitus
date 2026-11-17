@@ -14,7 +14,17 @@ from pathlib import Path
 import pytest
 
 from habitus.behavior.model import BehaviorKind
-from tests.unit.word_grow.site import HERE, QUERY, WEEKLY, GrowSite, Named, at, pick_calls, system_prompt
+from tests.unit.word_grow.site import (
+    HERE,
+    QUERY,
+    WEEKLY,
+    GrowSite,
+    Named,
+    at,
+    pick_calls,
+    system_prompt,
+    with_pick_v3,
+)
 from tests.unit.word_pick.site import MISSING, NONE, Continue, Raw, Word
 from tests.unit.word_pick.test_physical_pick import delivery
 
@@ -136,5 +146,6 @@ def test_s6_without_grown_nodes_the_session_prompt_is_the_step_a_prompt_plus_onl
 ) -> None:
     site.record("conv-s6", at(D13, 9), "帮我写一份本周周报", Word(WEEKLY))
     (call,) = pick_calls(site)
-    expected = (HERE / "session_system_2a.txt").read_text(encoding="utf-8")
+    # 夹具是第二步甲的提示词原文；选词提示词 v3 的两处差别（none 下加的一行、两个词的定义）由 ``with_pick_v3`` 补上
+    expected = with_pick_v3((HERE / "session_system_2a.txt").read_text(encoding="utf-8"))
     assert _strip_new_node_additions(system_prompt(call)) == expected

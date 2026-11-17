@@ -306,6 +306,32 @@ def system_prompt(text_or_call: Any) -> str:
     return str(found)
 
 
+#: 选词提示词 v3（2026-11-16，"单独问一个问题不算一件事"）在 ``"none"`` 那一项下面加的一行，逐字。
+STANDALONE_QUESTION_RULE = (
+    "  只是问一个问题、要一个解释或答案，听完就完了、没有让助手替他办什么事：先看词表里有没有一个词说的正是问这一种东西"
+    '（提醒他"该<那个词>了"，他这一轮问的就算做到了），有就选那个词；问的是【最近的记录】里某一条那件事的进展、结果或要求，'
+    '是接着那一条，选 "continue"；两样都不是，就是没有要办的事，选 "none"。'
+)
+#: 同一次改动收窄的两个初始词的定义：旧行 → 新行（词表里的写法，编号、名字不变）。
+V3_DEFINITIONS = (
+    ("82 查资料：就一个具体问题找答案", "82 查资料：为手上的一件事找材料、数据或出处"),
+    ("222 学知识：弄懂一个要学的知识点", "222 学知识：系统地学一门课或一个专题"),
+)
+
+
+def with_pick_v3(text: str) -> str:
+    """把钉住的旧提示词（实验原文或第二步甲的提示词）换成 v3 应有的样子：只在 ``"none"`` 那一行下面插 ``STANDALONE_QUESTION_RULE``、
+    换掉 ``V3_DEFINITIONS`` 两行；别处一字不动。夹具文件保持实验原文，差别写在这里。"""
+
+    lines = text.split("\n")
+    (none_at,) = [index for index, line in enumerate(lines) if line.startswith('- "none"：')]
+    lines.insert(none_at + 1, STANDALONE_QUESTION_RULE)
+    for old, new in V3_DEFINITIONS:
+        (where,) = [index for index, line in enumerate(lines) if line == old]
+        lines[where] = new
+    return "\n".join(lines)
+
+
 def pick_calls(site: GrowSite) -> list[Any]:
     return [call for call in site.router.calls if call.kind == "pick"]
 
@@ -369,8 +395,10 @@ __all__ = [
     "LAST_DOC_CHILD",
     "NAMES",
     "QUERY",
+    "STANDALONE_QUESTION_RULE",
     "STATE_FILENAME",
     "SUMMARY",
+    "V3_DEFINITIONS",
     "WEEKLY",
     "WRITE_DOC",
     "Barrier",
@@ -390,4 +418,5 @@ __all__ = [
     "node",
     "pick_calls",
     "system_prompt",
+    "with_pick_v3",
 ]
