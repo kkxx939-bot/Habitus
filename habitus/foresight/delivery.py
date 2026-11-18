@@ -11,12 +11,13 @@
 - **过了时限**（用户 11-10）：提醒档轮到决定时此刻已过最晚时限——不说（不记「待取」、不占名额、出口不收），终局，结算照常结它；
 - **等宿主**（最近一条是「待取」）：做了追加已发生；过了最晚时限还没人问出口追加宿主没取（终局，结算按没说过处理）；
   宿主还没取走、节点已不在用的撤下、追加已停用（``on_withdrawn``）。
-- **依据没说成**（``unsaid``，裁定 92 第 2 条②）：依据记了「不可达」「宿主没取」「过了时限」，或停在「等时窗末」「待取」过了最晚时限，
+- **依据没说成**（``unsaid``，裁定 92 第 2 条②）：依据记了「不可达」「宿主没取」「过了时限」「前因不成立」，或停在「等时窗末」「待取」过了最晚时限，
   或依据本来就不能开口（候选关系、巧合，裁定 56 第 12 条；这回已经做了的除外）——话没对人说出口，被它「单元已选」吸收的
-  成员时限还在的照常走时窗末（组合根接手）。依据能开口而自己决定不说的（已发生、单元读数定的影子、同类已说、名额已满、
-  模型判不像……）不算：那是单元替这一刻做的决定。
+  成员时限还在的（最晚时限那一刻也算）照常走时窗末（组合根接手）。依据能开口而自己决定不说的（已发生、单元读数定的影子、同类已说、
+  名额已满、模型判不像……）不算：那是单元替这一刻做的决定。
 - **依据记了影子之后才来的输入**（``joined_after_shadow``，裁定 103）：单元记影子时只看了当时在场的那几条；之后才形成、
-  并进它的成员没被看过，到了自己的时窗末按全部输入重算一次单元（组合根接手，同一刻只接手一条）。记影子时就在场的成员不接手。
+  并进它的成员没被看过，到了自己的时窗末按全部输入重算一次单元（组合根接手，同一刻只接手一条；依据只从这一拍到了自己时窗末的
+  成员里选，别的成员只当输入）。记影子时就在场的成员不接手。
 
 材料由组合根准备成 ``Circumstances``：每一项问到才算——走到那一步才读账、读树，前面的原因成立了后面的就不读。
 """
@@ -53,6 +54,8 @@ UNREACHABLE = "不可达"
 HAPPENED = "已发生"
 #: 单元按读数（或设置、提醒反馈）决定只记下、不开口。
 SHADOW = "影子"
+#: 开口前再核一遍，事件触发的前因此刻不成立（裁定 54）：这一刻的话没说出口，算没说成（裁定 92 第 2 条②）。
+ANTECEDENT_FAILED = "前因不成立"
 #: 优先于久别的设置：人说了"以后都提醒我"，就不因为久别回来而先看一次。
 _ALWAYS = "以后都提醒我"
 
@@ -142,7 +145,7 @@ def on_closing(
     level = standing.level
     cited = tuple(evidence)
     if not facts.antecedent_holds():
-        return Delivery(item.expectation_id, now, level, False, "前因不成立", 0.0, evidence=cited)
+        return Delivery(item.expectation_id, now, level, False, ANTECEDENT_FAILED, 0.0, evidence=cited)
     if kept is False:
         return Delivery(item.expectation_id, now, level, False, "模型判不像", 0.0, evidence=cited)
     if item.kind_token in spoken_kinds:
@@ -210,7 +213,7 @@ def related_spoken(item: Expectation, spoken: Iterable[Expectation], kinds: Kind
 def unsaid(
     item: Expectation, made: Sequence[Delivery], *, now: datetime, voiceless: bool = False, taken: bool = False
 ) -> bool:
-    """依据这条预期的话没对人说成、也说不成了（``made`` 是它的全部递送）：没有「说了」，而且最近一条是「不可达」「宿主没取」「过了时限」，
+    """依据这条预期的话没对人说成、也说不成了（``made`` 是它的全部递送）：没有「说了」，而且最近一条是「不可达」「宿主没取」「过了时限」「前因不成立」，
     或还停在「等时窗末」「待取」却已过了最晚时限（中间停过机、时窗末那一拍没跑到）。``voiceless`` 是它本来就不能当开口的依据
     （候选关系、巧合，``units.voiced``）：单元只能从它里面取、记了影子——也是没说成（裁定 56 第 12 条、裁定 92 第 2 条②），
     这回已经做了（「已发生」）的除外：那是单元替这一刻做的决定。``taken`` 是它的请求已被宿主取走（还没说出口）：取走等同说出口
@@ -221,7 +224,7 @@ def unsaid(
     if voiceless and all(item_.reason != HAPPENED for item_ in made):
         return True
     latest = max(made, key=lambda delivery: delivery.decided_at)
-    if latest.reason in (UNREACHABLE, HOST_NEVER_CLAIMED, PAST_DEADLINE):
+    if latest.reason in (UNREACHABLE, HOST_NEVER_CLAIMED, PAST_DEADLINE, ANTECEDENT_FAILED):
         return True
     return latest.reason in (PENDING, AWAITING_HOST) and item.deadline.astimezone(UTC) < now.astimezone(UTC)
 
@@ -244,18 +247,44 @@ def joined_after_shadow(
     )
 
 
+def closes(item: Expectation, pending: Delivery, since: datetime, instant: datetime) -> bool:
+    """这一拍（``since`` → ``instant``，UTC）是不是这条「等时窗末」的时窗末那一拍：此刻已过时窗终点，而且这一拍的区间与
+    (终点, 最晚时限] 有交集；终点与最晚时限重合时（区间为空）是越过终点的那一拍；开时窗那一拍（``pending`` 记下的时刻）就已
+    越过终点时，时窗末那一刻落在那一拍里、已经过去，是它之后的这一拍。"""
+
+    end, deadline = item.window[1].astimezone(UTC), item.deadline.astimezone(UTC)
+    if not end < instant:
+        return False
+    return since < deadline or since <= end or pending.decided_at.astimezone(UTC) >= end
+
+
+def _went_unsaid(
+    item: Expectation,
+    made: Sequence[Delivery],
+    instant: datetime,
+    voiced: Callable[[Expectation], bool],
+    taken: Callable[[str], bool],
+) -> bool:
+    """依据或接手过的成员这一刻的话没说成：能不能开口按此刻的机会表判，请求被宿主取走的等同说出口（``unsaid``）。"""
+
+    return unsaid(item, made, now=instant, voiceless=not voiced(item), taken=taken(item.expectation_id))
+
+
 def hand_over(
     known: Mapping[str, Expectation],
     decided: Mapping[str, Sequence[Delivery]],
     members: Mapping[str, Sequence[Expectation]],
     instant: datetime,
+    since: datetime,
     *,
     voiced: Callable[[Expectation], bool] = lambda item: True,
     taken: Callable[[str], bool] = lambda request_id: False,
 ) -> tuple[tuple[tuple[tuple[Expectation, ...], tuple[str, ...]], ...], dict[str, Delivery]]:
-    """依据没说成（``delivery.unsaid``）的那几刻里，能接手的成员：只决定过「单元已选」、自己最晚时限还没到的。已经有成员接手过、
-    它还没说成或自己决定了不说（不是 ``unsaid``）的，这一刻不再交给别的成员——同一刻只说一次。依据或成员已经结掉（不在账上的
-    还没结那几天里）的不动。
+    """依据没说成（``delivery.unsaid``）的那几刻里，能接手的成员：只决定过「单元已选」、自己时限还在的（最晚时限那一刻也算，
+    与时窗末、出口同一口径，裁定 103 第 4 条）。已经有成员接手过、它还没说成或自己决定了不说（不是 ``unsaid``）的，这一刻不再
+    交给别的成员——同一刻只说一次。依据或成员已经结掉（不在账上的还没结那几天里）的不动。只交出这一拍（``since`` → ``instant``）
+    到了自己时窗末（``closes``）的成员：依据只从它们里面选，别的成员只当输入；一条都没到，这一组这一拍不交出。接手过的成员
+    本来就不能开口（``voiced`` 为假）而记了影子的也算没说成，它的请求已被宿主取走（``taken``）的等同说出口（裁定 103 第 5 条）。
 
     依据本来就不能开口（``voiced`` 为假：候选关系、巧合——只进读数、不当依据，裁定 56 第 12 条）也算没说成（裁定 92 第 2 条②）：
     同一刻只有它先到了时窗，单元只能从它里面取、记了影子，被吸收的成员（还没到时窗时拉进来的、后来并进来的）到了自己的时窗末
@@ -263,8 +292,7 @@ def hand_over(
 
     依据能开口、单元按读数记了影子：记影子那一拍在场的成员不接手（单元看过它们）；之后才并进来的成员没被看过，只有它们能接手
     （``joined_after_shadow``，裁定 103），到了自己的时窗末按全部输入重算单元。
-
-    （原在 ``runtime.foresight_delivery._handovers``，纯规则，挪到这里与 ``unsaid`` 放在一起，判法不变。）"""
+    """
 
     found: list[tuple[tuple[Expectation, ...], tuple[str, ...]]] = []
     subsumed: dict[str, Delivery] = {}
@@ -277,24 +305,29 @@ def hand_over(
         group = [item for item in members[basis_id] if item.expectation_id in known]
         # 依据记了影子之后才并进来的成员：单元没看过它们，只有它们能接手（裁定 103）
         late: tuple[Expectation, ...] | None = None
-        if not unsaid(basis, spoken, now=instant, voiceless=not voiced(basis), taken=taken(basis_id)):
+        if not _went_unsaid(basis, spoken, instant, voiced, taken):
             late = joined_after_shadow(spoken, group, decided)
             if not late:
                 continue
         took = [item for item in group if any(made.reason != UNIT for made in decided[item.expectation_id])]
-        if any(not unsaid(item, decided[item.expectation_id], now=instant) for item in took):
+        if not all(_went_unsaid(item, decided[item.expectation_id], instant, voiced, taken) for item in took):
             continue
         free = [
             item
             for item in group
-            if item not in took and item.deadline.astimezone(UTC) > instant and decided[item.expectation_id]
+            if item not in took and item.deadline.astimezone(UTC) >= instant and decided[item.expectation_id]
             if late is None or item in late
         ]
-        if not free:
+        latest = {
+            item.expectation_id: max(decided[item.expectation_id], key=lambda made: made.decided_at) for item in free
+        }
+        closing = tuple(
+            item.expectation_id for item in free if closes(item, latest[item.expectation_id], since, instant)
+        )
+        if not closing:
             continue
-        for item in free:
-            subsumed[item.expectation_id] = max(decided[item.expectation_id], key=lambda made: made.decided_at)
-        found.append(((basis, *group), tuple(item.expectation_id for item in free)))
+        subsumed.update({identity: latest[identity] for identity in closing})
+        found.append(((basis, *group), closing))
     return tuple(found), subsumed
 
 
@@ -356,6 +389,7 @@ __all__ = [
     "PENDING",
     "UNREACHABLE",
     "Circumstances",
+    "closes",
     "done_since",
     "finer_first",
     "hand_over",

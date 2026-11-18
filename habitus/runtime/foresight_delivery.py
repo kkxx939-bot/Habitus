@@ -47,6 +47,7 @@ from habitus.foresight.absence import returned_after_absence
 from habitus.foresight.delivery import (
     PENDING,
     Circumstances,
+    closes,
     finer_first,
     hand_over,
     on_closing,
@@ -217,7 +218,7 @@ class DeliveryStage:
             )
             for item, _pending in found.closing
         }
-        # 依据没说成：同一刻里接手的那条到了自己的时窗末，按同一组输入重算单元、照时窗末那一套走
+        # 依据没说成：同一刻里接手的那条到了自己的时窗末，按同一组输入重算单元、照时窗末那一套走（``due`` 只有到了时窗末的成员）
         handed: list[tuple[Expectation, Delivery]] = []
         moment_of: dict[str, frozenset[str]] = {}
         for group, due in found.handovers:
@@ -231,11 +232,9 @@ class DeliveryStage:
                 table=table,
                 now=now,
             )
-            pending = found.subsumed[unit.basis.expectation_id]
-            if _closes(unit.basis, pending, since, now.astimezone(UTC)):
-                closing_units[unit.basis.expectation_id] = unit
-                handed.append((unit.basis, pending))
-                moment_of[unit.basis.expectation_id] = frozenset(item.expectation_id for item in group)
+            closing_units[unit.basis.expectation_id] = unit
+            handed.append((unit.basis, found.subsumed[unit.basis.expectation_id]))
+            moment_of[unit.basis.expectation_id] = frozenset(item.expectation_id for item in group)
         every = (*units, *closing_units.values())
         standings = {unit.basis.expectation_id: unit.standing for unit in every}
         inputs: dict[str, tuple[UnitInput, ...]] = {unit.basis.expectation_id: _unit_inputs(unit) for unit in every}
@@ -587,7 +586,7 @@ class DeliveryStage:
 
     def _due(self, now: datetime, since: datetime, *, voiced: Callable[[Expectation], bool]) -> _Due:
         """四拨：时窗与这一拍的区间（``since`` 到此刻：``JudgeMaterials.since``）有交集、还没结算、账上还没有决定的（开了）；只决定过「等时窗末」、这一拍
-        到了时窗末的（该来了还没来，``_closes``）；还没到时窗、没决定过的（单元从这里拉同一刻的另外几个输入）；最近一条决定是
+        到了时窗末的（该来了还没来，``delivery.closes``）；还没到时窗、没决定过的（单元从这里拉同一刻的另外几个输入）；最近一条决定是
         「待取」、还没说出口的（等宿主）。过了时窗终点还没决定过的不再递：那是结算去记的事。另记每条依据替哪几条一并决定过
         （「单元已选」引它）：时窗末开口时小包与话照样带上同一刻的全部输入。``voiced`` 按此刻的机会表判一条预期能不能当开口的
         依据（``units.voiced``）：不能的依据记了影子，被它吸收的成员照常接手（``delivery.hand_over``）。"""
@@ -625,7 +624,7 @@ class DeliveryStage:
                 if all(made_one.reason != UNIT for made_one in made):
                     bases.setdefault(item.kind_token, []).append((item, made[-1].level))
                 pending = [d for d in made if d.reason == PENDING]
-                if pending and len(pending) == len(made) and _closes(item, pending[-1], since, instant):
+                if pending and len(pending) == len(made) and closes(item, pending[-1], since, instant):
                     closing.append((item, pending[-1]))
                 latest = max(made, key=lambda d: d.decided_at)
                 if latest.reason == AWAITING_HOST and not any(d.spoken for d in made):
@@ -648,7 +647,7 @@ class DeliveryStage:
             else:
                 joins.append((item, base[0].expectation_id, base[1]))
                 members.setdefault(base[0].expectation_id, []).append(item)
-        handovers, subsumed = hand_over(known, decided, members, instant, voiced=voiced, taken=self.claimed)
+        handovers, subsumed = hand_over(known, decided, members, instant, since, voiced=voiced, taken=self.claimed)
         return _Due(
             tuple(opened),
             tuple(closing),
@@ -672,25 +671,14 @@ class _Due:
     joins: tuple[tuple[Expectation, str, int], ...] = ()
     #: 最近一条决定是「待取」、还没说出口的：（这条, 那条「待取」）。
     awaiting: tuple[tuple[Expectation, Delivery], ...] = ()
-    #: 依据没说成、该有成员接手的那几刻：（这一刻的全部输入——依据与它吸收的成员, 能接手的那几条的身份）。
+    #: 依据没说成、该有成员接手的那几刻：（这一刻的全部输入——依据与它吸收的成员, 能接手且这一拍到了自己时窗末的那几条的身份）。
     handovers: tuple[tuple[tuple[Expectation, ...], tuple[str, ...]], ...] = ()
-    #: 能接手的成员 → 它那条「单元已选」（接手后当时窗末的「等时窗末」用：档与决定时刻）。
+    #: 这一拍接手的候选成员 → 它那条「单元已选」（接手后当时窗末的「等时窗末」用：档与决定时刻）。
     subsumed: Mapping[str, Delivery] = field(default_factory=dict)
 
 
 def _kinds(materials: JudgeMaterials | None) -> KindHierarchy:
     return materials.kinds if materials is not None else FLAT
-
-
-def _closes(item: Expectation, pending: Delivery, since: datetime, instant: datetime) -> bool:
-    """这一拍（``since`` → ``instant``，UTC）是不是这条「等时窗末」的时窗末那一拍：此刻已过时窗终点，而且这一拍的区间与
-    (终点, 最晚时限] 有交集；终点与最晚时限重合时（区间为空）是越过终点的那一拍；开时窗那一拍（``pending`` 记下的时刻）就已
-    越过终点时，时窗末那一刻落在那一拍里、已经过去，是它之后的这一拍。"""
-
-    end, deadline = item.window[1].astimezone(UTC), item.deadline.astimezone(UTC)
-    if not end < instant:
-        return False
-    return since < deadline or since <= end or pending.decided_at.astimezone(UTC) >= end
 
 
 def _unit_inputs(unit: Unit) -> tuple[UnitInput, ...]:
