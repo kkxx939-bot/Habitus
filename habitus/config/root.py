@@ -386,6 +386,12 @@ def _require_workflow_bounds(config: HabitusConfig) -> None:
         raise ConfigError("workflow lifecycle cleanup batch cannot exceed workflow.receipts.max_files")
     if conversation.lifecycle.max_conversations_per_cycle > conversation.journal.max_conversation_tree_entries:
         raise ConfigError("conversation lifecycle batch cannot exceed the Conversation tree enumeration bound")
+    if conversation.lifecycle.idle_scan_batch_conversations > conversation.journal.max_conversation_tree_entries:
+        raise ConfigError("conversation idle scan batch cannot exceed the Conversation tree enumeration bound")
+    if conversation.lifecycle.idle_scan_interval_seconds > config.lifecycle.worker.maintenance_interval_seconds:
+        raise ConfigError(
+            "conversation.lifecycle.idle_scan_interval_seconds cannot exceed lifecycle.worker.maintenance_interval_seconds"
+        )
 
 
 def _require_rerank_bounds(config: HabitusConfig) -> None:

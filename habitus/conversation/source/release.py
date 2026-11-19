@@ -2,10 +2,14 @@
 
 门槛，三条同时满足：
 1. 同一地址后面有一份 start_sequence 更大、有序 Consumer（``ordered_within_conversation``，现在是 Memory）都已
-   COMMITTED 的交付——插件同会话严格顺序投递，后一份已提交，前一份就不会再被重投；
-2. 这份源两个消费者都已终态（COMMITTED / SKIPPED；行为侧的账坏了、已补救的算终态，``salvage``）；
+   COMMITTED 的交付——插件同会话严格顺序投递，后一份已提交，前一份就不会再被重投；或者这个地址的会话已经没有没封存的
+   消息（``fully_sealed``；第 2 条保证这份源已写进会话日志，日志的 live 只会因封存变短，所以它的消息都已进 history。
+   不比序号：日志会把超长消息拆成几条、重排物理序号）——每个地址最后一份就靠这一条放：会话闲置封存完（裁定 107），
+   不再有后一份可等。被重投也安全：Memory 按 delivery_id 回执去重，行为侧跳过水位以下的源；
+2. 这份源两个消费者都已终态（COMMITTED / SKIPPED；行为侧的账坏了、已补救的算终态，``salvage``）——行为侧该读的读完、
+   该判的判完，在这之前不放；
 3. 同一地址更早的源都已释放——所以水位只会连续推进。
-每个地址最后一份永远满足不了第 1 条，随会话退休一起删（memory 侧，待定）。
+放了之后同一地址再来新消息，新源序号在水位之上，照常建立、照常交付。
 
 删的顺序：持有两个消费者的执行锁 → 写地址水位（fence 住全局 lease 与两把锁；水位已盖住它就不写）→ 删信封 → 删 Outcome → 删输出 →
 放锁、删两把锁行 → 删"已补救"标记 → 删"还没终态"标记 → 最后删索引标记。任何一步崩溃，下一轮从索引标记续删：水位已盖住、且信封
@@ -14,9 +18,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from types import MappingProxyType
 
+from habitus.conversation.source.address import SourceAddress
 from habitus.conversation.source.delivery import ConversationDurableConsumer
 from habitus.conversation.source.fence import consumer_lock_key
 from habitus.conversation.source.index import SourceMarker
@@ -45,6 +50,7 @@ class ConversationSourceReleaser:
         lock_store: LockStore,
         *,
         lock_ttl_seconds: int,
+        fully_sealed: Callable[[SourceAddress], bool],
         salvage: SourceSalvage | None = None,
     ) -> None:
         missing = sorted(item.value for item in ConversationSourceConsumer if item not in consumers)
@@ -64,6 +70,7 @@ class ConversationSourceReleaser:
         self.ordered = ordered
         self.lock_store = lock_store
         self.lock_ttl_seconds = lock_ttl_seconds
+        self.fully_sealed = fully_sealed
         self.salvage = salvage
 
     def releasable(self, directory_name: str) -> tuple[SourceMarker, ...]:
@@ -83,7 +90,9 @@ class ConversationSourceReleaser:
                     found.append(marker)
                 continue
             later = markers[position + 1 :]
-            if not any(self._ordered_committed(item) for item in later) or not self._terminal(marker):
+            if not self._terminal(marker):
+                break
+            if not any(self._ordered_committed(item) for item in later) and not self.fully_sealed(address):
                 break
             found.append(marker)
         return tuple(found)
@@ -127,7 +136,7 @@ class ConversationSourceReleaser:
         return True
 
     def settle_pending(self) -> int:
-        """两个消费者都已终态的源，把"还没终态"标记清掉（每个地址最后那份要等到会话退休才释放，标记不能一直挂着）。"""
+        """两个消费者都已终态的源，把"还没终态"标记清掉（每个地址最后那份要等到封存完才释放，标记不能一直挂着）。"""
 
         settled = 0
         for source_id, _address in self.ledger.pending.listing().sources:

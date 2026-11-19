@@ -1,5 +1,8 @@
 """顶层 Runtime 管理的生命周期维护 Worker：只管调度、全局 lease、心跳与参与者之间的失败隔离。
 
+两种节奏：``frequent`` 参与者（闲置封存，裁定 107）每 ``frequent_interval_seconds`` 一拍都跑；其余每满
+``maintenance_interval_seconds`` 才随某一拍一起跑（首次也要等满这一个周期）。显式 ``run_once`` 全部都跑。
+
 具体放什么由参与者决定（``infrastructure.lifecycle.LifecycleParticipant``）：memory 的会话链与 L2 维护
 （``runtime/lifecycle_memory.py``）、行为侧 / 语义树 / 预测层 / 会话源的释放，都挂在同一个 Worker 上。
 一个参与者抛错只记进它自己的结果，不打断其余参与者；租约丢失则整轮立即停止。
@@ -13,7 +16,7 @@ import threading
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from uuid import uuid4
 
@@ -141,21 +144,31 @@ class LifecycleWorker:
         *,
         lock_store: LockStore,
         lease_key: str,
+        frequent: Sequence[LifecycleParticipant] = (),
+        frequent_interval_seconds: int | None = None,
         capacity: CapacitySnapshotStore | None = None,
         worker_id: str | None = None,
         observer: Observer | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         resolved = tuple(participants)
-        names = [participant.name for participant in resolved]
+        names = [participant.name for participant in (*frequent, *resolved)]
         if any(not name for name in names) or len(names) != len(set(names)):
             raise ValueError("participants must have unique non-empty names")
+        tick = config.maintenance_interval_seconds if frequent_interval_seconds is None else frequent_interval_seconds
+        if (
+            bool(frequent) != (frequent_interval_seconds is not None)
+            or not 0 < tick <= config.maintenance_interval_seconds
+        ):
+            raise ValueError("frequent participants need an interval within the maintenance interval")
         if not lease_key:
             raise ValueError("lease_key must be non-empty text")
         resolved_worker_id = worker_id or f"lifecycle-{os.getpid()}-{uuid4().hex}"
         if not resolved_worker_id or any(ord(character) < 32 for character in resolved_worker_id):
             raise ValueError("worker_id must be non-empty normalized text")
         self._participants = resolved
+        self._frequent = tuple(frequent)
+        self._tick_seconds = tick
         self.config = config
         self.lock_store = lock_store
         self.lock_key = lease_key
@@ -173,7 +186,7 @@ class LifecycleWorker:
 
     @property
     def participants(self) -> tuple[LifecycleParticipant, ...]:
-        return self._participants
+        return (*self._frequent, *self._participants)
 
     @property
     def state(self) -> LifecycleWorkerState:
@@ -240,10 +253,10 @@ class LifecycleWorker:
             raise LifecycleWorkerStateError("manual lifecycle run cannot race the background loop")
         if self.busy:
             raise LifecycleWorkerStateError("lifecycle worker already has an active cycle")
-        result = await self._run_once()
+        result = await self._run_once(full=True)
         self._last_cycle = result
         self._last_error = None
-        self._observe_cycle(result)
+        _observe_cycle(self.observer, result)
         return result
 
     def wake(self) -> None:
@@ -252,28 +265,33 @@ class LifecycleWorker:
         self._wake_event.set()
 
     async def _run_loop(self) -> None:
+        period = timedelta(seconds=self.config.maintenance_interval_seconds)
+        full_due = self._clock() + period
         try:
             while not self._stop_requested.is_set():
-                await self._wait(self.config.maintenance_interval_seconds)
+                await self._wait(self._tick_seconds)
                 if self._stop_requested.is_set():
                     break
+                full = not self._frequent or self._clock() >= full_due
                 try:
-                    result = await self._run_once()
+                    result = await self._run_once(full=full)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     self._last_error = exc
-                    self._observe_failure(exc)
+                    _observe_failure(self.observer, exc)
                     continue
+                if full and result.lease_acquired:
+                    full_due = result.started_at + period
                 self._last_cycle = result
                 self._last_error = None
-                self._observe_cycle(result)
+                _observe_cycle(self.observer, result)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._last_error = exc
             self._state = LifecycleWorkerState.FAILED
-            self._observe_failure(exc)
+            _observe_failure(self.observer, exc)
         finally:
             active = self._active_cycle
             if active is not None and not active.done():
@@ -283,7 +301,7 @@ class LifecycleWorker:
             if self._state in {LifecycleWorkerState.RUNNING, LifecycleWorkerState.STOPPING}:
                 self._state = LifecycleWorkerState.STOPPED
 
-    async def _run_once(self) -> LifecycleMaintenanceCycleResult:
+    async def _run_once(self, *, full: bool) -> LifecycleMaintenanceCycleResult:
         started_at = self._clock()
         try:
             token = await asyncio.to_thread(self.lock_store.acquire, self.lock_key, self.config.lease_ttl_seconds)
@@ -293,7 +311,8 @@ class LifecycleWorker:
             )
 
         execution = asyncio.create_task(
-            self._maintain_all(token, started_at), name=f"habitus-lifecycle-cycle:{self.worker_id}"
+            self._maintain_all(token, started_at, self.participants if full else self._frequent),
+            name=f"habitus-lifecycle-cycle:{self.worker_id}",
         )
         self._active_cycle = execution
         heartbeat_stop = threading.Event()
@@ -329,10 +348,12 @@ class LifecycleWorker:
                 if body_error is None:
                     raise
 
-    async def _maintain_all(self, token: LockToken, started_at: datetime) -> LifecycleMaintenanceCycleResult:
+    async def _maintain_all(
+        self, token: LockToken, started_at: datetime, participants: tuple[LifecycleParticipant, ...]
+    ) -> LifecycleMaintenanceCycleResult:
         context = _CycleContext(now=started_at, token=token, lock_store=self.lock_store)
         outcomes = []
-        for participant in self._participants:
+        for participant in participants:
             await asyncio.to_thread(context.assert_owned)
             outcomes.append(await self._maintain_one(participant, context))
         await asyncio.to_thread(context.assert_owned)
@@ -385,33 +406,35 @@ class LifecycleWorker:
         finally:
             self._wake_event.clear()
 
-    def _observe_cycle(self, result: LifecycleMaintenanceCycleResult) -> None:
-        self.observer.record(
-            ObservationEvent(
-                category="lifecycle",
-                operation="maintenance_cycle",
-                status=ObservationStatus.DEGRADED if result.failures or result.signals else ObservationStatus.SUCCESS,
-                duration_seconds=max(0.0, (result.finished_at - result.started_at).total_seconds()),
-                attributes={
-                    "lease_acquired": result.lease_acquired,
-                    "participants": len(result.outcomes),
-                    "failures": len(result.failures),
-                    "signals": len(result.signals),
-                    "released": sum(item.report.released for item in result.outcomes if item.report is not None),
-                },
-            )
-        )
 
-    def _observe_failure(self, error: BaseException) -> None:
-        self.observer.record(
-            ObservationEvent(
-                category="lifecycle",
-                operation="maintenance_cycle",
-                status=ObservationStatus.FAILURE,
-                duration_seconds=0.0,
-                attributes={"error_type": type(error).__name__},
-            )
+def _observe_cycle(observer: Observer, result: LifecycleMaintenanceCycleResult) -> None:
+    observer.record(
+        ObservationEvent(
+            category="lifecycle",
+            operation="maintenance_cycle",
+            status=ObservationStatus.DEGRADED if result.failures or result.signals else ObservationStatus.SUCCESS,
+            duration_seconds=max(0.0, (result.finished_at - result.started_at).total_seconds()),
+            attributes={
+                "lease_acquired": result.lease_acquired,
+                "participants": len(result.outcomes),
+                "failures": len(result.failures),
+                "signals": len(result.signals),
+                "released": sum(item.report.released for item in result.outcomes if item.report is not None),
+            },
         )
+    )
+
+
+def _observe_failure(observer: Observer, error: BaseException) -> None:
+    observer.record(
+        ObservationEvent(
+            category="lifecycle",
+            operation="maintenance_cycle",
+            status=ObservationStatus.FAILURE,
+            duration_seconds=0.0,
+            attributes={"error_type": type(error).__name__},
+        )
+    )
 
 
 __all__ = [

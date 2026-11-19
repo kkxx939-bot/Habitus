@@ -83,18 +83,26 @@ class ConversationLifecycleConfig:
     """Conversation 原文释放和两阶段 Summary 压缩的统一生命周期配置。
 
     LifecycleWorker 的周期、lease、心跳与停机等待已搬到 ``lifecycle.worker``（各层参与者共用一个 Worker）；
-    这里只留会话链自己的：每轮最多轮转多少个 Conversation、Summary 压缩。"""
+    这里只留会话链自己的：每轮最多轮转多少个 Conversation、Summary 压缩，以及闲置封存（裁定 107，数照 OpenViking：
+    闲置 1 天、可设 5 分钟到 7 天、每 10 分钟扫一遍）。"""
 
     max_conversations_per_cycle: int = 100
     summary_compaction: ConversationSummaryCompactionConfig = field(default_factory=ConversationSummaryCompactionConfig)
+    # 会话有没封存的内容、最后一条消息之后过了这么久，后台替它封存一次
+    idle_commit_seconds: int = 86_400
+    # 多久扫一遍闲置会话；LifecycleWorker 按它跑闲置封存，其余维护仍按 lifecycle.worker 的周期
+    idle_scan_interval_seconds: int = 600
+    # 每遍最多看多少个会话（按游标轮转）：一遍的读盘量不随会话总数变大
+    idle_scan_batch_conversations: int = 1_000
 
     def __post_init__(self) -> None:
-        _bounded_int(
-            self.max_conversations_per_cycle,
-            "conversation lifecycle max_conversations_per_cycle",
-            minimum=1,
-            maximum=10_000,
-        )
+        for name, value, minimum, maximum in (
+            ("max_conversations_per_cycle", self.max_conversations_per_cycle, 1, 10_000),
+            ("idle_commit_seconds", self.idle_commit_seconds, 300, 604_800),
+            ("idle_scan_interval_seconds", self.idle_scan_interval_seconds, 60, 86_400),
+            ("idle_scan_batch_conversations", self.idle_scan_batch_conversations, 1, 100_000),
+        ):
+            _bounded_int(value, f"conversation lifecycle {name}", minimum=minimum, maximum=maximum)
 
     @classmethod
     def from_mapping(cls, value: object) -> ConversationLifecycleConfig:
@@ -105,6 +113,18 @@ class ConversationLifecycleConfig:
                 "config.conversation.lifecycle.max_conversations_per_cycle",
             ),
             summary_compaction=_summary_compaction_config(data.get("summary_compaction", {})),
+            idle_commit_seconds=_integer_value(
+                data.get("idle_commit_seconds", cls.idle_commit_seconds),
+                "config.conversation.lifecycle.idle_commit_seconds",
+            ),
+            idle_scan_interval_seconds=_integer_value(
+                data.get("idle_scan_interval_seconds", cls.idle_scan_interval_seconds),
+                "config.conversation.lifecycle.idle_scan_interval_seconds",
+            ),
+            idle_scan_batch_conversations=_integer_value(
+                data.get("idle_scan_batch_conversations", cls.idle_scan_batch_conversations),
+                "config.conversation.lifecycle.idle_scan_batch_conversations",
+            ),
         )
 
 

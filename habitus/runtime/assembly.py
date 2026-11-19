@@ -161,12 +161,10 @@ from habitus.runtime.foresight import (
 )
 from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
 from habitus.runtime.lifecycle import LifecycleWorker
-from habitus.runtime.lifecycle_behavior import BehaviorParticipant
-from habitus.runtime.lifecycle_foresight import ForesightParticipant
-from habitus.runtime.lifecycle_housekeeping import LifecycleHousekeepingParticipant
+from habitus.runtime.lifecycle_downstream import downstream_participants
+from habitus.runtime.lifecycle_idle import ConversationIdleSealParticipant, fully_sealed
 from habitus.runtime.lifecycle_memory import ConversationChainParticipant, MemoryL2Participant, conversation_lease_key
 from habitus.runtime.lifecycle_retry import retry_ledger
-from habitus.runtime.lifecycle_scene import SceneParticipant
 from habitus.runtime.lifecycle_sources import ConversationSourceParticipant, ConversationSourceRecoveryParticipant
 from habitus.runtime.pipeline_assembly import assemble_pipeline
 from habitus.runtime.runtime import Runtime
@@ -689,6 +687,7 @@ def build_runtime(
         source_delivery.consumers,
         resolved_lock.lock_store,
         lock_ttl_seconds=source_config.execution_lock_ttl_seconds,
+        fully_sealed=fully_sealed(conversations),
         salvage=source_salvage,
     )
     runner = MemoryJobRunner(
@@ -725,44 +724,27 @@ def build_runtime(
     slot_worker, model_queue_worker = (
         build_workers(config, pipelines, observer=operation_observer) if pipelines else (None, None)
     )
-    # 行为侧、语义树、预测层的释放各一个参与者（26 号清单 6.14），挂进同一个生命周期 Worker；语义树、预测层一支一个
-    for item in pipelines:
-        participants.append(SceneParticipant(item.scene.relations, lane=item.lane))
-    if behavior_components is not None:
-        participants.append(
-            BehaviorParticipant(
-                behavior_components,
-                backfill_days=config.lifecycle.physical_max_backfill_days,
-            )
-        )
-    for foresight in foresights:
-        participants.append(
-            ForesightParticipant(
-                foresight.ledger,
-                foresight.history.store,
-                lane=foresight.lane,
-                feedback_kept=config.lifecycle.feedback_kept,
-                window=evidence_of(config).window,
-            )
-        )
-    # 生命周期骨架自己的状态（重试账、每晚重试的堆）按统一寿命清、报容量（L10.10；裁定 67）
-    branches = () if behavior_components is None else tuple(behavior_components)
-    participants.append(
-        LifecycleHousekeepingParticipant(
-            (
-                source_recovery.retries,
-                *(item for branch in branches for item in branch.retry_ledgers),
-                *(item.queue.retries for item in pipelines),
-            ),
-            keep_days=config.lifecycle.retry.given_up_days,
-            backlogs=tuple(branch.retry_backlog for branch in branches if branch.retry_backlog is not None),
-        )
+    participants.extend(
+        downstream_participants(config, pipelines, behavior_components, source_retries=source_recovery.retries)
     )
     lifecycle_worker = LifecycleWorker(
         tuple(participants),
         config.lifecycle.worker,
         lock_store=lifecycle_lock_store,
         lease_key=conversation_lease_key(conversation_lifecycle.journal),
+        # 闲置封存每一拍都跑，其余按 lifecycle.worker 的周期（裁定 107）
+        frequent=(
+            ConversationIdleSealParticipant(
+                enqueuer,
+                boundary_scorer,
+                source_releaser,
+                resolved_lock,
+                conversation_config.lifecycle,
+                lock_ttl_seconds=source_config.execution_lock_ttl_seconds,
+                wake_memory=worker.wake,
+            ),
+        ),
+        frequent_interval_seconds=conversation_config.lifecycle.idle_scan_interval_seconds,
         capacity=CapacitySnapshotStore(jobs.root),
         observer=operation_observer,
     )

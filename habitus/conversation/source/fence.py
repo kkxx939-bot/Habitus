@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractContextManager, asynccontextmanager, suppress
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, TypeVar
 
 from habitus.conversation.source.model import (
@@ -149,16 +150,7 @@ class ConversationConsumerExecutionFence:
         consumer_key = consumer_lock_key(source.source_id, consumer)
         if not conversation_ordered:
             return (consumer_key,)
-        # 同一地址、同一个有序 Consumer 一把顺序锁
-        address_digest = canonical_digest(
-            {
-                "schema_version": "conversation_order_lock_v2",
-                "consumer": consumer.value,
-                "conversation_id": conversation_identity(source.conversation_id),
-                "started_on": source.started_on.isoformat(),
-            }
-        )
-        return (f"conversation-ordered:{address_digest}", consumer_key)
+        return (conversation_order_lock_key(source.conversation_id, source.started_on, consumer), consumer_key)
 
 
 async def _enter_or_release_on_cancel(context: AbstractContextManager[LeaseGuard]) -> LeaseGuard:
@@ -185,6 +177,20 @@ async def _finish_despite_cancel(work: asyncio.Future[Any]) -> None:
         work.exception()  # 取走结果，不留"异常没人取"的告警
 
 
+def conversation_order_lock_key(conversation_id: str, started_on: date, consumer: ConversationSourceConsumer) -> str:
+    """同一地址、同一个有序 Consumer 一把顺序锁；闲置封存也持这把锁，不和这个地址正在跑的 Memory 交付并发。"""
+
+    address_digest = canonical_digest(
+        {
+            "schema_version": "conversation_order_lock_v2",
+            "consumer": ConversationSourceConsumer(consumer).value,
+            "conversation_id": conversation_identity(conversation_id),
+            "started_on": started_on.isoformat(),
+        }
+    )
+    return f"conversation-ordered:{address_digest}"
+
+
 def consumer_lock_key(source_id: str, consumer: ConversationSourceConsumer) -> str:
     """一份源、一个消费者的执行锁键；交付与释放用同一把，释放时持有它就不会和交付并发。"""
 
@@ -196,4 +202,5 @@ __all__ = [
     "ConversationConsumerExecutionLease",
     "ConversationConsumerLeaseLostError",
     "consumer_lock_key",
+    "conversation_order_lock_key",
 ]

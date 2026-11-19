@@ -41,9 +41,12 @@ class _Context:
         return self._token
 
 
-def _setup(root: Path):
+def _setup(root: Path, *, sealed: set[SourceAddress] | None = None):
+    """``sealed`` 里的地址算"会话已没有没封存的消息"；默认都还有。"""
+
     service, memory, behavior = delivery(root)
     lock_store = service.fence.path_lock.lock_store
+    sealed_addresses = set() if sealed is None else sealed
     releaser = ConversationSourceReleaser(
         service.sources,
         service.outcomes,
@@ -51,6 +54,7 @@ def _setup(root: Path):
         service.consumers,
         lock_store,
         lock_ttl_seconds=30,
+        fully_sealed=lambda address: address in sealed_addresses,
         salvage=SourceSalvage(root, salvagers={ConversationSourceConsumer.BEHAVIOR_SESSION: lambda _envelope: None}),
     )
     return service, memory, behavior, releaser, _Context(lock_store)
@@ -399,5 +403,68 @@ def test_an_unlistable_pending_directory_is_a_signal_not_a_failed_round(tmp_path
 
         assert {reading.name: reading.count for reading in report.readings}["pending_sources"] == 2
         assert any("pending markers failed to settle" in signal for signal in report.signals)
+
+    asyncio.run(scenario())
+
+def test_the_last_source_is_released_once_its_conversation_is_fully_sealed(tmp_path: Path) -> None:
+    """裁定 107：会话闲置封存完（live 已空），每个地址最后一份源连同锁行一起放；没封存完时照旧留着。"""
+
+    async def scenario() -> None:
+        sealed: set[SourceAddress] = set()
+        service, _memory, _behavior, releaser, ctx = _setup(tmp_path, sealed=sealed)
+        envelopes = [await _deliver(service, source(sequence=n, delivery_seed=f"d{n}")) for n in range(2)]
+        directory = _directory(service)
+        assert releaser.release_address(directory, ctx) == 1
+        assert service.sources.read(envelopes[1].source_id) is not None
+
+        sealed.add(SourceAddress.of(envelopes[1]))
+        assert releaser.release_address(directory, ctx) == 1
+
+        assert service.sources.read(envelopes[1].source_id) is None
+        assert service.ledger.index.address_directories() == ()
+        assert not any(envelopes[1].source_id in key for key in service.fence.path_lock.lock_store.locks)
+        assert (
+            service.ledger.watermarks.released_through(SourceAddress.of(envelopes[1]))
+            == envelopes[1].batch.end_sequence
+        )
+
+    asyncio.run(scenario())
+
+
+def test_the_last_source_waits_for_behavior_even_when_fully_sealed(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        envelope = source(sequence=0, delivery_seed="d0")
+        service, _memory, _behavior, releaser, ctx = _setup(tmp_path, sealed={SourceAddress.of(envelope)})
+        await _deliver(service, envelope, ConversationSourceConsumer.MEMORY)
+
+        assert releaser.releasable(_directory(service)) == ()
+
+        await service.ensure_outcome(envelope, ConversationSourceConsumer.BEHAVIOR_SESSION)
+        assert releaser.release_address(_directory(service), ctx) == 1
+
+    asyncio.run(scenario())
+
+
+def test_new_messages_after_the_last_source_was_released_are_delivered_as_usual(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        first = source(sequence=0, delivery_seed="d0")
+        sealed = {SourceAddress.of(first)}
+        service, memory, behavior, releaser, ctx = _setup(tmp_path, sealed=sealed)
+        await _deliver(service, first)
+        assert releaser.release_address(_directory(service), ctx) == 1
+        sealed.clear()  # 新消息进来，会话又有没封存的内容
+        calls = (memory.calls, behavior.calls)
+
+        later = await _deliver(service, source(sequence=1, delivery_seed="d1"))
+
+        for consumer in ConversationSourceConsumer:
+            outcome = service.outcomes.read(later.source_id, consumer)
+            assert outcome is not None
+            assert outcome.state is ConversationConsumerOutcomeState.COMMITTED
+        assert (memory.calls, behavior.calls) == (calls[0] + 1, calls[1] + 1)
+        assert [marker.source_id for marker in service.ledger.index.markers_in(_directory(service))] == [
+            later.source_id
+        ]
+        assert releaser.releasable(_directory(service)) == ()
 
     asyncio.run(scenario())

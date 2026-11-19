@@ -235,6 +235,12 @@ conversation:
 
   lifecycle:
     max_conversations_per_cycle: 100
+    # 闲置封存（数照 OpenViking）：会话有没封存的内容、最后一条消息之后过了 idle_commit_seconds（300–604800），
+    # 后台替它封存完整的轮（没闭合的那一轮留着）。每 idle_scan_interval_seconds 扫一遍（不大于 lifecycle.worker 的周期），
+    # 每遍最多看 idle_scan_batch_conversations 个会话、按游标轮转
+    idle_commit_seconds: 86400
+    idle_scan_interval_seconds: 600
+    idle_scan_batch_conversations: 1000
     summary_compaction:
       enabled: true
       segment_to_range:

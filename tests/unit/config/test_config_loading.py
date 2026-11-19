@@ -980,3 +980,39 @@ def test_model_route_yaml_with_wrong_types_is_refused_before_construction(
     group[keys[-1]] = bad
     with pytest.raises(ConfigError, match=message):
         HabitusConfig.from_mapping(mapping)
+
+
+def test_idle_commit_settings_follow_openviking_load_from_yaml_and_reject_out_of_range(tmp_path) -> None:
+    """裁定 107：闲置 1 天、可设 5 分钟到 7 天、每 10 分钟扫一遍；示例配置列全三项；越界、类型不对在读入处拒。"""
+
+    example = HabitusConfig.from_mapping(valid_mapping(tmp_path)).conversation.lifecycle
+    assert (example.idle_commit_seconds, example.idle_scan_interval_seconds, example.idle_scan_batch_conversations) == (
+        86_400,
+        600,
+        1_000,
+    )
+    payload = valid_mapping(tmp_path)
+    payload["conversation"]["lifecycle"]["idle_commit_seconds"] = 300
+    assert HabitusConfig.from_mapping(payload).conversation.lifecycle.idle_commit_seconds == 300
+    for field, bad, message in (
+        ("idle_commit_seconds", 299, "between 300 and 604800"),
+        ("idle_commit_seconds", 604_801, "between 300 and 604800"),
+        ("idle_commit_seconds", 0, "between 300 and 604800"),
+        ("idle_scan_interval_seconds", 59, "between 60 and 86400"),
+        ("idle_scan_batch_conversations", 0, "between 1 and 100000"),
+        ("idle_commit_seconds", "1d", "must be an integer"),
+        ("idle_scan_interval_seconds", 600.0, "must be an integer"),
+    ):
+        payload = valid_mapping(tmp_path)
+        payload["conversation"]["lifecycle"][field] = bad
+        with pytest.raises((ConfigError, ValueError), match=message):
+            HabitusConfig.from_mapping(payload)
+    payload = valid_mapping(tmp_path)
+    payload["conversation"]["lifecycle"]["idle_scan_interval_seconds"] = 7_200
+    with pytest.raises(ConfigError, match="idle_scan_interval_seconds cannot exceed"):
+        HabitusConfig.from_mapping(payload)
+    payload = valid_mapping(tmp_path)
+    payload["conversation"]["journal"]["max_conversation_tree_entries"] = 500
+    payload["conversation"]["lifecycle"]["max_conversations_per_cycle"] = 100
+    with pytest.raises(ConfigError, match="idle scan batch"):
+        HabitusConfig.from_mapping(payload)

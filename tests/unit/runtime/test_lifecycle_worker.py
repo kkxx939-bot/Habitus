@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -312,3 +312,66 @@ def test_participant_signals_mark_the_cycle_degraded_in_observations(tmp_path: P
     (cycle,) = [event for event in events if event.operation == "maintenance_cycle"]
     assert cycle.status is ObservationStatus.DEGRADED
     assert cycle.attributes["signals"] == 1
+
+
+def test_frequent_participants_run_every_tick_and_the_rest_once_per_maintenance_period(tmp_path: Path) -> None:
+    """裁定 107：闲置封存每一拍（这里 60 秒）都跑；其余每满维护周期（600 秒）才随一拍跑，首次也等满一个周期。"""
+
+    async def scenario() -> tuple[int, int, int, int]:
+        current = manager(tmp_path)
+        lock_store = current.journal.path_lock.lock_store
+        fast, slow = _Probe("fast"), _Probe("slow")
+        now = [datetime(2026, 7, 1, tzinfo=UTC)]
+        worker = LifecycleWorker(
+            (slow,),  # type: ignore[arg-type]
+            LifecycleWorkerConfig(
+                maintenance_interval_seconds=600,
+                lease_ttl_seconds=30,
+                heartbeat_interval_seconds=10,
+                shutdown_timeout_seconds=1,
+            ),
+            lock_store=lock_store,
+            lease_key=conversation_lease_key(current.journal),
+            frequent=(fast,),  # type: ignore[arg-type]
+            frequent_interval_seconds=60,
+            clock=lambda: now[0],
+        )
+        ticks = 0
+
+        async def wait(delay: float) -> None:
+            nonlocal ticks
+            ticks += 1
+            now[0] += timedelta(seconds=delay)
+            if ticks > 25:
+                worker._stop_requested.set()
+            await asyncio.sleep(0)
+
+        worker._wait = wait  # type: ignore[method-assign]
+        await worker.start()
+        assert worker._loop_task is not None
+        await worker._loop_task
+        loop_calls = (fast.calls, slow.calls)
+        await worker.run_once()
+        return (*loop_calls, fast.calls, slow.calls)
+
+    # 25 拍：第 10、20 拍各跑一次全部维护；显式 run_once 两边都跑
+    assert asyncio.run(scenario()) == (25, 2, 26, 3)
+
+
+@pytest.mark.parametrize(
+    ("frequent", "interval"),
+    [((), 60), (("fast",), None), (("fast",), 120), (("fast",), 0)],
+)
+def test_frequent_participants_need_an_interval_within_the_maintenance_period(
+    tmp_path: Path, frequent: tuple[str, ...], interval: int | None
+) -> None:
+    current = manager(tmp_path)
+    with pytest.raises(ValueError, match="frequent participants"):
+        LifecycleWorker(
+            (),
+            worker_config(),
+            lock_store=current.journal.path_lock.lock_store,
+            lease_key=conversation_lease_key(current.journal),
+            frequent=tuple(_Probe(name) for name in frequent),  # type: ignore[arg-type]
+            frequent_interval_seconds=interval,
+        )

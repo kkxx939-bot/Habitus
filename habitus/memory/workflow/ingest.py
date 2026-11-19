@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 
+from habitus.foundation.observability import ObservationEvent, ObservationStatus
 from habitus.memory.conversation import (
     ConversationAddress,
     ConversationAppendResult,
+    ConversationAppendStatus,
     ConversationIngressRequest,
     ConversationMessageJournal,
 )
+from habitus.memory.conversation.interruption import is_interruption_message
 from habitus.memory.conversation.retention import (
     ConversationRetentionPlan,
     ConversationRetentionPlanner,
@@ -24,6 +27,7 @@ from habitus.memory.workflow.jobs import MemoryJob, MemoryJobError, MemoryJobSta
 from habitus.memory.workflow.recovery import staged_job_segment
 from habitus.pre.conversation import (
     ConversationBatch,
+    ConversationMessage,
     ConversationMessageRole,
     ConversationSegment,
 )
@@ -104,10 +108,20 @@ class ConversationMemoryEnqueuer:
         omit_tool_call_ids: frozenset[str] = frozenset(),
         ingress: ConversationIngressRequest | None = None,
     ) -> ConversationAppendResult:
-        """降载工具结果、切分超长文本、把超过一段上限的工具交换抽到放得下，再写入唯一 live 主链。"""
+        """顺延撞上系统收尾消息的序号、丢掉迟到的工具结果、降载工具结果、切分超长文本、把超过一段上限的工具交换抽到放得下，
+        再写入唯一 live 主链。"""
 
         if any(not identifier for identifier in omit_tool_call_ids):
             raise TypeError("omit_tool_call_ids must be a frozenset of non-empty strings")
+        kept = _after_interruption(self.conversations, address, batch)
+        if kept != batch.messages:
+            if not kept:
+                live = self.conversations.read_live(address)
+                next_sequence = (
+                    self.conversations.read_state(address).next_sequence if live is None else live.end_sequence + 1
+                )
+                return ConversationAppendResult(ConversationAppendStatus.UNCHANGED, 0, live, next_sequence)
+            batch = ConversationBatch(batch.conversation_id, kept)
         reduced = ConversationBatch(
             batch.conversation_id,
             tuple(
@@ -286,6 +300,66 @@ class ConversationMemoryEnqueuer:
         )
         staged = self.jobs.stage(address, sealed.segment)
         return self.jobs.activate(staged)
+
+
+def _after_interruption(
+    journal: ConversationMessageJournal, address: ConversationAddress, batch: ConversationBatch
+) -> tuple[ConversationMessage, ...]:
+    """闲置封存补过收尾消息之后（裁定 107 第 2 条），宿主送来的这一批怎么接上：
+
+    - 开头的序号落在系统收尾消息上（插件编好序号、还没送出，会话就闲置封存了）：整批顺延到那一串收尾消息之后；
+    - 系统已经替某个调用补过终态结果、而且补在这一批之前，这一批里它的结果就是迟到的：丢掉、记一条观测，后面的消息
+      顺着补上序号（与切分超长消息重排序号同理，插件以服务端回的下一序号为准）。
+
+    两样都只看盘上已经写下、不会再变的事实（收尾消息在哪），同一份投递重放时判出同一批，入口回执对得上。"""
+
+    messages = batch.messages
+    live = journal.read_live(address)
+    local_calls = {
+        item.tool_call_id
+        for item in (*messages, *(() if live is None else live.messages))
+        if item.role is ConversationMessageRole.TOOL_CALL
+    }
+    late_candidates = any(
+        item.role is ConversationMessageRole.TOOL_RESULT and item.tool_call_id not in local_calls for item in messages
+    )
+    next_sequence = journal.read_state(address).next_sequence if live is None else live.end_sequence + 1
+    if batch.start_sequence >= next_sequence and not late_candidates:
+        return messages
+    stored = {
+        item.sequence: item
+        for item in (
+            *(item for segment in journal.list_history(address) for item in segment.messages),
+            *(() if live is None else live.messages),
+        )
+    }
+    start = batch.start_sequence
+    while start in stored and is_interruption_message(stored[start]):
+        start += 1
+    closed = {
+        item.tool_call_id
+        for sequence, item in stored.items()
+        if sequence < start and item.role is ConversationMessageRole.TOOL_RESULT and is_interruption_message(item)
+    }
+    kept = [
+        item
+        for item in messages
+        if item.role is not ConversationMessageRole.TOOL_RESULT
+        or item.tool_call_id in local_calls
+        or item.tool_call_id not in closed
+    ]
+    dropped = len(messages) - len(kept)
+    if dropped:
+        journal.path_lock.observer.record(
+            ObservationEvent(
+                category="conversation",
+                operation="late_tool_result_dropped",
+                status=ObservationStatus.DEGRADED,
+                duration_seconds=0.0,
+                attributes={"dropped": dropped},
+            )
+        )
+    return tuple(replace(item, sequence=start + index) for index, item in enumerate(kept))
 
 
 __all__ = [
