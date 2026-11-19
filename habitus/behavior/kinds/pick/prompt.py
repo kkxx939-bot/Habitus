@@ -22,7 +22,10 @@ from habitus.behavior.kinds.rules import SAMENESS_RULE
 #: 物理 lane 的提示词加了【新节点：new】一节与 ``new``，会话那一份一字没变，所以这个号不升；物理记录上不记提示词版本。
 #: v3（2026-11-16，用户定"做法一"）：``none`` 下面加一条——只是问一个问题、要一个解释、没让助手办事，不是一件事；问手上那件事的进展
 #: 仍是 ``continue``，词表里有专门说问这一种东西的词仍选那个词。同时"学知识""查资料"两个词的定义收窄（``words/session.json``）。
-PICK_PROMPT_VERSION = "pick-v3"
+#: v4（2026-11-19，实验 05-续话，裁定 106）：续话改口径——同一场对话里为同一件事往下做的每一步都是续话，带不带动作都算；
+#: 一件事看要办成什么、不看这一句的动作；同一场对话里拿不准当续话、不在同一场对话里当新的一件事；【最近的记录】分"这场对话里的"
+#: 与"别的对话里的"两段（编号连着，先这场对话的）。
+PICK_PROMPT_VERSION = "pick-v4"
 
 NONE, CONTINUE, MISSING = "none", "continue", "missing"
 SESSION_FIXED = (NONE, CONTINUE, MISSING)
@@ -78,9 +81,10 @@ def session_system(vocabulary: Vocabulary) -> str:
 【选一项：pick】
 - "none"：不是一件事。打招呼、道谢、闲聊、一句感受或抱怨、没有要办的事，都选这个。
   只是问一个问题、要一个解释或答案，听完就完了、没有让助手替他办什么事：先看词表里有没有一个词说的正是问这一种东西（提醒他"该<那个词>了"，他这一轮问的就算做到了），有就选那个词；问的是【最近的记录】里某一条那件事的进展、结果或要求，是接着那一条，选 "continue"；两样都不是，就是没有要办的事，选 "none"。
-- "continue"：接着【最近的记录】里的某一条，同时在 continues 填那条记录的编号。追问那件事办得怎么样、叫停或暂缓它、改口、补一句要求、让还没办完的那件接着办，都是接着那一条，不是新的一件事。
+- "continue"：接着【最近的记录】里的某一条，同时在 continues 填那条记录的编号。先看这一轮是不是还在办"这场对话里的"某一件事：是，就接那一条（不一定是最后一条）；不是了，再往下选。
+  一件事看的是他要办成什么，不是这一句让助手做哪个动作。为同一件事往下做的每一步——问进展、补要求、改口、叫停、换个做法、改其中一处、再检查一遍——要办成的东西没变，都是接着那一条，说没说要办什么都算。要办成的东西变了才是新的一件事，哪怕和前面那件有关：拿上一步的结果去办另一件事，是新的；同一种事换个场合再做一次（另一场对话、另一天、"跟上次一样再来一份"），也是新的。
   只能填【最近的记录】里给出的编号。看不出接的是哪一条、列表里也没有它接的那件事时，不要硬配：它说了要办什么事就按新的一件事选词，否则选 "none"。
-  拿不准是接着还是新的一件事时：这一轮说了要办什么事（哪怕带着"跟之前一样""老样子""照旧"），就是新的一件事；只有追问、叫停、改口、补一句而没说要办什么事，才是接着。
+  拿不准是接着还是新的一件事时：可能接的是"这场对话里的"某一条，就当接着；不在这场对话里，就当新的一件事。
 - 词表里一个词的编号（整数）：他开始了一件事（新的，或者同一种事又做了一次），而词表里有说这件事的词。
 - "missing"：是一件事，但词表里没有说这件事的词。宁可答 "missing"，也不要把它硬塞进一个说的不是这件事的词——选错了，系统会对他说错话。
 
@@ -93,11 +97,17 @@ def session_system(vocabulary: Vocabulary) -> str:
 {{"pick": 词编号（整数） | "none" | "continue" | "missing", "continues": 记录编号（整数，只在 pick 为 "continue" 时填，其余填 null）, "new": null | {{"first": {{"name": 名字, "definition": 一句定义}}, "second": null | {{"name": 名字, "definition": 一句定义}}}}}}"""
 
 
-def session_user(material: str, earlier: Sequence[str], records: Sequence[str]) -> str:
+def session_user(material: str, earlier: Sequence[str], mine: Sequence[str], others: Sequence[str]) -> str:
+    """``mine`` 是这场对话里的记录、``others`` 是别的对话里的，各自已按时间排、带好编号（编号连着：先 ``mine`` 后 ``others``）。"""
+
     earlier_text = "\n\n".join(earlier) if earlier else "（这场对话里之前没有别的轮）"
-    records_text = "\n".join(records) if records else "（还没有记录）"
+    mine_text = "\n".join(mine) if mine else "（还没有）"
+    others_text = "\n".join(others) if others else "（还没有）"
     return f"""【最近的记录】（编号、时刻、他当时说的、归到的词）
-{records_text}
+这场对话里的：
+{mine_text}
+别的对话里的：
+{others_text}
 
 【这场对话里之前的几轮】（只作上文参考）
 {earlier_text}

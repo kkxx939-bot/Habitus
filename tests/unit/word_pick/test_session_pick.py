@@ -31,6 +31,8 @@ from tests.unit.word_pick.site import (
     Word,
     at,
     record_lines,
+    record_number,
+    section,
     vocabulary_block,
 )
 
@@ -345,8 +347,9 @@ def test_c22_the_session_pick_prompt_keeps_the_fixed_choices_and_the_new_node_se
 
 
 def test_c23_recent_records_are_the_last_eight_plus_the_last_three_of_this_conversation(site: Site) -> None:
-    """10 条已有记录，第 2、6、9 条与这一轮同会话：给最近 8 条（3–10）加同会话最近 3 条（2、6、9），去重按时间排、
-    编号连续；第 1 条不在里面。"""
+    """10 条已有记录，第 2、6、9 条与这一轮同会话：给最近 8 条（3–10）加同会话最近 3 条（2、6、9），去重；
+    v4（裁定 106）起分两段——"这场对话里的"（2、6、9）在前、"别的对话里的"（3、4、5、7、8、10）在后，各按时间排，
+    编号从 1 连着排下来；第 1 条不在里面。"""
 
     long_said = (
         "请把下面这一大段会议录音整理成要点并按议题分组然后标出每个议题的负责人和截止时间"
@@ -364,10 +367,26 @@ def test_c23_recent_records_are_the_last_eight_plus_the_last_three_of_this_conve
     text = site.router.texts("pick")[-1]
     lines = record_lines(text)
     assert len(lines) == 9
-    for index, line in zip(range(2, 11), lines, strict=True):
+    for index, line in zip((2, 6, 9, 3, 4, 5, 7, 8, 10), lines, strict=True):
         assert said[index][:60] in line
         assert "写报告" in line  # 归到的词名
     assert not any(said[1] in line for line in lines)
     assert long_said[:61] not in lines[-1]  # 他当时说的只给前 60 字
     numbers = [int(re.match(r"^\s*(\d+)", line)[1]) for line in lines]  # type: ignore[index]
-    assert numbers == list(range(numbers[0], numbers[0] + 9))
+    assert numbers == list(range(1, 10))
+    block = section(text, "【最近的记录】")
+    assert block[0] == "这场对话里的：" and block[4] == "别的对话里的："
+
+
+def test_c23b_with_nothing_from_this_conversation_yet_its_part_says_so_and_a_continue_reaches_the_other_part(
+    site: Site,
+) -> None:
+    """这场对话里还没有记录时"这场对话里的"一段写"（还没有）"；接别的对话里那一条的 continue 按它的编号照样落成续话。"""
+
+    site.record("conv-a", at(DAY, 9), "帮我写一份本周周报", Word("s-k0005"))
+    site.record("conv-b", at(DAY, 10), "周报写得怎么样了", Continue(said="帮我写一份本周周报"))
+    text = site.router.texts("pick")[-1]
+    block = section(text, "【最近的记录】")
+    assert block[:3] == ["这场对话里的：", "（还没有）", "别的对话里的："]
+    assert record_number(text, "帮我写一份本周周报") == 1
+    assert sorted(marker(str(item["kind_token"])) for item in occurrences(site)) == ["s-k0005", "续话"]

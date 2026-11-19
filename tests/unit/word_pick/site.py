@@ -313,7 +313,9 @@ def word_number(text: str, name: str) -> object:
 
 
 def record_lines(text: str) -> list[str]:
-    return section(text, RECORDS_HEADER)
+    """【最近的记录】里带编号的各行（v4 起分"这场对话里的""别的对话里的"两段，段名与"（还没有）"不算）。"""
+
+    return [line for line in section(text, RECORDS_HEADER) if re.match(r"^\s*\d+\. ", line)]
 
 
 def record_number(text: str, said: str) -> int:
@@ -493,6 +495,8 @@ __all__ = [
     "config",
     "description",
     "record_lines",
+    "record_number",
     "runtime_of",
+    "section",
     "vocabulary_block",
 ]

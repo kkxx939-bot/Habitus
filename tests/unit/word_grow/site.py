@@ -332,6 +332,36 @@ def with_pick_v3(text: str) -> str:
     return "\n".join(lines)
 
 
+#: 选词提示词 v4（2026-11-19，裁定 106，续话改口径）："continue" 那一项原来的三行（逐字）→ 现在的四行（逐字）。
+CONTINUE_RULE_V3 = (
+    '- "continue"：接着【最近的记录】里的某一条，同时在 continues 填那条记录的编号。追问那件事办得怎么样、叫停或暂缓它、改口、补一句要求、'
+    "让还没办完的那件接着办，都是接着那一条，不是新的一件事。",
+    "  只能填【最近的记录】里给出的编号。看不出接的是哪一条、列表里也没有它接的那件事时，不要硬配：它说了要办什么事就按新的一件事选词，"
+    '否则选 "none"。',
+    '  拿不准是接着还是新的一件事时：这一轮说了要办什么事（哪怕带着"跟之前一样""老样子""照旧"），就是新的一件事；只有追问、叫停、改口、'
+    "补一句而没说要办什么事，才是接着。",
+)
+CONTINUE_RULE_V4 = (
+    '- "continue"：接着【最近的记录】里的某一条，同时在 continues 填那条记录的编号。先看这一轮是不是还在办"这场对话里的"某一件事：'
+    "是，就接那一条（不一定是最后一条）；不是了，再往下选。",
+    "  一件事看的是他要办成什么，不是这一句让助手做哪个动作。为同一件事往下做的每一步——问进展、补要求、改口、叫停、换个做法、改其中一处、"
+    "再检查一遍——要办成的东西没变，都是接着那一条，说没说要办什么都算。要办成的东西变了才是新的一件事，哪怕和前面那件有关："
+    '拿上一步的结果去办另一件事，是新的；同一种事换个场合再做一次（另一场对话、另一天、"跟上次一样再来一份"），也是新的。',
+    CONTINUE_RULE_V3[1],
+    '  拿不准是接着还是新的一件事时：可能接的是"这场对话里的"某一条，就当接着；不在这场对话里，就当新的一件事。',
+)
+
+
+def with_pick_v4(text: str) -> str:
+    """``with_pick_v3`` 之后再把 "continue" 那一项的三行换成 v4 的四行（``CONTINUE_RULE_V3`` → ``CONTINUE_RULE_V4``）；别处一字不动。"""
+
+    lines = with_pick_v3(text).split("\n")
+    (start,) = [index for index, line in enumerate(lines) if line == CONTINUE_RULE_V3[0]]
+    assert tuple(lines[start : start + 3]) == CONTINUE_RULE_V3
+    lines[start : start + 3] = CONTINUE_RULE_V4
+    return "\n".join(lines)
+
+
 def pick_calls(site: GrowSite) -> list[Any]:
     return [call for call in site.router.calls if call.kind == "pick"]
 
@@ -419,4 +449,5 @@ __all__ = [
     "pick_calls",
     "system_prompt",
     "with_pick_v3",
+    "with_pick_v4",
 ]

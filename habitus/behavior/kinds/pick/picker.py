@@ -170,7 +170,11 @@ class WordPicker:
         if self.state is None:
             raise ValueError("the session picker needs the vocabulary state")
         vocabulary = self.state.read()
-        records = self._records(conversation, at)
+        listed = self._records(conversation, at)
+        # 编号连着排：先这场对话里的，再别的对话里的（两段各按时间）；continues 按这个顺序换回记录
+        records = [seen for seen in listed if seen.conversation == conversation]
+        mine_count = len(records)
+        records += [seen for seen in listed if seen.conversation != conversation]
         earlier = self._earlier(conversation, at)
         lines = [
             f"{number}. {seen.at:%m-%d %H:%M} 他说「{_said(seen.material)}」→ {_display(vocabulary, seen.token)}"
@@ -202,7 +206,7 @@ class WordPicker:
 
         answer = await self._ask(
             system=session_system(vocabulary),
-            user=session_user(material, earlier, lines),
+            user=session_user(material, earlier, lines[:mine_count], lines[mine_count:]),
             schema=_schema(SESSION_FIXED, continues=True),
             validator=validate,
         )

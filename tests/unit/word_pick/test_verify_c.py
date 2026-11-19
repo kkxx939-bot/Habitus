@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import re
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -401,7 +402,8 @@ def _records_block(text: str) -> list[str]:
     for line in lines[start + 1 :]:
         if not line.strip():
             break
-        block.append(line)
+        if re.match(r"^\d+\. ", line):  # 段名（这场对话里的 / 别的对话里的）与"（还没有）"不算
+            block.append(line)
     return block
 
 
