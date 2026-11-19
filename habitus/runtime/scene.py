@@ -234,8 +234,9 @@ def assemble_branch(
         unsealed=unsealed, traces=traces, lock_store=lock_store, observer=observer, scene_lock=scene_lock,
     )  # fmt: skip
     return ScenePipeline(
-        behavior=branch, scene=scene, generation=look, queue=queue, foresight=foresight, tick=tick, lease=ledger_lease
-    )
+        behavior=branch, scene=scene, generation=look, queue=queue, foresight=foresight, tick=tick,
+        lease=ledger_lease, unsealed=unsealed,
+    )  # fmt: skip
 
 
 def build_workers(

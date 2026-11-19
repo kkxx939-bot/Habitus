@@ -122,10 +122,14 @@ def test_only_present_time_counts_gaps_and_the_cutoff_make_the_outcome_unknown()
     - 次日一段伸过截止日：未知；
     - 写文档是当天最后一件：之后没有在场的槽，"当天剩下的"未知（不是"它让一切都不发生"）；
     - 调研那一次的对照是同一天别的事做完的时刻：讨论方案之后碰到空白、写文档之后没有在场的槽，都不能比，只剩提交推送那一个。
+
+    修改代码在这一天之前自然发生过一次（上周五），这一天对它才是"结果已知"（第一次之前一律不知道，裁定 104 第 1 条）；
+    上周五只有这一条记录，没有前因的链，也进不了这一天的对照。
     """
 
     day = START
     records = (
+        record(day - timedelta(days=3), 9, 0, "修改代码"),
         record(day, 9, 0, "调研"),
         record(day, 10, 0, "讨论方案"),
         record(day, 14, 0, "提交推送"),
@@ -296,11 +300,18 @@ def test_the_chi_square_tail_matches_known_values() -> None:
 
 def test_a_pending_record_in_the_window_is_a_thing_that_is_not_the_consequent() -> None:
     """讨论方案 10:00 做完、10:20 一件「待定」（叫不出名）、之后没有修改代码：这一次是"修改代码没来"。「待定」是发生过的一件事，
-    只是词表还没把它稳定成类（用户 2026-10-12）：它算人在场、算那天一件事做完的时刻（对照时刻），不让任何概念判不了。"""
+    只是词表还没把它稳定成类（用户 2026-10-12）：它算人在场、算那天一件事做完的时刻（对照时刻），不让任何概念判不了。
+    修改代码上周五自然发生过一次，这一天对它才是"结果已知"（第一次之前一律不知道，裁定 104 第 1 条）。"""
 
     day = START
     pending = replace(record(day, 10, 20, "调研", number=9), kind_token="s-待定", classified=False)
-    records = (record(day, 9, 0, "调研"), record(day, 10, 0, "讨论方案"), pending, record(day, 14, 0, "提交推送"))
+    records = (
+        record(day - timedelta(days=3), 9, 0, "修改代码"),
+        record(day, 9, 0, "调研"),
+        record(day, 10, 0, "讨论方案"),
+        pending,
+        record(day, 14, 0, "提交推送"),
+    )
     series = EventSeries(cutoff=day + timedelta(days=1), records=records)
     line = build_timelines(series, CONCEPTS, {}, CONFIG)["session"]
     tests = LaneTests(line, CONCEPTS, CONFIG, series.cutoff)
@@ -365,7 +376,9 @@ def test_a_record_counts_only_toward_its_current_class() -> None:
     series = EventSeries(cutoff=day + timedelta(days=1), records=(series_record,))
     line = build_timelines(series, concepts, {series_record.uri: stale}, CONFIG)["session"]
     assert [mark.uri for mark in line.marks[cid("修改代码")]] == [series_record.uri]
-    assert not line.marks.get(cid("调研")) and not line.unknown
+    # 调研从没自然发生过，人在场的槽对它本来就是"不知道"（裁定 104 第 1 条），这里只看记录现在那个类：
+    # 陈旧的命中记录既没给调研添记号，也没让修改代码变成看不到
+    assert not line.marks.get(cid("调研")) and not line.unknown.get(cid("修改代码"))
 
 
 def test_a_record_past_midnight_ends_in_the_last_slot_of_its_day() -> None:

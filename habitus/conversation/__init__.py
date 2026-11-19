@@ -43,6 +43,7 @@ from habitus.conversation.source import (
     SourceIndex,
     conversation_consumer_output_id,
     conversation_source_request_digest,
+    source_unfinished,
 )
 
 __all__ = [
@@ -86,4 +87,5 @@ __all__ = [
     "SourceIndex",
     "conversation_consumer_output_id",
     "conversation_source_request_digest",
+    "source_unfinished",
 ]

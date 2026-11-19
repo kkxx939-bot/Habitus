@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Iterable
 from dataclasses import replace
@@ -334,7 +335,8 @@ def _with_burst(people: int) -> EventSeries:
 
 def test_long_span_family_and_results_are_unchanged_by_the_split() -> None:
     """短跨度那边加了 30 个同事、族的组成变了，长跨度的那一族不受影响：每条长跨度关系的判定、p、最小可达 p、方向与还要几次
-    与分族前（7dffb51 + E1–E5 工作区）逐字相同，过第 1 道的那几条照旧成为候选。"""
+    与期望值相同，过第 1 道的那几条照旧成为候选。期望值在裁定 104 第 1 条之后重算，除第一次之前的日子外与分族前的基线
+    （7dffb51 + E1–E5 工作区）相同。"""
 
     series = _with_burst(30)
     night = _tests(series, concepts=LONG_CONCEPTS).night()
@@ -421,11 +423,12 @@ def test_no_moderated_relation_enters_the_family_without_a_parent_or_a_group_tha
     assert night.family == sum(1 for test in night.tests if test.verdict is not Verdict.SPARSE) - carried
 
 
-# ── 在当前代码（7dffb51 + E1–E5 工作区，分族前）上跑出的长跨度期望值 ─────────────────
+# ── 长跨度期望值：裁定 104 第 1 条之后重算，除第一次之前的日子外与基线（7dffb51 + E1–E5 工作区，分族前）相同 ───────
 
 #: （键, 判定, p, 最小可达 p, 朝上, 还要几次）——进了长跨度族的那几条。
+#: 第一条的后果「复盘」第一次自然发生就在集中期第一天：之前 8 天不知道、不进表，8 天状态只对之后 8 天，双侧 p 是 2 / C(16, 8)。
 GOLDEN_LONG_FAMILY: list[tuple[str, str, float, float, bool, int | None]] = [
-    ("session|s-k621352|s-k659225|high_state", "significant", 2.719345834166133e-06, 2.719345834166133e-06, True, None),
+    ("session|s-k621352|s-k659225|high_state", "significant", 2 / math.comb(16, 8), 2 / math.comb(16, 8), True, None),
     ("session|s-k659225|s-k621352|first_seen", "tested", 0.12693498452012383, 0.0004422821760283061, True, None),
     (
         "session|s-k659225|s-k621352|high_state",

@@ -128,7 +128,9 @@ def test_a_limit_above_the_configured_cap_is_claimed_up_to_the_cap() -> None:
     asked: list[int] = []
 
     class Outlet:
-        def claim(self, host: str, session: str, at: datetime, limit: int) -> tuple[ClaimedReminder, ...]:
+        def claim(
+            self, host: str, session: str, at: datetime, limit: int, *, hold: object = None
+        ) -> tuple[ClaimedReminder, ...]:
             asked.append(limit)
             return tuple(
                 ClaimedReminder(f"e{index}", "写周报", "周报还没写。", OPTIONS, AT + timedelta(hours=1), AT + timedelta(minutes=30), AT)
@@ -138,7 +140,9 @@ def test_a_limit_above_the_configured_cap_is_claimed_up_to_the_cap() -> None:
     runtime = object.__new__(Runtime)
     runtime._state = __import__("habitus.runtime.runtime", fromlist=["RuntimeState"]).RuntimeState.READY  # type: ignore[attr-defined]
     runtime.config = SimpleNamespace(foresight=ForesightConfig())  # type: ignore[assignment]
-    runtime.components = SimpleNamespace(outlet=Outlet())  # type: ignore[assignment]
+    # 取的那一刻再判一次（裁定 104 第 2 条）：这里的判定永远不拦，只考条数上限
+    never_hold = SimpleNamespace(for_one_claim=lambda: lambda request, at: False)
+    runtime.components = SimpleNamespace(outlet=Outlet(), claim_check=never_hold)  # type: ignore[assignment]
     runtime.conversation_protocols = lambda: ("codex_rollout",)  # type: ignore[method-assign]
     runtime.start = AsyncMock()  # type: ignore[method-assign]
     runtime.close = AsyncMock()  # type: ignore[method-assign]

@@ -193,3 +193,57 @@ def test_comparisons_stay_within_the_same_week_so_a_fading_habit_is_not_read_as_
             records.append(record(at(day, 10, 0), cid("写代码")))
     holiday = _night(records, calendar, weeks=20)[("节假日", cid("写代码"))]
     assert holiday.verdict.value != "significant"
+
+
+def _late_meeting(*, begin: int = 0, skipped: int = 7 * 14 + 2):  # type: ignore[no-untyped-def]
+    """天天写代码；例会材料从第 11 周的周三（第 72 天）起每周三做，第 15 周的周三没做。``begin`` 之前的日子整段不要。"""
+
+    found = []
+    for offset in range(begin, 7 * 20):
+        day = START + timedelta(days=offset)
+        found.append(record(at(day, 10, 0), cid("写代码")))
+        if day.weekday() == 2 and offset >= 7 * 10 and offset != skipped:
+            found.append(record(at(day, 17, 0), cid("例会材料")))
+    return found
+
+
+def _wednesday_measure(records):  # type: ignore[no-untyped-def]
+    from habitus.scene.relations.calendar import calendar_measure
+
+    data = series(records, cutoff=START + timedelta(days=7 * 20))
+    line = build_timelines(data, _concepts(), {}, CONFIG, calendar=LocalCalendar())["session"]
+    return calendar_measure(line, cid("例会材料"), WEEKDAY_KEY, ("周三",))
+
+
+def test_b16_a_late_consequent_is_read_only_from_its_first_natural_day() -> None:
+    """T9 / B16（防回归）：例会材料第 72 天（第 11 周的周三）才第一次做，日历这一路本来就只算第一次之后。
+
+    手算：10 周各一张表，实验组是那周的周三。第 11 周只剩周三到周日 5 天，其余 9 周 7 天；第 15 周的周三没做、那张表没有阳性。
+    朝上的尾概率 = 9 周全中的概率 = (1/5) × (1/7)⁸。把第一次之前的日子整段去掉，读数逐字相同。"""
+
+    import pytest
+
+    measure = _wednesday_measure(_late_meeting())
+    effect = measure.effect()
+    assert measure.units == effect.antecedents == 10
+    assert effect.treated_rate == 0.9 and effect.control_rate == 0.0
+    upper, lower = measure.tails(exact_limit=400)
+    assert upper == pytest.approx((1 / 5) * (1 / 7) ** 8) and lower == pytest.approx(1.0)
+
+    trimmed = _wednesday_measure(_late_meeting(begin=7 * 10 + 2))
+    assert trimmed.units == measure.units and trimmed.effect() == effect
+    assert trimmed.tails(exact_limit=400) == (upper, lower)
+    assert trimmed.minimum_p() == measure.minimum_p()
+
+
+def test_b16_a_consequent_that_never_came_naturally_has_no_calendar_table() -> None:
+    """T9 / B16（防回归）：从没自然发生过的后果（只有空位，或只有被提醒才做的记录）没有表。"""
+
+    every_day = [record(at(START + timedelta(days=offset), 10, 0), cid("写代码")) for offset in range(7 * 20)]
+    prompted = [
+        record(at(START + timedelta(days=offset), 17, 0), cid("例会材料"), reminded=True)
+        for offset in range(2, 7 * 20, 7)
+    ]
+    for records in (every_day, [*every_day, *prompted]):
+        measure = _wednesday_measure(records)
+        assert measure.units == 0 and measure.tails(exact_limit=400) == (1.0, 1.0)

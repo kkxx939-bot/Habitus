@@ -102,6 +102,15 @@ class ExpectationForming:
         unsealed = self.unsealed.rows(since=since, until=now)
         return Recent(now, cache, unsealed, seen_rows(Moment(at=now, slot=0), cache, unsealed), kinds)
 
+    def snapshot(self, now: datetime) -> Recent:
+        """此刻往回看的几天，不调模型（宿主来取提醒那一刻用，``runtime.foresight_claim_check``）：与 ``read`` 同一个读法，
+        物理一支还没选上词的判断不归类。不改写任何共用状态，可以在预测拍之外的线程里调。"""
+
+        kinds, cache = hierarchy_of(self.read_side), day_cache(self.read_side)
+        since = datetime.combine(now.date() - timedelta(days=LOOKBACK_DAYS), clock_time(0), tzinfo=now.tzinfo)
+        unsealed = self.unsealed.rows(since=since, until=now)
+        return Recent(now, cache, unsealed, seen_rows(Moment(at=now, slot=0), cache, unsealed), kinds)
+
     def form(
         self,
         recent: Recent,
@@ -144,7 +153,10 @@ class ExpectationForming:
                 continue
             if item.kind_token not in silent:
                 silent[item.kind_token] = silenced(self.ledger.setting_of(item.kind_token))
-            if not silent[item.kind_token] and self.ledger.record_expectation(item):
+            if silent[item.kind_token]:
+                continue
+            standing = self.ledger.level_of(item.account)
+            if self.ledger.record_expectation(replace(item, level=standing.level if standing is not None else 0)):
                 recorded += 1
                 recorded_by_source[item.source] = recorded_by_source.get(item.source, 0) + 1
         return Formed(len(expectations), recorded, by_source, recorded_by_source)

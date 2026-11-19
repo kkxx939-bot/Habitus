@@ -340,6 +340,23 @@ class ConversationSourceRecovery:
                 ledger.index.remove(marker)
 
 
+def source_unfinished(recovery: ConversationSourceRecovery, consumer: ConversationSourceConsumer) -> bool:
+    """这个 Consumer 有没有已经交进来、还没到终态的会话源（宿主来取提醒那一刻用，裁定 104 第 2 条）：判法与 ``_scan`` 同一个，
+    "还没终态"标记是两个 Consumer 共用、惰性清除的，所以逐份看这个 Consumer 自己的状态。只读，不清标记；读不出来的信封跳过
+    （``_scan`` 把它记进 ``corrupt``，它挡不住别的源，也不该挡提醒）。"""
+
+    for source_id, _address in recovery.delivery.ledger.pending.listing().sources:
+        try:
+            envelope = recovery.sources.read(source_id)
+        except ConversationSourceError:
+            continue
+        if envelope is None or recovery.salvage.contains(source_id, consumer):
+            continue
+        if recovery.delivery.inspect(envelope, consumer).state not in _TERMINAL:
+            return True
+    return False
+
+
 def _waits_behind(
     entry: ConversationSourceRecoveryEntry, held: dict[tuple[SourceAddress, ConversationSourceConsumer], int]
 ) -> bool:
@@ -377,4 +394,5 @@ __all__ = [
     "ConversationSourceRecoveryPlan",
     "ConversationSourceRecoveryResult",
     "recovery_key",
+    "source_unfinished",
 ]

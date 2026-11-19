@@ -17,9 +17,9 @@
 终点与最晚时限重合时是越过终点的那一拍，开时窗那一拍就已越过终点时是它的下一拍——拍点照常走，「等时窗末」一定有下文。
 中间停过机、(终点, 最晚时限] 整段落在没跑的那几拍里的不再决定（过了时限的不再说，结算照常结它）。到时窗末那一拍
 按依据与它当时一并决定的那几条重算一次单元（窗里设了「以后别提了」就不说了），这时才问模型、才写那句话：
-话里的"今天""这会儿"说的是开口那一刻。
+话里的"今天""这会儿"说的是开口那一刻。上级到了时窗末、下级还在等自己的时窗末且此刻能开口的，上级这一拍不决定（裁定 104 第 3 条）。
 到了时窗时这件事已经做了记「已发生」；同一类今天已经说过一句的记「同类已说」；没有宿主活着的记「不可达」（方案 32 第 3.3 条：最近
-一段没有宿主来取过提醒就不问模型、不写话，结算按没说过处理）。每日上限按决定的日子数，「待取」也占名额。
+一段没有宿主来取过提醒就不问模型、不写话，结算按没说过处理）。每日上限按决定的日子数，宿主取得走的「待取」也占名额（取不走、没取走的不占，裁定 104 第 4 条）。
 记哪一种原因、先后怎么排是纯规则（``foresight.delivery``）；这里分拨、取材料、问模型、落账。
 
 模型只在有宿主活着时问（没人来取，问了也说不出口）：**像不像、先说哪个、一句话**——只问这一拍真要开口的（提醒档、时窗末还没做、
@@ -81,6 +81,7 @@ from habitus.foresight.reliability import Reliability
 from habitus.foresight.units import UNIT, UNIT_CITE, joinable, meets, voiced
 from habitus.runtime.foresight_delivery_tally import Tally, spoken_today
 from habitus.runtime.foresight_delivery_views import AccountView, DeliveryViews, OmissionView
+from habitus.runtime.foresight_finer import StandingOf, deciding_closing
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_outlet import OpenRequest, OutletPort
@@ -168,8 +169,6 @@ class DeliveryStage:
         table = materials.table if materials is not None else None
         since = (materials.since if materials is not None else None) or now.astimezone(UTC) - self.tick
         found = self._due(now, since, voiced=lambda item: voiced(table, item))
-        calls = 0
-        signals: tuple[str, ...] = ()
         cached: dict[str, Standing] = {}
         feedbacks: dict[str, Reliability | None] = {}
         settings: dict[str, str | None] = {}
@@ -203,35 +202,33 @@ class DeliveryStage:
             table=table,
             now=now,
         )
-        # 时窗末：按依据与它当时一并决定的那几条重算单元（2026-10-17 四方评审：原来改按依据那本账自己的档判，几个前因一起才稳的
-        # 轻事时窗开时单元说该说、时窗末又成了影子）
-        closing_units = {
-            item.expectation_id: self.units.unit_for(
-                (item, *found.members.get(item.expectation_id, ())),
-                due=(item.expectation_id,),
-                standing_of=standing_of,
+
+        def unit_of(group: Sequence[Expectation], due: Iterable[str], standing: StandingOf = standing_of) -> Unit:
+            return self.units.unit_for(
+                group,
+                due=due,
+                standing_of=standing,
                 previous_level=previous_unit,
                 feedback_of=feedback_of,
                 setting_of=setting_of,
                 table=table,
                 now=now,
             )
-            for item, _pending in found.closing
-        }
+
+        def closing_unit(item: Expectation, standing: StandingOf = standing_of) -> Unit:
+            return unit_of((item, *found.members.get(item.expectation_id, ())), (item.expectation_id,), standing)
+
+        def level_now(item: Expectation) -> int:  # 只看不记：不进这一拍要记档的 ``cached``
+            return closing_unit(item, lambda one: self._standing(one.account, one.kind_token, now, table)).level
+
+        # 时窗末：按依据与它当时一并决定的那几条重算单元（2026-10-17 四方评审：原来改按依据那本账自己的档判，几个前因一起才稳的
+        # 轻事时窗开时单元说该说、时窗末又成了影子）
+        closing_units = {item.expectation_id: closing_unit(item) for item, _pending in found.closing}
         # 依据没说成：同一刻里接手的那条到了自己的时窗末，按同一组输入重算单元、照时窗末那一套走（``due`` 只有到了时窗末的成员）
         handed: list[tuple[Expectation, Delivery]] = []
         moment_of: dict[str, frozenset[str]] = {}
         for group, due in found.handovers:
-            unit = self.units.unit_for(
-                group,
-                due=due,
-                standing_of=standing_of,
-                previous_level=previous_unit,
-                feedback_of=feedback_of,
-                setting_of=setting_of,
-                table=table,
-                now=now,
-            )
+            unit = unit_of(group, due)
             closing_units[unit.basis.expectation_id] = unit
             handed.append((unit.basis, found.subsumed[unit.basis.expectation_id]))
             moment_of[unit.basis.expectation_id] = frozenset(item.expectation_id for item in group)
@@ -251,9 +248,8 @@ class DeliveryStage:
                 self._subsume(tally, member, unit.basis.expectation_id, unit.level)
         for item, cited, level in found.joins:
             self._subsume(tally, item, cited, level)
-        due_closing = (*found.closing, *handed)
-        deferred = await self._reread(due_closing, materials)
-        closing = tuple((item, pending) for item, pending in due_closing if item.expectation_id not in deferred)
+        dues = (*found.closing, *handed)
+        closing = await deciding_closing(self.ledger, dues, materials, since, now, self.tick, self._reread, level_now)
         speaking = tuple(item for item, _pending in closing if now <= item.deadline)  # 过了时限的不说、不问模型
         judgement = await self._judge(speaking, standings, materials, now, tally, inputs)
         for item, pending in self._ordered_closing(closing, judgement, materials):
@@ -268,9 +264,6 @@ class DeliveryStage:
                 tally, unit.basis, self._opening(unit.basis, standings[unit.basis.expectation_id], materials, tally)
             )
         changes = self._record_levels(cached, every, now)
-        if judgement is not None:
-            calls += judgement.calls
-            signals = (*signals, *judgement.signals)
         open_requests = self._publish(found, tally, materials, now)
         return DeliveryReport(
             now,
@@ -283,8 +276,8 @@ class DeliveryStage:
             else len(judgement.verdicts)
             if not judgement.failed
             else len(judgement.order),
-            calls=calls,
-            signals=signals,
+            calls=0 if judgement is None else judgement.calls,
+            signals=() if judgement is None else tuple(judgement.signals),
             judge_failed=judgement is not None and judgement.failed,
             level_changes=changes,
             unreadable=len(self.ledger.take_unreadable()),

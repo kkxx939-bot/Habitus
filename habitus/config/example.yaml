@@ -599,6 +599,7 @@ workflow:
 #     unit_history_max_bytes: 33554432   # 一晚的单元历史快照最多多少字节
 #     opportunity_table_max_bytes: 16777216  # 一晚的机会表最多多少字节
 #     nightly_max_entries: 10000         # 每晚派生物一条 lane 的目录最多列多少条
+#     read_cache_max_records: 20000      # 账本在内存里最多留多少条解码好的记录（只影响快慢，一条约 2.3 KB）
 
 # 统一生命周期（裁定 15、60）。缺省即可运行；这几个数是运维边界，不是统计量。
 # lifecycle:

@@ -238,6 +238,11 @@ def test_an_awaiting_request_is_handed_to_the_outlet_and_closed_by_doing_it_spok
     stored = {(item.expectation_id, item.reason) for item in ledger.deliveries_on(DAY0.date())}
     assert ("t-s-k0004", "宿主没取") in stored and ("t-s-k0002", "宿主没取") not in stored
     assert asyncio.run(run.run_once(DAY0 + timedelta(hours=2, minutes=2), done)).decided == 0
+    # 转写晚到：记了「宿主没取」的那条其实在时限前问出口了，补一条「说了」（只有真的说出口才占名额，宿主没取的不占）
+    ledger.record_delivery(
+        DAY0.date(),
+        Delivery("t-s-k0004", DAY0 + timedelta(minutes=110), 1, True, "说了", 1.0, "题目", via="codex", turn="c2"),
+    )
     # 名额：「待取」与它之后的「说了」同一条预期只算一次——今天三条都已占满，再来一条记「名额已满」
     earn(ledger, kind="s-k0005")
     ledger.record_expectation(expectation("t-late", DAY0 + timedelta(minutes=50), kind="s-k0005"))
@@ -297,6 +302,11 @@ def test_one_class_is_spoken_once_a_day_even_from_several_accounts(tmp_path) -> 
     # 同一刻后来才形成的那条：并进已经决定过的单元，不另起一个（2026-10-17 四方评审）
     ledger.record_expectation(expectation("c", DAY0 + timedelta(minutes=30), trigger="rel"))
     assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=45))).by_reason == {"单元已选": 1}
+    # 那条「待取」问出口了（没人取走的不算说过，这里要的是真的说过一句）
+    ledger.record_delivery(
+        DAY0.date(),
+        Delivery(said.expectation_id, DAY0 + timedelta(minutes=50), 1, True, "说了", 1.0, "题目", via="codex", turn="c1"),
+    )
     # 同一天另一刻（说中的范围不相连）再来：同一类今天已经说过
     ledger.record_expectation(expectation("d", DAY0 + timedelta(hours=3), trigger="rel"))
     asyncio.run(run.run_once(DAY0 + timedelta(hours=3, minutes=15)))

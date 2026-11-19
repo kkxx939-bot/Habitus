@@ -138,7 +138,7 @@ def _by_key(night: LaneNight) -> dict[RelationKey, RelationTest]:
     return {test.key: test for test in night.tests}
 
 
-# ── 1. 不带条件、长跨度、非同一条链的带条件：读数与 V2 逐字相同 ─────────────────────
+# ── 1. 不带条件、长跨度、非同一条链的带条件：读数不受 V2.2 影响 ─────────────────────
 
 
 def _rounded(value: object) -> object:
@@ -188,11 +188,12 @@ def _digest(rows: list[object]) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
-#: 在改动前的工作区（7dffb51 + E1–E5 + V2，未提交）上跑出的（行数, 摘要）。
+#: （行数, 摘要）：裁定 104 第 1 条之后重算，除第一次之前的日子外与原基线（7dffb51 + E1–E5 + V2）相同；
+#: ``pure_interaction_with_colleague`` 的每个后果第一天就发生过，摘要没变。
 GOLDEN_UNCHANGED = {
     "pure_interaction_with_colleague": (173, "e9b8d34403cfebd4"),
-    "long_span_burst": (367, "7756b41bc26bd3e9"),
-    "routine": (110, "c671d00b2f26d580"),
+    "long_span_burst": (367, "6ffae3e74c898079"),
+    "routine": (110, "ecac4f91cce877ab"),
 }
 
 
@@ -206,7 +207,8 @@ def _unchanged_case(case: str) -> LaneNight:
 
 @pytest.mark.parametrize("case", sorted(GOLDEN_UNCHANGED))
 def test_readings_outside_conditioned_chain_keys_are_unchanged(case: str) -> None:
-    """场景 1：不带条件的（任何段）、长跨度的、非同一条链的带条件键，读数与 V2 逐字相同（浮点 10 位有效数字）。"""
+    """场景 1：不带条件的（任何段）、长跨度的、非同一条链的带条件键，读数与期望值相同（浮点 10 位有效数字）。期望值在裁定 104
+    第 1 条之后重算，除第一次之前的日子外与 V2 基线相同。"""
 
     rows = _unchanged_rows(_unchanged_case(case))
     assert (len(rows), _digest(rows)) == GOLDEN_UNCHANGED[case]

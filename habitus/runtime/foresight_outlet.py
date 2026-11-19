@@ -2,7 +2,7 @@
 
 预测层照旧只产出"递送请求 + 档 + 话"（递送那一拍记「待取」）。出口是它外面薄薄一层宿主适配：
 
-- **取**（``claim``）：宿主在 UserPromptSubmit 时来取此刻可取的请求，带租约（租约内别的会话取不到；同一会话重取拿回自己手里的）；
+- **取**（``claim``）：宿主在 UserPromptSubmit 时来取此刻可取的请求，带租约（租约内别的会话取不到；同一会话重取拿回自己手里的；新交出之前再判一次，裁定 104 第 2 条）；
   来取这件事本身就是活性（``alive``）——最近一段有宿主来取过，递送那一拍才问模型写话、记「待取」，否则记「不可达」、不花模型钱。
 - **认**（``observe``）：转写照常由 Stop hook 送回服务；同一份会话先过出口、再进会话 lane。出口在取走记录对应的会话里找 agent 用
   宿主提问工具问人的那次调用：题目含类名、或与那句话相似、或选项就是我们给的那几个 → 配上 → 账本追加「说了」（``decided_at`` =
@@ -77,6 +77,9 @@ class OpenRequest:
                 raise ForesightError(f"open request {label} must be a timezone-aware datetime")
         if isinstance(self.day, datetime):
             raise ForesightError("open request day must be a date")
+
+
+Hold = Callable[[OpenRequest, datetime], bool]  # 取的那一刻这一条这一次先不给吗（``runtime.foresight_claim_check``）
 
 
 @dataclass(frozen=True)
@@ -301,8 +304,11 @@ class ReminderOutlet:
 
     # ── 取 ──────────────────────────────────────────────────────────────────
 
-    def claim(self, host: str, session: str, at: datetime, limit: int) -> tuple[ClaimedReminder, ...]:
-        """宿主来取：去掉过了时限的、别的会话租着的、放回到上限的；按时限由近到远取 ``limit`` 条；同一会话租约内重取拿回自己手里的。"""
+    def claim(
+        self, host: str, session: str, at: datetime, limit: int, *, hold: Hold | None = None
+    ) -> tuple[ClaimedReminder, ...]:
+        """宿主来取：去掉过了时限的、别的会话租着的、放回到上限的；按时限由近到远取 ``limit`` 条；同一会话租约内重取拿回自己手里的。
+        ``hold`` 只问这一次新交出的：判出不给就跳过这一条，什么都不写、不占 ``limit``，下一次再取（裁定 104 第 2 条）；全部判完才写取走记录，判的时候出错一条都不写。"""
 
         for label, value in (("host", host), ("session", session)):
             if not value.strip():
@@ -319,6 +325,7 @@ class ReminderOutlet:
             self.sweep(at)
             claims = {key: _decode_claim(raw) for key, raw in self.store.claims().items()}
             given: list[ClaimedReminder] = []
+            taken: list[_Claim] = []  # 这一次新交出、续租的：全部判完再写
             rows = sorted(
                 (_decode_request(row) for row in self.store.read_open()), key=lambda r: (r.deadline, r.request_id)
             )
@@ -333,24 +340,23 @@ class ReminderOutlet:
                     if holder.session == session:
                         given.append(self._claimed(claim, holder))
                     continue
-                mine = next(
-                    (item for item in claim.history if item.session == session and item.ended == "expired"), None
-                )
+                mine = next((one for one in claim.history if one.session == session and one.ended == "expired"), None)
                 if mine is not None and (holder is None or holder.session == session):
                     # 同一会话租约过期后再来取（一轮跑了半小时、转写还没回来）：续租、``claimed_at`` 不变——宿主按它判是不是
                     # 同一次，不再注入；换 ``claimed_at`` 只在真正放回之后（方案 32 第 3.4、4.1 条）
                     claim.history.remove(mine)
                     claim.holder = _Holder(host, session, mine.claimed_at, min(at + self.lease, request.deadline))
-                    self.store.write_claim(request.request_id, _encode_claim(claim))
+                    taken.append(claim)
                     given.append(self._claimed(claim, claim.holder))
                     continue
-                if claim.attempts >= self.max_attempts:
+                if claim.attempts >= self.max_attempts or (hold is not None and hold(request, at)):
                     continue
-                if holder is not None:
-                    claim.history.append(holder)
+                claim.history.extend(() if holder is None else (holder,))
                 claim.holder = _Holder(host, session, at, min(at + self.lease, request.deadline))
-                self.store.write_claim(request.request_id, _encode_claim(claim))
+                taken.append(claim)
                 given.append(self._claimed(claim, claim.holder))
+            for claim in taken:
+                self.store.write_claim(claim.request.request_id, _encode_claim(claim))
         self._observe(ObservationStatus.SUCCESS, "claim", {"host": host, "given": len(given)})
         return tuple(given)
 
@@ -506,7 +512,7 @@ class ReminderOutlet:
         tool = tools[call.tool_name or ""]
         if call.occurred_at > claim.request.deadline:
             self.store.remove_claim(claim.request.request_id)
-            self._drop_open(claim.request.request_id)
+            self.store.drop_open(claim.request.request_id)
             return (
                 "already_spoken" if claim.spoken else "released"
             )  # 时限后才问的不算「说了」：那时账上已记「宿主没取」
@@ -515,14 +521,14 @@ class ReminderOutlet:
             # 他在被问之前已经做了（取走到提问之间几分钟，行为识别又有滞后）：这次提问不算「说了」，账上不记、取走记录删掉——
             # 否则结算把"做了"记成提醒的功劳（裁定 65）
             self.store.remove_claim(claim.request.request_id)
-            self._drop_open(claim.request.request_id)
+            self.store.drop_open(claim.request.request_id)
             return "already_done"
         if claim.spoken or not self._record_spoken(claim, call, question.title, via):
             if not claim.spoken and self.ledgers.has_spoken(*_where(claim)):
                 self._mark_spoken(claim)
             return "already_spoken"
         self._mark_spoken(claim)
-        self._drop_open(claim.request.request_id)
+        self.store.drop_open(claim.request.request_id)
         result = results.get(call.tool_call_id or "")
         if result is not None and not tool.replies_later and result.failed:
             # 同步提问工具的结果是失败：他把提问关掉了（OpenCode 的 question.rejected）或提问没成。问是问出口了，作答不会再来，
@@ -530,10 +536,11 @@ class ReminderOutlet:
             return "spoken"
         if result is not None and not tool.replies_later:
             polarity = answer_in_result(result.content, question.title, single=len(_questions(call, tool)) == 1)
-            if polarity is not None and self._record_response(
-                claim, result.occurred_at.astimezone(claim.request.deadline.tzinfo), polarity, call.tool_call_id or ""
-            ):
-                return "responded"
+            if polarity is not None:
+                at = result.occurred_at.astimezone(claim.request.deadline.tzinfo)
+                response = Response(claim.request.request_id, at, polarity, call.tool_call_id or "unknown")
+                if self._write_response(claim.request.lane, claim.request.day, response):
+                    return "responded"
             return "spoken"
         if call.tool_call_id:
             self.store.write_asked(
@@ -603,11 +610,6 @@ class ReminderOutlet:
             return False
         return True
 
-    def _record_response(self, claim: _Claim, at: datetime, polarity: str, turn: str) -> bool:
-        return self._write_response(
-            claim.request.lane, claim.request.day, Response(claim.request.request_id, at, polarity, turn or "unknown")
-        )
-
     def _write_response(self, lane: str, day: date, response: Response) -> bool:
         try:
             self.ledgers.of(lane).record_response(day, response)
@@ -633,9 +635,6 @@ class ReminderOutlet:
             self.store.write_claim(request_id, _encode_claim(claim))
             released += 1
         return released
-
-    def _drop_open(self, request_id: str) -> None:
-        self.store.drop_open(request_id)
 
     def _observe(self, status: ObservationStatus, operation: str, attributes: Mapping[str, Any]) -> None:
         record_observation(
@@ -865,6 +864,7 @@ __all__ = [
     "ClaimTrail",
     "ClaimedReminder",
     "Handoff",
+    "Hold",
     "HostMessage",
     "ObserveReport",
     "OpenRequest",

@@ -140,3 +140,124 @@ def test_every_day_sees_the_same_gaps_as_the_series(tmp_path) -> None:
         (at(days[2], 0, 0), at(days[2], 1, 0)),
         (at(days[2], 20, 0), at(days[3], 0, 0)),
     ]
+
+
+# ── 丙批：一次查询里空白目录只读一遍，换一次查询读到盘上此刻的样子 ──────────────────
+
+
+def _gap_reads(monkeypatch):
+    """按日子数 ``read_day`` 读空白目录的次数（包一层、照常调原函数）。"""
+
+    from collections import Counter
+
+    from habitus.behavior.model import BehaviorKind
+    from habitus.behavior.tree import BehaviorTree
+
+    reads = Counter()
+    original = BehaviorTree.read_day
+
+    def counting(tree, kind, occurred_on):
+        if BehaviorKind(kind) is BehaviorKind.GAP:
+            reads[occurred_on] += 1
+        return original(tree, kind, occurred_on)
+
+    monkeypatch.setattr(BehaviorTree, "read_day", counting)
+    return reads
+
+
+def _gaps(index) -> list[tuple]:
+    return [(gap.started_at, gap.ended_at, gap.kind) for gap in index.gaps]
+
+
+def test_one_query_reads_each_days_gap_directory_once(tmp_path, monkeypatch) -> None:
+    """处三 B3：同一个按天索引读 8 天：每个日子的空白目录只读 1 次，一共 39 个日子（8 天加往前回看的 31 天），不是 8 × 32 = 256 次。"""
+
+    from datetime import timedelta
+
+    ground = site(tmp_path)
+    days = [DAY1 + timedelta(days=offset) for offset in range(8)]
+    reads = _gap_reads(monkeypatch)
+    cache = cache_for(ground)
+    for day in days:
+        cache.day(day)
+    assert len(reads) == 39
+    assert sum(reads.values()) == 39, f"空白目录一共读了 {sum(reads.values())} 次"
+    assert set(reads.values()) == {1}
+
+
+def test_sharing_the_gap_reads_within_a_query_does_not_change_what_each_day_sees(tmp_path) -> None:
+    """处三 B3：同一个按天索引连读 8 天，每天看到的空白与每天单独查询完全相同：跨天的「未观测」只裁进各天那一段，
+    「没读懂」只被它自己那一天的行为证伪。"""
+
+    from datetime import timedelta
+
+    from tests.unit.scene.fixtures import publish_gap
+
+    ground = site(tmp_path)
+    days = [DAY1 + timedelta(days=offset) for offset in range(8)]
+    publish_gap(ground.behavior_tree, DAY1 - timedelta(days=3), (8, 0), (20, 0), end_day=DAY1 + timedelta(days=1))
+    publish_gap(ground.behavior_tree, days[2], (23, 0), (1, 0), kind="没读懂", end_day=days[3])
+    publish(ground.behavior_tree, days[3], "看手机", 0, 30)  # 证伪第二段落在 days[3] 的那一半
+    publish_gap(ground.behavior_tree, days[5], (9, 0), (10, 0), kind="没读懂")
+    publish(ground.behavior_tree, days[6], "刷牙", 9, 30)  # 别的一天的行为不证伪 days[5] 那一段
+    shared = cache_for(ground)
+    for day in days:
+        assert _gaps(shared.day(day)) == _gaps(cache_for(ground).day(day))
+    assert _gaps(shared.day(days[0])) == [(at(days[0], 0, 0), at(days[1], 0, 0), "未观测")]
+    assert _gaps(shared.day(days[1])) == [(at(days[1], 0, 0), at(days[1], 20, 0), "未观测")]
+    assert _gaps(shared.day(days[2])) == [(at(days[2], 23, 0), at(days[3], 0, 0), "没读懂")]
+    assert _gaps(shared.day(days[3])) == []
+    assert _gaps(shared.day(days[5])) == [(at(days[5], 9, 0), at(days[5], 10, 0), "没读懂")]
+
+
+def test_a_gap_written_between_two_queries_is_seen_by_the_next_query(tmp_path) -> None:
+    """处三 B9：两次查询之间落树一条空白：下一次查询（新建的按天索引）读得到，从它延续到的后面那天也读得到。"""
+
+    from datetime import timedelta
+
+    from tests.unit.scene.fixtures import publish_gap
+
+    ground = site(tmp_path)
+    later = DAY1 + timedelta(days=1)
+    first = cache_for(ground)
+    assert _gaps(first.day(DAY1)) == [] and _gaps(first.day(later)) == []
+    publish_gap(ground.behavior_tree, DAY1, (22, 0), (6, 0), end_day=later)
+    second = cache_for(ground)
+    assert _gaps(second.day(DAY1)) == [(at(DAY1, 22, 0), at(later, 0, 0), "未观测")]
+    assert _gaps(second.day(later)) == [(at(later, 0, 0), at(later, 6, 0), "未观测")]
+
+
+def test_todays_new_record_is_seen_by_the_next_query(tmp_path) -> None:
+    """处三 B10：两拍之间今天多了一条行为（行为树只增不改，正常的更新就是这样来的）：下一拍新建的按天索引读得到，
+    它还证伪了同一段里的「没读懂」。"""
+
+    from tests.unit.scene.fixtures import publish_gap
+
+    ground = site(tmp_path)
+    publish(ground.behavior_tree, DAY1, "洗菜", 8, 0)
+    publish_gap(ground.behavior_tree, DAY1, (20, 0), (20, 30), kind="没读懂")
+    first = cache_for(ground).day(DAY1)
+    assert [row.name for row in first.rows] == ["洗菜"] and len(first.gaps) == 1
+    uri = publish(ground.behavior_tree, DAY1, "炒菜", 20, 10)
+    second = cache_for(ground).day(DAY1)
+    assert [row.name for row in second.rows] == ["洗菜", "炒菜"]
+    assert second.by_uri[uri].name == "炒菜" and second.gaps == ()
+
+
+def test_a_rewritten_behaviour_document_is_read_anew_by_the_next_query(tmp_path) -> None:
+    """处三 B10：两拍之间行为文档被原子替换成同一地址、内容不同的一份：下一拍新建的按天索引读到新内容。"""
+
+    import os
+
+    ground = site(tmp_path)
+    uri = publish(ground.behavior_tree, DAY1, "洗菜", 8, 0, lasts_minutes=10)
+    assert cache_for(ground).day(DAY1).by_uri[uri].last_observed_at == at(DAY1, 8, 10)
+    twin = Site(tmp_path / "twin", now=at(DAY2, 23, 0))
+    assert publish(twin.behavior_tree, DAY1, "洗菜", 8, 0, lasts_minutes=25) == uri
+    (path,) = list((tmp_path / "behavior" / "tree").rglob("*.md"))
+    (rewritten,) = list((tmp_path / "twin" / "behavior" / "tree").rglob("*.md"))
+    assert path.name == rewritten.name and path.read_bytes() != rewritten.read_bytes()
+    temporary = path.with_name(".rewritten.tmp")
+    temporary.write_bytes(rewritten.read_bytes())
+    os.replace(temporary, path)
+    assert cache_for(ground).day(DAY1).by_uri[uri].last_observed_at == at(DAY1, 8, 25)

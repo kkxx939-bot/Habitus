@@ -46,12 +46,14 @@ class DayIndex:
         *,
         subject: str,
         admits: Callable[[BehaviorDocument], bool],
+        read_gaps: Callable[[date], tuple[BehaviorDocument, ...]],
         day_note: str | None = None,
         resolve: Callable[[str], str] | None = None,
     ) -> None:
         """``admits``：一条 occurrence 算不算数——组合根注入事件序列的那一条规则（``series.reader.admitted``：
-        撞车重复、「非事件」都不算），读侧不自己再写一遍。``resolve``：``kind_token`` 的换算（删掉的节点换成最近的活着的
-        上级，与事件序列同一个口 ``KindResolution``），按天的计数也按换算后的编号数。"""
+        撞车重复、「非事件」都不算），读侧不自己再写一遍。``read_gaps``：某一天起始目录里的空白文档（缓存给的口，一次查询
+        里同一天只读一遍）。``resolve``：``kind_token`` 的换算（删掉的节点换成最近的活着的上级，与事件序列同一个口
+        ``KindResolution``），按天的计数也按换算后的编号数。"""
 
         self.day = day
         self._resolve = resolve
@@ -74,7 +76,7 @@ class DayIndex:
         counts = Counter(self._kind(uri) for uri in self.ordered)
         self.rows: tuple[FlowRow, ...] = tuple(self._row(uri, counts) for uri in self.ordered)
         self.by_uri: Mapping[str, FlowRow] = MappingProxyType({row.uri: row for row in self.rows})
-        self.gaps: tuple[ObservationGap, ...] = self._read_gaps(behavior_tree)
+        self.gaps: tuple[ObservationGap, ...] = self._read_gaps(read_gaps)
 
     def _row(self, uri: str, counts: Mapping[str, int]) -> FlowRow:
         document = self.occurrences[uri]
@@ -100,11 +102,11 @@ class DayIndex:
         token = str(self.occurrences[uri].fields["kind_token"])
         return token if self._resolve is None else self._resolve(token)
 
-    def _read_gaps(self, behavior_tree: BehaviorTree) -> tuple[ObservationGap, ...]:
+    def _read_gaps(self, read_gaps: Callable[[date], tuple[BehaviorDocument, ...]]) -> tuple[ObservationGap, ...]:
         starts = sorted(self.occurrences[uri].address.started_at for uri in self.ordered)
         found: list[ObservationGap] = []
         for offset in range(GAP_LOOKBACK_DAYS, -1, -1):
-            for document in behavior_tree.read_day(BehaviorKind.GAP, self.day - timedelta(days=offset)):
+            for document in read_gaps(self.day - timedelta(days=offset)):
                 kind = str(document.fields["gap_kind"])
                 if kind not in GAP_KINDS:
                     raise ValueError(f"unknown gap kind on the behaviour tree: {kind!r}")
@@ -149,6 +151,7 @@ class DayIndexCache:
         self.subject = subject
         self.calendar: DayTypeCalendar = LocalCalendar() if calendar is None else calendar
         self._days: dict[date, DayIndex] = {}
+        self._gaps: dict[date, tuple[BehaviorDocument, ...]] = {}
 
     def day(self, day: date) -> DayIndex:
         cached = self._days.get(day)
@@ -158,9 +161,18 @@ class DayIndexCache:
                 day,
                 subject=self.subject,
                 admits=self.admits,
+                read_gaps=self._gap_documents,
                 day_note=self._note(day),
                 resolve=self.resolve,
             )
+        return cached
+
+    def _gap_documents(self, day: date) -> tuple[BehaviorDocument, ...]:
+        """这一天起始目录里的空白文档：每天的索引都要往前回看，回看的日子大半相同，一次查询里只读一遍。"""
+
+        cached = self._gaps.get(day)
+        if cached is None:
+            cached = self._gaps[day] = self.behavior_tree.read_day(BehaviorKind.GAP, day)
         return cached
 
     def has_gap(self, start: datetime, end: datetime, *, kinds: frozenset[str] | None = None) -> bool:

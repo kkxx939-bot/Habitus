@@ -101,6 +101,21 @@ class UnsealedFromJudgements:
 
         return 0 if self.stamping.picker is None else len(self._unpicked())
 
+    def undecided(self) -> bool:
+        """有没有判断写下了、还在等选词（``prepare`` 会去选的那些）。只读：宿主来取提醒那一刻在别的线程调，不能走 ``_unpicked``
+        改写缓存（裁定 104 第 2 条）。"""
+
+        picker = self.stamping.picker
+        if picker is None:
+            return False
+        picked = self._picked
+        return any(
+            record.kind_token is None
+            and record.chain_digest not in picked
+            and record_material(record, max_steps=picker.config.prompt_max_steps) is not None
+            for record in pending_judgements(self.judgements, self.ledger).occurrences
+        )
+
     def cache_only(self) -> CachedUnsealed:
         """只读缓存的那一份（换代里的日子预期用）：``prepare`` 不问模型。"""
 

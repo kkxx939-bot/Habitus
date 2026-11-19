@@ -148,6 +148,8 @@ def test_the_daily_cap_does_not_count_the_moment_that_was_never_said_but_counts_
     asyncio.run(run2.run_once(at(17)))
     asyncio.run(run2.run_once(at(41)))
     assert reasons(ledger2, "x-s-k0003")[-1] == "待取" and reasons(ledger2, "x-s-k0004")[-1] == "名额已满"
+    # 别的单元那条真的问出口了（过了最晚时限没人取的不占名额，这里要的是说过的那一句占着）
+    ledger2.record_delivery(DAY0.date(), Delivery("x-s-k0003", at(50), 1, True, "说了", 1.0, "话", via="c", turn="s"))
     late: Expectation = expectation("x-late", DAY0, kind="s-k0005")
     ledger2.record_expectation(late)
     ledger2.record_delivery(late.day, Delivery("x-late", at(60), 1, True, "说了", 1.0, "话", via="c", turn="t"))

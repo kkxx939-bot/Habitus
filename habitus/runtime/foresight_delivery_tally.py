@@ -1,5 +1,6 @@
 """递送那一拍的计数（``runtime.foresight_delivery``）：决定了几条、说了几条、今天说过几次、今天说过哪几条预期。"同类已说"看
 它们的类，"上下级已说"看它们的类与说中的范围（裁定 101 第 8 条）；今天说过的从账本读（``spoken_today``），跨拍、重启都在。
+宿主没取走的不算说过（裁定 104 第 4 条）：记了「宿主没取」的，和记在最晚时限那一刻或之后、出口不给取的「待取」。
 """
 
 from __future__ import annotations
@@ -9,30 +10,46 @@ from datetime import datetime
 
 from habitus.foresight.delivery import related_spoken
 from habitus.foresight.hierarchy import KindHierarchy
-from habitus.foresight.ledger import AWAITING_HOST, BASIS_WITHDRAWN, NODE_RETIRED, Delivery, Expectation
+from habitus.foresight.ledger import (
+    AWAITING_HOST,
+    BASIS_WITHDRAWN,
+    HOST_NEVER_CLAIMED,
+    NODE_RETIRED,
+    Delivery,
+    Expectation,
+)
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
+
+#: 「待取」之后记了这两种的，话没对人说出口：不再算今天说过。
+_NOT_SAID_AFTER_ALL = (NODE_RETIRED, HOST_NEVER_CLAIMED)
+
+
+def _claimable(delivery: Delivery, item: Expectation | None) -> bool:
+    """这条「待取」宿主取得走：记在最晚时限之前（出口从最晚时限那一刻起不给取）。账上读不到那条预期的照旧占名额。"""
+
+    return item is None or delivery.decided_at < item.deadline
 
 
 def spoken_today(ledger: ForesightLedgerStore, now: datetime) -> dict[str, Expectation | None]:
     """今天（按决定的日子）说过的那几条预期（条数就是说过几次；"同类已说"看它们的类，"上下级已说"看它们的类与说中的范围，
     读的是账本，跨拍、重启都在）——「待取」也算（话已经写好、等着问出口），同一条预期「待取」之后又来
-    「说了」只算一次。说出口的递送挂在预期所在的日子下：今天决定的，那条预期还没结（结算在它最晚时限那天定稿之后），所以只看
-    还没结完的日子。"""
+    「说了」只算一次；宿主取不走、没取走的不算（裁定 104 第 4 条）。说出口的递送挂在预期所在的日子下：今天决定的，那条预期还没结
+    （结算在它最晚时限那天定稿之后），所以只看还没结完的日子。"""
 
     today = now.date()
     counted: dict[str, Expectation | None] = {}
     for day in ledger.open_days():
         made = ledger.deliveries_on(day)
-        # 「待取」之后因节点不在用撤下的（「已停用」）没对人说出口：不再算今天说过（不然它会替还在用的上级压掉"上下级已说"）
-        retired = {item.expectation_id for item in made if item.reason == NODE_RETIRED}
-        deliveries = [
-            item
-            for item in made
-            if item.spoken or (item.reason == AWAITING_HOST and item.expectation_id not in retired)
+        # 「待取」之后撤下的（「已停用」）、宿主一直没取的（「宿主没取」）没对人说出口：不再算今天说过（不然「已停用」的会替还在用的
+        # 上级压掉"上下级已说"）
+        unsaid = {item.expectation_id for item in made if item.reason in _NOT_SAID_AFTER_ALL}
+        candidates = [
+            item for item in made if item.spoken or (item.reason == AWAITING_HOST and item.expectation_id not in unsaid)
         ]
-        if not deliveries:
+        if not candidates:
             continue
         by_id = {item.expectation_id: item for item in ledger.expectations_on(day)}
+        deliveries = [item for item in candidates if item.spoken or _claimable(item, by_id.get(item.expectation_id))]
         for delivery in deliveries:
             if delivery.decided_at.astimezone(now.tzinfo).date() == today and delivery.expectation_id not in counted:
                 counted[delivery.expectation_id] = by_id.get(delivery.expectation_id)
@@ -75,8 +92,13 @@ class Tally:
         self.by_level[delivery.level] = self.by_level.get(delivery.level, 0) + 1
         if delivery.spoken:
             self.spoken += 1
-        if delivery.spoken or delivery.reason == AWAITING_HOST:
-            self.spoken_today += 1  # 「待取」也占名额、也算"同类已说""上下级已说"
+        if delivery.reason in _NOT_SAID_AFTER_ALL and delivery.expectation_id in self.counted:
+            # 这一拍才知道没说成：同一拍后面决定的那几条就不再算它
+            del self.counted[delivery.expectation_id]
+            self.spoken_today = len(self.counted)
+            self.spoken_kinds = {found.kind_token for found in self.counted.values() if found is not None}
+        if delivery.spoken or (delivery.reason == AWAITING_HOST and _claimable(delivery, item)):
+            self.spoken_today += 1  # 取得走的「待取」也占名额、也算"同类已说""上下级已说"
             self.spoken_kinds.add(item.kind_token)
             self.counted[delivery.expectation_id] = item
 

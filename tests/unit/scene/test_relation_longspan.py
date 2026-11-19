@@ -179,7 +179,8 @@ def burst_with_docs() -> EventSeries:
 
 
 def test_a_clean_state_effect_is_compared_with_the_days_around_it() -> None:
-    """8 天集中期对前后各 8 个平常日子：状态里 8 天全写、前后 16 天一天没写——零假设下这种排法的概率是 1 / C(24, 8)。
+    """8 天集中期对前后各 8 个平常日子：写文档第一次自然发生就在集中期第一天，之前那 8 天对它是"不知道"、不进表（裁定 104
+    第 1 条），只剩之后 8 天作对照。状态里 8 天全写、之后 8 天一天没写——零假设下这种排法的概率是 1 / C(16, 8)。
     原先的循环平移在 48 天里最小只能到 2 / 48。"""
 
     series = burst_with_docs()
@@ -188,11 +189,11 @@ def test_a_clean_state_effect_is_compared_with_the_days_around_it() -> None:
     effect = measure.effect()
     assert (effect.antecedents, effect.treated_rate, effect.control_rate) == (8, 1.0, 0.0)
     upper, lower = measure.tails(exact_limit=0)
-    assert upper == pytest.approx(1 / math.comb(24, 8)) and lower == 1.0
-    assert measure.minimum_p() == pytest.approx(2 / math.comb(24, 8))
-    # 只朝一侧：朝上全写进状态 1 / C(24, 8)；朝下状态里一天不写 C(16, 8) / C(24, 8)
-    assert measure.minimum_toward(upward=True) == pytest.approx(1 / math.comb(24, 8))
-    assert measure.minimum_toward(upward=False) == pytest.approx(math.comb(16, 8) / math.comb(24, 8))
+    assert upper == pytest.approx(1 / math.comb(16, 8)) and lower == 1.0
+    assert measure.minimum_p() == pytest.approx(2 / math.comb(16, 8))
+    # 只朝一侧：朝上全写进状态 1 / C(16, 8)；朝下状态里一天不写 C(8, 8) / C(16, 8)
+    assert measure.minimum_toward(upward=True) == pytest.approx(1 / math.comb(16, 8))
+    assert measure.minimum_toward(upward=False) == pytest.approx(math.comb(8, 8) / math.comb(16, 8))
     spread, relative = measure.interval(level=0.95, rounds=200, seed=0)
     assert spread == (1.0, 1.0) and relative is None  # 对照率是 0：说不清相对差
     # 只有一段状态：切成前后两半，两半各自都比对照多

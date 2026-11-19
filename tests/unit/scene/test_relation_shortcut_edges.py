@@ -2,8 +2,9 @@
 **链数**上数，这里专挑链数恰好卡在 ``MIN_PER_SIDE``（3）与差一条（2）的组，以及几种容易数错链的情形——几个条件合起来的组合键、非同一条链段合并之后链变少、条件判不了（``None``）的链——再加上
 "跳过的键在加权归一之后可能进族、必须回退去逐条量"的那条路。
 
-只看对外结果：``fold`` 产出的 ``LaneState``（``document.encode_night``）与迁移的摘要、各段稀疏计数与族的大小。期望值一律
-在基线（7dffb51 + 裁定 95 分族层级与 V2.2、不含 E1–E5 捷径的参照代码）上跑出来写死；每个情形另用基线也有的公开函数（``chains`` / ``merge_for`` / ``conditions.evaluator``）
+只看对外结果：``fold`` 产出的 ``LaneState``（``document.encode_night``）与迁移的摘要、各段稀疏计数与族的大小。期望值在基线
+（7dffb51 + 裁定 95 分族层级与 V2.2、不含 E1–E5 捷径的参照代码）上跑出来写死，其中后果有"第一次自然发生之前的日子"的情形在裁定 104
+第 1 条之后重算，除这些日子外与原基线相同；每个情形另用基线也有的公开函数（``chains`` / ``merge_for`` / ``conditions.evaluator``）
 核对它确实卡在所说的边上，免得数据一改就悄悄不再考边缘。
 """
 
@@ -238,7 +239,8 @@ PLACE_EDGES = {
 @pytest.mark.parametrize("name", sorted(PLACE_PLANS))
 def test_conditions_with_undecidable_chains_on_the_gate_edge_match_the_baseline(name: str) -> None:
     """地点是机械列举的条件（公司 / 家里），只有六七天给了地点，其余三十多天判不了、不进任何一组：可判的链恰好 3 / 2 条。
-    整份关系表与迁移与基线逐字相同。"""
+    整份关系表与迁移与期望值相同（``strong`` 的修改代码头 8 个工作日、提交推送头 5 个工作日还没发生过，期望值在裁定 104 第 1 条
+    之后重算，除第一次之前的日子外与基线相同）。"""
 
     plan = PLACE_PLANS[name]
 
@@ -350,7 +352,8 @@ MERGED_EDGES = {
 @pytest.mark.parametrize("name", sorted(MERGED_PLANS))
 def test_segments_whose_merged_chains_fall_to_the_gate_edge_match_the_baseline(name: str) -> None:
     """同一条链段里"之前推送过"有 4 条链（过门），当天剩下与次日合并后只剩 3 / 2 条（卡在门上 / 差一条）。按段数链，
-    不按同一条链段的链数推。整份关系表与迁移与基线逐字相同。"""
+    不按同一条链段的链数推。整份关系表与迁移与期望值相同（``4-to-3`` 的期望值在裁定 104 第 1 条之后重算，除第一次之前的日子外
+    与基线相同）。"""
 
     plan = MERGED_PLANS[name]
 
@@ -369,7 +372,7 @@ def test_segments_whose_merged_chains_fall_to_the_gate_edge_match_the_baseline(n
 def test_skipped_keys_that_could_enter_the_family_after_normalisation_are_measured_like_the_baseline() -> None:
     """不带条件的键（十几个类两两 × 四段）先验权重都极小，带条件的只有"讨论方案｜之前推送过"一组、每边链不够：
     权重归一之后这组键的有效权重被抬到 1 / q 以上（"最小可达 p / 权重 ≤ q"不再必不成立），不能再当"必不进族"略过，
-    得逐条量回来。结果与基线逐字相同。"""
+    得逐条量回来。结果与期望值相同（期望值在裁定 104 第 1 条之后重算，除第一次之前的日子外与基线相同）。"""
 
     plan = Plan(primed=frozenset({4, 19}), code_after=60, rare=10)
 
@@ -453,7 +456,8 @@ def _admitted_premise(tests: LaneTests) -> list[RelationKey]:
 def test_skipped_keys_under_a_passing_parent_count_in_the_moderated_normalisation(hopeless: float) -> None:
     """父关系当晚过了第 1 道，"讨论方案 → 修改代码｜之前推送过"放得进带条件那一族，但门 1 整组到不了、不逐条量。给那一组
     0.1 或 10 的权重：它按自己的权重计入带条件那一族的归一，把"｜在公司""｜某同事在"这些量了的键的有效权重抬高或压低，
-    族的大小随之不同（0.1 时 6、10 时 5）。拿掉它的归一（只按量了的键归一），两种权重的结果就一样了。结果与基线逐字相同。"""
+    族的大小随之不同（0.1 时 6、10 时 5）。拿掉它的归一（只按量了的键归一），两种权重的结果就一样了。结果与期望值相同（期望值在
+    裁定 104 第 1 条之后重算，除第一次之前的日子外与基线相同）。"""
 
     tests = _tests(ADMITTED)
     group = _admitted_premise(tests)
@@ -469,7 +473,7 @@ def test_skipped_keys_under_a_passing_parent_count_in_the_moderated_normalisatio
 def test_a_skipped_key_that_may_enter_the_moderated_family_is_measured_like_the_baseline() -> None:
     """父关系当晚过了第 1 道；底下二十来条量了的带条件键调用方都给 0.001，"｜之前推送过"那一组按 1。带条件那一族归一之后，
     "讨论方案 → 修改代码｜之前推送过"的有效权重约 22.5、比值约 0.044 ≤ q（0.1）：它可能进族，不能当"必不进族"略过，得逐条量回来——
-    当晚它进了族（判"没过"，不是稀疏）。结果与基线逐字相同。"""
+    当晚它进了族（判"没过"，不是稀疏）。结果与期望值相同（期望值在裁定 104 第 1 条之后重算，除第一次之前的日子外与基线相同）。"""
 
     tests = _tests(CROWDED)
     _admitted_premise(tests)
@@ -481,7 +485,9 @@ def test_a_skipped_key_that_may_enter_the_moderated_family_is_measured_like_the_
     assert (night.family, state.family, dict(state.sparse), _digest(state, transitions)) == GOLDEN_MAY_ENTER
 
 
-# ── 基线（7dffb51 + 裁定 95 分族层级与 V2.2、不含 E1–E5）上跑出的期望值（生成脚本：V22实现/regen/regen.py）
+# ── 基线（7dffb51 + 裁定 95 分族层级与 V2.2、不含 E1–E5）上跑出的期望值（生成脚本：V22实现/regen/regen.py）；
+# ``strong``、``4-to-3``、``GOLDEN_FALLBACK``、``GOLDEN_ADMITTED_WEIGHTS``、``GOLDEN_MAY_ENTER`` 在裁定 104 第 1 条之后重算，
+# 除第一次之前的日子外与原基线相同
 
 #: （不加权折叠的摘要, 加权折叠的摘要, 不加权的各段稀疏, 不加权的族, 加权的族）
 GOLDEN_STRONG_ROWS: dict[str, dict[str, str]] = {
@@ -510,8 +516,8 @@ GOLDEN_PLACE: dict[str, Outcome] = {
         2,
     ),
     "strong": (
-        "f8ba0fa4e002f449689c0e51d9e74a68f03908f2eda5de1bf222c3b97415a328",
-        "662ac666e1887e68d65e2e684c0b31d02b0bf46f008eea4be41d813049e18ca9",
+        "b485b963131cdefee6f1ae13e2eb5ad9087d6dd3d6201e2c882e7a37a2868337",
+        "c67140f651661534dc33342321ed2f225c0c9ea46f0183d9b702a959bdab087b",
         {"chain": 29, "days_2_7": 30, "next_day": 31, "rest_of_day": 30},
         4,
         4,
@@ -556,16 +562,16 @@ GOLDEN_MERGED: dict[str, Outcome] = {
         4,
     ),
     "4-to-3": (
-        "587ff8015e57cec5c2a27461d805c38ea90c5e104dc6a1072722bb9945036b0f",
-        "27a102a29c2d2a501d6009f25533746cb904c23ce0aa87f404240835a2a6d828",
+        "960b1c740956b40a91aa14beb2b4dc2fa8bfad88394eb96546645e66561485b8",
+        "01038a6ab7e6ff2ca31676cf0a2d118c905f016e96980aa9845194045266c85c",
         {"chain": 23, "days_2_7": 26, "next_day": 25, "rest_of_day": 25},
         5,
         5,
     ),
 }
 GOLDEN_FALLBACK: Outcome = (
-    "07993f9d31564e3a78a131fe3c954fa7a1a8e5e566ec47439367957df8e074d5",
-    "297e76a2031edc52f1c9055d64f098400df674bdf2c42bce7491b33de996e81f",
+    "c3882192f0579d3c1d7cde9d5aa4d0718a1ca013e814b6759885aa36dea7635d",
+    "f17d9a61c1fb2ae4653920f6399741b09807dbf4a6b12814ca34bc0118fad510",
     {"chain": 222, "days_2_7": 223, "next_day": 220, "rest_of_day": 223},
     4,
     4,
@@ -599,12 +605,12 @@ GOLDEN_ADMITTED_WEIGHTS: dict[float, tuple[int, dict[str, int], str]] = {
     0.1: (
         6,
         {"chain": 75, "days_2_7": 78, "next_day": 79, "rest_of_day": 78},
-        "9567efd6c139fe71a3e2077a10d4062d5b72ab7063eecf381a1836fd2b921648",
+        "23009a440aecbdd694b1132914682eccccd5294a87581ed99615e83dae797be3",
     ),
     10.0: (
         5,
         {"chain": 76, "days_2_7": 78, "next_day": 79, "rest_of_day": 78},
-        "b452f1eb58ec1b727f72a80cf48c738275329902a6ee42753abfe73a9297ed21",
+        "a3236aed511b4adefa0b9a84fdfadd21f71cb9297297a0faa68a8151535e3c15",
     ),
 }
 #: （当晚加权的族, 折叠后的族, 各段稀疏, 摘要）
@@ -612,7 +618,7 @@ GOLDEN_MAY_ENTER: tuple[int, int, dict[str, int], str] = (
     5,
     5,
     {"chain": 348, "days_2_7": 350, "next_day": 351, "rest_of_day": 350},
-    "3398b8f39176cd7e62577da89a3260cb0f2d0797de5a9feee9298089acb49deb",
+    "79420813920cc7d4359c29a78f9baa3986411071ceec1fe0733fec31892995f0",
 )
 
 

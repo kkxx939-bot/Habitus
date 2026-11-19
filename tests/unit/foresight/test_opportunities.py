@@ -384,3 +384,85 @@ def test_the_shapes_refuse_contradictions() -> None:
         DayWatch(NIGHT, 1.0, "")
     with pytest.raises(ForesightError, match="distinct and ascending"):
         OpportunityTable("session", NIGHT, NIGHT, 15, 3, (), (), watch=(DayWatch(NIGHT, 1.0), DayWatch(NIGHT, 0.5)))
+
+
+def _late_consequent(antecedent_days, consequent_days, *, reminded_days=(), hour: int = 9, minute: int = 20):  # type: ignore[no-untyped-def]
+    """从 ``START``（周一）起 60 个日历日，每天 8:00 调研、17:00 写文档让人在场；``antecedent_days`` 那几天 9:00 讨论方案；
+    ``consequent_days`` 那几天修改代码，``reminded_days`` 那几天的修改代码是被提醒之后才做的。"""
+
+    from habitus.series import EventSeries
+    from tests.unit.scene.relation_fixtures import START, record
+
+    def day(offset: int) -> date:
+        return START + timedelta(days=offset)
+
+    found = []
+    for offset in range(60):
+        found += [record(day(offset), 8, 0, "调研"), record(day(offset), 17, 0, "写文档")]
+    found += [record(day(offset), 9, 0, "讨论方案") for offset in antecedent_days]
+    found += [record(day(offset), hour, minute, "修改代码") for offset in consequent_days]
+    found += [replace(record(day(offset), hour, minute, "修改代码"), reminded=True) for offset in reminded_days]
+    found.sort(key=lambda item: (item.started_at, item.uri))
+    return EventSeries(cutoff=day(60), records=tuple(found))
+
+
+def test_b9_an_antecedent_before_the_first_time_of_the_consequent_is_not_a_miss() -> None:
+    """T10 / B9：修改代码第 30 天第一次出现。第 10 天那次讨论方案在第一次之前，结果不知道（``came`` 是 None），不算一次没来；
+    第 38、52 天来了，第 45 天没来照常是 False。来了 2 次、机会 3 次、不知道 1 次。"""
+
+    from tests.unit.scene.relation_fixtures import START
+
+    came = [offset for offset in range(30, 60) if offset != 45]
+    series = _late_consequent((10, 38, 45, 52), came)
+    (relation,) = table((established(DISCUSS, CODE),), series=series).relations
+    assert {(item.day - START).days: item.came for item in relation.items} == {10: None, 38: True, 45: False, 52: True}
+    assert (relation.hits, relation.opportunities, relation.unknown) == (2, 3, 1)
+
+
+def test_b9_a_reminded_record_is_not_the_first_time_in_the_table() -> None:
+    """T10 / B9：第 5 天被提醒才做的修改代码不算第一次，第 10 天那次讨论方案的结果仍然不知道。"""
+
+    from tests.unit.scene.relation_fixtures import START
+
+    series = _late_consequent((10, 38), range(30, 60), reminded_days=(5,))
+    (relation,) = table((established(DISCUSS, CODE),), series=series).relations
+    assert {(item.day - START).days: item.came for item in relation.items} == {10: None, 38: True}
+
+
+def _wednesday_table(series):  # type: ignore[no-untyped-def]
+    concepts = ConceptSet([base(title) for title in TITLES] + list(calendar_concepts(now=CREATED)))
+    relation = Relation(key=key("周三", CODE, Segment.SITUATION), status=Status.ESTABLISHED, upward=True)
+    (found,) = table((relation,), concepts, series=series, calendar=LocalCalendar()).relations
+    return found
+
+
+def test_b10_a_calendar_day_before_the_first_time_is_not_a_miss() -> None:
+    """T11 / B10："周三 → 修改代码"，修改代码第 30 天（周三）第一次出现。之前的周三（第 2、9、16、23 天）结果不知道；
+    第 30、44 天来了；第 37 天在第一次之后没做，照常是 False；第 51 天只有被提醒才做的，仍是不知道（B15）；第 58 天来了。"""
+
+    from tests.unit.scene.relation_fixtures import START
+
+    series = _late_consequent((), (30, 44, 58), reminded_days=(51,), hour=11, minute=0)
+    found = _wednesday_table(series)
+    assert {(item.day - START).days: item.came for item in found.items} == {
+        2: None,
+        9: None,
+        16: None,
+        23: None,
+        30: True,
+        37: False,
+        44: True,
+        51: None,
+        58: True,
+    }
+    assert (found.hits, found.opportunities, found.unknown) == (3, 4, 5)
+
+
+def test_b10_a_reminded_calendar_day_is_not_the_first_time() -> None:
+    """T11 / B10：第 9 天（周三）被提醒才做的不算第一次，第 16、23 天两个周三仍在第一次之前，结果不知道。"""
+
+    from tests.unit.scene.relation_fixtures import START
+
+    found = _wednesday_table(_late_consequent((), (30,), reminded_days=(9,), hour=11, minute=0))
+    came = {(item.day - START).days: item.came for item in found.items}
+    assert came[9] is None and came[16] is None and came[23] is None and came[30] is True

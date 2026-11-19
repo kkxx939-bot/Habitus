@@ -41,6 +41,7 @@ _STORE_BOUNDS = (
     ("unit_history_max_bytes", 1_024 * 1_024, 1_024 * 1_024 * 1_024),
     ("opportunity_table_max_bytes", 1_024 * 1_024, 1_024 * 1_024 * 1_024),
     ("nightly_max_entries", 100, 1_000_000),
+    ("read_cache_max_records", 1, 10_000_000),
 )
 
 
@@ -65,6 +66,8 @@ class ForesightStoreConfig:
     opportunity_table_max_bytes: int = 16 * 1024 * 1024
     # 每晚派生物一条 lane 的目录最多列多少条。
     nightly_max_entries: int = 10_000
+    # 账本在内存里最多留多少条解码好的记录（只影响快慢，不影响读到什么；一条约 2.3 KB）。
+    read_cache_max_records: int = 20_000
 
     def __post_init__(self) -> None:
         for name, lower, upper in _STORE_BOUNDS:

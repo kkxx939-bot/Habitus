@@ -46,6 +46,7 @@ from habitus.conversation.source.recovery import (
     ConversationSourceRecoveryEntry,
     ConversationSourceRecoveryPlan,
     ConversationSourceRecoveryResult,
+    source_unfinished,
 )
 from habitus.conversation.source.release import ConversationSourceReleaser
 from habitus.conversation.source.repair import (
@@ -111,4 +112,5 @@ __all__ = [
     "discard_output_directory",
     "require_sha256",
     "source_timestamp",
+    "source_unfinished",
 ]

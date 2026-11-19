@@ -16,6 +16,7 @@ from habitus.runtime.generation_lease import Lease
 from habitus.runtime.generation_runner import GenerationRunner
 from habitus.runtime.model_queue import ModelQueue
 from habitus.runtime.scene_night import SceneNightlyRun
+from habitus.runtime.unsealed import UnsealedFromJudgements
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,8 @@ class ScenePipeline:
     tick: ForesightTick | None
     #: 这一支的预测根租约（有预测拍时在预测拍手里，没有时那一槽自己持）。
     lease: Lease
+    #: 这一支未封口的那座桥（预测拍用的同一座，带选词缓存；没开预测层是 None）。
+    unsealed: UnsealedFromJudgements | None = None
 
     def __post_init__(self) -> None:
         """实例同一性：这一支的换代、队列、预测层读的都是**这一支**的行为树、定稿日、完成标记与写锁。接错了进程照常、健康全绿，

@@ -16,7 +16,8 @@
    不要求相邻），这一代起在用，记"哪一天转的在用"= 这一代的日子。上级不因下级被选中而在用；被删节点的旧记录换算到上级，
    算上级的。**例外一条**（裁定 101 第 7 条，用户 2026-11-15 定）：记录挂在**候选**（自己长的、不在用；在用以前的那些日子也算）上时，
    这一天也算给它最近的不是候选的上级（初始词，或自己长的、在用的；上级也是候选就接着往上找）——只算"转在用"的日子；退出、
-   删除、"最后被选中"仍只看直接记录。上级靠下级的日子转了在用、自己从没被直接选中过的，20 天从转在用那天算。每条 lane 在用的词最多 ``cap`` 个：满了够条件的词等着、不挤别人；等着的按"凑够天数的那一天"先后进，同一天按编号。
+   删除、"最后被选中"仍只看直接记录。上级靠下级的日子转了在用、自己从没被直接选中过的，20 天从转在用那天算。日子够数、但按第 1 条现在就该退出的词，这一代不转在用，
+   也不算等着的；之后再被直接选中一次，攒下的日子照算。每条 lane 在用的词最多 ``cap`` 个：满了够条件的词等着、不挤别人；等着的按"凑够天数的那一天"先后进，同一天按编号。
 """
 
 from __future__ import annotations
@@ -59,8 +60,7 @@ def count_active(
     for level in sorted({word.level for word in vocabulary.words}, reverse=True):
         days = _days(vocabulary, picks)
         for word in [word for word in vocabulary.words if word.level == level]:
-            last = _last_seen(vocabulary, word.id, days)
-            if last is None or (today - last).days < retire_days:
+            if not _overdue(vocabulary, word.id, days, today=today, retire_days=retire_days):
                 continue
             if word.grown and not vocabulary.children(word.id):
                 vocabulary = vocabulary.without(word.id, on=today)
@@ -70,12 +70,15 @@ def count_active(
                 vocabulary = vocabulary.with_active(active, {**vocabulary.exited, word.id: today})
                 exited.append(word.id)
     days = _entering_days(vocabulary, picks)
+    # 用退出这一步做完以后的词表重算：这一代刚删的下级，旧日子要换算到上级头上
+    direct = _days(vocabulary, picks)
     left = vocabulary.exited
     ready = sorted(
         (counted[min_days - 1], word_id)
         for word_id, seen in days.items()
         if word_id not in vocabulary.active
         and len(counted := sorted(day for day in seen if word_id not in left or day > left[word_id])) >= min_days
+        and not _overdue(vocabulary, word_id, direct, today=today, retire_days=retire_days)
     )
     room = max(0, cap - len(vocabulary.active))
     added = tuple(word_id for _day, word_id in ready[:room])
@@ -91,6 +94,15 @@ def count_active(
             vocabulary.lane, vocabulary.words, vocabulary.active, revision, vocabulary.deleted, vocabulary.exited
         )
     return ActiveCount(vocabulary, waiting, added, tuple(deleted), tuple(exited))
+
+
+def _overdue(
+    vocabulary: Vocabulary, word_id: ClassId, days: dict[ClassId, set[date]], *, today: date, retire_days: int
+) -> bool:
+    """这一代算不算"``retire_days`` 天没被选中"：退出和转在用用同一把尺。"""
+
+    last = _last_seen(vocabulary, word_id, days)
+    return last is not None and (today - last).days >= retire_days
 
 
 def _last_seen(vocabulary: Vocabulary, word_id: ClassId, days: dict[ClassId, set[date]]) -> date | None:

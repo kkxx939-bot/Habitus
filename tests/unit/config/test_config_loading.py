@@ -572,6 +572,23 @@ def test_the_model_queue_operating_numbers_are_validated_and_listed_in_the_examp
         SceneConfig.from_mapping({"model_queue_backoff_seconds": 60.0})  # 未知字段
 
 
+def test_the_ledger_read_cache_size_loads_is_bounded_and_listed_in_the_example(tmp_path) -> None:
+    """账本读缓存的容量走唯一配置边界：默认 20000，能从 YAML 映射加载，越界与类型不对都拒绝，示例 YAML 里列着。"""
+
+    from habitus.config.foresight import ForesightConfig, ForesightStoreConfig
+
+    assert ForesightStoreConfig().read_cache_max_records == 20_000
+    loaded = ForesightConfig.from_mapping({"store": {"read_cache_max_records": 1}})
+    assert loaded.store.read_cache_max_records == 1
+    for bad in (0, 10_000_001):
+        with pytest.raises((ConfigError, ValueError), match="read_cache_max_records"):
+            ForesightStoreConfig.from_mapping({"read_cache_max_records": bad})
+    with pytest.raises(ConfigError, match="read_cache_max_records"):
+        ForesightStoreConfig.from_mapping({"read_cache_max_records": "20000"})
+    example = (Path(__file__).resolve().parents[3] / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8")
+    assert "#     read_cache_max_records: 20000 " in example
+
+
 def test_a_tick_is_one_slot(tmp_path) -> None:
     """实时化方案第 5 节：预测拍一拍一槽、对齐槽边界——预测层开着时 ``tick_interval_seconds`` 必须等于槽宽 × 60。"""
 

@@ -18,6 +18,8 @@
 - **依据记了影子之后才来的输入**（``joined_after_shadow``，裁定 103）：单元记影子时只看了当时在场的那几条；之后才形成、
   并进它的成员没被看过，到了自己的时窗末按全部输入重算一次单元（组合根接手，同一刻只接手一条；依据只从这一拍到了自己时窗末的
   成员里选，别的成员只当输入）。记影子时就在场的成员不接手。
+- **上级让给还在等时窗末的下级**（``waits_for_finer``，裁定 104 第 3 条）：上级到了时窗末，下级还没到自己的时窗末、此刻能开口、
+  到时窗末之后的第一拍上级的提醒还来得及被宿主取走，上级这一拍不决定（不落账），等下级决定之后再决定。
 
 材料由组合根准备成 ``Circumstances``：每一项问到才算——走到那一步才读账、读树，前面的原因成立了后面的就不读。
 """
@@ -26,7 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from habitus.foresight.hierarchy import FLAT, KindHierarchy
 from habitus.foresight.ladder import Standing, decide
@@ -129,7 +131,7 @@ def on_closing(
     一次；跨夜的时窗换了机会表，这里再判一次）。
 
     ``pending`` 是时窗开时记的那条「等时窗末」；``kept`` 是模型判像不像（没问是 None），``evidence`` 是模型指的那几条历史记录；
-    ``spoken_kinds`` 是今天已经说过的类、``spoken`` 是今天已经说过的那几条预期（「待取」都算）；``kinds`` 是此刻的上下级；
+    ``spoken_kinds`` 是今天已经说过的类、``spoken`` 是今天已经说过的那几条预期（宿主取得走的「待取」也算，裁定 104 第 4 条）；``kinds`` 是此刻的上下级；
     ``alive`` 是这一拍有没有宿主活着；``text`` 问到才写那句话。"""
 
     if not facts.active():
@@ -357,6 +359,64 @@ def reminded_before(
     return decided_at < started_at and item.covers(started_at) and kind_token in kinds.family(item.kind_token)
 
 
+def waits_for_finer(
+    item: Expectation,
+    others: Iterable[tuple[Expectation, Sequence[Delivery]]],
+    *,
+    since: datetime,
+    instant: datetime,
+    tick: timedelta,
+    deferred: Collection[str],
+    kinds: KindHierarchy,
+    speaks: Callable[[Expectation], bool],
+) -> bool:
+    """这条上级这一拍先不决定（裁定 104 第 3 条）：``others``（还没结的预期与它们的全部递送）里有它的下级，说中的范围重叠，
+    下级还没决定（没决定过且时窗终点晚于这一拍起点，或只记过「等时窗末」「单元已选」且这一拍还没越过终点，或这一拍被重读推迟——``deferred``，
+    不管它的时窗终点），下级最早决定的那一拍上级的提醒还取得走（``max(时窗终点, 此刻) + tick`` 严格早于上级的最晚时限，``tick`` 是
+    配置的拍长：时窗整段落在两拍之间的下级要到下一拍才决定；正好相等时上级那一拍写下的「待取」落在最晚时限那一刻，出口取不走），
+    而且下级此刻能开口（``speaks``，问到才算）。下级一决定就不再等。"""
+
+    start, end = item.observed_from.astimezone(UTC), item.deadline.astimezone(UTC)
+    for other, made in others:
+        if other.kind_token == item.kind_token or other.kind_token not in kinds.family(item.kind_token):
+            continue
+        close = other.window[1].astimezone(UTC)
+        undecided = (
+            close > since if not made else close >= instant and all(one.reason in (PENDING, UNIT) for one in made)
+        )
+        waiting = other.expectation_id in deferred or undecided
+        overlaps = other.observed_from.astimezone(UTC) < end and start < other.deadline.astimezone(UTC)
+        if waiting and overlaps and max(close, instant) + tick < end and speaks(other):
+            return True
+    return False
+
+
+def yield_along(closing: Iterable[Expectation], yielding: Collection[str], kinds: KindHierarchy) -> frozenset[str]:
+    """同一拍里让位要传递到底（裁定 104 第 3 条、裁定 101 第 8 条"只说最细的"）：``closing`` 这一拍到了时窗末的预期里，有下级
+    在让位集合里、说中的范围和它重叠的上级也跟着让，不看它自己等不等得到；G 看 P、P 看 C，一直补到不再变化。"""
+
+    items = list(closing)
+    found = set(yielding)
+    grew = True
+    while grew:
+        grew = False
+        for item in items:
+            if item.expectation_id in found:
+                continue
+            start, end = item.observed_from.astimezone(UTC), item.deadline.astimezone(UTC)
+            if any(
+                other.expectation_id in found
+                and other.kind_token != item.kind_token
+                and other.kind_token in kinds.family(item.kind_token)
+                and other.observed_from.astimezone(UTC) < end
+                and start < other.deadline.astimezone(UTC)
+                for other in items
+            ):
+                found.add(item.expectation_id)
+                grew = True
+    return frozenset(found)
+
+
 def finer_first(
     closing: tuple[tuple[Expectation, Delivery], ...], kinds: KindHierarchy
 ) -> tuple[tuple[Expectation, Delivery], ...]:
@@ -401,4 +461,6 @@ __all__ = [
     "related_spoken",
     "reminded_before",
     "unsaid",
+    "waits_for_finer",
+    "yield_along",
 ]

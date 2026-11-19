@@ -7,8 +7,9 @@
 
 - **命中**：记录的类编号就是那个行为概念，或在那个行为概念管的编号里（下级的记录也记在在用的上级账上，裁定 101 第 8 条：
   一条记录给它自己的概念和每一个在用上级的概念各留一个记号，``ConceptSet.concepts_for``）；
-- **看不到**：被提醒过的那一次当后果（见下）。窗口里有"看不到"、又没有命中的，这一次的结果算未知，两边都不计
-  （用户 09-27"没看到就不算"）。
+- **看不到**：被提醒过的那一次当后果（见下），以及这个概念第一次自然发生那天之前人在场的槽（下级的记录算，被提醒才做的不算，
+  第一次那天起照常量；从没自然发生过的，人在场的槽全算；裁定 104 第 1 条）。窗口里有"看不到"、又没有命中的，这一次的结果算未知，
+  两边都不计（用户 09-27"没看到就不算"）。
 
 **被提醒过的记录**（行为树的 ``reminded``，裁定 54）：语义树量的是"他自然有多规律"，被系统提醒之后才做的不算。这条记录照样
 在时间线上（``marks``：当前因、合链、算人在场都照常），当**后果**时按"看不到"——不进 ``outcomes``、记进 ``unknown``，窗口里
@@ -164,7 +165,7 @@ def build_timelines(
             line.marks.setdefault(identity, []).append(mark)
             if record.reminded:
                 line.unknown.setdefault(identity, []).append(absolute)
-    covered = _gap_slots(series, config.slot_minutes, per_day)
+    blocked = set(_gap_slots(series, config.slot_minutes, per_day))
     # 同一类之后合并窗口内又开始了的，不是它那条链的最后一件：每一次（``temporal.merge_starts``，与 ``chains_of`` 同一把尺）里
     # 除了最后那条都算"后面还接着"（2026-10-18 四方评审：原来这里内联了一份合并规则）
     window_seconds = config.transition_window_slots * config.slot_minutes * 60
@@ -173,6 +174,9 @@ def build_timelines(
         ordered = sorted(begun)
         for group in merge_starts([moment for moment, _uri in ordered], window_seconds=window_seconds):
             followed.update(ordered[index][1] for index in group[:-1])
+    for (lane, day), (first, final) in spans.items():
+        start = day.toordinal() * per_day
+        lines[lane].present[day] = tuple(slot for slot in range(first, final + 1) if start + slot not in blocked)
     for line in lines.values():
         for day, finished in line.ends.items():
             line.ends[day] = sorted(item for item in finished if item[1] not in followed)
@@ -184,14 +188,27 @@ def build_timelines(
         for identity in concepts.behaviors():
             if concepts.lane_of(identity) == line.lane:
                 line.marks.setdefault(identity, [])
-
-    blocked = set(covered)
-    for (lane, day), (first, final) in spans.items():
-        start = day.toordinal() * per_day
-        lines[lane].present[day] = tuple(slot for slot in range(first, final + 1) if start + slot not in blocked)
+        _unseen_before_first(line)
     if calendar is not None:
         _calendar_situations(lines, concepts, calendar)
     return lines
+
+
+def _unseen_before_first(line: LaneTimeline) -> None:
+    """每个概念第一次自然发生那天之前、人在场的槽记"看不到"；从没自然发生过的，人在场的槽全记（裁定 104 第 1 条）。
+    要在记号排好序、人在场建好之后调。"""
+
+    for identity in line.marks:
+        natural = line.outcomes(identity)
+        first = natural[0].day if natural else None
+        blind = {
+            line.day_start(day) + slot
+            for day, slots in line.present.items()
+            if first is None or day < first
+            for slot in slots
+        }
+        if blind:
+            line.unknown[identity] = sorted(blind.union(line.unknown.get(identity, ())))
 
 
 def _calendar_situations(lines: Mapping[str, LaneTimeline], concepts: ConceptSet, calendar: DayTypeCalendar) -> None:

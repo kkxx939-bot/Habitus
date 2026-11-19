@@ -181,8 +181,8 @@ def _most_specific_calendar(relations: Iterable[Relation], concepts: ConceptSet)
 def _calendar_opportunities(
     line: LaneTimeline, antecedent: str, consequent: str, key: str
 ) -> tuple[tuple[Opportunity, ...], tuple[str, ...]]:
-    """日历条件成立的每一个人在场的日子是一次机会：后果那天有没有自然发生（只有被提醒才做的那天不知道）。
-    机会的"前因"就是那一天本身（``calendar:<日子>``），起算是那天零点。
+    """日历条件成立的每一个人在场的日子是一次机会：后果那天有没有自然发生（只有被提醒才做的那天、后果第一次自然发生之前的
+    日子不知道，裁定 104 第 1 条）。机会的"前因"就是那一天本身（``calendar:<日子>``），起算是那天零点。
 
     周几、几号、月末这类关系还交出它在哪几种日型上见过他自然地做（检验时日型是固定住的，裁定 59 第 7 条）；机会只列这几种日型的
     日子与日型答不出的日子——建预期时也只在这几种日型上建，账上的机会与建预期的口径一致。"""
@@ -190,6 +190,7 @@ def _calendar_opportunities(
     held = line.calendar_days(antecedent) or {}
     marks = line.marks.get(consequent, [])
     unknown = set(line.unknown.get(consequent, []))
+    blind_days = {slot // line.slots_per_day for slot in unknown}
     rows = []
     seen: set[str] = set()
     for day in line.days():
@@ -213,7 +214,7 @@ def _calendar_opportunities(
             came: bool | None = True
             uri, started = first.uri, first.started_at
         else:
-            came, uri, started = (None if today else False), None, None
+            came, uri, started = (None if today or day.toordinal() in blind_days else False), None, None
         found.append(
             Opportunity(
                 antecedent_uri=anchor,

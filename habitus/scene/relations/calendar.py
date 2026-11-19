@@ -6,7 +6,7 @@
 - **其余维度固定**：比周几、几号、月末时把日型固定住（国庆的周三只和国庆那几天比，不拉低"周三"）；比日型时不固定周几
   （周几决定了名义日型，固定它就没东西可比了）。
 - **只在同一段时间里比**：周几、日型按同一周分层，几号、月末按同一个月分层，抵掉习惯慢慢变多变少、这段时间的忙闲；
-  而且从这件事第一次自然发生那天起才算（之前那几周它还不存在，算进来只会稀释）。
+  这件事第一次自然发生之前的日子在时间线上是"看不到"，结果不知道，不进表（裁定 104 第 1 条，``timeline``）。
 
 每层一张四格表（单位是一个人在场、结果已知的日子），零假设下实验组里的阳性数服从超几何分布，各层卷起来——与长跨度同一套检验
 （``longspan.EpisodeMeasure``），只是表怎么分不同。样本少（层里只有实验组或只有对照）的层不进表，少见的取值因此攒够之前出不了读数。
@@ -54,9 +54,7 @@ class CalendarMeasure(EpisodeMeasure):
 def calendar_measure(line: LaneTimeline, consequent: str, key: str, values: tuple[str, ...]) -> CalendarMeasure:
     """这个日历情境（``key`` 这一维取 ``values``）对 ``consequent`` 的量法。这一维答不出的日子不算（日型缺数据的年份）。"""
 
-    natural = [mark.day for mark in line.outcomes(consequent)]
-    first = min(natural) if natural else None
-    days = tuple(day for day in line.days() if first is not None and day >= first)
+    days = line.days()
     treated: set[date] = set()
     strata: dict[date, tuple[object, ...]] = {}
     for day in days:

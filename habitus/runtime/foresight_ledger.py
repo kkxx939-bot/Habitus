@@ -94,7 +94,7 @@ from habitus.infrastructure.store.filesystem import (
     atomic_create_bytes,
     durable_unlink,
 )
-from habitus.runtime.foresight_files import JsonFiles
+from habitus.runtime.foresight_files import LedgerFiles
 
 _FINAL = "_final"
 #: 一本账压实了的那一段（整份替换）。
@@ -125,13 +125,7 @@ class ForesightLedgerStore:
     def __init__(self, root: str | Path, *, limits: ForesightStoreConfig | None = None) -> None:
         limits = limits if limits is not None else ForesightStoreConfig()
         #: 写一次的记录写入就查大小（超限的不落盘：按目录读时会被当坏文件跳过、结算永远结不到它，26 号清单 2.5.4）。
-        self._files = JsonFiles(
-            root,
-            label="ledger",
-            max_bytes=limits.record_max_bytes,
-            max_entries=limits.directory_max_entries,
-            max_unreadable=limits.unreadable_max_paths,
-        )
+        self._files = LedgerFiles(root, limits)
         self.root = self._files.root
         self._expectations = self.root / "expectations"
         self._deliveries = self.root / "deliveries"
@@ -638,9 +632,9 @@ class ForesightLedgerStore:
     def _decoded[T](
         self, directory: Path, decode: Callable[[dict[str, Any]], T], sink: list[str] | None = None
     ) -> Iterable[T]:
-        """一个目录里的记录逐条解码；读不出来、形状或版本不对的记下路径、跳过。"""
+        """一个目录里的记录逐条解码（身份没变的文件不再打开）；读不出来、形状或版本不对的记下路径、跳过。"""
 
-        return (item for _stem, item in self._files.decoded(directory, decode, sink))
+        return (item for _stem, item in self._files.cached_decoded(directory, decode, sink))
 
     def _days(self, root: Path) -> tuple[date, ...]:
         days: list[date] = []

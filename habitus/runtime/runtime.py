@@ -370,9 +370,9 @@ class Runtime:
         outlet = self.components.outlet
         if outlet is None:
             return ()
-        return await asyncio.to_thread(
-            outlet.claim, host, session, at, min(limit, self.config.foresight.outlet_claim_limit)
-        )
+        capped = min(limit, self.config.foresight.outlet_claim_limit)
+        hold = self.components.claim_check.for_one_claim()
+        return await asyncio.to_thread(outlet.claim, host, session, at, capped, hold=hold)
 
     async def reminders(self, day: date | None = None) -> ReminderDay:
         """``day``（省略是本地今天）进了提醒出口的每条提醒（两支的都在）走到了哪一步（方案 36 第 2 步）。没开预测层是空。只读。"""

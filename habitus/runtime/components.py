@@ -6,6 +6,7 @@ from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import cast
 
+from habitus.behavior.kinds.ids import Lane
 from habitus.conversation import (
     BehaviorSessionOutputStore,
     ConversationConsumerDelivery,
@@ -18,6 +19,7 @@ from habitus.conversation import (
     ConversationSourceRecovery,
     ConversationSourceReleaser,
     ConversationSourceStore,
+    source_unfinished,
 )
 from habitus.foundation.observability import Observer
 from habitus.infrastructure.observability import ManagedObservability, MetricRegistry
@@ -58,6 +60,7 @@ from habitus.model_client import (
 )
 from habitus.runtime.behavior import BehaviorBranches
 from habitus.runtime.foresight import ForesightRuntimeComponents
+from habitus.runtime.foresight_claim_check import ClaimBranch, ClaimCheck
 from habitus.runtime.foresight_outlet import ReminderOutlet
 from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
 from habitus.runtime.foresight_worker import ForesightWorker
@@ -327,6 +330,27 @@ class RuntimeComponents:
         """各支的预测层（按支的先后）；没开预测层是空的。"""
 
         return tuple(item.foresight for item in self.pipelines if item.foresight is not None)
+
+    @property
+    def claim_check(self) -> ClaimCheck:
+        """宿主来取提醒那一刻再判一次要的材料（裁定 104 第 2 条）：两支各看自己的"还没判完"——会话一支看会话源的会话 lane 这个
+        Consumer 到没到终态，物理一支看判断选上词没有（用预测拍那座带选词缓存的桥）。"""
+
+        recovery = self.conversation.source_recovery
+
+        def session_unfinished() -> bool:
+            return source_unfinished(recovery, ConversationSourceConsumer.BEHAVIOR_SESSION)
+
+        return ClaimCheck(
+            {
+                item.lane: ClaimBranch(
+                    item.tick.forming,
+                    session_unfinished if item.lane == Lane.SESSION.value else item.unsealed.undecided,
+                )
+                for item in self.pipelines
+                if item.tick is not None and item.unsealed is not None
+            }
+        )
 
     def _check_pipelines(self) -> None:
         """各支的管线读**这个** Runtime 的那一支（实例同一性，``ScenePipeline`` 自己再核内部接线）；两个常驻 worker 驱动的正是这
