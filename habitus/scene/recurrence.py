@@ -1,15 +1,16 @@
 """复现规律（裁定 59）：每个在用节点自己"隔多久又来"，登记在语义树上，预测层「离上次够久」的预期从这里来。
 
 它不过关系检验那套门槛：自己隔多久又来没有对照组可比，靠不靠得住交给账去判。内容全由 ``temporal`` 算——按天的发生、
-相邻间隔（漏看的权重、被提醒结尾的截尾都在里面）；这里只把一个在用节点的记录交给它：它的行为概念管的编号（自己 + 全部下级，
-裁定 101 第 8 条）上的记录。不在用的节点（没有概念或概念已停用）没有复现，也就没有日子预期。每晚从同一份序列重算、只在内存里传一晚，
+相邻间隔（漏看的权重、被提醒结尾的截尾都在里面）；这里只把一个在用节点的记录交给它：直接选中它的记录，加上它没有直接记录、
+只有下级记录的那些日子（裁定 105 第 2 条：对它是"不知道"，按被提醒才做的交进去——以那天结尾的间隔截尾，离上次从那天重新算，
+不进命中、钟点分布与密度）。不在用的节点（没有概念或概念已停用）没有复现，也就没有日子预期。每晚从同一份序列重算、只在内存里传一晚，
 由预测层的机会表落盘。
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from habitus.scene.concepts.model import ConceptSet
@@ -46,10 +47,17 @@ def recurrences_of(
         concept = concepts[identity]
         if concept.retired:
             continue
-        records = series.records_of(frozenset(concept.classes))
+        kind = concept.classes[0]
+        managed = series.records_of(frozenset(concept.classes))
+        direct = {record.day for record in managed if record.kind_token == kind}
+        records = tuple(
+            record if record.kind_token == kind else replace(record, reminded=True)
+            for record in managed
+            if record.kind_token == kind or record.day not in direct
+        )
         if not records:
             continue
-        kind, lane = concept.classes[0], records[0].lane
+        lane = records[0].lane
         reading = kind_reading(records, lanes[lane], rulers)
         found[kind] = Recurrence(kind_token=kind, lane=lane, days=reading.days, intervals=reading.intervals)
     return MappingProxyType(found)

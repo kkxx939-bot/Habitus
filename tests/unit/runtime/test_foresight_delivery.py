@@ -1140,8 +1140,8 @@ def test_a_member_takes_over_when_its_basis_is_past_its_deadline(tmp_path) -> No
 
 
 def test_a_waiting_request_withdrawn_because_its_node_left_use_no_longer_counts_as_said_today(tmp_path) -> None:
-    """丙一阶段 D：「待取」之后节点退出在用、请求撤下（「已停用」），话没对人说出口——不再算今天说过，不替还在用的上级压
-    "上下级已说"。说出口的照算。"""
+    """丙一阶段 D：「待取」之后节点退出在用、请求撤下（「已停用」），话没对人说出口——不再算今天说过（不占名额、同类）。
+    说出口的照算。"""
 
     ledger = ForesightLedgerStore(tmp_path / "ledger")
     now = DAY0.replace(hour=12)

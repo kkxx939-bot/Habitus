@@ -5,9 +5,8 @@
 归约盖 ``reminded`` 的查法、提醒出口的可取清单与宿主来取。预期直接写进账本（形成预期那一半的端到端在
 ``test_bookkeeping.py::test_c8``）；账的级用账上的流水 + 单元历史快照垫到提醒档（``World.earn``）；宿主活着由出口的 ``claim`` 定。
 
-改动前（``780e298``）"他做没做这件事"按编号完全相等认、没有"上下级已说""已停用"：C16、C18、C19、C20、C22、C24、C26 与
-"不在用的类建日子预期"在旧代码上应当失败；C17、C21、C23、C25、C27 是"反过来不认 / 范围不重叠 / 兄弟 / 账不互相当先验 /
-一拍用开头那一份"的守门，旧代码上本来就成立。
+2026-11-19 按裁定 105 改写：下级的记录对上级是"不知道"——结算记中性（C16）、递送这一次不说（C18）；上下级之间不再互相避让，
+原来的 C20、C22、C24（「上下级已说」）删掉，新规则的递送场景在 ``tests/unit/runtime/test_foresight_parent_child_delivery.py``。
 """
 
 from __future__ import annotations
@@ -63,18 +62,20 @@ def _ready(world: World, *kinds: str) -> None:
     world.host_alive(at(DAY, 8))
 
 
-# ── 结算：上级的预期认下级的记录；下级的不认上级的（C16、C17）──────────────────────
+# ── 结算：上级的预期遇到下级的记录不记命中也不记漏做；下级的不认上级的（C16、C17）──────────
 
 
-def test_c16_a_parent_expectation_is_done_by_a_record_on_its_child(tmp_path: Path) -> None:
+def test_c16_a_record_on_the_child_is_neither_a_hit_nor_a_miss_for_the_parent_expectation(tmp_path: Path) -> None:
     world = World(tmp_path)
     world.use(WRITE_DOC, WEEKLY)
-    world.ledger.record_expectation(expectation("doc", WRITE_DOC, at(DAY, 9)))
-    uri = world.record(WEEKLY, at(DAY, 9, 20))
+    item = expectation("doc", WRITE_DOC, at(DAY, 9))
+    world.ledger.record_expectation(item)
+    world.record(WEEKLY, at(DAY, 9, 20))
     world.set_clock(at(DAY + timedelta(days=1), 4))
     world.settle(DAY)
     (settled,) = world.ledger.settlements_on(DAY)
-    assert (settled.occurrence_uri, settled.outcome) == (uri, "准时")
+    (fact,) = world.ledger.facts_of(item.account)
+    assert (settled.occurrence_uri, settled.outcome, fact.strength) == (None, "过期待决", 0.0)
 
 
 def test_c17_a_child_expectation_is_not_done_by_its_sibling_or_its_parent(tmp_path: Path) -> None:
@@ -111,19 +112,7 @@ def test_c19_a_record_on_the_child_after_the_parent_reminder_counts_as_reminded(
     assert (lookup(WEEKLY, at(DAY, 9, 30)), lookup(WRITE_DOC, at(DAY, 9, 30))) == (True, True)
 
 
-# ── 上级和下级只说一条（C20–C24、D4「上下级已说」）────────────────────────────────
-
-
-def test_c20_d4_parent_and_child_due_in_the_same_tick_with_overlapping_ranges_only_the_child_is_said(
-    tmp_path: Path,
-) -> None:
-    world = World(tmp_path)
-    _ready(world, WRITE_DOC, WEEKLY)
-    world.ledger.record_expectation(expectation("doc", WRITE_DOC, at(DAY, 9)))
-    world.ledger.record_expectation(expectation("weekly", WEEKLY, at(DAY, 9)))
-    _ticks(world, at(DAY, 9, 15), at(DAY, 9, 45))
-    made = world.deliveries(DAY)
-    assert (made["weekly"][-1], made["doc"][-1]) == ("待取", "上下级已说")
+# ── 范围不重叠、兄弟：各说各的（C21、C23）────────────────────────────────────────
 
 
 def test_c21_parent_said_in_the_morning_does_not_block_the_child_in_the_evening_without_overlap(
@@ -139,15 +128,6 @@ def test_c21_parent_said_in_the_morning_does_not_block_the_child_in_the_evening_
     assert world.deliveries(DAY)["weekly"][-1] == "待取"
 
 
-def test_c22_d4_child_said_in_the_morning_blocks_the_parent_in_the_afternoon_with_overlap(tmp_path: Path) -> None:
-    world = World(tmp_path)
-    _ready(world, WRITE_DOC, WEEKLY)
-    spoken(world, expectation("weekly", WEEKLY, at(DAY, 9), deadline_minutes=180), at(DAY, 9, 40))
-    world.ledger.record_expectation(_day_expectation("doc-day", WRITE_DOC, (14 * 60, 15 * 60)))
-    _ticks(world, at(DAY, 14), at(DAY, 15, 15))
-    assert world.deliveries(DAY)["doc-day"][-1] == "上下级已说"
-
-
 def test_c23_a_sibling_said_in_the_morning_does_not_block(tmp_path: Path) -> None:
     """守门：兄弟不是上下级（旧代码上本来就成立）。"""
 
@@ -157,19 +137,6 @@ def test_c23_a_sibling_said_in_the_morning_does_not_block(tmp_path: Path) -> Non
     world.ledger.record_expectation(_day_expectation("plan-day", PLAN, (14 * 60, 15 * 60)))
     _ticks(world, at(DAY, 14), at(DAY, 15, 15))
     assert world.deliveries(DAY)["plan-day"][-1] == "待取"
-
-
-def test_c24_d4_first_and_third_levels_due_together_with_the_second_idle_only_the_third_is_said(
-    tmp_path: Path,
-) -> None:
-    world = World(tmp_path)
-    grown = world.grow(WEEKLY, "写需求书", written=at(DAY - timedelta(days=30), 9))
-    _ready(world, WRITE_DOC, grown)
-    world.ledger.record_expectation(expectation("doc", WRITE_DOC, at(DAY, 9)))
-    world.ledger.record_expectation(expectation("third", grown, at(DAY, 9)))
-    _ticks(world, at(DAY, 9, 15), at(DAY, 9, 45))
-    made = world.deliveries(DAY)
-    assert (made["third"][-1], made["doc"][-1]) == ("待取", "上下级已说")
 
 
 # ── 账：上级和下级两本账，不互相当先验（C25）────────────────────────────────────

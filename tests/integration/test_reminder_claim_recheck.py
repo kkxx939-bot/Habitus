@@ -351,7 +351,7 @@ def test_q19_3_a_sealed_row_on_the_tree_keeps_the_reminder_back(world: World) ->
 
 
 def test_q19_4_doing_the_finer_kind_counts_for_its_parent(world: World) -> None:
-    """Q19-4：E 是上级（记指标），他做的是下级（记体重）：下级算上级做了，不给。"""
+    """Q19-4：E 是上级（记指标），他做的是下级（记体重）：对上级是"不知道"，这一次不给（裁定 105 第 2 条）。"""
 
     world.use("session", WEIGHT)
     awaiting(world, identity="metric", kind=METRIC)

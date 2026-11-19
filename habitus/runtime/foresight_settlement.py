@@ -51,6 +51,7 @@ from habitus.foresight.ledger import (
     Response,
     Settlement,
     antecedent_holds_when_settling,
+    below_done,
     omissions,
     rule_overdue,
     settle,
@@ -316,7 +317,6 @@ class SettlementStage:
                 rows_between(cache, item.deadline.date(), last_closed),
                 before=before,
                 ruled_at=now,
-                kinds=self._kinds,
             )
             if ruling is not None:
                 self._append(catch_up_fact(item, ruling, table))
@@ -358,12 +358,13 @@ class SettlementStage:
         return settlement_fact(item, result, known=known, earlier_offsets=earlier)
 
     def _unobserved(self, item: Expectation, cache: DayIndexCache) -> bool:
-        """这条说中的范围里有没有没在看的：上游报的空白，或一整天一条记录都没有的日子——后者等同上游报了全天「未观测」
-        （裁定 89 第 2 条；两条 lane 同一个规矩，用户 2026-11-16）。递送那一拍不看这一条（裁定 68 第 2 条：白天还不知道这天会不会空着）。"""
+        """这条说中的范围里有没有说不清做没做的：上游报的空白，或一整天一条记录都没有的日子（等同上游报了全天「未观测」，裁定 89
+        第 2 条；两条 lane 同一个规矩，用户 2026-11-16），或它的下级做了（对它是"不知道"，裁定 105 第 2 条）。递送那一拍不看空白（裁定 68）。"""
 
-        if cache.has_gap(item.observed_from, item.deadline):
+        start, end = item.observed_from, item.deadline
+        if cache.has_gap(start, end) or cache.silent_within(start, end):
             return True
-        return cache.silent_within(item.observed_from, item.deadline)
+        return below_done(item, rows_between(cache, start.date(), end.date()), kinds=self._kinds)
 
     def _said_done(self, asked: Asked) -> bool:
         """说给他的那句提醒（这条自己的，或单元一并决定时依据那条的）他回了「已做」（裁定 91 第 3 条②）。"""
@@ -387,7 +388,7 @@ class SettlementStage:
 
     def _settle(self, item: Expectation, cache: DayIndexCache, asked: Asked, now: datetime) -> Settlement:
         rows = rows_between(cache, item.observed_from.date(), item.deadline.date())
-        return settle(item, rows, spoken_at=asked.spoken_at, settled_at=now, kinds=self._kinds)
+        return settle(item, rows, spoken_at=asked.spoken_at, settled_at=now)
 
     def resettle(self, days: Iterable[date]) -> int:
         """修了 bug 之后：用当前代码把这些日子里已结的预期重结一遍，和账上现有的不一样的追加改判（机会的时刻不变，写下的时刻取
@@ -521,7 +522,7 @@ class SettlementStage:
                 for item in self.ledger.expectations_on(earlier)
                 if item.deadline.date() >= day
             ]
-            items = omissions(rows, covering, noticed_at=now, kinds=self._kinds)
+            items = omissions(rows, covering, noticed_at=now)
             for omission in items:
                 self.ledger.record_omission(omission)
             watermark = self.ledger.mark_scanned(day, start=start)

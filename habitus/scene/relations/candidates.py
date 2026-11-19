@@ -108,7 +108,7 @@ class RelationCandidates:
 
         line = self.tests.line
         if self.tests.concepts.related(key.antecedent, key.consequent):
-            # 上下级之间不量关系（裁定 101 第 8 条）：之前一代留下的这一对的行不再带着，由状态折叠清掉
+            # 上下级之间不量关系（裁定 105 第 5 条）：之前一代留下的这一对的行不再带着，由状态折叠清掉
             return False
         if key.segment in (Segment.HIGH_STATE, Segment.LOW_STATE) and key.antecedent in line.concepts():
             if not self.tests.episodes(key.antecedent, key.segment):
@@ -127,8 +127,8 @@ class RelationCandidates:
 
 
 def _circular(concepts: ConceptSet, condition: Condition, consequent: str) -> bool:
-    """ "B 刚出现过"不是调节：条件里的那一类就是后果、或是后果的上级 / 下级（读的是同一批记录）时，它说的是 B 自己扎堆，
-    不是 A 被什么左右。"""
+    """ "B 刚出现过"不是调节：条件里的那一类就是后果、或是后果的上级 / 下级（上下级之间不量关系，裁定 105 第 5 条）时，
+    它说的是 B 自己扎堆，不是 A 被什么左右。"""
 
     return condition.template is Template.TIMELINE and (
         condition.value == consequent or concepts.related(condition.value, consequent)

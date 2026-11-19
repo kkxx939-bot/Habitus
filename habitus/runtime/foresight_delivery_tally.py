@@ -1,5 +1,5 @@
 """递送那一拍的计数（``runtime.foresight_delivery``）：决定了几条、说了几条、今天说过几次、今天说过哪几条预期。"同类已说"看
-它们的类，"上下级已说"看它们的类与说中的范围（裁定 101 第 8 条）；今天说过的从账本读（``spoken_today``），跨拍、重启都在。
+它们的类；今天说过的从账本读（``spoken_today``），跨拍、重启都在。
 宿主没取走的不算说过（裁定 104 第 4 条）：记了「宿主没取」的，和记在最晚时限那一刻或之后、出口不给取的「待取」。
 """
 
@@ -8,8 +8,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 
-from habitus.foresight.delivery import related_spoken
-from habitus.foresight.hierarchy import KindHierarchy
 from habitus.foresight.ledger import (
     AWAITING_HOST,
     BASIS_WITHDRAWN,
@@ -31,7 +29,7 @@ def _claimable(delivery: Delivery, item: Expectation | None) -> bool:
 
 
 def spoken_today(ledger: ForesightLedgerStore, now: datetime) -> dict[str, Expectation | None]:
-    """今天（按决定的日子）说过的那几条预期（条数就是说过几次；"同类已说"看它们的类，"上下级已说"看它们的类与说中的范围，
+    """今天（按决定的日子）说过的那几条预期（条数就是说过几次；"同类已说"看它们的类，
     读的是账本，跨拍、重启都在）——「待取」也算（话已经写好、等着问出口），同一条预期「待取」之后又来
     「说了」只算一次；宿主取不走、没取走的不算（裁定 104 第 4 条）。说出口的递送挂在预期所在的日子下：今天决定的，那条预期还没结
     （结算在它最晚时限那天定稿之后），所以只看还没结完的日子。"""
@@ -40,8 +38,7 @@ def spoken_today(ledger: ForesightLedgerStore, now: datetime) -> dict[str, Expec
     counted: dict[str, Expectation | None] = {}
     for day in ledger.open_days():
         made = ledger.deliveries_on(day)
-        # 「待取」之后撤下的（「已停用」）、宿主一直没取的（「宿主没取」）没对人说出口：不再算今天说过（不然「已停用」的会替还在用的
-        # 上级压掉"上下级已说"）
+        # 「待取」之后撤下的（「已停用」）、宿主一直没取的（「宿主没取」）没对人说出口：不再算今天说过
         unsaid = {item.expectation_id for item in made if item.reason in _NOT_SAID_AFTER_ALL}
         candidates = [
             item for item in made if item.spoken or (item.reason == AWAITING_HOST and item.expectation_id not in unsaid)
@@ -98,27 +95,25 @@ class Tally:
             self.spoken_today = len(self.counted)
             self.spoken_kinds = {found.kind_token for found in self.counted.values() if found is not None}
         if delivery.spoken or (delivery.reason == AWAITING_HOST and _claimable(delivery, item)):
-            self.spoken_today += 1  # 取得走的「待取」也占名额、也算"同类已说""上下级已说"
+            self.spoken_today += 1  # 取得走的「待取」也占名额、也算"同类已说"
             self.spoken_kinds.add(item.kind_token)
             self.counted[delivery.expectation_id] = item
 
-    def spoken_for(self, expectation_id: str) -> tuple[int, frozenset[str], tuple[Expectation, ...]]:
-        """这一条决定时看到的「今天说过几次、说过哪些类、说过哪几条」：接手的成员不算它那一刻里没说成的几条（它们一句也没说出口）。"""
+    def spoken_for(self, expectation_id: str) -> tuple[int, frozenset[str]]:
+        """这一条决定时看到的「今天说过几次、说过哪些类」：接手的成员不算它那一刻里没说成的几条（它们一句也没说出口）。"""
 
         skip = self.same_moment.get(expectation_id)
-        rest = {key: item for key, item in self.counted.items() if not skip or key not in skip}
-        items = tuple(item for item in rest.values() if item is not None)
         if not skip:
-            return self.spoken_today, frozenset(self.spoken_kinds), items
-        return self.spoken_today - (len(self.counted) - len(rest)), frozenset(item.kind_token for item in items), items
+            return self.spoken_today, frozenset(self.spoken_kinds)
+        rest = {key: item for key, item in self.counted.items() if key not in skip}
+        kinds = frozenset(item.kind_token for item in rest.values() if item is not None)
+        return self.spoken_today - (len(self.counted) - len(rest)), kinds
 
-    def room_for(self, item: Expectation, daily_cap: int, kinds: KindHierarchy) -> bool:
-        """名额没满、同一类今天还没说过、今天也没对它的上级或下级在重叠的范围里说过（模型只问这一拍真要开口的）。"""
+    def room_for(self, item: Expectation, daily_cap: int) -> bool:
+        """名额没满、同一类今天还没说过（模型只问这一拍真要开口的）。"""
 
-        spoken_today, spoken_kinds, spoken = self.spoken_for(item.expectation_id)
-        return (
-            spoken_today < daily_cap and item.kind_token not in spoken_kinds and not related_spoken(item, spoken, kinds)
-        )
+        spoken_today, spoken_kinds = self.spoken_for(item.expectation_id)
+        return spoken_today < daily_cap and item.kind_token not in spoken_kinds
 
 
 __all__ = ["Tally", "spoken_today"]

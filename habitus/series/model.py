@@ -197,8 +197,7 @@ class EventSeries:
         return datetime.combine(self.cutoff, time(), tzinfo=moment.tzinfo)
 
     def records_of(self, kind_tokens: Collection[str]) -> tuple[SeriesRecord, ...]:
-        """几类合起来的时间线：编号在 ``kind_tokens`` 里（已转正的类编号）的记录按开始时刻排好。一个在用节点的记录范围是它自己
-        加全部下级（裁定 101 第 8 条）。待定的不在任何一类里（裁定 59）。"""
+        """几类合起来的时间线：编号在 ``kind_tokens`` 里（已转正的类编号）的记录按开始时刻排好。待定的不在任何一类里（裁定 59）。"""
 
         return tuple(record for record in self.records if record.classified and record.kind_token in kind_tokens)
 

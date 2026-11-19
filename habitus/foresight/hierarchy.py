@@ -1,6 +1,6 @@
-"""词表上下级在预测层的那一份（裁定 101 第 8 条）：预期、账、单元仍按节点的编号记，一个节点一本账；凡是问
-"他做没做这件事"的地方，认这条预期的节点自己和它全部活着的下级的记录（``family``）——反过来不认：做了上级那件宽的事，不算
-做到了细的。上级和下级在同一件事上只说最细的那一条（``related``、``depth``），节点不在用以后不再说它（``active``）。
+"""词表上下级在预测层的那一份（裁定 105）：预期、账、单元按节点的编号记，一个节点一本账，攒证据只数直接选中它的记录。
+他做了下级那件事的那一次，对上级是"不知道"——不算做了，也不算没做：预期到期时不记命中也不记漏做（结算按"窗里有观测空白"
+那条记中性），到点要提醒上级时这一次不说（``family``）。上下级之间不互相借记录，也不互相避让；节点不在用以后不再说它（``active``）。
 
 foresight 不认识词表包：这一份由组合根从词表状态装出来交进来（``runtime.scene_vocabulary.kind_hierarchy``），每一拍开头取一份、
 整拍用同一份。不给就是"没有上下级、全都在用"（``FLAT``）。
@@ -27,29 +27,20 @@ class KindHierarchy:
         object.__setattr__(self, "below", MappingProxyType(below))
 
     def family(self, kind_token: str) -> frozenset[str]:
-        """算"这个节点的事做了"的编号：它自己加全部下级。"""
+        """这个节点自己加全部下级：其中下级的记录对它是"不知道"（不算做了、也不算没做）。"""
 
         return frozenset({kind_token}) | self.below.get(kind_token, frozenset())
 
     def counted_for(self, kind_token: str) -> frozenset[str]:
-        """一条挂在这个编号上的记录算"做了"给哪些节点：它自己加它的每一个上级（``family`` 的反面）。"""
+        """一条挂在这个编号上的记录涉及哪些节点：它自己（做了）加它的每一个上级（不知道）——``family`` 的反面。"""
 
         return frozenset({kind_token}) | frozenset(kind for kind, items in self.below.items() if kind_token in items)
 
     def done(self, kind_tokens: Iterable[str]) -> frozenset[str]:
-        """这几条记录（的编号）算"做了"的全部节点：每一条自己加它的每一个上级。"""
+        """这几条记录（的编号）涉及的全部节点：每一条自己加它的每一个上级（"今天做过没有"、"表那晚之后再出现过没有"：
+        做了的、说不清做没做的都不再当"没做"）。"""
 
         return frozenset(kind for token in kind_tokens for kind in self.counted_for(token))
-
-    def related(self, first: str, second: str) -> bool:
-        """一个是另一个的上级（同一个不算）。"""
-
-        return first != second and (second in self.family(first) or first in self.family(second))
-
-    def depth(self, kind_token: str) -> int:
-        """它有几个上级（层数减一）：同一拍里细的先处理，按它从大到小排。"""
-
-        return sum(1 for items in self.below.values() if kind_token in items)
 
     def active(self, kind_token: str) -> bool:
         return self.in_use is None or kind_token in self.in_use

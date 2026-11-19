@@ -290,11 +290,11 @@ class Controls:
         if segment is Segment.CHAIN and pairing is Pairing.SAME_DAY:
             # 同一天别的事做完的时刻（同一槽做完的几件算一个时刻）。做完的那件本身是 B 的不算：它那一类之后暂时不会再来，
             # 对照里的 B 会被压低（实验组的前因不是 B，没有这一层）——两边都得是"一件不是 B 的事做完、它那一类暂时不再来"。
-            # 被提醒才做的 B 一样是 B 做完了（它当后果看不到，当"做完了一件 B"照算）：按全部记号排，不按 ``outcomes``
+            # 被提醒才做的 B 也按做完了一件 B 排（全部记号，不按 ``outcomes``）；前因下级做完的那一刻对前因是"不知道"，也不取
             start_of_day = line.day_start(day)
             itself = {
                 mark.uri
-                for mark in line.marks.get(consequent, [])
+                for mark in (*line.marks.get(consequent, []), *line.shadows.get(antecedent, []))
                 if start_of_day <= mark.slot < start_of_day + line.slots_per_day
             }
             ending: dict[int, set[str]] = {}
@@ -354,19 +354,19 @@ class Controls:
         )
 
     def _days_with(self, antecedent: str) -> frozenset[date]:
-        """A 来过的日子。"""
+        """A 来过、或说不清来没来（A 的下级来过，裁定 105 第 2 条）的日子：都不是"没做 A"的对照。"""
 
         if antecedent not in self._antecedent_days:
-            self._antecedent_days[antecedent] = frozenset(mark.day for mark in self.line.marks.get(antecedent, []))
+            self._antecedent_days[antecedent] = frozenset(mark.day for mark in self.line.touched(antecedent))
         return self._antecedent_days[antecedent]
 
     def _antecedent_near(self, antecedent: str, day: date, slot: int) -> bool:
-        """那天 ``slot`` 前后 W 槽内有没有 A（A 占着的那段与 ``[slot − W, slot + W]`` 有交集）。"""
+        """那天 ``slot`` 前后 W 槽内有没有 A 或 A 的下级（占着的那段与 ``[slot − W, slot + W]`` 有交集）。"""
 
         moment = self.line.day_start(day) + slot
         return any(
             mark.slot <= moment + self.window and mark.end >= moment - self.window
-            for mark in self.line.marks.get(antecedent, [])
+            for mark in self.line.touched(antecedent)
             if mark.day == day
         )
 

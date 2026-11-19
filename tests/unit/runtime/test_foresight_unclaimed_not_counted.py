@@ -1,6 +1,6 @@
 """宿主没取走的不算说过（A3；裁定 96 第 9、10 条）：
 
-「待取」记在最晚时限那一刻或之后的（出口到最晚时限起不给取），和记了「宿主没取」的，都不算今天说过，不占当天的名额、同类和上下级。
+「待取」记在最晚时限那一刻或之后的（出口到最晚时限起不给取），和记了「宿主没取」的，都不算今天说过，不占当天的名额和同类。
 还在等宿主、或已被宿主取走还没到最晚时限的，照旧算说过。「待取」之后记了「已发生」「依据失效」的，这次不动，仍占名额。
 
 入口是 ``DeliveryStage.run_once``，每 15 分钟一拍；重启用新建的 ``DeliveryStage`` 读同一份账本。断言落在账上每条预期的递送原因和
@@ -22,6 +22,17 @@ from habitus.foresight.ledger import Delivery, Expectation
 from habitus.foresight.opportunities import OpportunityTable, RelationOpportunities, TreeReading
 from habitus.runtime.foresight_delivery import DeliveryStage, JudgeMaterials
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
+from tests.unit.runtime.delivery_ticks import (
+    DAY,
+    MIDNIGHT,
+    book,
+    clock,
+    listed,
+    made,
+    said,
+    site,
+    walk,
+)
 from tests.unit.runtime.test_foresight_delivery import (
     DAY0,
     EVIDENCE,
@@ -33,17 +44,6 @@ from tests.unit.runtime.test_foresight_delivery import (
     stage,
 )
 from tests.unit.runtime.test_foresight_delivery_handover import moment, reasons
-from tests.unit.runtime.test_foresight_finer_first_across_ticks import (
-    DAY,
-    MIDNIGHT,
-    book,
-    clock,
-    listed,
-    made,
-    said,
-    site,
-    walk,
-)
 
 E_KIND, X_KIND = "s-k0301", "s-k0302"
 RELATION = "rel-x"
@@ -101,7 +101,7 @@ def table_of(*relations: RelationOpportunities) -> OpportunityTable:
     return OpportunityTable("session", DAY, DAY, 15, 3, relations, ())
 
 
-# ── 复现：取不走的「待取」、「宿主没取」不占名额、同类、上下级 ────────────────
+# ── 复现：取不走的「待取」、「宿主没取」不占名额、同类 ────────────────
 
 
 def test_a3_1_a_request_nobody_could_take_leaves_the_cap_free_for_a_later_one(tmp_path: Path) -> None:
@@ -142,15 +142,6 @@ def test_a3_4_the_same_kind_at_another_moment_is_not_silenced(tmp_path: Path) ->
     run, ledger, _outlet = site(tmp_path, basis_item(), later)
     walk(run, clock(9, 45), clock(11, 45), kinds=FLAT)
     assert book(ledger, "e", "y") == {"e": UNCLAIMED, "y": [("等时窗末", "11:30"), ("待取", "11:45")]}
-
-
-def test_a3_5_a_parent_nobody_could_take_does_not_silence_its_child(tmp_path: Path) -> None:
-    """A3-5：E 是上级，下级 10:45 到时窗末：E 没说成，不算「上下级已说」，下级记「待取」。"""
-
-    hierarchy = KindHierarchy({E_KIND: frozenset({X_KIND})})
-    run, ledger, _outlet = site(tmp_path, basis_item(), other_item((clock(10, 30), clock(10, 40))))
-    walk(run, clock(9, 45), clock(10, 45), kinds=hierarchy)
-    assert book(ledger, "e", "x") == {"e": UNCLAIMED, "x": [("等时窗末", "10:30"), ("待取", "10:45")]}
 
 
 def test_a3_6_a_request_that_could_be_taken_but_never_was_stops_counting_once_it_is_closed(tmp_path: Path) -> None:

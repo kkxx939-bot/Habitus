@@ -281,18 +281,17 @@ NESTED = ConceptSet(
 )
 
 
-def test_a_record_of_a_child_is_the_first_time_of_its_parent() -> None:
-    """B 节"第一次"的定义：下级的记录算上级的第一次：第 10 天第一次有下级的记录，上级自己的记录第 30 天才有。第 20 天那次前因的次日已经在第一次之后，
-    上级没来就是"没来"，这一层在。"""
+def test_a_record_of_a_child_is_not_the_first_time_of_its_parent() -> None:
+    """裁定 105：下级的记录对上级是"不知道"，不算上级的第一次。第 10 天第一次有下级的记录，上级自己的记录第 30 天才有；
+    第 20 天那次前因的次日仍在上级第一次之前，对上级是"不知道"，这一层不存在。"""
 
     child = record(day_of(10), 14, 0, "写函数")
     series = _series((20,), range(FIRST, DAYS), consequent_title="开发", extra=(child,))
-    (stratum,) = _tests(series, NESTED).strata(key(DISCUSS, PARENT.name, Segment.NEXT_DAY))
-    assert stratum.treated == 0
+    assert _tests(series, NESTED).strata(key(DISCUSS, PARENT.name, Segment.NEXT_DAY)) == ()
 
 
 def test_days_before_the_first_record_of_a_child_are_unknown_for_its_parent() -> None:
-    """B 节"第一次"的定义：下级的记录算上级的第一次，在它之前的日子对上级仍是"不知道"：第 5 天那次前因的次日在第 10 天之前，这一层不存在。"""
+    """下级更早出现也不改变：第 5 天那次前因的次日在上级第一次之前，这一层不存在。"""
 
     child = record(day_of(10), 14, 0, "写函数")
     series = _series((5,), range(FIRST, DAYS), consequent_title="开发", extra=(child,))

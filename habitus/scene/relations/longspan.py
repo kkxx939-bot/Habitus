@@ -57,7 +57,11 @@ def episodes(
     alpha: float,
     visits: Sequence[Visit] = (),
 ) -> tuple[Episode, ...]:
-    """这个前因在这一种标志下的全部状态。``visits`` 是这个前因的链日（久别重来用，与块长同一口径）。"""
+    """这个前因在这一种标志下的全部状态。``visits`` 是这个前因的链日（久别重来用，与块长同一口径）。
+
+    前因的下级来过的日子对它是"不知道"（裁定 105 第 2 条）：不进它的日序列（高位、低位按剩下的日子切）；第一次出现之前
+    有这样的日子，说不清哪天是第一次，不立「第一次出现」。久别重来的截尾由 ``visits`` 带进来，只有下级来过的那天不当重来的起点。
+    量的时候这些日子也不进（``evaluation`` 交 ``measure_of`` 的 ``known``）。"""
 
     days = line.days()
     if not days:
@@ -69,12 +73,15 @@ def episodes(
     seen = [day for day in days if counts[day]]
     if not seen:
         return ()
+    blind = {mark.day for mark in line.shadows.get(concept, [])}
     if segment is Segment.FIRST_SEEN:
         settle = max(first_seen[0], math.ceil(first_seen[1] * block_days))
         first = seen[0]
+        if any(day < first for day in blind):
+            return ()
         return (Episode(first, end),) if (first - days[0]).days >= settle else ()
     if segment is Segment.RETURN:
-        starts = _returns(visits, present=frozenset(days), alpha=alpha)
+        starts = [day for day in _returns(visits, present=frozenset(days), alpha=alpha) if day not in blind - set(seen)]
         bounds = [*starts, end]
         found = []
         for start, following in zip(bounds, bounds[1:], strict=False):
@@ -86,7 +93,8 @@ def episodes(
             if inside:
                 found.append(Episode(start, max(inside) + timedelta(days=1)))
         return tuple(found)
-    return _states(days, counts, segment, minimum=max(1, math.ceil(block_days)))
+    known = [day for day in days if day not in blind]
+    return _states(known, counts, segment, minimum=max(1, math.ceil(block_days)))
 
 
 #: 各段量法的版本：判据一改就加一，状态里记着的旧版本那一段的行会被清掉（``state.fold``；26 号清单 3.5）。

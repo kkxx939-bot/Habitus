@@ -197,7 +197,10 @@ class RelationEvaluator:
             # 日历情境按维度取对照（``relations.calendar``，裁定 59 第 7 条）；模型写的情境仍和前后紧挨着的平常日子比
             measure = calendar_measure(line, key.consequent, *rule)
         elif key.segment.long:
-            measure = longspan.measure_of(line, key.consequent, self.tests.episodes(key.antecedent, key.segment))
+            # 前因下级来过的日子对前因是"不知道"：既不当状态日、也不当平常日子（裁定 105 第 2 条）
+            known = frozenset(line.days()) - {mark.day for mark in line.shadows.get(key.antecedent, [])}
+            episodes = self.tests.episodes(key.antecedent, key.segment)
+            measure = longspan.measure_of(line, key.consequent, episodes, known=known)
         elif key.condition:
             judges = [self.tests.condition_judge(key.antecedent, condition) for condition in key.conditions]
             # 每个条件各比一次、按最难过的那组读（裁定 63 第 1 条）；同一条链两道对照各分一次组、两道都显著才算（裁定 95 第 4 条）

@@ -1,6 +1,6 @@
 """词表口的实现：用基础词表的在用状态装出语义树要的 ``ClassCatalog``（裁定 20；裁定 101），读行为树上
 ``kind_token`` 的换算口（``series.model.KindResolution``：删掉的节点换成最近的活着的上级，裁定 101 第 7 条），以及预测层的上下级口
-（``foresight.hierarchy.KindHierarchyPort``：每个活着的词的全部下级、在用的词，裁定 101 第 8 条）。
+（``foresight.hierarchy.KindHierarchyPort``：每个活着的词的全部下级、在用的词，裁定 105）。
 
 scene、序列、预测层都不 import 词表状态，所以"在用状态怎么读成在用的词""编号怎么换算"住在组合根（occurrence 上的编号
 怎么分流归事件序列 ``series.reader``）。
@@ -67,7 +67,7 @@ def kind_resolution(store: BehaviorKindStore) -> Callable[[], Callable[[str], st
 
 
 def kind_hierarchy(store: BehaviorKindStore) -> KindHierarchyPort:
-    """这一支的上下级口（裁定 101 第 8 条）：每次调用读一次此刻的词表状态，给出每个活着的词的全部下级与在用的词。预测层每拍开头
+    """这一支的上下级口（裁定 105）：每次调用读一次此刻的词表状态，给出每个活着的词的全部下级与在用的词。预测层每拍开头
     取一份、整拍用同一份。"""
 
     def hierarchy() -> KindHierarchy:

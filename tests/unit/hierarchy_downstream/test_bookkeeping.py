@@ -1,5 +1,5 @@
-"""丙一"应当变"的记账一段（预期表 D1 与场景 C1–C9；共享说明 3.1、3.2）：一条记录算给它自己的概念与每一个在用上级的概念；
-上级和下级之间不量关系；下级增减改上级概念管的编号。
+"""丙一"应当变"的记账一段（预期表 D1 与场景 C1–C9；共享说明 3.1、3.2）：一条记录只算给它自己的概念，对每一个在用上级的
+概念是"不知道"（裁定 105，2026-11-19 改写 C1、C2、C4、C5、C8）；上级和下级之间不量关系；下级增减改上级概念管的编号。
 
 走换代的语义树一步（组合根装的 ``build_scene_nightly``，``site.World.generate``：同步词表 → 封口 → 时间线 → 关系），看它交出来的
 材料（概念集、时间线上的记号、复现）、关系表与命中记录。改动前（``780e298``）一个行为概念只管它自己那一个类、一条记录只给它自己的
@@ -43,6 +43,11 @@ def _marks(report: NightReport, identity: str) -> list[str]:
     return [mark.uri for mark in line.marks.get(identity, [])]
 
 
+def _shadows(report: NightReport, identity: str) -> list[str]:
+    line = _materials(report).timelines["session"]
+    return [mark.uri for mark in line.shadows.get(identity, [])]
+
+
 def _all_marked(report: NightReport) -> set[str]:
     return {mark.uri for marks in _materials(report).timelines["session"].marks.values() for mark in marks}
 
@@ -68,23 +73,25 @@ def test_d1_a_concept_in_use_manages_itself_and_every_live_descendant_itself_fir
 # ── C1–C4：一条记录给谁留记号 ─────────────────────────────────────────────
 
 
-def test_c1_a_record_on_a_child_marks_both_concepts_and_the_hit_keeps_its_own_id(tmp_path: Path) -> None:
+def test_c1_a_record_on_a_child_marks_only_the_child_and_is_unknown_for_the_parent(tmp_path: Path) -> None:
     world = World(tmp_path)
     world.use(WRITE_DOC, WEEKLY)
     uri = world.record(WEEKLY, at(DAY, 10))
     report = world.generate(NIGHT)
     assert uri in _marks(report, WEEKLY)
-    assert uri in _marks(report, WRITE_DOC)
+    assert (uri in _marks(report, WRITE_DOC), _shadows(report, WRITE_DOC)) == (False, [uri])
     (hit,) = world.scene.hits.read_day(DAY)
     assert (hit.occurrence_uri, hit.kind_token) == (uri, WEEKLY)
 
 
-def test_c2_a_record_on_an_idle_child_marks_only_the_parent_in_use(tmp_path: Path) -> None:
+def test_c2_a_record_on_an_idle_child_is_unknown_for_the_parent_in_use_too(tmp_path: Path) -> None:
+    """不分下级在不在用（裁定 105 第 3 条）。"""
+
     world = World(tmp_path)
     world.use(WRITE_DOC)
     uri = world.record(WEEKLY, at(DAY, 10))
     report = world.generate(NIGHT)
-    assert _marks(report, WRITE_DOC) == [uri]
+    assert (_marks(report, WRITE_DOC), _shadows(report, WRITE_DOC)) == ([], [uri])
     assert WEEKLY not in _materials(report).concepts.behaviors()
 
 
@@ -99,19 +106,19 @@ def test_c3_a_record_on_a_parent_is_not_counted_downwards(tmp_path: Path) -> Non
     assert _marks(report, WEEKLY) == []
 
 
-def test_c4_a_record_on_a_third_level_node_marks_the_first_level_in_use(tmp_path: Path) -> None:
+def test_c4_a_record_on_a_third_level_node_is_unknown_for_the_first_level_in_use(tmp_path: Path) -> None:
     world = World(tmp_path)
     world.use(WRITE_DOC)
     grown = world.grow(WEEKLY, "写需求书")
     uri = world.record(grown, at(DAY, 10))
     report = world.generate(NIGHT)
-    assert _marks(report, WRITE_DOC) == [uri]
+    assert (_marks(report, WRITE_DOC), _shadows(report, WRITE_DOC)) == ([], [uri])
 
 
-# ── C5：复现按直接记录加全部下级的记录算 ─────────────────────────────────────
+# ── C5：复现按直接记录算；只有下级的日子当截尾（不自然发生）的一天 ─────────────────────
 
 
-def test_c5_the_recurrence_of_a_parent_counts_its_own_and_its_descendants_records(tmp_path: Path) -> None:
+def test_c5_the_recurrence_of_a_parent_censors_the_days_with_only_its_descendants(tmp_path: Path) -> None:
     world = World(tmp_path)
     world.use(WRITE_DOC)
     grown = world.grow(WEEKLY, "写需求书")
@@ -120,10 +127,15 @@ def test_c5_the_recurrence_of_a_parent_counts_its_own_and_its_descendants_record
     world.record(grown, at(date(2026, 4, 6), 10))
     report = world.generate(date(2026, 4, 8))
     recurrence = _materials(report).recurrences[WRITE_DOC]
-    assert [item.day for item in recurrence.days] == [date(2026, 4, 1), date(2026, 4, 3), date(2026, 4, 6)]
+    assert [(item.day, item.natural) for item in recurrence.days] == [
+        (date(2026, 4, 1), 1),
+        (date(2026, 4, 3), 0),
+        (date(2026, 4, 6), 0),
+    ]
+    assert [item.censored for item in recurrence.intervals] == [True, True]
 
 
-# ── C6–C8：上下级之间不量关系；兄弟照常；下级的记录算上级来了 ─────────────────────────
+# ── C6–C8：上下级之间不量关系；兄弟照常；下级的记录对上级是"不知道" ─────────────────────
 
 
 STORY_DAYS = 60
@@ -184,8 +196,9 @@ def test_c7_siblings_form_relation_keys_as_before_even_with_their_parent_in_use(
     assert (WEEKLY, PLAN) in keys and (PLAN, WEEKLY) in keys
 
 
-def test_c8_after_query_then_weekly_the_parent_relation_counts_as_come(tmp_path: Path) -> None:
-    """查数据 → 写文档 成立（写周报不在用）；那一天他查了数据以后写了周报：时间线上写文档在那一刻有记号，事件预期结成做到了。"""
+def test_c8_after_query_then_weekly_the_parent_relation_is_neither_hit_nor_missed(tmp_path: Path) -> None:
+    """查数据 → 写文档 成立（写周报不在用）；那一天他查了数据以后写了周报：时间线上那一刻对写文档是"不知道"，事件预期
+    不记命中也不记漏做（中性）。"""
 
     world = World(tmp_path)
     world.use(WRITE_DOC, QUERY, MAIL, ACCOUNT)
@@ -213,8 +226,10 @@ def test_c8_after_query_then_weekly_the_parent_relation_counts_as_come(tmp_path:
     world.set_clock(at(night + timedelta(days=1), 4))
     world.settle(night)
     (settled,) = [item for item in world.ledger.settlements_on(night) if item.expectation_id == formed.expectation_id]
+    (fact,) = [item for item in world.ledger.facts_of(formed.account) if item.expectation_id == formed.expectation_id]
     later = world.generate(night + timedelta(days=1))
-    assert (settled.occurrence_uri, weekly in _marks(later, WRITE_DOC)) == (weekly, True)
+    assert (settled.occurrence_uri, fact.strength) == (None, 0.0)
+    assert (weekly in _marks(later, WRITE_DOC), weekly in _shadows(later, WRITE_DOC)) == (False, True)
 
 
 # ── C9：下级增减改上级概念管的编号，身份不变 ─────────────────────────────────────

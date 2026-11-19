@@ -150,7 +150,7 @@ def test_only_present_time_counts_gaps_and_the_cutoff_make_the_outcome_unknown()
 
 
 def test_a_concept_is_never_compared_with_itself_nor_with_its_parent_or_child() -> None:
-    """自己与自己不比；上下级也不比（下级的记录也记在上级的账上，读的是同一批记录，丙一 2026-11-15）；兄弟、不相干的照常比。"""
+    """自己与自己不比；上下级也不比（上下级之间不量关系，裁定 105 第 5 条）；兄弟、不相干的照常比。"""
 
     from dataclasses import replace
 

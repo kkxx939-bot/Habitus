@@ -6,8 +6,7 @@
 - **时窗开**：已停用（节点此刻不在用，裁定 101 第 8 条）→ 已发生 → 影子（档 0）→ 久别回来 → 过了时限 → 等时窗末
   （提醒档一律等到时窗末还没做再说，裁定 58 第 1 条）；
 - **时窗末**：已停用 → 已发生 → 说不准（窗里有「没读懂」，裁定 67 第 14 条）→ 影子（窗里被压回影子或关了账）→ 久别回来 →
-  前因不成立 → 模型判不像 → 同类已说 → 上下级已说（今天对它的上级或下级说过、说中的范围有重叠，只说最细的那一条）→
-  不可达（没有宿主活着，方案 32 第 3.3 条）→ 过了时限 → ``decide``；
+  前因不成立 → 模型判不像 → 同类已说 → 不可达（没有宿主活着，方案 32 第 3.3 条）→ 过了时限 → ``decide``；
 - **过了时限**（用户 11-10）：提醒档轮到决定时此刻已过最晚时限——不说（不记「待取」、不占名额、出口不收），终局，结算照常结它；
 - **等宿主**（最近一条是「待取」）：做了追加已发生；过了最晚时限还没人问出口追加宿主没取（终局，结算按没说过处理）；
   宿主还没取走、节点已不在用的撤下、追加已停用（``on_withdrawn``）。
@@ -18,8 +17,7 @@
 - **依据记了影子之后才来的输入**（``joined_after_shadow``，裁定 103）：单元记影子时只看了当时在场的那几条；之后才形成、
   并进它的成员没被看过，到了自己的时窗末按全部输入重算一次单元（组合根接手，同一刻只接手一条；依据只从这一拍到了自己时窗末的
   成员里选，别的成员只当输入）。记影子时就在场的成员不接手。
-- **上级让给还在等时窗末的下级**（``waits_for_finer``，裁定 104 第 3 条）：上级到了时窗末，下级还没到自己的时窗末、此刻能开口、
-  到时窗末之后的第一拍上级的提醒还来得及被宿主取走，上级这一拍不决定（不落账），等下级决定之后再决定。
+- **上下级不互相避让**（裁定 105 第 4 条）：上级和下级各凭自己的账开口；只有"他这回做了下级"对上级算已发生（``done_since``）。
 
 材料由组合根准备成 ``Circumstances``：每一项问到才算——走到那一步才读账、读树，前面的原因成立了后面的就不读。
 """
@@ -28,7 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from habitus.foresight.hierarchy import FLAT, KindHierarchy
 from habitus.foresight.ladder import Standing, decide
@@ -38,13 +36,11 @@ from habitus.foresight.ledger.model import (
     HOST_NEVER_CLAIMED,
     NODE_RETIRED,
     PAST_DEADLINE,
-    RELATED_SPOKEN,
     RETURNED,
     UNOBSERVED,
     Delivery,
     Expectation,
 )
-from habitus.foresight.ledger.settle import counts_as_done
 from habitus.foresight.model import Seen
 from habitus.foresight.units import UNIT
 
@@ -119,8 +115,6 @@ def on_closing(
     kept: bool | None,
     evidence: Sequence[str],
     spoken_kinds: Collection[str],
-    spoken: Collection[Expectation] = (),
-    kinds: KindHierarchy = FLAT,
     alive: bool,
     spoken_today: int,
     daily_cap: int,
@@ -131,7 +125,7 @@ def on_closing(
     一次；跨夜的时窗换了机会表，这里再判一次）。
 
     ``pending`` 是时窗开时记的那条「等时窗末」；``kept`` 是模型判像不像（没问是 None），``evidence`` 是模型指的那几条历史记录；
-    ``spoken_kinds`` 是今天已经说过的类、``spoken`` 是今天已经说过的那几条预期（宿主取得走的「待取」也算，裁定 104 第 4 条）；``kinds`` 是此刻的上下级；
+    ``spoken_kinds`` 是今天已经说过的类（宿主取得走的「待取」也算，裁定 104 第 4 条）；
     ``alive`` 是这一拍有没有宿主活着；``text`` 问到才写那句话。"""
 
     if not facts.active():
@@ -152,8 +146,6 @@ def on_closing(
         return Delivery(item.expectation_id, now, level, False, "模型判不像", 0.0, evidence=cited)
     if item.kind_token in spoken_kinds:
         return Delivery(item.expectation_id, now, level, False, "同类已说", 0.0, evidence=cited)
-    if related_spoken(item, spoken, kinds):
-        return Delivery(item.expectation_id, now, level, False, RELATED_SPOKEN, 0.0, evidence=cited)
     if not alive:
         return Delivery(item.expectation_id, now, level, False, UNREACHABLE, 0.0, evidence=cited)
     if now > item.deadline:  # 时窗末那一拍才轮到、已过了时限：不说，不记「待取」占名额
@@ -197,19 +189,6 @@ def on_withdrawn(
     if voiced:
         return None
     return Delivery(item.expectation_id, now, pending.level, False, BASIS_WITHDRAWN, 0.0)
-
-
-def related_spoken(item: Expectation, spoken: Iterable[Expectation], kinds: KindHierarchy) -> bool:
-    """今天说过（含「待取」）的预期里有这一条的上级或下级、而且两条说中的范围 ``(起算, 最晚时限]`` 有重叠（裁定 101 第 8 条）。
-    兄弟、不相干的不算；范围不重叠的各说各的。"""
-
-    start, end = item.observed_from.astimezone(UTC), item.deadline.astimezone(UTC)
-    return any(
-        kinds.related(other.kind_token, item.kind_token)
-        and other.observed_from.astimezone(UTC) < end
-        and start < other.deadline.astimezone(UTC)
-        for other in spoken
-    )
 
 
 def unsaid(
@@ -335,12 +314,15 @@ def hand_over(
 
 def done_since(item: Expectation, seen: Iterable[Seen], *, now: datetime, kinds: KindHierarchy = FLAT) -> bool:
     """递送判"这件事这回已经做了"（做了就不递：那句话说的事他刚做完）：这一拍读到的行（已封口的与还没封口、现场归上类的）里，
-    有到此刻为止开始、按结算同一个口径算做了的（``ledger.settle.counts_as_done``：说中的范围里——起算之后、最晚时限之前——
-    这个节点或它的下级、没放弃）。过了最晚时限才做的不算这一回做了：结算也不认它（结成过期待决）。"""
+    有到此刻为止开始、落在说中的范围里（起算之后、最晚时限之前）、没放弃的这个节点或它的下级。下级做了对它是"不知道"
+    （裁定 105 第 2 条）：这一次不说，结算也不记漏做。过了最晚时限才做的不算这一回做了：结算也不认它（结成过期待决）。"""
 
+    family = kinds.family(item.kind_token)
     return any(
         row.started_at <= now
-        and counts_as_done(item, row.kind_token, row.started_at, abandoned=row.abandoned, kinds=kinds)
+        and row.kind_token in family
+        and item.covers(row.started_at.astimezone(UTC))
+        and not row.abandoned
         for row in seen
     )
 
@@ -354,95 +336,9 @@ def reminded_before(
     kinds: KindHierarchy = FLAT,
 ) -> bool:
     """一条 ``started_at`` 开始、类为 ``kind_token`` 的记录，是不是被这条说出口的预期（``decided_at`` 决定说的）提醒过：决定在它
-    开始之前、它落在那条预期说中的范围里（起算之后、最晚时限之前），而且编号是那条预期的节点或它的下级（与结算同一个口径）。"""
+    开始之前、它落在那条预期说中的范围里（起算之后、最晚时限之前），而且编号是那条预期的节点或它的下级（结算只认节点自己；这里认下级是用户 2026-11-19 定的照旧，裁定 105 第 6 条）。"""
 
     return decided_at < started_at and item.covers(started_at) and kind_token in kinds.family(item.kind_token)
-
-
-def waits_for_finer(
-    item: Expectation,
-    others: Iterable[tuple[Expectation, Sequence[Delivery]]],
-    *,
-    since: datetime,
-    instant: datetime,
-    tick: timedelta,
-    deferred: Collection[str],
-    kinds: KindHierarchy,
-    speaks: Callable[[Expectation], bool],
-) -> bool:
-    """这条上级这一拍先不决定（裁定 104 第 3 条）：``others``（还没结的预期与它们的全部递送）里有它的下级，说中的范围重叠，
-    下级还没决定（没决定过且时窗终点晚于这一拍起点，或只记过「等时窗末」「单元已选」且这一拍还没越过终点，或这一拍被重读推迟——``deferred``，
-    不管它的时窗终点），下级最早决定的那一拍上级的提醒还取得走（``max(时窗终点, 此刻) + tick`` 严格早于上级的最晚时限，``tick`` 是
-    配置的拍长：时窗整段落在两拍之间的下级要到下一拍才决定；正好相等时上级那一拍写下的「待取」落在最晚时限那一刻，出口取不走），
-    而且下级此刻能开口（``speaks``，问到才算）。下级一决定就不再等。"""
-
-    start, end = item.observed_from.astimezone(UTC), item.deadline.astimezone(UTC)
-    for other, made in others:
-        if other.kind_token == item.kind_token or other.kind_token not in kinds.family(item.kind_token):
-            continue
-        close = other.window[1].astimezone(UTC)
-        undecided = (
-            close > since if not made else close >= instant and all(one.reason in (PENDING, UNIT) for one in made)
-        )
-        waiting = other.expectation_id in deferred or undecided
-        overlaps = other.observed_from.astimezone(UTC) < end and start < other.deadline.astimezone(UTC)
-        if waiting and overlaps and max(close, instant) + tick < end and speaks(other):
-            return True
-    return False
-
-
-def yield_along(closing: Iterable[Expectation], yielding: Collection[str], kinds: KindHierarchy) -> frozenset[str]:
-    """同一拍里让位要传递到底（裁定 104 第 3 条、裁定 101 第 8 条"只说最细的"）：``closing`` 这一拍到了时窗末的预期里，有下级
-    在让位集合里、说中的范围和它重叠的上级也跟着让，不看它自己等不等得到；G 看 P、P 看 C，一直补到不再变化。"""
-
-    items = list(closing)
-    found = set(yielding)
-    grew = True
-    while grew:
-        grew = False
-        for item in items:
-            if item.expectation_id in found:
-                continue
-            start, end = item.observed_from.astimezone(UTC), item.deadline.astimezone(UTC)
-            if any(
-                other.expectation_id in found
-                and other.kind_token != item.kind_token
-                and other.kind_token in kinds.family(item.kind_token)
-                and other.observed_from.astimezone(UTC) < end
-                and start < other.deadline.astimezone(UTC)
-                for other in items
-            ):
-                found.add(item.expectation_id)
-                grew = True
-    return frozenset(found)
-
-
-def finer_first(
-    closing: tuple[tuple[Expectation, Delivery], ...], kinds: KindHierarchy
-) -> tuple[tuple[Expectation, Delivery], ...]:
-    """同一拍里有上下级关系的那几条，细的（层数大的）先处理，说出去的就是最细的那一条，上级记「上下级已说」（裁定 101 第 8 条）。
-    只挪有上下级关系的：轮到一条时，先把排在它后面、它的下级都放到它前面（深的先）；其余先后照旧（模型排的、按时窗的）。"""
-
-    done: set[str] = set()
-    ordered: list[tuple[Expectation, Delivery]] = []
-    for item, pending in closing:
-        if item.expectation_id in done:
-            continue
-        below = sorted(
-            (
-                pair
-                for pair in closing
-                if pair[0].expectation_id not in done
-                and pair[0].kind_token != item.kind_token
-                and pair[0].kind_token in kinds.family(item.kind_token)
-            ),
-            key=lambda pair: -kinds.depth(pair[0].kind_token),
-        )
-        for pair in (*below, (item, pending)):
-            if pair[0].expectation_id not in done:
-                done.add(pair[0].expectation_id)
-                ordered.append(pair)
-    return tuple(ordered)
 
 
 __all__ = [
@@ -451,16 +347,12 @@ __all__ = [
     "Circumstances",
     "closes",
     "done_since",
-    "finer_first",
     "hand_over",
     "on_awaiting",
     "on_closing",
     "on_opening",
     "on_withdrawn",
     "quiet_after_absence",
-    "related_spoken",
     "reminded_before",
     "unsaid",
-    "waits_for_finer",
-    "yield_along",
 ]

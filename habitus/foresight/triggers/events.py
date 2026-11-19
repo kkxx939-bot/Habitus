@@ -10,7 +10,8 @@
 前两段里前因做完之后后果**已经开始过**的、后两段里后果在窗口里已经来过的**照建**（裁定 49：那是一次命中，不建账上就只剩
 没来的那几次），而且不退场；从前因做完那一刻（按天的两段：窗口第一天零点）起的发生都算这条说中的，结算照常给准时 / 早到。
 时窗从机会表里这条关系历史上命中的那几次取：按槽的两段取"做完之后多久"，按天的两段取"第几天、几点"；只命中过一次的不建
-（样本少就没有读数，裁定 47）。**前因还在进行中不建**：同一条链这一段只认最后所见已经过去至少一槽的链（未封口的判断最后所见
+（样本少就没有读数，裁定 47）。前因、后果都只认那一头的节点自己（管的编号第一个）：下级的记录不触发上级的关系，也不算上级的后果来了（裁定 105）。
+**前因还在进行中不建**：同一条链这一段只认最后所见已经过去至少一槽的链（未封口的判断最后所见
 就是此刻，开始那一拍就落在链段、窗锚在开始槽，是评审指出的毛病）。
 **退场**：此刻已经过了历史上最晚那一次（方案第三节），不再建——按槽的两段多宽限一槽（未封口的判断最多晚一拍才到场，
 紧挨着的链不然永远赶不上）。触发实例是前因那条链的锚的**开始时刻**，不是它的 URI：今天的前因还没封口时只有 ``unsealed:<开始时刻>``
@@ -80,13 +81,18 @@ def event_drafts(
     ).values():
         segment = Segment(members[0].segment)
         chains = chains_in_segment(
-            line, members[0].antecedent_classes, segment, today=moment.day, now_slot=now_slot, window=table.window_slots
+            line,
+            members[0].antecedent_classes[:1],
+            segment,
+            today=moment.day,
+            now_slot=now_slot,
+            window=table.window_slots,
         )
         for chain in chains:
             relation = most_specific(members, chain, line, window=table.window_slots)
             if relation is None or relation.status not in wanted:
                 continue
-            came = consequent_came(line, relation.consequent_classes, segment, chain, today=moment.day)
+            came = consequent_came(line, relation.consequent_classes[:1], segment, chain, today=moment.day)
             draft = _draft(relation, segment, chain, line, moment, table, came=came)
             if draft is not None:
                 found.append(draft)
@@ -118,7 +124,7 @@ def antecedents_of(
     for members in families(events).values():
         chains = chains_in_segment(
             line,
-            members[0].antecedent_classes,
+            members[0].antecedent_classes[:1],
             Segment(members[0].segment),
             today=moment.day,
             now_slot=now_slot,

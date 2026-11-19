@@ -5,11 +5,13 @@
 
 每个行为概念在时间线上有两种记号：
 
-- **命中**：记录的类编号就是那个行为概念，或在那个行为概念管的编号里（下级的记录也记在在用的上级账上，裁定 101 第 8 条：
-  一条记录给它自己的概念和每一个在用上级的概念各留一个记号，``ConceptSet.concepts_for``）；
-- **看不到**：被提醒过的那一次当后果（见下），以及这个概念第一次自然发生那天之前人在场的槽（下级的记录算，被提醒才做的不算，
-  第一次那天起照常量；从没自然发生过的，人在场的槽全算；裁定 104 第 1 条）。窗口里有"看不到"、又没有命中的，这一次的结果算未知，
+- **命中**：记录的类编号就是那个行为概念（一条记录只算给它选中的那个词，裁定 105）；
+- **看不到**：被提醒过的那一次当后果（见下）；下级的记录开始的那一槽（对每一个在用上级是"不知道"：不算做了、也不算没做，
+  裁定 105 第 2 条）；以及这个概念第一次自然发生那天之前人在场的槽（只数直接的记录，被提醒才做的不算，第一次那天起照常量；
+  从没自然发生过的，人在场的槽全算；裁定 104 第 1 条）。窗口里有"看不到"、又没有命中的，这一次的结果算未知，
   两边都不计（用户 09-27"没看到就不算"）。
+- **下级的记号**（``shadows``）：上级当前因时，下级出现的那一刻、那一天不是"没做上级"——对照不取它们，长跨度的日序列
+  拿掉这些日子，久别把它们当截尾（裁定 105 第 2 条）。
 
 **被提醒过的记录**（行为树的 ``reminded``，裁定 54）：语义树量的是"他自然有多规律"，被系统提醒之后才做的不算。这条记录照样
 在时间线上（``marks``：当前因、合链、算人在场都照常），当**后果**时按"看不到"——不进 ``outcomes``、记进 ``unknown``，窗口里
@@ -71,6 +73,8 @@ class LaneTimeline:
     horizon: int
     marks: dict[str, list[Mark]] = field(default_factory=dict)
     unknown: dict[str, list[int]] = field(default_factory=dict)
+    #: 概念 → 它下级的记录（对它是"不知道"，裁定 105）：不是它的命中，前因一侧当"说不清做没做"。
+    shadows: dict[str, list[Mark]] = field(default_factory=dict)
     #: 日子 → 人在场的当天槽号（升序）。
     present: dict[date, tuple[int, ...]] = field(default_factory=dict)
     #: 日子 → 那天每件事（含「待定」）做完的绝对槽号与 uri，只留**它那一类的链的最后一件**（之后转移窗口内同一类没再开始）：
@@ -98,6 +102,11 @@ class LaneTimeline:
             cached = (id(items), len(items), tuple(mark for mark in items if not mark.reminded))
             self._outcomes[concept] = cached
         return cached[2]
+
+    def touched(self, concept: str) -> tuple[Mark, ...]:
+        """当前因读的记号：它自己的命中加它下级的记号——都不是"没做它"（裁定 105 第 2 条）。"""
+
+        return (*self.marks.get(concept, []), *self.shadows.get(concept, []))
 
     def day_start(self, day: date) -> int:
         return day.toordinal() * self.slots_per_day
@@ -132,14 +141,8 @@ def build_timelines(
     spans: dict[tuple[str, date], tuple[int, int]] = {}
     starts: dict[tuple[str, str], list[tuple[datetime, str]]] = {}
     for record in series.records:
-        line = lines.setdefault(
-            record.lane,
-            LaneTimeline(
-                lane=record.lane,
-                slots_per_day=per_day,
-                horizon=series.cutoff.toordinal() * per_day,
-            ),
-        )
+        horizon = series.cutoff.toordinal() * per_day
+        line = lines.setdefault(record.lane, LaneTimeline(lane=record.lane, slots_per_day=per_day, horizon=horizon))
         line.records[record.uri] = record
         _situations(line, record, concepts, hits.get(record.uri))
         slot = slot_index(record.started_at, slot_minutes=config.slot_minutes)
@@ -161,10 +164,14 @@ def build_timelines(
             last_slot=ended,
             reminded=record.reminded,
         )
-        for identity in concepts.concepts_for(record.kind_token):  # 没有概念的类不留记号
-            line.marks.setdefault(identity, []).append(mark)
+        own = concepts.base_for(record.kind_token)  # 没有概念的类不留命中
+        if own is not None:
+            line.marks.setdefault(own, []).append(mark)
             if record.reminded:
-                line.unknown.setdefault(identity, []).append(absolute)
+                line.unknown.setdefault(own, []).append(absolute)
+        for identity in concepts.above(record.kind_token):
+            line.shadows.setdefault(identity, []).append(mark)
+            line.unknown.setdefault(identity, []).append(absolute)
     blocked = set(_gap_slots(series, config.slot_minutes, per_day))
     # 同一类之后合并窗口内又开始了的，不是它那条链的最后一件：每一次（``temporal.merge_starts``，与 ``chains_of`` 同一把尺）里
     # 除了最后那条都算"后面还接着"（2026-10-18 四方评审：原来这里内联了一份合并规则）
@@ -180,7 +187,7 @@ def build_timelines(
     for line in lines.values():
         for day, finished in line.ends.items():
             line.ends[day] = sorted(item for item in finished if item[1] not in followed)
-        for items in line.marks.values():
+        for items in (*line.marks.values(), *line.shadows.values()):
             items.sort(key=lambda item: (item.slot, item.started_at, item.uri))
         for slots in line.unknown.values():
             slots.sort()

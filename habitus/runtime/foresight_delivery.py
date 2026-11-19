@@ -17,7 +17,7 @@
 终点与最晚时限重合时是越过终点的那一拍，开时窗那一拍就已越过终点时是它的下一拍——拍点照常走，「等时窗末」一定有下文。
 中间停过机、(终点, 最晚时限] 整段落在没跑的那几拍里的不再决定（过了时限的不再说，结算照常结它）。到时窗末那一拍
 按依据与它当时一并决定的那几条重算一次单元（窗里设了「以后别提了」就不说了），这时才问模型、才写那句话：
-话里的"今天""这会儿"说的是开口那一刻。上级到了时窗末、下级还在等自己的时窗末且此刻能开口的，上级这一拍不决定（裁定 104 第 3 条）。
+话里的"今天""这会儿"说的是开口那一刻。上级和下级各凭自己的账决定，不互相等（裁定 105 第 4 条）。
 到了时窗时这件事已经做了记「已发生」；同一类今天已经说过一句的记「同类已说」；没有宿主活着的记「不可达」（方案 32 第 3.3 条：最近
 一段没有宿主来取过提醒就不问模型、不写话，结算按没说过处理）。每日上限按决定的日子数，宿主取得走的「待取」也占名额（取不走、没取走的不占，裁定 104 第 4 条）。
 记哪一种原因、先后怎么排是纯规则（``foresight.delivery``）；这里分拨、取材料、问模型、落账。
@@ -48,7 +48,6 @@ from habitus.foresight.delivery import (
     PENDING,
     Circumstances,
     closes,
-    finer_first,
     hand_over,
     on_closing,
     on_opening,
@@ -81,7 +80,6 @@ from habitus.foresight.reliability import Reliability
 from habitus.foresight.units import UNIT, UNIT_CITE, joinable, meets, voiced
 from habitus.runtime.foresight_delivery_tally import Tally, spoken_today
 from habitus.runtime.foresight_delivery_views import AccountView, DeliveryViews, OmissionView
-from habitus.runtime.foresight_finer import StandingOf, deciding_closing
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_outlet import OpenRequest, OutletPort
@@ -128,7 +126,7 @@ class JudgeMaterials:
     #: （与结算同一个找法，``ledger.settle.event_antecedent_holds``）。
     seen: Sequence[Seen] = ()
     since: datetime | None = None  # 区间起点（``foresight_tick.delivery_since``）；None 是此刻 − 1 拍
-    #: 这一拍开头取的上下级（裁定 101 第 8 条）：节点在不在用、"上下级已说"、同一拍里细的先处理都按它。
+    #: 这一拍开头取的上下级：节点在不在用、"这回做了"（下级做了对它是"不知道"，这一次不说；裁定 105）都按它。
     kinds: KindHierarchy = FLAT
 
 
@@ -203,11 +201,11 @@ class DeliveryStage:
             now=now,
         )
 
-        def unit_of(group: Sequence[Expectation], due: Iterable[str], standing: StandingOf = standing_of) -> Unit:
+        def unit_of(group: Sequence[Expectation], due: Iterable[str]) -> Unit:
             return self.units.unit_for(
                 group,
                 due=due,
-                standing_of=standing,
+                standing_of=standing_of,
                 previous_level=previous_unit,
                 feedback_of=feedback_of,
                 setting_of=setting_of,
@@ -215,11 +213,8 @@ class DeliveryStage:
                 now=now,
             )
 
-        def closing_unit(item: Expectation, standing: StandingOf = standing_of) -> Unit:
-            return unit_of((item, *found.members.get(item.expectation_id, ())), (item.expectation_id,), standing)
-
-        def level_now(item: Expectation) -> int:  # 只看不记：不进这一拍要记档的 ``cached``
-            return closing_unit(item, lambda one: self._standing(one.account, one.kind_token, now, table)).level
+        def closing_unit(item: Expectation) -> Unit:
+            return unit_of((item, *found.members.get(item.expectation_id, ())), (item.expectation_id,))
 
         # 时窗末：按依据与它当时一并决定的那几条重算单元（2026-10-17 四方评审：原来改按依据那本账自己的档判，几个前因一起才稳的
         # 轻事时窗开时单元说该说、时窗末又成了影子）
@@ -249,10 +244,11 @@ class DeliveryStage:
         for item, cited, level in found.joins:
             self._subsume(tally, item, cited, level)
         dues = (*found.closing, *handed)
-        closing = await deciding_closing(self.ledger, dues, materials, since, now, self.tick, self._reread, level_now)
+        deferred = await self._reread(dues, materials)  # 当场重读：推迟到下一拍的这一拍不决定
+        closing = tuple(pair for pair in dues if pair[0].expectation_id not in deferred)
         speaking = tuple(item for item, _pending in closing if now <= item.deadline)  # 过了时限的不说、不问模型
         judgement = await self._judge(speaking, standings, materials, now, tally, inputs)
-        for item, pending in self._ordered_closing(closing, judgement, materials):
+        for item, pending in self._ordered_closing(closing, judgement):
             verdict = judgement.verdicts.get(item.expectation_id) if judgement is not None else None
             self._record(
                 tally,
@@ -323,7 +319,7 @@ class DeliveryStage:
         tally: Tally,
         inputs: Mapping[str, Sequence[UnitInput]],
     ) -> Delivery:
-        spoken_today, spoken_kinds, spoken = tally.spoken_for(item.expectation_id)
+        spoken_today, spoken_kinds = tally.spoken_for(item.expectation_id)
         return on_closing(
             item,
             pending,
@@ -333,8 +329,6 @@ class DeliveryStage:
             kept=verdict.kept if verdict is not None else None,
             evidence=verdict.evidence if verdict is not None else (),
             spoken_kinds=spoken_kinds,
-            spoken=spoken,
-            kinds=_kinds(materials),
             alive=tally.alive,
             spoken_today=spoken_today,
             daily_cap=self.daily_cap,
@@ -525,7 +519,7 @@ class DeliveryStage:
             item
             for item in due
             if standings[item.expectation_id].level >= 1
-            and tally.room_for(item, self.daily_cap, materials.kinds)
+            and tally.room_for(item, self.daily_cap)
             and not materials.happened(item)
             and not self._returned(item, standings[item.expectation_id], materials)
         )
@@ -549,16 +543,16 @@ class DeliveryStage:
 
     @staticmethod
     def _ordered_closing(
-        closing: tuple[tuple[Expectation, Delivery], ...], judgement: Judgement | None, materials: JudgeMaterials | None
+        closing: tuple[tuple[Expectation, Delivery], ...], judgement: Judgement | None
     ) -> tuple[tuple[Expectation, Delivery], ...]:
-        """模型排的先后在前（名额先给它们），其余按时窗；有上下级关系的那几条再把细的挪到前面（``delivery.finer_first``）。"""
+        """模型排的先后在前（名额先给它们），其余按时窗。"""
 
-        if judgement is not None:
-            by_id = {item.expectation_id: (item, pending) for item, pending in closing}
-            first = [by_id[identity] for identity in judgement.order if identity in by_id]
-            rest = [pair for pair in closing if pair[0].expectation_id not in judgement.order]
-            closing = tuple(first + rest)
-        return finer_first(closing, _kinds(materials))
+        if judgement is None:
+            return closing
+        by_id = {item.expectation_id: (item, pending) for item, pending in closing}
+        first = [by_id[identity] for identity in judgement.order if identity in by_id]
+        rest = [pair for pair in closing if pair[0].expectation_id not in judgement.order]
+        return tuple(first + rest)
 
     @staticmethod
     def _text(

@@ -123,7 +123,11 @@ class LaneTests:
                 block_days=blocks.days if blocks is not None else 1.0,
                 first_seen=(self.config.thresholds.first_seen_min_days, self.config.thresholds.first_seen_min_blocks),
                 alpha=self.config.thresholds.forward_alpha,
-                visits=tuple(Visit(chain.day, prompted=chain.anchor.reminded) for chain in self.chains(antecedent)),
+                # 下级来过的日子对前因是"不知道"：当截尾的一次（裁定 105 第 2 条）
+                visits=(
+                    *(Visit(chain.day, prompted=chain.anchor.reminded) for chain in self.chains(antecedent)),
+                    *(Visit(mark.day, prompted=True) for mark in self.line.shadows.get(antecedent, [])),
+                ),
             )
         return self._episodes[cache]
 

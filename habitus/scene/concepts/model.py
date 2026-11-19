@@ -1,9 +1,9 @@
 """概念定义：语义树的词汇层，一个概念一份。只有两种概念（2026-11-14 用户定："节点来做行为事件来预测"）：
 
 - **行为概念**：词表里一个在用的节点原样对应的概念（裁定 20 第 2 条），身份 = 节点编号（``s-k0004``），显示名是节点名，判据是
-  节点判据；同步词表时自动生成，不调模型。它**管的编号**（``classes``）是自己加词表里它全部活着的下级（第一个是自己；裁定 101
-  第 8 条）：下级的记录也记在它的账上。一条记录算哪些行为概念只看它的编号（读时现读，不存命中）：它自己的
-  概念，加每一个在用上级的概念（``concepts_for``）。上下级之间不量关系（``related``）。
+  节点判据；同步词表时自动生成，不调模型。它**管的编号**（``classes``）是自己加词表里它全部活着的下级（第一个是自己）。
+  一条记录只算给它自己的概念（``base_for``）；对它的每一个在用上级，这条记录是"不知道"（``above``）：不算做了，也不算没做
+  （裁定 105）。上下级之间不量关系（``related``）。
 - **日历情境**：周几、几号、月末、日型这类外部条件（裁定 59 第 7 条），由日历机械生成（``calendar_situations``），不由模型写；
   只当前因或调节条件，不当后果。
 
@@ -177,14 +177,13 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
                 raise ConceptError(f"concept {definition.name!r} appears twice in the set")
             resolved[definition.identity] = definition
         base = {definition.classes[0]: identity for identity, definition in resolved.items() if definition.classes}
-        counted: dict[str, list[str]] = {}
+        above: dict[str, list[str]] = {}
         managers: dict[str, list[str]] = {}
         for identity, definition in sorted(resolved.items()):
             for index, item in enumerate(definition.classes):
                 managers.setdefault(item, []).append(identity)
-                # 自己的那个类照旧算给自己（停用了也算，历史记号留着读）；下级的只算给在用的上级
-                if index == 0 or not definition.retired:
-                    counted.setdefault(item, []).append(identity)
+                if index > 0 and not definition.retired:
+                    above.setdefault(item, []).append(identity)
         for item, names in managers.items():
             for index, first in enumerate(names):
                 for second in names[index + 1 :]:
@@ -194,8 +193,8 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
                         )
         self._items: Mapping[str, ConceptDefinition] = MappingProxyType(resolved)
         self._base: Mapping[str, str] = MappingProxyType(base)
-        self._counted: Mapping[str, tuple[str, ...]] = MappingProxyType(
-            {item: tuple(names) for item, names in counted.items()}
+        self._above: Mapping[str, tuple[str, ...]] = MappingProxyType(
+            {item: tuple(names) for item, names in above.items()}
         )
         for lane in {item.lane for item in resolved.values() if item.lane is not None}:
             self._require_unique_labels(lane)
@@ -257,13 +256,13 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
 
         return self._base.get(class_id)
 
-    def concepts_for(self, class_id: str) -> tuple[str, ...]:
-        """一条挂在这个类上的记录算给哪些行为概念：它自己的（停用了也算），加每一个管着它的在用上级的（按身份排）。"""
+    def above(self, class_id: str) -> tuple[str, ...]:
+        """一条挂在这个类上的记录对哪些行为概念是"不知道"：每一个管着它的在用上级（按身份排；裁定 105）。它自己的概念不在里面。"""
 
-        return self._counted.get(class_id, ())
+        return self._above.get(class_id, ())
 
     def related(self, first: str, second: str) -> bool:
-        """两个行为概念一个是另一个的上级（它们读的是同一批记录，不量关系、不互为时间线条件）。同一个概念不算。"""
+        """两个行为概念一个是另一个的上级（不量关系、不互为时间线条件；裁定 105 第 5 条）。同一个概念不算。"""
 
         if first == second or first not in self or second not in self:
             return False

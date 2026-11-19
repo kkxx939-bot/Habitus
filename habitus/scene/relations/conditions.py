@@ -48,7 +48,7 @@ from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.relations import stats
 from habitus.scene.relations.measures import ChainMeasure, PairedMeasure
 from habitus.scene.relations.spans import Chain, Stratum
-from habitus.scene.relations.timeline import LaneTimeline
+from habitus.scene.relations.timeline import LaneTimeline, Mark
 
 
 class Template(str, Enum):
@@ -128,7 +128,7 @@ def mechanical(
                 Condition(Template.FIELD, name, Field.WITH) for name in record.subjects if CONDITION_JOIN not in name
             )
     for identity in concepts.behaviors():
-        # 前因自己、它的上级与下级不当它的时间线条件：读的是同一批记录（裁定 101 第 8 条）
+        # 前因自己、它的上级与下级不当它的时间线条件（上下级之间不量关系，裁定 105 第 5 条）
         if (
             identity != antecedent
             and not concepts.related(identity, antecedent)
@@ -165,12 +165,21 @@ def evaluator(line: LaneTimeline, condition: Condition, *, window: int) -> Calla
         return by_field
     if condition.template is Template.TIMELINE:
         marks = line.marks.get(condition.value, [])
+        below = line.shadows.get(condition.value, [])
 
-        def by_timeline(chain: Chain) -> bool:
+        def by_timeline(chain: Chain) -> bool | None:
             low = chain.anchor.slot - window
-            return any(
-                low <= mark.slot <= chain.anchor.slot and mark.started_at < chain.anchor.started_at for mark in marks
-            )
+
+            def within(found: list[Mark]) -> bool:
+                return any(
+                    low <= mark.slot <= chain.anchor.slot and mark.started_at < chain.anchor.started_at
+                    for mark in found
+                )
+
+            if within(marks):
+                return True
+            # 窗里只有条件的下级：对条件是"不知道"，判不了（裁定 105 第 2 条）
+            return None if within(below) else False
 
         return by_timeline
 
