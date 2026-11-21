@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from habitus.model_client.contracts import ModelContentSafetyError
+from habitus.model_client.errors import ModelContentSafetyError
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from tests.unit.physical_downstream.site import (
     MEDICINE,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -239,6 +240,9 @@ def test_c11_an_unavailable_model_while_picking_is_an_error_and_the_retry_redoes
     assert (item.kind, item.cause) == (RetryKind.TURN, RetryCause.UNAVAILABLE)
     assert (site.router.count("describe"), site.router.count("pick")) == (1, 1)
 
+    # 密钥错属于"要人处理"：熔断直接打开（裁定 108）；人改好之后到了试探的时候，重试才会真去问模型
+    breaker = site.runtime.components.models.chat.breaker
+    breaker._monotonic = lambda: time.monotonic() + 86_400.0
     asyncio.run(TurnHandler(site.session.fusion).attempt(item))
     assert (site.router.count("describe"), site.router.count("pick")) == (2, 2)
     site.reduce()

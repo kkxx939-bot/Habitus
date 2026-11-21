@@ -53,6 +53,15 @@ class MemoryJobStatus(str, Enum):
     RUNNING = "running"
     FAILED = "failed"
     COMMITTED = "committed"
+    #: 这一段的输入有问题（请求不合法、太长、内容安全），记不进长期记忆：终态，后面的序号照常往下走（裁定 108）。
+    #: ``last_error`` 写着原因（``<类别>: <说明>``）。
+    SKIPPED = "skipped"
+
+    @property
+    def terminal(self) -> bool:
+        """写完了或跳过了：不再阻挡后面的序号。"""
+
+        return self in {MemoryJobStatus.COMMITTED, MemoryJobStatus.SKIPPED}
 
 
 @dataclass(frozen=True)
@@ -268,7 +277,7 @@ class MemoryJob:
                 raise ValueError("new staged memory job cannot contain retry state")
             if self.attempts > 0 and self.last_error is None:
                 raise ValueError("retried staged memory job requires its last error")
-        if status is MemoryJobStatus.FAILED and self.last_error is None:
+        if status in {MemoryJobStatus.FAILED, MemoryJobStatus.SKIPPED} and self.last_error is None:
             raise ValueError("failed memory job requires its last error")
         if self.last_error is not None and (not self.last_error or len(self.last_error) > MEMORY_JOB_ERROR_MAX_CHARS):
             raise ValueError("memory job last_error is invalid")

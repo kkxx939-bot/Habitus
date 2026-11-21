@@ -28,7 +28,7 @@ def advice_on(root):  # type: ignore[no-untyped-def]
     client, provider = answering_client()
     advice = RelationAdvice(
         store=AdviceStore(root / "scene"),
-        prior=PriorAdvisor(client, config=PriorConfig(transient_retry_delay_seconds=0.0)),
+        prior=PriorAdvisor(client, config=PriorConfig()),
     )
     return advice, provider
 

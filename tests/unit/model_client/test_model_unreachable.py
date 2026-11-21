@@ -35,8 +35,6 @@ def _ask(*errors: BaseException) -> object:
             schema={"type": "object"},
             name="probe",
             validator=lambda value: value,
-            retries=1,
-            delay_seconds=0.0,
         )
     )
 
@@ -47,7 +45,7 @@ def _ask(*errors: BaseException) -> object:
         (ModelQuotaError("quota"),),
         (ModelAuthenticationError("denied"),),
         (ModelConfigurationError("no key"),),
-        (ModelTransportError("down"), ModelTransportError("still down")),  # 传输重试用完
+        (ModelTransportError("down"),),  # "等一等可能好"在客户端一层重试用完（这里 retries=0），ask 不再重试
     ],
 )
 def test_an_unusable_model_is_raised_not_swallowed_as_a_failed_answer(errors: tuple[BaseException, ...]) -> None:
@@ -57,7 +55,7 @@ def test_an_unusable_model_is_raised_not_swallowed_as_a_failed_answer(errors: tu
 
 def test_other_failures_stay_a_failed_answer_at_this_touchpoint() -> None:
     answer = _ask(ModelContentSafetyError("blocked"))
-    assert isinstance(answer, Failed) and "ModelContentSafetyError" in answer.signal
+    assert isinstance(answer, Failed) and "ModelContentSafetyError" in answer.signal and answer.input_problem
 
 
 class _Probed(ScriptedProvider):

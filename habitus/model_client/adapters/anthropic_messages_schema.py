@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
-from habitus.model_client.contracts import ModelConfigurationError
+from habitus.model_client.errors import ModelConfigurationError
 
 _SUPPORTED_FORMATS = frozenset(
     {"date-time", "time", "date", "duration", "email", "hostname", "uri", "ipv4", "ipv6", "uuid"}

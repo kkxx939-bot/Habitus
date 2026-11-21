@@ -16,10 +16,10 @@ from pathlib import Path
 from habitus.model_client import ModelTransportError
 from habitus.runtime import health as health_module
 from habitus.runtime.generation_marks import GenerationMark, GenerationMarks
-from habitus.runtime.model_queue import ADVICE, DONE, QueueSettings
+from habitus.runtime.model_queue import ADVICE, DONE, ModelQueueState, QueueSettings
 from habitus.series.reader import read_series
 from tests.unit.kind_ids import kind_id
-from tests.unit.runtime.test_model_queue_acceptance import TODAY, disk, done, queue_on, scene_on
+from tests.unit.runtime.test_model_queue_acceptance import TODAY, chat_breaker, disk, done, queue_on, scene_on
 from tests.unit.runtime.test_scene_night import NOW, publish_tonight, site_with_three_bedtimes
 
 LUNCH = kind_id("午饭")
@@ -121,7 +121,7 @@ def test_cd_13_an_outage_of_a_few_hours_on_the_same_day_asks_the_same_prompts_an
     site, scene, _provider, advisor = world(root)
     down = outage_on(advisor)
     clock = [NOW]
-    queue = queue_on(root, scene, site, clock=lambda: clock[0], settings=QueueSettings(unreachable_after_failures=1))
+    queue = queue_on(root, scene, site, clock=lambda: clock[0], state=ModelQueueState(chat_breaker(scene, clock)))
     for hours in (0, 1, 2, 3):
         clock[0] = NOW + timedelta(hours=hours)
         report = asyncio.run(queue.drain())
@@ -151,7 +151,8 @@ def test_cd_14_an_outage_across_a_generation_loses_nothing_is_reported_and_is_ma
         clock=lambda: clock[0],
         sealed=lambda: sealed[0],
         marks=marks,
-        settings=QueueSettings(unreachable_after_failures=1, warning_items=1, warning_wait_seconds=3_600.0),
+        state=ModelQueueState(chat_breaker(scene, clock)),
+        settings=QueueSettings(warning_items=1, warning_wait_seconds=3_600.0),
     )
     first = asyncio.run(queue.drain())
     assert not first.clear and first.owed[ADVICE] >= 1

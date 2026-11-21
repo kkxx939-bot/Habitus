@@ -8,6 +8,7 @@ from typing import TypeVar
 
 from habitus.config.loader import ConfigError, construct_config, group_fields, require_field_types, required_field
 from habitus.model_client import (
+    CallFailureConfig,
     ChatModelConfig,
     EmbeddingModelConfig,
     ProviderConfig,
@@ -37,6 +38,7 @@ class ModelConfig:
     embedding: EmbeddingModelConfig
     rerank: RerankModelConfig | None = None
     structured_output: StructuredOutputConfig = field(default_factory=StructuredOutputConfig)
+    call_failures: CallFailureConfig = field(default_factory=CallFailureConfig)
 
     @classmethod
     def from_mapping(cls, value: object) -> ModelConfig:
@@ -56,6 +58,11 @@ class ModelConfig:
                 StructuredOutputConfig,
                 data.get("structured_output", {}),
                 "config.models.structured_output",
+            ),
+            call_failures=construct_config(
+                CallFailureConfig,
+                data.get("call_failures", {}),
+                "config.models.call_failures",
             ),
         )
 

@@ -1,4 +1,4 @@
-"""MemoryJob 失败的确定性重试分类。"""
+"""MemoryJob 失败的确定性处置分类。模型调用失败只按模型层统一的三条规则分派（``model_client.model_failure``，裁定 108）。"""
 
 from __future__ import annotations
 
@@ -13,32 +13,47 @@ from habitus.infrastructure.vector import (
 from habitus.memory.editor.extraction.model import MemoryExtractionPermanentError
 from habitus.memory.editor.transaction import MemoryCommitConflictError
 from habitus.memory.workflow.jobs import MemoryJobError, MemoryJobLeaseLostError
-from habitus.model_client import MODEL_UNAVAILABLE, ModelClientError, ModelStructuredOutputError
+from habitus.model_client import ModelClientError, ModelErrorRule, ModelStructuredOutputError, model_failure
 
-#: 依赖此刻用不了：对话或嵌入模型用不了，或向量库忙 / 连不上。
-_DEPENDENCY_UNAVAILABLE: tuple[type[BaseException], ...] = (*MODEL_UNAVAILABLE, VectorStoreBusyError)
+
+class MemoryJobSkipped(RuntimeError):  # noqa: N818 - 不是故障，是"这一段跳过"的结论
+    """这一段在生成摘要与记忆计划时碰到"这一条输入有问题"（请求不合法、太长、内容安全）：同一份输入不重发，这一段记不进
+    长期记忆，任务进 SKIPPED，后面的序号照常往下走（裁定 108）。只在长期记忆还没写之前（规划阶段）认；``reason`` 是
+    ``<类别>: <说明>``。"""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class MemoryJobFailureKind(str, Enum):
     """一次 Job 失败之后怎么处置。"""
 
-    #: 依赖此刻用不了：模型（``model_client.MODEL_UNAVAILABLE``：连不上、限流、额度或余额、鉴权、权限、服务端答坏，
-    #: 对话与嵌入同一组）或向量库忙（``VectorStoreBusyError``：断网、超时、5xx、索引重建中）。同一份输入过一阵再来就能成，
-    #: 走单独的长退避、不计入尝试次数，等依赖恢复（裁定 80 问题 2、裁定 82 第 3 条）。
+    #: 依赖此刻用不了：模型（统一规则里的"等一等可能好"用尽、"要人处理"、熔断开着）或向量库忙（``VectorStoreBusyError``）。
+    #: 不计入尝试次数，排回队列等依赖恢复、挡住后面的序号（裁定 80 问题 2、裁定 82 第 3 条、裁定 108）。
     WAITS_FOR_MODEL = "waits_for_model"
     #: 明确瞬态、答复用完结构纠错仍不合格（模型回答的正常波动，裁定 80 第 4 条）或未知运行时故障：有界退避重试，
     #: 到 ``max_attempts`` 进 FAILED。
     RETRYABLE = "retryable"
-    #: 同一份输入再试也一样（输入超长、内容安全、永久抽取错误、完整性错误……）：第一次就 FAILED。
+    #: 再试也一样（长期记忆写成之后才碰到的输入问题、永久抽取错误、完整性错误……）：第一次就 FAILED，挡住后面等人处理。
     PERMANENT = "permanent"
+
+
+def skip_reason(error: BaseException) -> str | None:
+    """规划阶段的失败如果是"这一条输入有问题"，给出跳过的原因；否则 None。"""
+
+    failure = model_failure(error)
+    if failure is None or failure.rule is not ModelErrorRule.INPUT or failure.kind is None:
+        return None
+    return f"{failure.kind.value}: {failure}"
 
 
 def memory_job_failure_kind(error: BaseException) -> MemoryJobFailureKind:
     """把一次执行失败归到三种处置之一。
 
-    顺着 ``__cause__`` 链从外往里看，第一层认得的异常决定处置：检索、抽取把依赖的失败包成自己的 RuntimeError，
-    外层认不得时由里面的根因决定，向量库或嵌入服务连不上照样归"等依赖恢复"，向量库 401 / 403 / 400 照样明确失败。
-    泛化的 ValueError / TypeError 只在最外层算数，包在里面的不改变外层的处置。整条链都认不得的未知运行时故障有界重试。
+    顺着 ``__cause__`` 链从外往里看，第一层认得的异常决定处置；模型调用失败那一层按统一规则（``ModelErrorRule``）认：
+    "这一条输入有问题"到了这里（长期记忆已写成之后）是 PERMANENT，其余等模型恢复。泛化的 ValueError / TypeError 只在
+    最外层算数。整条链都认不得的未知运行时故障有界重试。
     """
 
     if isinstance(error, MemoryJobLeaseLostError):
@@ -54,10 +69,23 @@ def memory_job_failure_kind(error: BaseException) -> MemoryJobFailureKind:
     return MemoryJobFailureKind.RETRYABLE
 
 
+def model_wait_seconds(error: BaseException) -> float | None:
+    """模型那条能力的熔断给的离下一次试探还有多久（熔断没开是 None）。"""
+
+    failure = model_failure(error)
+    return None if failure is None else failure.retry_after_seconds
+
+
 def _known_failure_kind(error: BaseException, *, outermost: bool) -> MemoryJobFailureKind | None:
     """单层异常认得时给出处置，认不得返回 None。"""
 
-    if isinstance(error, _DEPENDENCY_UNAVAILABLE):
+    if isinstance(error, ModelClientError) and error.rule is not None:
+        return (
+            MemoryJobFailureKind.PERMANENT
+            if error.rule is ModelErrorRule.INPUT
+            else MemoryJobFailureKind.WAITS_FOR_MODEL
+        )
+    if isinstance(error, VectorStoreBusyError):
         return MemoryJobFailureKind.WAITS_FOR_MODEL
     if isinstance(error, ModelStructuredOutputError):
         return MemoryJobFailureKind.RETRYABLE
@@ -65,8 +93,6 @@ def _known_failure_kind(error: BaseException, *, outermost: bool) -> MemoryJobFa
         return MemoryJobFailureKind.RETRYABLE
     if isinstance(error, VectorStoreIntegrityError | VectorStoreError):
         return MemoryJobFailureKind.PERMANENT
-    if isinstance(error, ModelClientError):
-        return MemoryJobFailureKind.RETRYABLE if error.retryable else MemoryJobFailureKind.PERMANENT
     if isinstance(error, MemoryExtractionPermanentError):
         return MemoryJobFailureKind.PERMANENT
     if outermost and isinstance(error, MemoryJobError | ValueError | TypeError):
@@ -74,4 +100,4 @@ def _known_failure_kind(error: BaseException, *, outermost: bool) -> MemoryJobFa
     return None
 
 
-__all__ = ["MemoryJobFailureKind", "memory_job_failure_kind"]
+__all__ = ["MemoryJobFailureKind", "MemoryJobSkipped", "memory_job_failure_kind", "model_wait_seconds", "skip_reason"]

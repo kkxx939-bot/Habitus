@@ -294,7 +294,7 @@ def build_foresight_tick(
         daily_cap=foresight.daily_reminder_cap,
         unit_prior_share=foresight.unit_prior_share,
         history=components.history.store,
-        judge=None if structured_chat is None else _judge(structured_chat, config),
+        judge=None if structured_chat is None else Judge(structured_chat),
         tick_seconds=foresight.tick_interval_seconds,
         outlet=None if components.outlet is None else BranchOutlet(components.outlet, lane),
         claimed=components.outlet.store.claimed if components.outlet is not None else lambda request_id: False,
@@ -400,15 +400,6 @@ def build_reminder_responses(
             for item in branches
         ),
         limit=config.foresight.open_reminders_judged,
-    )
-
-
-def _judge(structured_chat: StructuredChatClient, config: HabitusConfig) -> Judge:
-    foresight = config.foresight
-    return Judge(
-        structured_chat,
-        retries=foresight.judge_transient_retries,
-        delay_seconds=foresight.judge_transient_retry_delay_seconds,
     )
 
 

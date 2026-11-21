@@ -22,6 +22,7 @@ from habitus.model_client import (
     ChatModelConfig,
     EmbeddingModelConfig,
     ModelClientError,
+    ModelErrorRule,
     ModelProxyAuthError,
     ModelTLSError,
     ModelTransportError,
@@ -30,7 +31,7 @@ from habitus.model_client import (
 )
 from habitus.model_client.adapters import register_builtin_adapters
 from habitus.model_client.factory import ProviderFactory
-from habitus.model_client.retry import normalize_provider_error
+from habitus.model_client.failures import classify_failure
 from tests.tls_helpers import EMBEDDING_DIMENSION, FAKE_MODEL_HOST, TEST_CA, ConnectProxy, HTTPSModelServer
 
 _PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
@@ -110,8 +111,7 @@ def test_untrusted_certificate_fails_once_as_model_tls_error() -> None:
         assert server.requests == []
     error = raised.value
     assert error.code == "MODEL_TLS"
-    assert error.retryable is False
-    assert error.failover_eligible is True
+    assert error.rule is ModelErrorRule.OPERATOR
     assert "network.ca_bundle" in str(error)
 
 
@@ -372,8 +372,7 @@ def test_proxy_authentication_required_fails_once_with_the_forwarding_proxy_hint
         assert proxy.connects == [f"{FAKE_MODEL_HOST}:443"]
     error = raised.value
     assert error.code == "MODEL_PROXY_AUTH"
-    assert error.retryable is False
-    assert error.failover_eligible is True
+    assert error.rule is ModelErrorRule.OPERATOR
     message = str(error)
     for expected in ("407", "HTTPS_PROXY", "NTLM", "Kerberos", "PAC", "cntlm", "px", "network.proxy"):
         assert expected in message
@@ -412,36 +411,36 @@ def test_certificate_verification_errors_are_tls_errors_even_when_wrapped() -> N
     mismatch = ssl.SSLCertVerificationError(1, "certificate verify failed: Hostname mismatch")
     wrapped = _wrapped(httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED]"), bare)
     for error in (bare, mismatch, wrapped):
-        failure = normalize_provider_error(error)
+        failure = classify_failure(error)
         assert isinstance(failure, ModelTLSError)
-        assert failure.retryable is False
+        assert failure.rule is ModelErrorRule.OPERATOR
 
 
 def test_certificate_errors_win_over_message_keywords() -> None:
     # 证书报错里可能带主机名；主机名碰上内容安全 / 限流这类关键词时仍是证书问题
     error = httpx.ConnectError("certificate is not valid for 'moderation-gw.corp.example'")
     error.__cause__ = ssl.SSLCertVerificationError("certificate is not valid for 'moderation-gw.corp.example'")
-    assert isinstance(normalize_provider_error(error), ModelTLSError)
+    assert isinstance(classify_failure(error), ModelTLSError)
     proxy = httpx.ProxyError("407 Proxy Authentication Required (rate limit gateway)")
-    assert isinstance(normalize_provider_error(proxy), ModelProxyAuthError)
+    assert isinstance(classify_failure(proxy), ModelProxyAuthError)
 
 
 def test_plain_connection_errors_stay_retryable_transport_errors() -> None:
     for error in (ConnectionError("connection refused"), ssl.SSLError(1, "handshake failure"), OSError("reset")):
-        failure = normalize_provider_error(error)
+        failure = classify_failure(error)
         assert type(failure) is ModelTransportError
-        assert failure.retryable is True
+        assert failure.rule is ModelErrorRule.WAIT
 
 
 def test_only_a_407_proxy_rejection_is_a_proxy_auth_error() -> None:
     rejected = _wrapped(httpx.ProxyError("407 Proxy Authentication Required"), RuntimeError("tunnel"))
-    assert isinstance(normalize_provider_error(rejected), ModelProxyAuthError)
-    assert not isinstance(normalize_provider_error(httpx.ProxyError("502 Bad Gateway")), ModelProxyAuthError)
+    assert isinstance(classify_failure(rejected), ModelProxyAuthError)
+    assert not isinstance(classify_failure(httpx.ProxyError("502 Bad Gateway")), ModelProxyAuthError)
 
     class StatusError(RuntimeError):
         status_code = 407
 
-    assert isinstance(normalize_provider_error(StatusError("proxy says no")), ModelProxyAuthError)
+    assert isinstance(classify_failure(StatusError("proxy says no")), ModelProxyAuthError)
 
 
 @pytest.mark.parametrize("error_type", [ModelTLSError, ModelProxyAuthError])

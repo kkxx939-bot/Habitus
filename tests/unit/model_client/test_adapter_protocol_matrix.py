@@ -18,9 +18,15 @@ from habitus.model_client import (
     EmbeddingModelConfig,
     ModelAuthenticationError,
     ModelConfigurationError,
+    ModelContentSafetyError,
+    ModelErrorRule,
+    ModelInvalidRequestError,
+    ModelNotFoundError,
+    ModelQuotaError,
     ModelRateLimitError,
     ModelResponseError,
-    ModelTransportError,
+    ModelServiceError,
+    ModelUnknownError,
     ProviderConfig,
     ReasoningOptions,
     RerankModelConfig,
@@ -32,7 +38,7 @@ from habitus.model_client import (
 from habitus.model_client.adapters.openai_compatible_chat import OpenAICompatibleChatProvider
 from habitus.model_client.adapters.openai_compatible_embedding import OpenAICompatibleEmbeddingProvider
 from habitus.model_client.adapters.openai_compatible_rerank import OpenAICompatibleRerankProvider
-from habitus.model_client.retry import normalize_provider_error
+from habitus.model_client.failures import classify_failure
 
 
 def chat_config(**overrides: object) -> ChatModelConfig:
@@ -694,7 +700,6 @@ def test_openai_stream_rejects_malformed_or_non_utf8_sse_payload(wire: bytes) ->
 @pytest.mark.parametrize(
     "wire",
     [
-        b'data: {"error":{"message":"upstream failed"}}\n\n',
         b'data: {"choices":[]}\n\n',
         b'data: {"usage":{"prompt_tokens":1,"completion_tokens":2}}\n\n',
         b'data: {"choices":[{"delta":{"reasoning_content":"r"},"finish_reason":"stop"}]}\n\n',
@@ -738,6 +743,29 @@ def test_openai_stream_rejects_success_status_without_a_valid_choice(wire: bytes
             tuple(stream(provider, request()))
     finally:
         provider._sync_client.close()
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (b'{"error":{"message":"upstream failed"}}', ModelUnknownError),
+        (b'{"error":{"code":"rate_limit_exceeded","message":"slow"}}', ModelRateLimitError),
+        (b'{"error":{"code":"content_filter","message":"blocked"}}', ModelContentSafetyError),
+    ],
+)
+def test_openai_stream_error_payload_is_classified_by_its_protocol_code(payload: bytes, expected: type) -> None:
+    """流里的错误载荷带协议错误代码，按代码归类；没有代码的是认不出（按"等一等可能好"处理，裁定 108）。"""
+
+    wire = b"data: " + payload + b"\n\n"
+    provider = sync_provider(
+        lambda _request: httpx.Response(200, content=wire, headers={"content-type": "text/event-stream"})
+    )
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            tuple(stream(provider, request()))
+    finally:
+        provider._sync_client.close()
+    assert type(classify_failure(caught.value)) is expected
 
 
 def test_openai_stream_rejects_body_over_byte_bound() -> None:
@@ -1004,14 +1032,17 @@ def test_embedding_adapter_rejects_malformed_or_non_object_http_response(body: b
 
 
 @pytest.mark.parametrize(
-    ("status", "body", "retry_after", "message", "error_type", "retryable"),
+    ("status", "body", "retry_after", "message", "error_type", "rule"),
     [
-        (400, {"error": {"message": "bad input"}}, None, "bad input", ModelResponseError, False),
-        (401, {"error": {"message": "bad key"}}, None, "bad key", ModelAuthenticationError, False),
-        (404, {"message": "model not found"}, None, "model not found", ModelResponseError, False),
-        (429, {"error": {"message": "slow down"}}, "3", "slow down", ModelRateLimitError, True),
-        (500, ["bad"], "invalid", "HTTP 500", ModelTransportError, True),
-        (503, "plain", "-1", "HTTP 503", ModelTransportError, True),
+        (400, {"error": {"message": "bad input"}}, None, "bad input", ModelInvalidRequestError, ModelErrorRule.INPUT),
+        (401, {"error": {"message": "bad key"}}, None, "bad key", ModelAuthenticationError, ModelErrorRule.OPERATOR),
+        (404, {"message": "model not found"}, None, "model not found", ModelNotFoundError, ModelErrorRule.OPERATOR),
+        (429, {"error": {"message": "slow down"}}, "3", "slow down", ModelRateLimitError, ModelErrorRule.WAIT),
+        (500, ["bad"], "invalid", "HTTP 500", ModelServiceError, ModelErrorRule.WAIT),
+        (503, "plain", "-1", "HTTP 503", ModelServiceError, ModelErrorRule.WAIT),
+        # 协议的错误代码优先于状态码（429 + insufficient_quota 是额度用完，不是限流）
+        (429, {"error": {"code": "insufficient_quota", "message": "quota"}}, None, "quota", ModelQuotaError,
+         ModelErrorRule.OPERATOR),
     ],
 )
 def test_embedding_adapter_http_errors_are_classified_by_the_retry_layer(
@@ -1020,7 +1051,7 @@ def test_embedding_adapter_http_errors_are_classified_by_the_retry_layer(
     retry_after: str | None,
     message: str,
     error_type: type[Exception],
-    retryable: bool,
+    rule: ModelErrorRule,
 ) -> None:
     provider = OpenAICompatibleEmbeddingProvider(embedding_config(), api_key="secret")
     headers = {} if retry_after is None else {"Retry-After": retry_after}
@@ -1028,9 +1059,9 @@ def test_embedding_adapter_http_errors_are_classified_by_the_retry_layer(
         _embedding_call(provider, lambda _request: httpx.Response(status, json=body, headers=headers))
     assert caught.value.status_code == status
     assert message in str(caught.value)
-    normalized = normalize_provider_error(caught.value)
+    normalized = classify_failure(caught.value)
     assert type(normalized) is error_type
-    assert normalized.retryable is retryable
+    assert normalized.rule is rule
     if retry_after == "3":
         assert normalized.retry_after_seconds == 3.0
     elif retry_after == "-1":

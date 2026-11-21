@@ -13,6 +13,7 @@ from collections.abc import Container
 from datetime import UTC, date, tzinfo
 
 from habitus.foundation.integrity import canonical_digest
+from habitus.foundation.lifecycle import DeterministicFailure
 from habitus.scene.advice.model import PriorLevel
 from habitus.scene.advice.pairing import Questions, assign
 from habitus.scene.advice.prior import PriorAdvisor, consequents_question_for
@@ -121,12 +122,15 @@ class LanePriors:
     # ── 问、清 ──────────────────────────────────────────────────────────────
 
     async def ask(self, signals: list[str]) -> None:
-        """把现在要问的题都问了、写缓存：先旧问法（按后果），再新问法（按前因）。一题没答成，这一题这一回不写，下次再问。"""
+        """把现在要问的题都问了、写缓存：先旧问法（按后果），再新问法（按前因）。一题没答成，这一题这一回不写，下次再问。
+        有题因为这一条输入有问题没答成（裁定 108）：别的题照问，问完抛 ``DeterministicFailure``，队列的重试账据它这一晚不再重发。"""
 
         questions = self.questions()
+        rejected = 0
         for consequent, antecedents in questions.by_consequent.items():
             answer = await self.advisor.rate(prior_question(self.concepts, self.lane, consequent, antecedents))
             signals.extend(answer.signals)
+            rejected += answer.input_problem
             if answer.levels:
                 cached = self._old(consequent)
                 cached.update({self.ids[antecedent]: level for antecedent, level in answer.levels.items()})
@@ -143,6 +147,7 @@ class LanePriors:
                 consequents_question_for(self.concepts, self.lane, antecedent, consequents)
             )
             signals.extend(answer.signals)
+            rejected += answer.input_problem
             if answer.levels:
                 cached = self._new(antecedent)
                 cached.update({self.ids[consequent]: level for consequent, level in answer.levels.items()})
@@ -154,6 +159,8 @@ class LanePriors:
                     version=answer.version,
                     models=answer.models,
                 )
+        if rejected:
+            raise DeterministicFailure(f"prior: {rejected} question(s) rejected by the model as invalid input")
 
     def orphans(self) -> tuple[frozenset[str], frozenset[str]]:
         """这条 lane 没人再读的缓存键（旧问法的, 新问法的）：概念改名、改判据、删了，或换了先验触点的版本与模型。"""

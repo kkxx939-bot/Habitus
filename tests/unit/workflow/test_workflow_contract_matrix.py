@@ -64,7 +64,7 @@ def _job(status: MemoryJobStatus, **overrides: object) -> MemoryJob:
         "worker_id": "worker-1" if running else None,
         "lease_expires_at": BASE_TIME + timedelta(minutes=2) if running else None,
         "next_attempt_at": None,
-        "last_error": "failed" if status is MemoryJobStatus.FAILED else None,
+        "last_error": "failed" if status in {MemoryJobStatus.FAILED, MemoryJobStatus.SKIPPED} else None,
         "created_at": BASE_TIME,
         "updated_at": BASE_TIME,
     }

@@ -265,7 +265,8 @@ def wrapped(outer: BaseException, cause: BaseException) -> BaseException:
         # 同一份输入再试也一样：第一次就 FAILED
         (ModelInputTooLargeError("too large"), PERMANENT),
         (ModelContentSafetyError("blocked"), PERMANENT),
-        (ModelConfigurationError("missing dependency"), PERMANENT),
+        # 没配好属于"要人处理"（裁定 108）：等人改好、随熔断试探接上，不当场 FAILED
+        (ModelConfigurationError("missing dependency"), WAITS),
         (MemoryExtractionCapacityError("too large"), PERMANENT),
         (MemoryExtractionPermanentError("invalid candidates"), PERMANENT),
         (MemoryJobLeaseLostError("lost"), PERMANENT),

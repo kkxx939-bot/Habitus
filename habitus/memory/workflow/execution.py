@@ -16,6 +16,7 @@ from habitus.memory.editor.transaction_log import (
     MemoryTransactionJournalRecord,
     MemoryTransactionJournalState,
 )
+from habitus.memory.workflow.failure import MemoryJobSkipped, skip_reason
 from habitus.memory.workflow.jobs import (
     MemoryJobError,
     MemoryJobLease,
@@ -83,12 +84,19 @@ class MemoryJobExecutor:
         editor_segment, turn_context = self._editor_input(address, segment)
         summary_existed = self.summary_service.store.try_read(address, segment) is not None
         with observe_operation(self.observer, "workflow", "memory_plan") as observed:
-            products = await self.segment_products.build(
-                address,
-                segment,
-                editor_segment=editor_segment,
-                turn_context=turn_context,
-            )
+            try:
+                products = await self.segment_products.build(
+                    address,
+                    segment,
+                    editor_segment=editor_segment,
+                    turn_context=turn_context,
+                )
+            except Exception as exc:
+                reason = skip_reason(exc)
+                if reason is None:
+                    raise
+                observed["skipped"] = reason[:_OBSERVED_TEXT_MAX_CHARS]
+                raise MemoryJobSkipped(reason) from exc
             extraction = products.editor_plan.extraction
             if extraction is not None:
                 observed["retrieval_ended_at_limit"] = extraction.retrieval_ended_at_limit

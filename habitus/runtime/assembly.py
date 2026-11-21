@@ -136,7 +136,7 @@ from habitus.memory.workflow import (
     MemoryJobRunner,
     MemoryJobStore,
 )
-from habitus.model_client import ProviderFactory, StructuredChatClient
+from habitus.model_client import ChatClient, Embedder, ProviderFactory, Reranker, StructuredChatClient
 from habitus.pre.conversation import ConversationAdapterRegistry
 from habitus.runtime.behavior import (
     behavior_domain_configs,
@@ -268,20 +268,7 @@ def build_runtime(
     )
     snapshot_reader = MemorySnapshotReader(tree, config=memory_config.snapshot)
 
-    embedder = resolved_providers.create_embedder(
-        model_config.embedding,
-        credentials=_model_credentials(config, model_config.embedding.route.credential_ref),
-        observer=operation_observer,
-        outbound=config.network,
-    )
-    reranker = None
-    if model_config.rerank is not None:
-        reranker = resolved_providers.create_reranker(
-            model_config.rerank,
-            credentials=_model_credentials(config, model_config.rerank.route.credential_ref),
-            observer=operation_observer,
-            outbound=config.network,
-        )
+    embedder, reranker, chat = _model_clients(resolved_providers, config, operation_observer)
     vector_store = build_vector_store(
         resolved_vector_stores, config, memory_config.vector_store, memory_config.vector_index, memory_vector_lock
     )
@@ -306,12 +293,6 @@ def build_runtime(
         snapshot_reader=snapshot_reader,
         semantic_search=semantic_search,
         config=memory_config.editor_retrieval,
-    )
-    chat = resolved_providers.create_chat_client(
-        model_config.chat,
-        credentials=_model_credentials(config, model_config.chat.route.credential_ref),
-        observer=operation_observer,
-        outbound=config.network,
     )
     structured_chat = StructuredChatClient(
         chat,
@@ -343,16 +324,8 @@ def build_runtime(
         transaction=transaction,
     )
 
-    overview_generator = LLMMemoryOverviewGenerator(
-        structured_chat,
-        config=memory_config.semantic,
-    )
-    semantic_refresher = MemorySemanticRefresher(
-        tree,
-        overview_generator,
-        resolved_lock,
-        config=memory_config.semantic,
-    )
+    overview_generator = LLMMemoryOverviewGenerator(structured_chat, config=memory_config.semantic)
+    semantic_refresher = MemorySemanticRefresher(tree, overview_generator, resolved_lock, config=memory_config.semantic)
 
     conversations = ConversationMessageJournal(
         config.conversation_root,
@@ -489,17 +462,8 @@ def build_runtime(
         observer=operation_observer,
     )
 
-    jobs = MemoryJobStore(
-        config.workflow_root,
-        resolved_lock,
-        memory_root=tree.root,
-        config=workflow_config.jobs,
-    )
-    receipts = MemoryChangeReceiptStore(
-        config.workflow_root,
-        codec,
-        config=workflow_config.receipts,
-    )
+    jobs = MemoryJobStore(config.workflow_root, resolved_lock, memory_root=tree.root, config=workflow_config.jobs)
+    receipts = MemoryChangeReceiptStore(config.workflow_root, codec, config=workflow_config.receipts)
     conversation_lifecycle = ConversationLifecycleManager(
         summary_compactor,
         conversations,
@@ -821,6 +785,38 @@ def _builtin_provider_factory() -> ProviderFactory:
     providers = ProviderFactory()
     register_builtin_adapters(providers)
     return providers
+
+
+def _model_clients(
+    providers: ProviderFactory, config: HabitusConfig, observer: Observer
+) -> tuple[Embedder, Reranker | None, ChatClient]:
+    """三种模型能力的客户端；每个客户端带自己的熔断，共用 ``models.call_failures`` 这组数（裁定 108）。"""
+
+    models = config.models
+    embedder = providers.create_embedder(
+        models.embedding,
+        credentials=_model_credentials(config, models.embedding.route.credential_ref),
+        observer=observer,
+        outbound=config.network,
+        failures=models.call_failures,
+    )
+    reranker = None
+    if models.rerank is not None:
+        reranker = providers.create_reranker(
+            models.rerank,
+            credentials=_model_credentials(config, models.rerank.route.credential_ref),
+            observer=observer,
+            outbound=config.network,
+            failures=models.call_failures,
+        )
+    chat = providers.create_chat_client(
+        models.chat,
+        credentials=_model_credentials(config, models.chat.route.credential_ref),
+        observer=observer,
+        outbound=config.network,
+        failures=models.call_failures,
+    )
+    return embedder, reranker, chat
 
 
 def _model_credentials(config: HabitusConfig, reference: str) -> Mapping[str, str]:

@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 _INTEGER_BOUNDS: tuple[tuple[str, int, int], ...] = (
     ("pick_retries", 0, 5),
-    ("transient_retries", 0, 20),
     ("max_encoded_bytes", 1, 256 * 1024 * 1024),
     ("active_min_days", 1, 365),
     ("active_cap", 1, 10_000),
@@ -30,7 +29,7 @@ _INTEGER_BOUNDS: tuple[tuple[str, int, int], ...] = (
 class BehaviorKindConfig:
     """词表的门槛与运维边界。
 
-    - 选词调用：答复结构不合格时带着错误重问几次（``pick_retries``，用尽记「待定」）、瞬态错误重试几次、隔多久。
+    - 选词调用：答复结构不合格时带着错误重问几次（``pick_retries``，用尽记「待定」）；调用失败的重试只在模型客户端一层（裁定 108）。
     - 在用：一个词在 ``active_min_days`` 个不同的本地日被直接选中，下一次换代起在用；每条 lane 在用的词最多 ``active_cap`` 个，
       满了够条件的词等着、不挤别人（裁定 101 第 7 条）。
     - 会话 lane 选词给模型看的上文（实验原数）：最近 ``recent_records`` 条成了记录的轮，加同一会话最近
@@ -42,8 +41,6 @@ class BehaviorKindConfig:
     """
 
     pick_retries: int = 2
-    transient_retries: int = 5
-    transient_retry_delay_seconds: float = 5.0
     max_encoded_bytes: int = 16 * 1024 * 1024
     active_min_days: int = 2
     active_cap: int = 100
@@ -62,8 +59,6 @@ class BehaviorKindConfig:
             value = getattr(self, name)
             if not lower <= value <= upper:
                 raise ValueError(f"{name} must be an integer between {lower} and {upper}")
-        if not 0.0 <= float(self.transient_retry_delay_seconds) <= 600.0:
-            raise ValueError("transient_retry_delay_seconds must be between 0.0 and 600.0")
 
 
 __all__ = ["BehaviorKindConfig"]

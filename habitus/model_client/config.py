@@ -209,6 +209,52 @@ class RerankModelConfig:
 CapabilityConfig: TypeAlias = ChatModelConfig | EmbeddingModelConfig | RerankModelConfig
 
 
+@dataclass(frozen=True)
+class CallFailureConfig:
+    """模型调用失败的处理数（裁定 108）：限流的重试间隔与熔断。三种能力（对话、向量、重排）各一个熔断，共用这组数。
+
+    - 限流的重试间隔照 OpenViking（5 秒起、120 秒封顶）；其余"等一等可能好"的重试次数与间隔用各路由的
+      ``max_retries`` / ``retry_*_delay_seconds``。
+    - 熔断的数沿用原模型队列整体退避的数：连着 ``breaker_failure_threshold`` 次调用失败（每次已按路由重试过）打开，
+      ``breaker_reset_base_seconds`` 后放一个请求试探，试探失败等待加倍、封顶 ``breaker_reset_max_seconds``。
+    """
+
+    rate_limit_retry_base_delay_seconds: float = 5.0
+    rate_limit_retry_max_delay_seconds: float = 120.0
+    breaker_failure_threshold: int = 3
+    breaker_reset_base_seconds: float = 60.0
+    breaker_reset_max_seconds: float = 3_600.0
+
+    def __post_init__(self) -> None:
+        rate_base = _positive_float(
+            self.rate_limit_retry_base_delay_seconds,
+            "models.call_failures.rate_limit_retry_base_delay_seconds",
+            maximum=600.0,
+        )
+        rate_max = _positive_float(
+            self.rate_limit_retry_max_delay_seconds,
+            "models.call_failures.rate_limit_retry_max_delay_seconds",
+            maximum=3_600.0,
+        )
+        if rate_max < rate_base:
+            raise ValueError("models.call_failures rate-limit max delay cannot be below its base delay")
+        _bounded_int(
+            self.breaker_failure_threshold, "models.call_failures.breaker_failure_threshold", minimum=1, maximum=1_000
+        )
+        reset_base = _positive_float(
+            self.breaker_reset_base_seconds, "models.call_failures.breaker_reset_base_seconds", maximum=86_400.0
+        )
+        reset_max = _positive_float(
+            self.breaker_reset_max_seconds, "models.call_failures.breaker_reset_max_seconds", maximum=86_400.0
+        )
+        if reset_max < reset_base:
+            raise ValueError("models.call_failures breaker max reset cannot be below its base reset")
+        object.__setattr__(self, "rate_limit_retry_base_delay_seconds", rate_base)
+        object.__setattr__(self, "rate_limit_retry_max_delay_seconds", rate_max)
+        object.__setattr__(self, "breaker_reset_base_seconds", reset_base)
+        object.__setattr__(self, "breaker_reset_max_seconds", reset_max)
+
+
 def _validate_base_url(base_url: str) -> None:
     parsed = urlsplit(base_url)
     if (
@@ -263,6 +309,7 @@ def _json_mapping(value: object, label: str) -> dict[str, object]:
 
 
 __all__ = [
+    "CallFailureConfig",
     "CapabilityConfig",
     "ChatModelConfig",
     "ChatStructuredOutputMode",

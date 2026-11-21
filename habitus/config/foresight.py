@@ -14,7 +14,6 @@ from habitus.config.loader import construct_config, group_fields
 
 _INT_BOUNDS = (
     ("daily_reminder_cap", 1, 100),
-    ("judge_transient_retries", 0, 20),
     ("open_reminders_judged", 1, 50),
     ("outlet_max_attempts", 1, 20),
     ("outlet_claim_limit", 1, 20),
@@ -24,7 +23,6 @@ _INT_BOUNDS = (
 _FLOAT_BOUNDS = (
     ("false_alarm_rate", 0.01, 0.99),
     ("tick_interval_seconds", 60.0, 86_400.0),
-    ("judge_transient_retry_delay_seconds", 0.0, 600.0),
     ("worker_shutdown_timeout_seconds", 1.0, 3_600.0),
     ("half_life_opportunities", 1.0, 200.0),
     ("outlet_liveness_hours", 1.0, 720.0),
@@ -103,9 +101,6 @@ class ForesightConfig:
     # 1 / (1 − 2^(−1/H)) 的这个比例（还不超过先验自己的有效样本）：没见过的组合贴着更粗的那一层，见得越多越按它自己。
     # 按机会数遗忘后有效样本有上限（H = 8 时约 12），分量写成固定数会占到四成、让 100/100 的组合也过不了线。暂定值，回放后定。
     unit_prior_share: float = 1 / 3
-    # 模型对传输层瞬态错的有界重试。
-    judge_transient_retries: int = 1
-    judge_transient_retry_delay_seconds: float = 5.0
     # 常驻 worker：多久一拍（一拍 = 建预期、到时窗的决定说不说），与停机时限。一拍就是一个槽：拍点对齐槽边界，
     # 必须等于 ``temporal.slot_minutes`` × 60（配置根交叉校验，实时化方案第 5 节）。
     tick_interval_seconds: float = 900.0

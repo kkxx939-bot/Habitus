@@ -210,7 +210,7 @@ def assemble_branch(
         return None
     runner = branch.reduction_runner
     retry = retry_stage_of((branch,))
-    state = ModelQueueState()
+    state = ModelQueueState(structured_chat.client.breaker)
     generation = build_generation(
         config,
         behavior_tree=branch.tree,
@@ -330,9 +330,6 @@ def model_queue_settings(config: HabitusConfig) -> QueueSettings:
     scene = config.scene
     return QueueSettings(
         poll_seconds=scene.model_queue_poll_seconds,
-        backoff_base_seconds=scene.model_queue_backoff_base_seconds,
-        backoff_max_seconds=scene.model_queue_backoff_max_seconds,
-        unreachable_after_failures=scene.model_queue_unreachable_after_failures,
         warning_items=scene.model_queue_backlog_warning_items,
         warning_wait_seconds=scene.model_queue_backlog_warning_seconds,
         kept_days=scene.generation_kept_days,

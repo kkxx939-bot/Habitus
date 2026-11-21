@@ -11,37 +11,47 @@ from dataclasses import replace
 from typing import cast
 
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
-from habitus.model_client.config import ChatModelConfig
+from habitus.model_client.breaker import CircuitBreaker
+from habitus.model_client.config import CallFailureConfig, ChatModelConfig
 from habitus.model_client.contracts import (
     ChatCallContext,
     ChatMessage,
     ChatProvider,
     ChatRequest,
-    ModelClientError,
-    ModelInputTooLargeError,
     ModelResponse,
-    ModelResponseError,
     ModelStreamEvent,
     PreparedChatRequest,
     TokenUsage,
 )
-from habitus.model_client.retry import normalize_provider_error, retry_delay
+from habitus.model_client.errors import (
+    ModelCircuitOpenError,
+    ModelClientError,
+    ModelErrorRule,
+    ModelInputTooLargeError,
+    ModelResponseError,
+)
+from habitus.model_client.failures import classify_failure, retry_delay
 
 
 class ChatClient:
-    """供应商无关的对话调用入口；Provider 的创建只属于工厂。"""
+    """供应商无关的对话调用入口；Provider 的创建只属于工厂。失败按 ``model_client.errors`` 的三条规则处理：只有"等一等可能好"
+    的按路由有界重试，用尽交回调用方；每次逻辑调用的结局记进这条能力的熔断（``model_client.breaker``）。"""
 
     def __init__(
         self,
         config: ChatModelConfig,
         provider: ChatProvider,
         *,
+        failures: CallFailureConfig | None = None,
         sleep: Callable[[float], None] = time.sleep,
         async_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         observer: Observer | None = None,
     ) -> None:
         self.config = config
         self.provider = provider
+        self.failures = failures or CallFailureConfig()
+        #: 对话这一种能力的熔断：同一个客户端的所有调用（会话、选词、判官、记忆、摘要）共用。
+        self.breaker = CircuitBreaker(self.failures, name="chat")
         self._sleep = sleep
         self._async_sleep = async_sleep
         self._sync_slots = threading.BoundedSemaphore(config.route.max_concurrent)
@@ -72,26 +82,29 @@ class ChatClient:
         call_context = self._context(context)
         prepared = self._prepare(request, stream=False, context=call_context)
         call, started = (prepared.request, call_context), time.monotonic()
-        with self._sync_slots:
-            for attempt in range(self.config.route.max_retries + 1):
-                try:
-                    response = self._response_context(
-                        self._require_response(self.provider.complete(prepared)),
-                        call_context,
-                    )
+        probe = self._admit("complete", started, call)
+        try:
+            with self._sync_slots:
+                for attempt in range(self.config.route.max_retries + 1):
+                    try:
+                        raw = self.provider.complete(prepared)
+                        response = self._response_context(self._require_response(raw), call_context)
+                    except Exception as exc:
+                        failure, delay = self._settle(attempt, exc)
+                        if delay is None:
+                            self._observe(
+                                "complete", ObservationStatus.FAILURE, started, call, error=failure, retry_count=attempt
+                            )
+                            raise failure from exc
+                        self._sleep(delay)
+                        continue
+                    self.breaker.record_success()
                     self._observe(
                         "complete", ObservationStatus.SUCCESS, started, call, response=response, retry_count=attempt
                     )
                     return response
-                except Exception as exc:
-                    failure = normalize_provider_error(exc)
-                    if failure.retryable and attempt < self.config.route.max_retries:
-                        self._sleep(self._retry_delay(attempt, failure))
-                        continue
-                    self._observe(
-                        "complete", ObservationStatus.FAILURE, started, call, error=failure, retry_count=attempt
-                    )
-                    raise failure from exc
+        finally:
+            self._release(probe)
         raise AssertionError("chat retry loop exhausted without a result")  # pragma: no cover
 
     async def complete_async(
@@ -103,13 +116,28 @@ class ChatClient:
         call_context = self._context(context)
         prepared = self._prepare(request, stream=False, context=call_context)
         call, started = (prepared.request, call_context), time.monotonic()
-        async with self._async_slot():
-            for attempt in range(self.config.route.max_retries + 1):
-                try:
-                    response = self._response_context(
-                        self._require_response(await self.provider.complete_async(prepared)),
-                        call_context,
-                    )
+        probe = self._admit("complete_async", started, call)
+        try:
+            async with self._async_slot():
+                for attempt in range(self.config.route.max_retries + 1):
+                    try:
+                        raw = await self.provider.complete_async(prepared)
+                        response = self._response_context(self._require_response(raw), call_context)
+                    except Exception as exc:
+                        failure, delay = self._settle(attempt, exc)
+                        if delay is None:
+                            self._observe(
+                                "complete_async",
+                                ObservationStatus.FAILURE,
+                                started,
+                                call,
+                                error=failure,
+                                retry_count=attempt,
+                            )
+                            raise failure from exc
+                        await self._async_sleep(delay)
+                        continue
+                    self.breaker.record_success()
                     self._observe(
                         "complete_async",
                         ObservationStatus.SUCCESS,
@@ -119,15 +147,8 @@ class ChatClient:
                         retry_count=attempt,
                     )
                     return response
-                except Exception as exc:
-                    failure = normalize_provider_error(exc)
-                    if failure.retryable and attempt < self.config.route.max_retries:
-                        await self._async_sleep(self._retry_delay(attempt, failure))
-                        continue
-                    self._observe(
-                        "complete_async", ObservationStatus.FAILURE, started, call, error=failure, retry_count=attempt
-                    )
-                    raise failure from exc
+        finally:
+            self._release(probe)
         raise AssertionError("chat retry loop exhausted without a result")  # pragma: no cover
 
     def stream(
@@ -147,66 +168,44 @@ class ChatClient:
     ) -> AsyncIterator[ModelStreamEvent]:
         prepared = self._prepare(request, stream=True, context=self._context(context))
         started = time.monotonic()
-        async with self._async_slot():
-            for attempt in range(self.config.route.max_retries + 1):
-                emitted = False
-                usage: TokenUsage | None = None
-                try:
-                    async for event in self.provider.stream_async(prepared):
-                        if not isinstance(event, ModelStreamEvent):
-                            raise ModelResponseError("provider returned an invalid stream event")
-                        emitted = True
-                        if event.usage is not None:
-                            usage = event.usage
-                        yield event
-                    if not emitted:
-                        raise ModelResponseError("provider returned an empty stream")
+        probe = self._admit("stream_async", started)
+        try:
+            async with self._async_slot():
+                for attempt in range(self.config.route.max_retries + 1):
+                    events = _StreamTally()
+                    try:
+                        async for event in self.provider.stream_async(prepared):
+                            yield events.take(event)
+                        events.finish()
+                    except Exception as exc:
+                        failure, delay = self._settle(attempt, exc, retry=not events.emitted)
+                        if delay is None:
+                            self._observe(
+                                "stream_async", ObservationStatus.FAILURE, started, error=failure, retry_count=attempt
+                            )
+                            raise failure from exc
+                        await self._async_sleep(delay)
+                        continue
+                    self.breaker.record_success()
                     self._observe(
-                        "stream_async",
-                        ObservationStatus.SUCCESS,
-                        started,
-                        usage=usage,
-                        retry_count=attempt,
+                        "stream_async", ObservationStatus.SUCCESS, started, usage=events.usage, retry_count=attempt
                     )
                     return
-                except Exception as exc:
-                    failure = normalize_provider_error(exc)
-                    if emitted:
-                        self._observe(
-                            "stream_async",
-                            ObservationStatus.FAILURE,
-                            started,
-                            error=failure,
-                            retry_count=attempt,
-                        )
-                        raise failure from exc
-                    if failure.retryable and attempt < self.config.route.max_retries:
-                        await self._async_sleep(self._retry_delay(attempt, failure))
-                        continue
-                    self._observe(
-                        "stream_async",
-                        ObservationStatus.FAILURE,
-                        started,
-                        error=failure,
-                        retry_count=attempt,
-                    )
-                    raise failure from exc
+        finally:
+            self._release(probe)
 
     def health_check(self) -> dict[str, object]:
+        """探针不经过熔断、不计入熔断：要看到服务此刻真实的样子。"""
+
         try:
             result = self.provider.health_check()
             return dict(result)
         except Exception as exc:
-            failure = normalize_provider_error(exc)
-            return {
-                "ok": False,
-                "provider": self.provider.provider_name,
-                "model": self.provider.model,
-                "error_code": failure.code,
-            }
+            return self._probe_failed(classify_failure(exc))
 
     async def health_check_async(self) -> dict[str, object]:
-        """只调用 Provider 显式提供的异步探针，保证调用方可真正取消。"""
+        """只调用 Provider 显式提供的异步探针，保证调用方可真正取消。探针不经过熔断；"等一等可能好"的错按路由的次数与退避
+        再探，一次超时不当成整个用不了（裁定 94 第 8 条）。"""
 
         probe = getattr(self.provider, "health_check_async", None)
         if not callable(probe):
@@ -216,26 +215,16 @@ class ChatClient:
                 "model": self.provider.model,
                 "error_code": "async_health_check_unsupported",
             }
-        async_probe = cast(
-            Callable[[], Awaitable[Mapping[str, object]]],
-            probe,
-        )
-        # 探针与普通调用同一套重试规矩：网络抖动这类可重试的错按路由的次数与退避再探，一次超时不当成整个用不了（裁定 94 第 8 条）
+        async_probe = cast(Callable[[], Awaitable[Mapping[str, object]]], probe)
         for attempt in range(self.config.route.max_retries + 1):
             try:
-                result = await async_probe()
-                return dict(result)
+                return dict(await async_probe())
             except Exception as exc:
-                failure = normalize_provider_error(exc)
-                if failure.retryable and attempt < self.config.route.max_retries:
+                failure = classify_failure(exc)
+                if failure.rule is ModelErrorRule.WAIT and attempt < self.config.route.max_retries:
                     await self._async_sleep(self._retry_delay(attempt, failure))
                     continue
-                return {
-                    "ok": False,
-                    "provider": self.provider.provider_name,
-                    "model": self.provider.model,
-                    "error_code": failure.code,
-                }
+                return self._probe_failed(failure)
         raise AssertionError("health probe retry loop exhausted without a result")  # pragma: no cover
 
     async def aclose(self) -> None:
@@ -245,50 +234,59 @@ class ChatClient:
 
     def _stream_sync(self, request: PreparedChatRequest) -> Iterator[ModelStreamEvent]:
         started = time.monotonic()
-        with self._sync_slots:
-            for attempt in range(self.config.route.max_retries + 1):
-                emitted = False
-                usage: TokenUsage | None = None
-                try:
-                    for event in self.provider.stream(request):
-                        if not isinstance(event, ModelStreamEvent):
-                            raise ModelResponseError("provider returned an invalid stream event")
-                        emitted = True
-                        if event.usage is not None:
-                            usage = event.usage
-                        yield event
-                    if not emitted:
-                        raise ModelResponseError("provider returned an empty stream")
-                    self._observe(
-                        "stream",
-                        ObservationStatus.SUCCESS,
-                        started,
-                        usage=usage,
-                        retry_count=attempt,
-                    )
-                    return
-                except Exception as exc:
-                    failure = normalize_provider_error(exc)
-                    if emitted:
-                        self._observe(
-                            "stream",
-                            ObservationStatus.FAILURE,
-                            started,
-                            error=failure,
-                            retry_count=attempt,
-                        )
-                        raise failure from exc
-                    if failure.retryable and attempt < self.config.route.max_retries:
-                        self._sleep(self._retry_delay(attempt, failure))
+        probe = self._admit("stream", started)
+        try:
+            with self._sync_slots:
+                for attempt in range(self.config.route.max_retries + 1):
+                    events = _StreamTally()
+                    try:
+                        for event in self.provider.stream(request):
+                            yield events.take(event)
+                        events.finish()
+                    except Exception as exc:
+                        failure, delay = self._settle(attempt, exc, retry=not events.emitted)
+                        if delay is None:
+                            self._observe(
+                                "stream", ObservationStatus.FAILURE, started, error=failure, retry_count=attempt
+                            )
+                            raise failure from exc
+                        self._sleep(delay)
                         continue
-                    self._observe(
-                        "stream",
-                        ObservationStatus.FAILURE,
-                        started,
-                        error=failure,
-                        retry_count=attempt,
-                    )
-                    raise failure from exc
+                    self.breaker.record_success()
+                    self._observe("stream", ObservationStatus.SUCCESS, started, usage=events.usage, retry_count=attempt)
+                    return
+        finally:
+            self._release(probe)
+
+    def _admit(self, operation: str, started: float, call: tuple[ChatRequest, ChatCallContext] | None = None) -> bool:
+        """问熔断能不能发；熔断开着就记一笔失败观测、原样抛 ``ModelCircuitOpenError``。返回这次是不是半开时的试探。"""
+
+        try:
+            return self.breaker.before_call()
+        except ModelCircuitOpenError as exc:
+            self._observe(operation, ObservationStatus.FAILURE, started, call, error=exc)
+            raise
+
+    def _settle(self, attempt: int, exc: Exception, *, retry: bool = True) -> tuple[ModelClientError, float | None]:
+        """一次尝试失败：归类；"等一等可能好"且还有次数就返回等多久，否则把这次逻辑调用的失败记进熔断、返回 None。"""
+
+        failure = classify_failure(exc)
+        if retry and failure.rule is ModelErrorRule.WAIT and attempt < self.config.route.max_retries:
+            return failure, self._retry_delay(attempt, failure)
+        self.breaker.record_failure(failure)
+        return failure, None
+
+    def _release(self, probe: bool) -> None:
+        if probe:
+            self.breaker.release_probe()
+
+    def _probe_failed(self, failure: ModelClientError) -> dict[str, object]:
+        return {
+            "ok": False,
+            "provider": self.provider.provider_name,
+            "model": self.provider.model,
+            "error_code": failure.code,
+        }
 
     def estimate_input_tokens(self, request: ChatRequest | str) -> int:
         """按供应商真实的请求投影估算模型可见输入 token，不发请求；与每次调用前的预算检查（``_prepare``）同一个估法。"""
@@ -345,12 +343,7 @@ class ChatClient:
         return response
 
     def _retry_delay(self, attempt: int, failure: ModelClientError) -> float:
-        return retry_delay(
-            attempt,
-            base_delay=self.config.route.retry_base_delay_seconds,
-            max_delay=self.config.route.retry_max_delay_seconds,
-            error=failure,
-        )
+        return retry_delay(attempt, route=self.config.route, failures=self.failures, error=failure)
 
     def _async_slot(self) -> asyncio.Semaphore:
         loop = asyncio.get_running_loop()
@@ -398,6 +391,26 @@ class ChatClient:
                 attributes=attributes,
             )
         )
+
+
+class _StreamTally:
+    """一次流式尝试里收到的事件：有没有吐出过事件（吐出过就不能再重试）、最后的用量。"""
+
+    def __init__(self) -> None:
+        self.emitted = False
+        self.usage: TokenUsage | None = None
+
+    def take(self, event: object) -> ModelStreamEvent:
+        if not isinstance(event, ModelStreamEvent):
+            raise ModelResponseError("provider returned an invalid stream event")
+        self.emitted = True
+        if event.usage is not None:
+            self.usage = event.usage
+        return event
+
+    def finish(self) -> None:
+        if not self.emitted:
+            raise ModelResponseError("provider returned an empty stream")
 
 
 def _call_attributes(

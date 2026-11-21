@@ -55,23 +55,18 @@ class DayWork:
             return []
         due = await asyncio.to_thread(retry.due, through=current.today)
         self.state.record(RETRY, len(due), current.now, min((item.entered_at for item in due), default=None))
-        # 上一次卡在"模型用不了"上的那几项在进程里退避着：这一遍不试它们（项留在堆里、仍算欠着），别的照试
-        resting = self.state.waiting_names(current.now)
-        waiting = frozenset(item.item_id for item in due if _retry_name(item.item_id) in resting)
-        if len(waiting) == len(due):
+        if not due:
             return []
-        stuck: list[tuple[str, ...]] = [()]
 
         async def run(detail: dict[str, object], signals: list[str]) -> str:
-            report = await retry.run_once(through=current.today, skip=waiting)
+            report = await retry.run_once(through=current.today)
             detail.update(retry_summary(report))
             if report.unreachable:
-                stuck[0] = tuple(_retry_name(identity) for identity in report.stuck_items)  # 卡在哪几项上
-                return UNREACHABLE
+                return UNREACHABLE  # 模型此刻用不了：项留在堆里、仍算欠着，下一轮再试（熔断开着时等试探）
             # 一项都没有定论（都被时窗末重读占着、或锁被占）不算进展：下一轮再来
             return DONE if report.ready and report.recovered + report.invalid + report.deterministic else WAITING
 
-        return [Item(RETRY, None, run, stuck=lambda: stuck[0])]
+        return [Item(RETRY, None, run)]
 
     async def unsealed(self, current: Round, night: date) -> list[Item]:
         unsealed = self.bridge
@@ -85,7 +80,7 @@ class DayWork:
         async def run(detail: dict[str, object], signals: list[str]) -> str:
             await unsealed.prepare(until=self.clock())
             if unsealed.unavailable is not None:
-                raise unsealed.unavailable  # 桥把"模型此刻用不了"吞了：交给队列按错误种类处理（整体退避，不磨这一项）
+                raise unsealed.unavailable  # 桥把"模型此刻用不了"吞了：交给队列（这一项留着，熔断开着时等试探）
             left = await asyncio.to_thread(unsealed.unclassified)
             detail.update({"judgements": count, "unclassified": left})
             return UNFINISHED if left else DONE
@@ -173,12 +168,6 @@ class SceneWork:
         """先验的补问。"""
 
         return await self.asking.items(current, night, series)
-
-
-def _retry_name(identity: str) -> str:
-    """出错重试里一项在进程里的名字（模型失败后的退避按它记）。"""
-
-    return f"retry:{identity}"
 
 
 async def owed(daily: DayWork, sealed: SceneWork, category: str, current: Round) -> list[Item]:

@@ -65,6 +65,7 @@ def test_the_service_compares_the_configured_zone_even_without_a_generation(monk
     monkeypatch.setattr(service, "_foresight_checks", lambda *_args: [])
     monkeypatch.setattr(service, "_queue_check", lambda: none_check())
     monkeypatch.setattr(service, "_vector_check", lambda *_args: none_check())
+    monkeypatch.setattr("habitus.runtime.health.model_checks", lambda _components: [])
     report = asyncio.run(service.report("running"))
     found = {item.name: item for item in report.checks}
     assert found["generation"].detail == "disabled"

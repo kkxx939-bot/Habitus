@@ -17,7 +17,10 @@ from habitus.model_client import (
     ChatRequest,
     ChatStructuredOutputMode,
     ModelAuthenticationError,
+    ModelContentSafetyError,
     ModelInputTooLargeError,
+    ModelInvalidRequestError,
+    ModelQuotaError,
     ModelResponse,
     ModelResponseError,
     ModelStreamEvent,
@@ -300,9 +303,11 @@ def test_sync_completion_retries_transport_error_and_records_delay() -> None:
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
+        # 只有"等一等可能好"的重试（裁定 108）：要人处理、这一条输入有问题的一次就交回
         (ModelAuthenticationError("bad key"), ModelAuthenticationError),
-        (ModelResponseError("bad response"), ModelResponseError),
-        (ValueError("invalid payload"), ModelResponseError),
+        (ModelQuotaError("no credit"), ModelQuotaError),
+        (ModelContentSafetyError("blocked"), ModelContentSafetyError),
+        (ModelInvalidRequestError("bad request"), ModelInvalidRequestError),
     ],
 )
 def test_sync_completion_does_not_retry_nonretryable_failure(
@@ -319,13 +324,15 @@ def test_sync_completion_does_not_retry_nonretryable_failure(
     assert delays == []
 
 
-def test_sync_completion_rejects_invalid_provider_response_after_retry_boundary() -> None:
-    provider = ScriptedProvider(completions=[object()])
-    client = ChatClient(config(retries=3), provider)
+def test_sync_completion_retries_a_malformed_provider_response_as_a_service_failure() -> None:
+    """服务答回来的东西不合协议算服务故障（等一等可能好）：按路由重试，用尽交回。"""
+
+    provider = ScriptedProvider(completions=[object(), ValueError("unrecognised"), object()])
+    client = ChatClient(config(retries=2), provider, sleep=lambda _delay: None)
 
     with pytest.raises(ModelResponseError, match="invalid normalized"):
         client.complete("hello")
-    assert len(provider.requests) == 1
+    assert len(provider.requests) == 3
 
 
 def test_async_completion_retries_with_async_sleep_and_returns_response() -> None:
@@ -393,12 +400,11 @@ def test_sync_stream_retries_only_before_first_event() -> None:
     assert len(delays) == 1
 
 
-def test_sync_stream_empty_result_is_nonretryable_response_failure() -> None:
+def test_sync_stream_empty_result_is_retried_as_a_service_failure() -> None:
     provider = ScriptedProvider(streams=[(), stream_events()])
     client = ChatClient(config(retries=1), provider, sleep=lambda _delay: None)
-    with pytest.raises(ModelResponseError, match="empty stream"):
-        tuple(client.stream("hello"))
-    assert len(provider.requests) == 1
+    assert tuple(client.stream("hello")) == stream_events()
+    assert len(provider.requests) == 2
 
 
 @pytest.mark.parametrize("stream", [(), (object(),)])
@@ -491,7 +497,7 @@ def test_health_check_returns_detached_success_mapping() -> None:
     [
         (TimeoutError("offline"), "MODEL_TRANSPORT"),
         (PermissionError("forbidden"), "MODEL_TRANSPORT"),
-        (ValueError("invalid"), "MODEL_RESPONSE"),
+        (ValueError("invalid"), "MODEL_UNKNOWN"),
     ],
 )
 def test_health_check_normalizes_failure_without_raising(error: Exception, code: str) -> None:

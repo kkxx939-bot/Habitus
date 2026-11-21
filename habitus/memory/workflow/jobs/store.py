@@ -70,6 +70,8 @@ class MemoryJobQueueSnapshot:
     committed: int
     high_watermark: int
     oldest_age_seconds: float
+    #: 输入有问题、跳过了的段（仍在保留期里的）。
+    skipped: int = 0
 
 
 class MemoryJobStore:
@@ -116,18 +118,10 @@ class MemoryJobStore:
             state = self._load_or_initialize_state(jobs)
             return state.last_allocated_memory_sequence
 
-    def stage(
-        self,
-        address: ConversationAddress,
-        segment: ConversationSegment,
-    ) -> MemoryJob:
+    def stage(self, address: ConversationAddress, segment: ConversationSegment) -> MemoryJob:
         """在 history 发布前幂等建立不可执行 outbox 并分配全局序号。"""
 
-        if not same_path_identity(
-            segment.conversation_id,
-            address.conversation_id,
-            "conversation_id",
-        ):
+        if not same_path_identity(segment.conversation_id, address.conversation_id, "conversation_id"):
             raise ValueError("conversation address does not match the sealed segment")
         source_key = self._source_key(address, segment)
         with self._queue_fence():
@@ -159,11 +153,7 @@ class MemoryJobStore:
                 created_at=timestamp,
                 updated_at=timestamp,
             )
-            atomic_create_bytes(
-                self._path(source_key),
-                self._encode(job),
-                artifact_root=self.root,
-            )
+            atomic_create_bytes(self._path(source_key), self._encode(job), artifact_root=self.root)
             return job
 
     def high_watermark(self) -> int:
@@ -200,10 +190,7 @@ class MemoryJobStore:
             counts = {status: 0 for status in MemoryJobStatus}
             for job in jobs:
                 counts[job.status] += 1
-            oldest = next(
-                (item for item in jobs if item.status is not MemoryJobStatus.COMMITTED),
-                None,
-            )
+            oldest = next((item for item in jobs if not item.status.terminal), None)
             age = 0.0 if oldest is None else max(0.0, (self._timestamp() - oldest.created_at).total_seconds())
             return MemoryJobQueueSnapshot(
                 staged=counts[MemoryJobStatus.STAGED],
@@ -211,6 +198,7 @@ class MemoryJobStore:
                 running=counts[MemoryJobStatus.RUNNING],
                 failed=counts[MemoryJobStatus.FAILED],
                 committed=counts[MemoryJobStatus.COMMITTED],
+                skipped=counts[MemoryJobStatus.SKIPPED],
                 high_watermark=state.last_allocated_memory_sequence,
                 oldest_age_seconds=age,
             )
@@ -218,8 +206,8 @@ class MemoryJobStore:
     def discard_committed(self, job: MemoryJob) -> bool:
         """在队列栅栏内耐久删除一条已经满足外部安全门槛的终态 Job。"""
 
-        if job.status is not MemoryJobStatus.COMMITTED:
-            raise MemoryJobError("only a COMMITTED memory job can be discarded")
+        if not job.status.terminal:
+            raise MemoryJobError("only a COMMITTED or SKIPPED memory job can be discarded")
         with self._queue_fence():
             state = self._load_or_initialize_state(self._read_all())
             if state.last_allocated_memory_sequence < job.memory_sequence:
@@ -252,6 +240,12 @@ class MemoryJobStore:
             )
             self._write(activated)
             return activated
+
+    def skipped(self) -> tuple[MemoryJob, ...]:
+        """仍保留的、输入有问题跳过了的 Job（健康检查读，裁定 108）。"""
+
+        with self._queue_fence():
+            return tuple(job for job in self._read_all() if job.status is MemoryJobStatus.SKIPPED)
 
     def oldest_uncommitted(self) -> MemoryJob | None:
         """返回最早未完成任务，不允许调用者越过它。"""
@@ -329,7 +323,7 @@ class MemoryJobStore:
             now = self._timestamp()
             if current.status is MemoryJobStatus.FAILED:
                 raise MemoryJobBlockedError("oldest memory job exhausted retries and blocks later jobs")
-            if current.status is MemoryJobStatus.COMMITTED:
+            if current.status.terminal:
                 raise MemoryJobError("committed memory job cannot be claimed")
             if current.status is MemoryJobStatus.STAGED:
                 raise MemoryJobBlockedError("oldest memory job has not published its history source")
@@ -403,11 +397,13 @@ class MemoryJobStore:
         *,
         retryable: bool = True,
         waits_for_model: bool = False,
+        wait_seconds: float | None = None,
         before_settlement: Callable[[], None] | None = None,
     ) -> MemoryJob:
         """在同一租约栅栏内清理未提交副作用、记录失败和退避。
 
-        ``waits_for_model``：模型此刻用不了，这一次不计入尝试次数，按 ``model_wait_*`` 的长退避排回队列等它恢复。
+        ``waits_for_model``：模型此刻用不了，这一次不计入尝试次数，排回队列等它恢复。``wait_seconds`` 是模型那条能力的熔断
+        给的离下一次试探还有多久（裁定 108）：给了就按它排期，人改好配置后随熔断的试探一起接上；没给按 ``model_wait_*`` 的退避。
         """
 
         message = " ".join(str(error).split()) or type(error).__name__
@@ -417,6 +413,26 @@ class MemoryJobStore:
             error=message[:MEMORY_JOB_ERROR_MAX_CHARS],
             retryable=retryable,
             waits_for_model=waits_for_model,
+            wait_seconds=wait_seconds,
+            before_settlement=before_settlement,
+        )
+
+    def skip(
+        self,
+        lease: MemoryJobLease,
+        reason: str,
+        *,
+        before_settlement: Callable[[], None] | None = None,
+    ) -> MemoryJob:
+        """以 fencing 租约把最早任务标记为 SKIPPED（这一段的输入有问题，记不进长期记忆），后面的序号照常往下走。"""
+
+        message = " ".join(reason.split()) or "skipped"
+        return self._finish(
+            lease,
+            committed=False,
+            error=message[:MEMORY_JOB_ERROR_MAX_CHARS],
+            retryable=False,
+            skipped=True,
             before_settlement=before_settlement,
         )
 
@@ -518,6 +534,8 @@ class MemoryJobStore:
         error: str | None,
         retryable: bool,
         waits_for_model: bool = False,
+        wait_seconds: float | None = None,
+        skipped: bool = False,
         before_settlement: Callable[[], None] | None = None,
     ) -> MemoryJob:
         with self._queue_fence():
@@ -527,16 +545,17 @@ class MemoryJobStore:
                 before_settlement()
             attempts = current.attempts
             model_waits = 0
-            if committed:
-                status = MemoryJobStatus.COMMITTED
+            if committed or skipped:
+                status = MemoryJobStatus.COMMITTED if committed else MemoryJobStatus.SKIPPED
                 next_attempt_at = None
-                last_error = current.last_error
+                last_error = current.last_error if committed else error
             elif waits_for_model:
                 # 认领时已经记了一次尝试：等模型恢复的这一次退回去，不让它把 max_attempts 用完
                 status = MemoryJobStatus.QUEUED
                 attempts = current.attempts - 1
                 model_waits = current.model_waits + 1
-                next_attempt_at = now + timedelta(seconds=self.config.model_wait_delay_seconds(model_waits))
+                delay = self.config.model_wait_delay_seconds(model_waits) if wait_seconds is None else wait_seconds
+                next_attempt_at = now + timedelta(seconds=max(1.0, delay))
                 last_error = error
             elif not retryable or current.attempts >= self.config.max_attempts:
                 status = MemoryJobStatus.FAILED
@@ -561,12 +580,7 @@ class MemoryJobStore:
             self._write(finished)
             return finished
 
-    def _current_lease_job(
-        self,
-        lease: MemoryJobLease,
-        *,
-        now: datetime,
-    ) -> MemoryJob:
+    def _current_lease_job(self, lease: MemoryJobLease, *, now: datetime) -> MemoryJob:
         current = self._oldest_required(lease.job)
         if (
             current.status is not MemoryJobStatus.RUNNING
@@ -588,7 +602,7 @@ class MemoryJobStore:
 
     def _oldest_uncommitted_unlocked(self) -> MemoryJob | None:
         return next(
-            (item for item in self._read_all() if item.status is not MemoryJobStatus.COMMITTED),
+            (item for item in self._read_all() if not item.status.terminal),
             None,
         )
 
@@ -698,13 +712,7 @@ class MemoryJobStore:
 
     def _read_path(self, path: Path) -> MemoryJob:
         try:
-            raw = json.loads(
-                read_regular_bytes(
-                    path,
-                    artifact_root=self.root,
-                    max_bytes=self.config.max_file_bytes,
-                )
-            )
+            raw = json.loads(read_regular_bytes(path, artifact_root=self.root, max_bytes=self.config.max_file_bytes))
             return self._parse(raw)
         except Exception as exc:
             if isinstance(exc, MemoryJobError):
@@ -798,19 +806,9 @@ class MemoryJobStore:
             raise
 
     @staticmethod
-    def _source_key(
-        address: ConversationAddress,
-        segment: ConversationSegment,
-    ) -> str:
-        source_address = ConversationAddress(
-            segment.conversation_id,
-            address.started_on,
-        )
-        return MemoryJobStore._source_key_values(
-            source_address,
-            segment.segment_id,
-            segment.digest,
-        )
+    def _source_key(address: ConversationAddress, segment: ConversationSegment) -> str:
+        source_address = ConversationAddress(segment.conversation_id, address.started_on)
+        return MemoryJobStore._source_key_values(source_address, segment.segment_id, segment.digest)
 
     @staticmethod
     def _source_key_values(

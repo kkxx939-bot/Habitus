@@ -277,7 +277,7 @@ def advised(tmp_path, client=None):  # type: ignore[no-untyped-def]
     chat = client(advisor) if client is not None else StructuredChatClient(ChatClient(model_config(), advisor))
     scene.advice = RelationAdvice(
         store=AdviceStore(tmp_path / "scene"),
-        prior=PriorAdvisor(chat, config=PriorConfig(transient_retry_delay_seconds=0.0)),
+        prior=PriorAdvisor(chat, config=PriorConfig()),
     )
     return site, scene, advisor
 

@@ -67,11 +67,7 @@ class SceneConfig:
     generation_retry_max_seconds: float = 3_600.0
     # 模型队列（原来换代里调模型的活都在它那里做，一项一项）：没活时隔多久从盘上看一眼有没有新欠账。
     model_queue_poll_seconds: float = 60.0
-    # 模型整个调不通时队列整体退避：首次等多久、最多等多久（逐次加倍；单项失败也按它各自等；到点接着做，不另探模型）。退避只在进程里。
-    model_queue_backoff_base_seconds: float = 60.0
-    model_queue_backoff_max_seconds: float = 3_600.0
-    # 连着这么多项（不同的项）都是模型失败、中间没有任何一项做成，队列就整体退避（不分失败原因）。
-    model_queue_unreachable_after_failures: int = 3
+    # 模型此刻用不了时队列怎么等：并进了模型层的熔断（``models.call_failures``，裁定 108）。
     # 停机时等模型队列当前这一项多久，超时取消（取消掉的那一项下次从盘上重新认出来）。
     model_queue_shutdown_timeout_seconds: float = 30.0
     # 欠账到这么多项、或最老一项等了这么久，健康面报降级（non-critical；清完自动消掉）。
@@ -95,13 +91,6 @@ class SceneConfig:
 
         if not 1.0 <= float(self.model_queue_poll_seconds) <= 86_400.0:
             raise ValueError("scene.model_queue_poll_seconds must be between 1 and 86400")
-        base, cap = float(self.model_queue_backoff_base_seconds), float(self.model_queue_backoff_max_seconds)
-        if not 1.0 <= base <= cap <= 86_400.0:
-            raise ValueError(
-                "scene.model_queue_backoff_base_seconds must be at least 1 and at most model_queue_backoff_max_seconds (≤ 86400)"
-            )
-        if not 1 <= self.model_queue_unreachable_after_failures <= 1_000:
-            raise ValueError("scene.model_queue_unreachable_after_failures must be an integer between 1 and 1000")
         if not 1.0 <= float(self.model_queue_shutdown_timeout_seconds) <= 3_600.0:
             raise ValueError("scene.model_queue_shutdown_timeout_seconds must be between 1 and 3600")
         if not 1 <= self.model_queue_backlog_warning_items <= 1_000_000:

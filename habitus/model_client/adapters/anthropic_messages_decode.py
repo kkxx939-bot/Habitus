@@ -11,15 +11,9 @@ import time
 from collections.abc import Mapping
 
 from habitus.foundation.validation import is_int, is_nonblank_str
-from habitus.model_client.adapters._http import HTTPStatusError
-from habitus.model_client.contracts import (
-    ModelContentSafetyError,
-    ModelResponse,
-    ModelResponseError,
-    ModelStreamEvent,
-    TokenUsage,
-    ToolCall,
-)
+from habitus.model_client.adapters._http import HTTPStatusError, error_code
+from habitus.model_client.contracts import ModelResponse, ModelStreamEvent, TokenUsage, ToolCall
+from habitus.model_client.errors import ModelContentSafetyError, ModelResponseError
 from habitus.model_client.json_parser import parse_json_response
 
 # Messages 的 stop_reason → 运行层（structured.py 认 length / content_filter）使用的终止原因；未列出的原样传
@@ -32,19 +26,6 @@ _FINISH_REASONS = {
     "model_context_window_exceeded": "length",
     "tool_use": "tool_calls",
     "refusal": "content_filter",
-}
-# 协议文档里错误类型与 HTTP 状态码的对应；流开始后服务端只能用 error 事件报错，换回状态码好让运行层同样分类
-_STATUS_BY_ERROR_TYPE = {
-    "invalid_request_error": 400,
-    "authentication_error": 401,
-    "billing_error": 402,
-    "permission_error": 403,
-    "not_found_error": 404,
-    "request_too_large": 413,
-    "rate_limit_error": 429,
-    "api_error": 500,
-    "timeout_error": 504,
-    "overloaded_error": 529,
 }
 
 
@@ -64,7 +45,12 @@ def normalize_message(
     """把一次非流式 ``/v1/messages`` 成功响应换成 ``ModelResponse``。"""
 
     if source.get("type") == "error":
-        raise ModelResponseError(f"anthropic_messages returned an error payload: {_error_text(source)}")
+        raise HTTPStatusError(
+            f"anthropic_messages returned an error payload: {_error_text(source)}",
+            status_code=None,
+            retry_after=None,
+            provider_code=error_code(source),
+        )
     blocks = source.get("content")
     if not isinstance(blocks, list):
         raise ModelResponseError("anthropic_messages response content must be an array")
@@ -122,15 +108,14 @@ def normalize_usage(source: object, *, output_tokens: object = None) -> TokenUsa
 
 
 def stream_error(event: Mapping[str, object]) -> Exception:
-    """流里的 ``error`` 事件：已知错误类型换回 HTTP 状态码，未知的按服务端答坏处理。"""
+    """流里的 ``error`` 事件：带上协议的错误类型（``error.type``），由 ``failures.classify_failure`` 归类。"""
 
-    error = event.get("error")
-    kind = error.get("type") if isinstance(error, Mapping) else None
-    status = _STATUS_BY_ERROR_TYPE.get(kind) if isinstance(kind, str) else None
-    message = f"anthropic_messages stream error: {_error_text(event)}"
-    if status is None:
-        return ModelResponseError(message)
-    return HTTPStatusError(message, status_code=status, retry_after=None)
+    return HTTPStatusError(
+        f"anthropic_messages stream error: {_error_text(event)}",
+        status_code=None,
+        retry_after=None,
+        provider_code=error_code(event),
+    )
 
 
 class MessagesStreamDecoder:

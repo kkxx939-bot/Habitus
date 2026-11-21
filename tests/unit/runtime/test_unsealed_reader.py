@@ -29,7 +29,7 @@ def reader(
     judgements = BehaviorJudgementStore(root)
     ledger = BehaviorReductionLedger(root / "reduction")
     resolved = provider if provider is not None else NameMatchingProvider()
-    stamping = kind_components(names=names, provider=resolved, config=BehaviorKindConfig(transient_retries=0))
+    stamping = kind_components(names=names, provider=resolved, config=BehaviorKindConfig())
     return UnsealedFromJudgements(judgements, ledger, stamping), judgements, ledger, resolved
 
 

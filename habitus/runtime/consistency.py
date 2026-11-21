@@ -27,6 +27,8 @@ class MemoryConsistencyState(str, Enum):
     COMMITTED = "committed"
     FAILED = "failed"
     ABANDONED = "abandoned"
+    #: 这一段的输入有问题、跳过了，记不进长期记忆（裁定 108）。终态。
+    SKIPPED = "skipped"
     UNKNOWN = "unknown"
 
 
@@ -54,6 +56,7 @@ class MemoryConsistencySnapshot:
             MemoryConsistencyState.COMMITTED,
             MemoryConsistencyState.FAILED,
             MemoryConsistencyState.ABANDONED,
+            MemoryConsistencyState.SKIPPED,
             MemoryConsistencyState.UNKNOWN,
         }
 
@@ -88,6 +91,8 @@ class MemoryConsistencyService:
         if current is not None:
             if current.status is MemoryJobStatus.FAILED:
                 state = MemoryConsistencyState.FAILED
+            elif current.status is MemoryJobStatus.SKIPPED:
+                state = MemoryConsistencyState.SKIPPED
             elif current.status is MemoryJobStatus.COMMITTED:
                 # Receipt 只证明 L2 事务已提交；Job 终态还要求 Summary、L0/L1 和
                 # 远程向量投影全部完成。两者必须同时成立才能对外宣告最终一致。

@@ -47,6 +47,8 @@ class CommittedWorkflowCleanup:
         job = self.jobs.try_read_source(address, segment.segment_id, segment.digest)
         if job is None:
             raise ConversationLifecycleError("History Segment has no durable MemoryJob")
+        if job.status is MemoryJobStatus.SKIPPED:
+            return True  # 这一段跳过了（裁定 108）：没有长期记忆变化、没有回执；有摘要接替时原文照常释放
         if job.status is not MemoryJobStatus.COMMITTED:
             return False
         source = MemoryChangeSource.from_job(job)
@@ -75,9 +77,15 @@ class CommittedWorkflowCleanup:
         released_through = self.journal.read_state(address).released_through
         deleted: list[int] = []
         for job in self.jobs.list_for_conversation(address):
-            if job.status is not MemoryJobStatus.COMMITTED or job.updated_at > cutoff:
+            if not job.status.terminal or job.updated_at > cutoff:
                 continue
             if not self.source_history_is_released(job.segment_id, released_through):
+                continue
+            if job.status is MemoryJobStatus.SKIPPED:
+                if self.jobs.discard_committed(job):  # 跳过的段没有回执与事务日志
+                    deleted.append(job.memory_sequence)
+                if len(deleted) >= self.config.cleanup_batch_size:
+                    break
                 continue
             source = MemoryChangeSource.from_job(job)
             receipt = self.receipts.try_read(source)

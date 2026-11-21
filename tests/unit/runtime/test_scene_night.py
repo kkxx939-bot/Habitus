@@ -196,7 +196,7 @@ def test_with_model_advice_the_night_asks_priors_once_and_reads_them_from_the_ca
     client, advisor_model = answering_client()
     run.advice = RelationAdvice(
         store=AdviceStore(tmp_path / "scene"),
-        prior=PriorAdvisor(client, config=PriorConfig(transient_retry_delay_seconds=0.0)),
+        prior=PriorAdvisor(client, config=PriorConfig()),
     )
     report = night(run, TONIGHT, NOW)
     first = advisor_model.calls

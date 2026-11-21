@@ -49,14 +49,8 @@ class Judgement:
 
 
 class Judge:
-    def __init__(self, client: StructuredChatClient, *, retries: int = 1, delay_seconds: float = 5.0) -> None:
-        if retries < 0:
-            raise ValueError("retries must be a non-negative integer")
-        if delay_seconds < 0:
-            raise ValueError("delay_seconds must be a non-negative number")
+    def __init__(self, client: StructuredChatClient) -> None:
         self.client = client
-        self.retries = retries
-        self.delay_seconds = float(delay_seconds)
 
     async def judge(self, package: Package) -> Judgement:
         forward = package.candidates
@@ -108,8 +102,6 @@ class Judge:
             request,
             schema=judge_json_schema([item.number for item in shown]),
             validator=validator,
-            retries=self.retries,
-            delay_seconds=self.delay_seconds,
         )
 
     @staticmethod
@@ -129,18 +121,14 @@ async def _ask[T](
     *,
     schema: Mapping[str, Any],
     validator: Callable[[object], T],
-    retries: int,
-    delay_seconds: float,
     name: str = "foresight_judge",
 ) -> tuple[T, str, tuple[str, ...]] | str:
-    """调模型用各触点共用的那一段（``model_client.asking.ask``）：传输层瞬态错按退避重试，答复不合格由结构层带着错误重问；
-    都没成返回信号文本。判决在白天那一拍：模型整个用不了（``ModelUnreachable``）也只是这一次没判成，调用方按算法顺序、模板
+    """调模型用各触点共用的那一段（``model_client.asking.ask``）：调用失败的重试只在模型客户端一层（裁定 108），答复不合格由结构层带着错误重问；
+    都没成返回信号文本。判决在白天那一拍：模型此刻用不了（``ModelUnreachable``）也只是这一次没判成，调用方按算法顺序、模板
     措辞递；模型调不通在哪儿都不停下什么，换代里也只是调模型的那一步走退路（裁定 94 第 8 条）。"""
 
     try:
-        answer = await ask(
-            client, request, schema=schema, name=name, validator=validator, retries=retries, delay_seconds=delay_seconds
-        )
+        answer = await ask(client, request, schema=schema, name=name, validator=validator)
     except ModelUnreachable as exc:
         return f"model unreachable: {exc}"
     if isinstance(answer, Failed):

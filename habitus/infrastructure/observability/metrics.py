@@ -208,12 +208,6 @@ def _model_queue_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, 
                 category,
             ),
         )
-    if event.operation == "backoff":
-        delay = _non_negative_number(attributes.get("delay_seconds")) or 0.0
-        return (
-            MetricUpdate("model_queue_backoffs_total", "counter", 1.0),
-            MetricUpdate("model_queue_backoff_seconds_total", "counter", delay),
-        )
     if event.operation == "model_call":
         touch = category + (("touch", _label_value(attributes.get("touch"))),)
         updates = [MetricUpdate("model_queue_model_calls_total", "counter", 1.0, touch)]

@@ -1,7 +1,7 @@
 """模型适配器（OpenAI 兼容的 rerank、embedding，以及 anthropic_messages）共用的单次 JSON POST 与 HTTP 错误换算。
 
 只负责一次请求：带上限地读响应、把 4xx/5xx 换成带 ``status_code`` 与 ``retry_after`` 的异常（交给
-``model_client.retry`` 分类）、把成功响应解析成 JSON 对象。重试、并发与业务字段校验都不在这里。
+``model_client.failures`` 归类）、把成功响应解析成 JSON 对象。重试、并发与业务字段校验都不在这里。
 """
 
 from __future__ import annotations
@@ -14,17 +14,26 @@ from urllib.parse import urlsplit
 import httpx
 
 from habitus.foundation.validation import is_nonblank_str
-from habitus.model_client.contracts import ModelResponseError
+from habitus.model_client.errors import ModelResponseError
 from habitus.model_client.json_parser import parse_json_response
 
 
 class HTTPStatusError(RuntimeError):
-    """服务返回 4xx/5xx；``retry.normalize_provider_error`` 按这两个属性分类。"""
+    """服务返回 4xx/5xx（或流里的错误事件）；``failures.classify_failure`` 按状态码与协议错误代码归类。
+    流里的错误事件没有状态码，``status_code`` 为空。"""
 
-    def __init__(self, message: str, *, status_code: int, retry_after: float | None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None,
+        retry_after: float | None,
+        provider_code: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.retry_after = retry_after
+        self.provider_code = provider_code
 
 
 async def post_json_object(
@@ -48,6 +57,7 @@ async def post_json_object(
                 error_message(content, status_code, label=label),
                 status_code=status_code,
                 retry_after=retry_after(getattr(response, "headers", None)),
+                provider_code=error_code(content),
             )
     try:
         value = parse_json_response(content.decode("utf-8"), allow_repair=False).value
@@ -94,6 +104,7 @@ def raise_for_status(response: httpx.Response, content: bytes, *, label: str) ->
             error_message(content, response.status_code, label=label),
             status_code=response.status_code,
             retry_after=retry_after(response.headers),
+            provider_code=error_code(content),
         )
 
 
@@ -112,6 +123,26 @@ def error_message(content: bytes, status_code: int, *, label: str) -> str:
     if not is_nonblank_str(message):
         message = payload.get("message")
     return message.strip()[:2048] if isinstance(message, str) and message.strip() else fallback
+
+
+def error_code(content: bytes | Mapping[str, object]) -> str | None:
+    """协议的错误代码：``error.code``、``error.type``、顶层 ``code``、顶层 ``type``（Anthropic 顶层固定是 ``error``，跳过）里
+    第一个非空文本；响应体不是 JSON 对象就没有。"""
+
+    payload: object = content
+    if isinstance(content, bytes):
+        try:
+            payload = json.loads(content)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+    if not isinstance(payload, Mapping):
+        return None
+    error = payload.get("error")
+    nested: Mapping[str, object] = error if isinstance(error, Mapping) else {}
+    for value in (nested.get("code"), nested.get("type"), payload.get("code"), payload.get("type")):
+        if isinstance(value, str) and value.strip() and value != "error":
+            return value.strip()[:128]
+    return None
 
 
 def retry_after(headers: object) -> float | None:
@@ -143,6 +174,7 @@ def is_remote_url(url: str) -> bool:
 
 __all__ = [
     "HTTPStatusError",
+    "error_code",
     "error_message",
     "is_remote_url",
     "post_json_object",

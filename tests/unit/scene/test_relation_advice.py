@@ -61,7 +61,7 @@ def test_the_prior_only_sees_names_and_criteria_and_is_asked_three_times_in_diff
             ratings({"调研": "unlikely", "提交推送": "unlikely", "讨论方案": "likely"}),
         ]
     )
-    advisor = PriorAdvisor(client, config=PriorConfig(transient_retry_delay_seconds=0.0))
+    advisor = PriorAdvisor(client, config=PriorConfig())
     answer = asyncio.run(advisor.rate(question))
     assert provider.calls == 3
     orders = [
@@ -103,7 +103,7 @@ def test_priors_are_cached_by_input_and_replays_read_only_the_cache(tmp_path) ->
     store = AdviceStore(tmp_path / "scene")
     client, provider = answering_client()
     advice = RelationAdvice(
-        store=store, prior=PriorAdvisor(client, config=PriorConfig(transient_retry_delay_seconds=0.0))
+        store=store, prior=PriorAdvisor(client, config=PriorConfig())
     )
     signals: list[str] = []
     first = asyncio.run(advice.weights(tests, signals))
@@ -125,7 +125,7 @@ def test_a_new_concept_only_asks_the_new_pairs(tmp_path) -> None:
     store = AdviceStore(tmp_path / "scene")
     client, provider = answering_client()
     advice = RelationAdvice(
-        store=store, prior=PriorAdvisor(client, config=PriorConfig(transient_retry_delay_seconds=0.0))
+        store=store, prior=PriorAdvisor(client, config=PriorConfig())
     )
     asyncio.run(advice.weights(lane_tests(series), []))
     before = len(provider.prompts)
@@ -198,7 +198,7 @@ def test_orphan_priors_of_the_lane_are_pruned(tmp_path) -> None:
     store.write_prior("otherlane", lane="physical", consequent="洗手", levels={}, version="v1", models=())
     client, _provider = answering_client()
     advice = RelationAdvice(
-        store=store, prior=PriorAdvisor(client, config=PriorConfig(transient_retry_delay_seconds=0.0))
+        store=store, prior=PriorAdvisor(client, config=PriorConfig())
     )
     asyncio.run(advice.weights(tests, []))
     assert "orphan0" not in store.prior_keys("session")

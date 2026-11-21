@@ -144,14 +144,6 @@ class QueueRecorder:
             except Exception as exc:  # noqa: BLE001 - 留存清理是旁路
                 self.observe("prune", ObservationStatus.FAILURE, {"error_type": type(exc).__name__})
 
-    def backoff(self, failures: int, delay: float) -> None:
-        logger.warning("model queue backing off failures=%d delay=%.0fs", failures, delay)
-        self.observe("backoff", ObservationStatus.DEGRADED, {"failures": failures, "delay_seconds": delay})
-
-    def recovered(self, waited: float) -> None:
-        logger.info("model queue recovered after %.0fs", waited)
-        self.observe("recovered", ObservationStatus.SUCCESS, {"unreachable_seconds": waited})
-
     def scan_failed(self, category: str, code: str) -> None:
         logger.warning("model queue cannot read what is owed category=%s error=%s", category, code)
         self.observe("scan", ObservationStatus.FAILURE, {"category": category, "error_type": code})

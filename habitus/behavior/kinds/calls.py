@@ -1,36 +1,31 @@
-"""词表唯一的模型触点：一次结构化调用 + 瞬态错误的有界重试。
+"""词表唯一的模型触点：一次结构化调用（重试只在模型客户端一层，裁定 108）。
 
 选词经这里调模型（``pick``），只交出系统提示、用户消息、schema 与形状校验。
-这一次调用本身答不了时（校验用尽、输入过长、内容安全拦截）抛 ``KindModelOutputError``，调用方按"没答好"降级；
-瞬态错误重试用尽、配额与鉴权这类全局故障原样抛出。
+这一次调用本身答不了时（校验用尽，或这一条输入有问题）抛 ``KindModelOutputError``，调用方按"没答好"降级；
+模型此刻用不了（全流程统一规则里的"等一等可能好"用尽、"要人处理"、熔断开着）原样抛出。
 
-调用方要按错误分类分开处理时（裁定 94 错误分类）用 ``call_failure``：答复重问之后仍不合格 / 模型整个用不了 / 这一份触发内容安全 /
-输入超长 / 别的（我们自己的 bug）。分类只在这里认模型客户端的异常，行为侧别处不直接依赖它。
+调用方要按错误分类分开处理时（裁定 94 错误分类）用 ``call_failure``：它只按模型层统一的判定入口
+（``model_client.model_failure``）分派，行为侧别处不直接认模型客户端的异常类型。
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable, Mapping
 from enum import Enum
 from typing import Any, TypeVar, cast
 
 from habitus.behavior.kinds.config import BehaviorKindConfig
 from habitus.model_client import (
-    MODEL_DETERMINISTIC,
     MODEL_REFUSED,
-    MODEL_UNUSABLE,
     ChatMessage,
     ChatRequest,
+    ModelErrorRule,
     ModelStructuredOutputError,
     StructuredChatClient,
+    model_failure,
 )
-from habitus.model_client.contracts import ModelResponseError, ModelTransportError
 
 T = TypeVar("T")
-
-#: 这一次调用本身答不了：输出校验用尽，或同一份输入再问也一样（``MODEL_DETERMINISTIC``：输入过长、内容安全）。
-_UNANSWERABLE: tuple[type[BaseException], ...] = (ModelStructuredOutputError, *MODEL_DETERMINISTIC)
 
 
 class KindModelOutputError(RuntimeError):
@@ -41,25 +36,24 @@ class CallFailure(str, Enum):
     """一次词表调模型失败属于哪一类（裁定 94 错误分类）。"""
 
     INVALID = "invalid"  # 答复重问之后仍不合格：选词记「待定」，不硬归
-    UNAVAILABLE = "unavailable"  # 模型整个用不了（此刻用不了、没配好）：换代里走退路照常往下做，白天放一边等重试收尾
-    REFUSED = "refused"  # 这一份触发内容安全：不重试
-    TOO_LARGE = "too_large"  # 输入超长：材料上限与模型窗口没对上，是 bug，不重试
+    UNAVAILABLE = "unavailable"  # 模型此刻用不了（"等一等可能好"用尽、"要人处理"、熔断开着）：放一边等下一次
+    REFUSED = "refused"  # 这一条输入有问题里的内容安全：不重发，单列
+    TOO_LARGE = "too_large"  # 这一条输入有问题里的其余两种（太长、请求不合法）：不重发
     BUG = "bug"  # 别的：我们自己的代码出错，当场报
 
 
 def call_failure(exc: BaseException) -> CallFailure:
-    """沿 ``__cause__`` 链找模型客户端的异常，定它属于哪一类（``KindModelOutputError`` 把原异常挂在 ``__cause__`` 上）。"""
+    """按模型层统一的判定入口（``model_failure``）定这一次失败属于哪一类；``KindModelOutputError`` 把原异常挂在 ``__cause__`` 上。"""
 
+    failure = model_failure(exc)
+    if failure is not None:
+        if failure.rule is ModelErrorRule.INPUT:
+            return CallFailure.REFUSED if isinstance(failure, MODEL_REFUSED) else CallFailure.TOO_LARGE
+        return CallFailure.UNAVAILABLE
     current: BaseException | None = exc
     while current is not None:
         if isinstance(current, ModelStructuredOutputError):
             return CallFailure.INVALID
-        if isinstance(current, MODEL_UNUSABLE):
-            return CallFailure.UNAVAILABLE
-        if isinstance(current, MODEL_REFUSED):
-            return CallFailure.REFUSED
-        if isinstance(current, MODEL_DETERMINISTIC):
-            return CallFailure.TOO_LARGE
         current = current.__cause__
     return CallFailure.BUG
 
@@ -81,19 +75,14 @@ class KindModelCaller:
         request = ChatRequest(
             messages=(ChatMessage(role="system", content=system), ChatMessage(role="user", content=user))
         )
-        for attempt in range(self.config.transient_retries + 1):
-            try:
-                response = await self.client.complete_json_async(request, schema=schema, name=name, validator=validator)
-            except _UNANSWERABLE as exc:
-                # 这一次调用本身答不了（输出不合形状、输入过长、被内容安全拦下）：重试也一样，按"没答好"交调用方降级。
+        try:
+            response = await self.client.complete_json_async(request, schema=schema, name=name, validator=validator)
+        except Exception as exc:
+            if call_failure(exc) in (CallFailure.INVALID, CallFailure.REFUSED, CallFailure.TOO_LARGE):
+                # 这一次调用本身答不了（输出不合形状、这一条输入有问题）：再问也一样，按"没答好"交调用方降级。
                 raise KindModelOutputError(f"{type(exc).__name__}: {exc}") from exc
-            except (ModelTransportError, ModelResponseError):
-                if attempt >= self.config.transient_retries:
-                    raise
-                await asyncio.sleep(self.config.transient_retry_delay_seconds * (attempt + 1))
-                continue
-            return cast("T", response.value)
-        raise AssertionError("unreachable")  # pragma: no cover
+            raise
+        return cast("T", response.value)
 
 
 __all__ = ["CallFailure", "KindModelCaller", "KindModelOutputError", "call_failure"]

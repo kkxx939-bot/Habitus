@@ -16,10 +16,10 @@ from habitus.model_client import (
     ChatRequest,
     ModelConfigurationError,
     ModelContentSafetyError,
-    ModelInputTooLargeError,
-    ModelRateLimitError,
+    ModelErrorRule,
+    ModelInvalidRequestError,
     ModelResponseError,
-    ModelTransportError,
+    ModelServiceError,
     ProviderConfig,
     ProviderFactory,
     ReasoningOptions,
@@ -32,7 +32,7 @@ from habitus.model_client.adapters import register_builtin_adapters
 from habitus.model_client.adapters._http import HTTPStatusError
 from habitus.model_client.adapters.anthropic_messages import AnthropicMessagesProvider
 from habitus.model_client.adapters.anthropic_messages_schema import messages_output_schema
-from habitus.model_client.retry import normalize_provider_error
+from habitus.model_client.failures import classify_failure
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -574,7 +574,6 @@ def test_refusal_without_any_output_is_content_safety_not_retryable() -> None:
         message_payload(content=[{"type": "text", "text": 3}]),
         message_payload(content=[{"type": "tool_use", "id": "", "name": "x", "input": {}}]),
         message_payload(content=[{"type": "tool_use", "id": "t", "name": "x", "input": "{}"}]),
-        {"type": "error", "error": {"type": "api_error", "message": "boom"}},
     ],
 )
 def test_complete_rejects_malformed_or_empty_messages(payload: dict[str, object]) -> None:
@@ -589,9 +588,10 @@ def test_complete_rejects_malformed_or_empty_messages(payload: dict[str, object]
 @pytest.mark.parametrize(
     ("status", "retry_after", "expected_type", "expected_delay"),
     [
-        (429, "2.5", ModelRateLimitError, 2.5),
-        (500, None, ModelTransportError, None),
-        (529, "1", ModelTransportError, 1.0),
+        # 协议错误代码 overloaded_error 优先于状态码：都是服务故障（裁定 108）
+        (429, "2.5", ModelServiceError, 2.5),
+        (500, None, ModelServiceError, None),
+        (529, "1", ModelServiceError, 1.0),
     ],
 )
 def test_http_errors_carry_status_message_and_retry_after_and_are_sent_once(
@@ -616,9 +616,9 @@ def test_http_errors_carry_status_message_and_retry_after_and_are_sent_once(
     assert caught.value.status_code == status
     assert "Overloaded now" in str(caught.value)
     assert caught.value.retry_after == expected_delay
-    normalized = normalize_provider_error(caught.value)
+    normalized = classify_failure(caught.value)
     assert isinstance(normalized, expected_type)
-    assert normalized.retryable is True
+    assert normalized.rule is ModelErrorRule.WAIT
     assert normalized.retry_after_seconds == expected_delay
 
 
@@ -742,8 +742,8 @@ def test_stream_error_event_is_classified_like_the_matching_http_status() -> Non
     )
     with pytest.raises(HTTPStatusError) as caught:
         _stream(wire)
-    assert caught.value.status_code == 529
-    assert isinstance(normalize_provider_error(caught.value), ModelTransportError)
+    assert caught.value.status_code is None and caught.value.provider_code == "overloaded_error"
+    assert isinstance(classify_failure(caught.value), ModelServiceError)
 
 
 def test_stream_refusal_without_output_is_content_safety() -> None:
@@ -967,11 +967,30 @@ def test_doctor_chat_probe_path_reports_messages_health(status: int, payload: di
         provider._sync_client.close()
 
 
-def test_protocol_context_overflow_message_is_classified_as_input_too_large() -> None:
-    """Messages 协议的上下文超长 400 文字是 "prompt is too long"：归到输入过长（不重试、走调用方的降级），不是服务端答坏。"""
+def test_protocol_context_overflow_is_an_input_problem_not_a_service_failure() -> None:
+    """Messages 协议的上下文超长是 400 + invalid_request_error：报错文字不参与归类（裁定 108），按状态码归"请求不合法"，
+    与"太长"同属"这一条输入有问题"（不重发、走调用方的降级）。"""
 
-    error = HTTPStatusError("prompt is too long: 210000 tokens > 200000 maximum", status_code=400, retry_after=None)
-    assert isinstance(normalize_provider_error(error), ModelInputTooLargeError)
+    error = HTTPStatusError(
+        "prompt is too long: 210000 tokens > 200000 maximum",
+        status_code=400,
+        retry_after=None,
+        provider_code="invalid_request_error",
+    )
+    failure = classify_failure(error)
+    assert isinstance(failure, ModelInvalidRequestError) and failure.rule is ModelErrorRule.INPUT
+
+
+def test_error_payload_in_a_success_response_is_classified_by_its_type() -> None:
+    provider = sync_provider(
+        lambda _item: httpx.Response(200, json={"type": "error", "error": {"type": "api_error", "message": "boom"}})
+    )
+    try:
+        with pytest.raises(HTTPStatusError) as caught:
+            provider.complete(provider.prepare(request(), stream=False))
+    finally:
+        provider._sync_client.close()
+    assert isinstance(classify_failure(caught.value), ModelServiceError)
 
 
 @pytest.mark.parametrize(

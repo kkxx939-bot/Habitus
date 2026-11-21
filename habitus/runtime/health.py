@@ -6,7 +6,6 @@ import asyncio
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
-from enum import Enum
 from zoneinfo import ZoneInfo
 
 from habitus.foresight import ForesightError
@@ -17,7 +16,9 @@ from habitus.runtime.generation import Generation
 from habitus.runtime.generation_marks import GenerationMarkError
 from habitus.runtime.generation_result import REWOUND
 from habitus.runtime.generation_runner import GenerationRunner
+from habitus.runtime.health_model import RuntimeHealthCheck, RuntimeHealthStatus
 from habitus.runtime.lifecycle import LifecycleWorkerState
+from habitus.runtime.model_health import model_checks
 from habitus.runtime.model_queue import ModelQueue
 from habitus.runtime.model_queue_health import queue_pending, queue_problems
 from habitus.runtime.reminder_basis import REPORT_AFTER_DAYS, basis_age, told
@@ -27,21 +28,6 @@ from habitus.runtime.worker import MemoryWorkerState
 _SIGNAL_DETAIL_LIMIT = 1_000
 #: 只关记忆写入侧的检查：后台 Job 停住（失败待处置、或在等模型恢复）不影响已有记忆的召回。
 _WRITE_SIDE_CHECKS = frozenset({"memory_worker", "memory_queue"})
-
-
-class RuntimeHealthStatus(str, Enum):
-    HEALTHY = "healthy"
-    DEGRADED = "degraded"
-    UNHEALTHY = "unhealthy"
-    CLOSED = "closed"
-
-
-@dataclass(frozen=True)
-class RuntimeHealthCheck:
-    name: str
-    status: RuntimeHealthStatus
-    detail: str
-    critical: bool = True
 
 
 @dataclass(frozen=True)
@@ -82,6 +68,7 @@ class RuntimeHealthService:
         checks.extend(self._generation_checks(runtime_state))
         checks.extend(self._foresight_checks(runtime_state))
         checks.append(await self._queue_check())
+        checks.extend(await asyncio.to_thread(model_checks, self.components))
         checks.extend(
             await asyncio.gather(
                 self._vector_check("memory_vector", self.components.memory.vector_index.store),
@@ -369,8 +356,7 @@ class RuntimeHealthService:
             self.components.infrastructure.observability.set_gauge("memory_queue_blocked", 1)
             return RuntimeHealthCheck("memory_queue", RuntimeHealthStatus.DEGRADED, f"failed:{job.memory_sequence}")
         if job.waiting_for_model:
-            # 模型此刻用不了（额度、鉴权、断网……）：不是失败，长退避里等它恢复；要人看的多半是换 key 或充值
-            assert job.next_attempt_at is not None
+            assert job.next_attempt_at is not None  # 模型此刻用不了：等它恢复，原因看 model_* 那几项（裁定 108）
             self.components.infrastructure.observability.set_gauge("memory_queue_blocked", 1)
             return RuntimeHealthCheck(
                 "memory_queue",

@@ -3,18 +3,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
 from habitus.foundation.observability import ObservationStatus
+from habitus.model_client.breaker import CircuitBreaker
 from habitus.series import EventSeries
 
 RETRY, UNSEALED, SYNC, ADVICE = "retry", "unsealed", "sync", "advice"
 #: 各类活，按一轮里的先后。
 CATEGORIES = (RETRY, UNSEALED, ADVICE, SYNC)
 
-#: 一项的结局：做成了；做完了但判据还说欠着（模型没答成）；抛了；还没准备好（锁被另一进程拿着）；模型整个调不通。
+#: 一项的结局：做成了；做完了但判据还说欠着（模型没答成）；抛了；还没准备好（锁被另一进程拿着）；模型此刻用不了。
 DONE, UNFINISHED, FAILED, WAITING, UNREACHABLE = "done", "unfinished", "failed", "waiting", "unreachable"
 ITEM_SPAN = "model_queue.item"
 
@@ -36,13 +37,9 @@ class QueueSettings:
     """模型队列的运维数（``config.scene.model_queue_*``，组合根换算过来）。"""
 
     poll_seconds: float = 60.0
-    backoff_base_seconds: float = 60.0
-    backoff_max_seconds: float = 3_600.0
     #: 欠账到这么多项、或最老一项等了这么久，健康面报降级。
     warning_items: int = 50
     warning_wait_seconds: float = 21_600.0
-    #: 连着这么多项（不同的项）都是模型失败、中间没有一项做成，就整体退避。
-    unreachable_after_failures: int = 3
     kept_days: int = 366
 
 
@@ -61,7 +58,7 @@ class ItemResult:
 
 @dataclass(frozen=True)
 class DrainReport:
-    """``ModelQueue.drain`` 这一趟：做了哪些项、各类还欠着几项、整体退避到什么时候、队列租约是不是被另一个进程拿着。"""
+    """``ModelQueue.drain`` 这一趟：做了哪些项、各类还欠着几项、对话熔断开着时到什么时候试探、队列租约是不是被另一个进程拿着。"""
 
     done: tuple[ItemResult, ...]
     owed: Mapping[str, int]
@@ -76,9 +73,12 @@ class DrainReport:
 
 
 class ModelQueueState:
-    """模型队列给别人看的那一面（换代与健康面读；只在进程里，重起后从盘上重新认）。"""
+    """模型队列给别人看的那一面（换代与健康面读；只在进程里，重起后从盘上重新认）。"模型是不是整个用不了"不在这里记：读对话
+    这一种能力的熔断（``breaker``，裁定 108；原来队列自己的整体退避并进了熔断）。"""
 
-    def __init__(self) -> None:
+    def __init__(self, breaker: CircuitBreaker | None = None) -> None:
+        #: 对话熔断（模型客户端的那一个，会话、选词、判官、记忆共用）；没接（离线回放）就当模型一直可用。
+        self.breaker = breaker
         #: 各类最近一次从盘上认出来还欠着几项。
         self.owed: dict[str, int] = {}
         #: 各类最老的一项从什么时候起欠着（盘上看得出的按盘上的，看不出的按这个进程第一次看到它欠着）。
@@ -87,18 +87,7 @@ class ModelQueueState:
         self.crossed: dict[str, int] = {}
         #: 认欠账时读盘出错的类 → 原因码（异常类型名）；那一类下一次认成了就清掉。
         self.errors: dict[str, str] = {}
-        #: 模型整个调不通：从什么时候起、连着几次没通、下一次最早什么时候再做。
-        self.unreachable_since: datetime | None = None
-        self.failures = 0
-        self.retry_at: datetime | None = None
-        #: 累计整体退避了几次、共多少秒。
-        self.backoffs = 0
-        self.backoff_seconds = 0.0
         self.scanned_at: datetime | None = None
-        #: 模型失败后在退避里的项（只在进程里，重起后从头）：名字 → （连着失败了几次, 最早什么时候再做）。这些项仍算欠着。
-        self.waits: dict[str, tuple[int, datetime]] = {}
-        #: 连着模型失败、中间没有任何一项做成的那几项（不同的项）：到了配置的项数就整体退避；有一项做成就清空。
-        self.streak: set[str] = set()
         #: 先验要问的题各有几份（健康面与换代报告读）：``priors_by_consequent`` / ``priors_by_antecedent`` 两种问法各要问几题。
         self.pending: dict[str, int] = {}
         #: 同一进程的换代正在做（``set_generating``）：队列在两项之间看到就先不取下一项，换代做完再继续。
@@ -109,19 +98,17 @@ class ModelQueueState:
 
         self.generating = generating
 
-    def waiting(self, name: str, now: datetime) -> bool:
-        """这一项模型失败之后还在退避期内：这一轮不重问它。"""
-
-        wait = self.waits.get(name)
-        return wait is not None and now < wait[1]
-
-    def waiting_names(self, now: datetime) -> frozenset[str]:
-        return frozenset(name for name in self.waits if self.waiting(name, now))
-
     def down(self) -> bool:
-        """正在整体退避（模型整个调不通，还没有一项重新做成）。"""
+        """对话熔断开着（模型此刻用不了，还没有试探成功）：换代据它这一代不判关系、沿用上一代（裁定 96、108）。"""
 
-        return self.unreachable_since is not None
+        return self.breaker is not None and self.breaker.is_open()
+
+    def retry_in_seconds(self) -> float | None:
+        """熔断开着时离下一次试探还有多久；关着是 None。"""
+
+        if self.breaker is None:
+            return None
+        return self.breaker.snapshot().retry_in_seconds
 
     def owed_now(self) -> dict[str, int]:
         """各类还欠着几项（每一类都给，没欠是 0）。"""
@@ -154,16 +141,6 @@ class Item:
     key: str | None
     run: Callable[[dict[str, object], list[str]], Awaitable[str]]
     day: date | None = None
-    #: 这一项模型失败时，卡住的是它里面的哪几样（出错重试：卡在"模型用不了"上的那几项的名字）；不给就是这一项本身。
-    stuck: Callable[[], Sequence[str]] | None = None
-
-    @property
-    def name(self) -> str:
-        """这一项在进程里的名字（模型失败后的退避按它记）：重试账的键，没有键的是类别加日子。"""
-
-        return (
-            self.key if self.key is not None else f"{self.category}:{'' if self.day is None else self.day.isoformat()}"
-        )
 
 
 @dataclass

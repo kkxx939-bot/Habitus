@@ -164,6 +164,18 @@ class MemoryCommittedJobFinalizer:
             journal_cleaned=journal_cleaned,
         )
 
+    async def finalize_skipped(self, lease: MemoryJobLease, reason: str) -> MemoryJob:
+        """这一段跳过了（裁定 108）：长期记忆不动、没有回执；摘要要是已经做出来了照常进摘要检索（同步这一 Conversation 的
+        活跃摘要前沿），然后把任务记成 SKIPPED。摘要也没做出来的，这一段的原文不释放（没有摘要接替它）。"""
+
+        job = self.store.assert_current(lease)
+        address = ConversationAddress(job.conversation_id, job.started_on)
+        with observe_operation(self.observer, "workflow", "summary_vector_publish"):
+            await self.summary_vector_index.synchronize(address, checkpoint=job.memory_sequence)
+        self.store.assert_current(lease)
+        with observe_operation(self.observer, "workflow", "job_skip"):
+            return self.store.skip(lease, reason)
+
     async def _forget_retired_recall_state(
         self,
         deleted_uris: tuple[MemoryURI, ...],

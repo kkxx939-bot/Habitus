@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from habitus.model_client.contracts import ModelTransportError
+from habitus.model_client.errors import ModelTransportError
 from habitus.runtime.health import RuntimeHealthStatus
 from tests.unit.physical_downstream.site import Named, World, at, delivery, texts_under
 
@@ -155,14 +155,14 @@ def test_c3_the_session_scene_lock_held_elsewhere_stops_only_the_session_slot(tm
 
 
 def _fail_fast(raw: dict[str, Any]) -> None:
-    raw["scene"] = {"enabled": True, "model_queue_unreachable_after_failures": 1}
-    raw["behavior"]["kinds_transient_retries"] = 0  # 阶段 C 加：选词调不通时不按真的退避睡（原来一趟 85 秒）
+    raw["scene"] = {"enabled": True}
+    raw["models"]["call_failures"] = {"breaker_failure_threshold": 1}
 
 
-def test_c4_the_physical_model_queue_backing_off_leaves_the_session_queue_working(tmp_path: Path) -> None:
-    """阶段 C 改的造法：物理那条没选词的判断放在今天这一代**之前**（今天 01:00 归约刚把昨天定了稿、预测 worker 还没跑这一槽）。
-    原来放在今天这一代之后，而 ``unsealed`` 一类按设计只在今天这一代还没做时认欠账（``runtime/model_queue.py:10,19``），
-    队列根本不问它，测不到整体退避。"""
+def test_c4_a_model_outage_pauses_both_branch_queues_through_the_one_chat_breaker(tmp_path: Path) -> None:
+    """阶段 C 的造法（物理那条没选词的判断放在今天这一代之前，``unsealed`` 才认欠账）。裁定 108 起"整体退避"并进了对话熔断：
+    两支共用一个对话模型、一个熔断——物理一支的选词把模型调不通，熔断打开，两支的队列都停在试探之前、不再问模型；健康检查
+    只有一项 ``model_chat`` 写着原因，模型队列那几项不报退避。"""
 
     world = World(tmp_path, start=at(D13, 0), edit=_fail_fast)
     try:
@@ -174,7 +174,6 @@ def test_c4_the_physical_model_queue_backing_off_leaves_the_session_queue_workin
         _day(world, yesterday)
         world.slots_between(at(today, 0), at(today, 0, 45))
         assert "2026-04-14" in world.marks("physical"), "the physical branch never generated"
-        # 今天这一代之前，物理一支一条还没封口的判断（00:40–00:50，01:00 送到）：队列要给它选词，模型调不通
         world.set_clock(at(today, 1))
         world.deliver(
             delivery("late", [("吃药", at(today, 0, 40), at(today, 0, 50))],
@@ -187,24 +186,14 @@ def test_c4_the_physical_model_queue_backing_off_leaves_the_session_queue_workin
         asked = len(world.router.physical_calls())
         assert asked > before, "the physical queue never asked for the judgement"
         assert reports["physical"].backing_off_until is not None, reports
-        assert reports["session"].backing_off_until is None, reports
         health = asyncio.run(world.runtime.health())
-        backoff = [check for check in health.checks if "backoff" in check.name]
-        assert any("physical" in f"{check.name} {check.detail}" for check in backoff), backoff
-        assert not any("session" in f"{check.name} {check.detail}" for check in backoff), backoff
-        # 会话一支的队列照常：再排一趟，物理这一侧整体退避中（不再问），会话这一侧照常走一轮、不报退避、不报扫不了
-        reports = world.drain(at(today, 1) + timedelta(seconds=30))  # 物理一支整体退避到 01:01，这时还在退避里
+        chat = next(check for check in health.checks if check.name == "model_chat")
+        assert chat.status is RuntimeHealthStatus.DEGRADED and "network_error" in chat.detail, chat
+        assert not any("backoff" in check.name for check in health.checks)
+        # 熔断开着、没到试探的时候：两支都不再问模型
+        reports = world.drain(at(today, 1) + timedelta(seconds=30))
         assert len(world.router.physical_calls()) == asked
-        assert reports["session"].backing_off_until is None and not reports["session"].held_elsewhere, reports
-        health = asyncio.run(world.runtime.health())
-        stuck = [
-            check
-            for check in health.checks
-            if check.name.startswith("model_queue")
-            and check.status is not RuntimeHealthStatus.HEALTHY
-            and "physical" not in f"{check.name} {check.detail}"
-        ]
-        assert stuck == []
+        assert all(report.backing_off_until is not None for report in reports.values()), reports
     finally:
         world.close()
 

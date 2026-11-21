@@ -582,32 +582,32 @@ def test_closing_waits_while_a_written_item_of_that_day_is_still_to_be_reduced(t
     assert stage.close(through=DAY) == RetryReport(taken=1, recovered=1) and stores.backlog.through() == DAY
 
 
-def test_the_item_a_pass_got_stuck_on_is_reported_and_can_be_skipped_next_time(tmp_path: Path) -> None:
-    """就近试因"模型用不了"停下来时（不分起因），报告记下卡在它上面的那一项（``stuck_items``）；这一次不算试过、项留着。
-    下一遍 ``skip`` 掉那一项，排在它后面的照试。重试收尾的计数名目不变。"""
+def test_an_item_stuck_on_an_unavailable_model_is_kept_and_tried_again_next_pass(tmp_path: Path) -> None:
+    """就近试因"模型用不了"停下来时（不分起因）：这一次不算试过、项留着、报告 ``unreachable``；下一遍（模型好了）照试。
+    模型队列不再按项在进程里退避（裁定 108：整体的等待并进了熔断）。"""
 
     from habitus.model_client import ModelTransportError
 
     stores = Stores(tmp_path)
-    session, provider = lane(stores, [description()])
+    session, provider = lane(stores, [description(), description()])
     real = session.describer.describe
     slow = _turn("一直超时的一轮", 0)
+    down = [True]
 
     async def describe(turn, reminders=()):  # type: ignore[no-untyped-def]
-        if turn.key == slow.key:
+        if turn.key == slow.key and down[0]:
             raise ModelTransportError("read timed out")
         return await real(turn, reminders)
 
     session.describer.describe = describe  # type: ignore[method-assign]
-    stuck, fine = _turn_item(slow), _turn_item(_turn("好的一轮", 10))
+    stuck = _turn_item(slow)
     stores.backlog.put(stuck)
-    stores.backlog.put(fine)
+    stores.backlog.put(_turn_item(_turn("好的一轮", 10)))
     stage = _stage(stores, session)
 
     first = asyncio.run(stage.run_once(through=DAY))
-    assert first.unreachable and first.unavailable == 1 and first.stuck_items == (stuck.item_id,)
-
-    second = asyncio.run(stage.run_once(through=DAY, skip=first.stuck_items))
-    assert not second.unreachable and first.recovered + second.recovered == 1 and provider.calls == 1
-    assert [item.item_id for item in stores.backlog.snapshot().items] == [stuck.item_id]
-    assert stage.close(through=DAY) == RetryReport(taken=2, recovered=1, unavailable=1)  # 收尾的计数名目不变
+    assert first.unreachable and first.unavailable == 1
+    assert stuck.item_id in [item.item_id for item in stores.backlog.snapshot().items]
+    down[0] = False
+    second = asyncio.run(stage.run_once(through=DAY))
+    assert not second.unreachable and first.recovered + second.recovered == 2

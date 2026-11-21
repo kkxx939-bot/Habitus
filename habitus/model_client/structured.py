@@ -8,15 +8,9 @@ from dataclasses import dataclass, replace
 from typing import Generic, Literal, TypeVar, cast
 
 from habitus.model_client.client import ChatClient
-from habitus.model_client.contracts import (
-    ChatCallContext,
-    ChatMessage,
-    ChatRequest,
-    ModelContentSafetyError,
-    ModelResponse,
-    ModelStructuredOutputError,
-    ResponseFormat,
-)
+from habitus.model_client.contracts import ChatCallContext, ChatMessage, ChatRequest, ModelResponse, ResponseFormat
+from habitus.model_client.errors import ModelContentSafetyError, ModelStructuredOutputError
+from habitus.model_client.failures import CONTENT_BLOCKED_FINISH_REASONS
 from habitus.model_client.json_parser import JSONParseMode, parse_json_response
 from habitus.model_client.schema_validation import JSONSchemaValidationError, validate_json_schema
 
@@ -250,7 +244,7 @@ class StructuredChatClient:
                 "response",
                 ValueError("structured model response was truncated"),
             )
-        if response.finish_reason in {"content_filter", "safety"}:
+        if response.finish_reason in CONTENT_BLOCKED_FINISH_REASONS:
             raise ModelContentSafetyError("structured model response was blocked by content safety")
         if not response.content:
             raise _StructuredValidationFailure(

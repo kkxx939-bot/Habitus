@@ -188,7 +188,7 @@ def test_without_a_live_host_the_window_end_is_unreachable_and_the_model_is_not_
 
     client, provider = recording_client([LIKE, LIKE])
     outlet = Outlet(alive=False)
-    run, ledger = stage(tmp_path, outlet=outlet, judge=Judge(client, retries=0, delay_seconds=0.0))
+    run, ledger = stage(tmp_path, outlet=outlet, judge=Judge(client))
     earn(ledger)
     ledger.record_expectation(expectation("today", DAY0))
     opened = asyncio.run(run.run_once(DAY0 + timedelta(minutes=15), NO_ROWS))
@@ -378,7 +378,7 @@ def test_at_the_window_end_the_account_is_read_again_and_the_model_is_asked_then
     from habitus.foresight.ledger import UnitSetting
 
     client, provider = recording_client([LIKE, LIKE])
-    run, ledger = stage(tmp_path, judge=Judge(client, retries=0, delay_seconds=0.0))
+    run, ledger = stage(tmp_path, judge=Judge(client))
     earn(ledger, kind="s-k0003")
     earn(ledger, kind="s-k0002")
     ledger.record_expectation(expectation("silenced", DAY0, kind="s-k0003"))
@@ -635,7 +635,7 @@ def test_a_return_seen_only_at_the_window_end_is_not_put_to_the_model(tmp_path) 
     """时窗开时还没有机会表（判不了久别）、到时窗末有了：时窗末记「久别回来」，也不拿它去问模型。"""
 
     client, provider = recording_client([LIKE, LIKE])
-    run, ledger = stage(tmp_path, judge=Judge(client, retries=0, delay_seconds=0.0))
+    run, ledger = stage(tmp_path, judge=Judge(client))
     _middle_band(ledger)
     ledger.record_expectation(expectation("back", DAY0))
     assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=15), NO_ROWS)).by_reason == {"等时窗末": 1}
@@ -915,7 +915,7 @@ def test_the_model_is_not_asked_once_the_days_cap_is_full(tmp_path) -> None:
     """名额满了不问模型（成本保护，M63：去掉这一道也全绿）：记「名额已满」，一次也没调。"""
 
     client, provider = recording_client([LIKE, LIKE])
-    run, ledger = stage(tmp_path, judge=Judge(client, retries=0, delay_seconds=0.0))
+    run, ledger = stage(tmp_path, judge=Judge(client))
     for index, kind in enumerate(("s-k0007", "s-k0008")):
         said = expectation(f"said-{index}", DAY0, kind=kind)
         ledger.record_expectation(said)
@@ -1089,7 +1089,7 @@ def _past_deadline_shape(tmp_path, crowded: bool):  # type: ignore[no-untyped-de
     from dataclasses import replace
 
     client, provider = recording_client([LIKE, LIKE, LIKE])
-    run, ledger = stage(tmp_path, tick_seconds=900.0, judge=Judge(client, retries=0, delay_seconds=0.0))
+    run, ledger = stage(tmp_path, tick_seconds=900.0, judge=Judge(client))
     earn(ledger)
     start = DAY0.replace(hour=22, minute=45) if crowded else DAY0.replace(hour=10, minute=0)
     item = replace(expectation("short", start, window=(3, 13)), deadline=start + timedelta(minutes=20))

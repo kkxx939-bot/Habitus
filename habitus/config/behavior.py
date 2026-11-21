@@ -77,8 +77,6 @@ class BehaviorConfig:
     physical_max_segment_id_chars: int | None = None
     physical_max_future_seconds: int | None = None
     kinds_pick_retries: int | None = None
-    kinds_transient_retries: int | None = None
-    kinds_transient_retry_delay_seconds: float | None = None
     kinds_max_encoded_bytes: int | None = None
     kinds_active_min_days: int | None = None
     kinds_active_cap: int | None = None

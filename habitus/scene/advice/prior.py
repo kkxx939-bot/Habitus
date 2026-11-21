@@ -251,12 +251,12 @@ class PriorAnswer:
     #: 出处：提示词与 schema 的版本、这几遍实际作答的模型（与缓存一起存，回看时分得清是谁答的）。
     version: str = ""
     models: tuple[str, ...] = ()
+    #: 没答成是因为这一条输入有问题（裁定 108）：同一份输入不重发。
+    input_problem: bool = False
 
 
 @dataclass(frozen=True)
 class PriorConfig:
-    transient_retries: int = 1
-    transient_retry_delay_seconds: float = 5.0
     #: 乱序问几遍（方案：三遍取中位）。
     rounds: int = 3
 
@@ -325,11 +325,9 @@ class PriorAdvisor:
                 schema=schema(order),
                 name=name,
                 validator=validator,
-                retries=self.config.transient_retries,
-                delay_seconds=self.config.transient_retry_delay_seconds,
             )
             if isinstance(answer, Failed):
-                return PriorAnswer(levels={}, signals=(answer.signal,))
+                return PriorAnswer(levels={}, signals=(answer.signal,), input_problem=answer.input_problem)
             assert isinstance(answer, Answered)
             rounds.append(cast("dict[str, PriorLevel]", answer.value))
             notes.extend(answer.notes)

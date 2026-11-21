@@ -1,9 +1,10 @@
 """模型队列在健康面上要人看的（``runtime.health`` 读；都是 non-critical，清完、恢复后各项自己消掉）：
 
 - ``model_queue_backlog``：欠账到了阈值（项数，或最老一项等了多久；``scene.model_queue_backlog_warning_*``），带各类条数；
-- ``model_queue_backoff``：正在整体退避（模型整个调不通），带从什么时候起、连着几次、下一次什么时候再做；
 - ``model_queue_crossed``：有活欠着跨过了换代（哪几类、跨了几代）——那几代是按"不知道"算出来的，队列补上之后下一代用上；
 - ``model_queue_scan``：有的类认欠账时读盘出错（哪几类、原因码）——那一类的活这一趟没看成，后面的类照做。
+
+模型此刻用不了不在这里报：看 ``model_chat``（对话熔断，``runtime.model_health``，裁定 108）。
 
 另有一项读数（不是故障）``model_queue_pending``：先验两种问法各要问几题（``queue_pending``）。
 """
@@ -24,14 +25,6 @@ def queue_problems(state: ModelQueueState, settings: QueueSettings, now: datetim
     if sum(owed.values()) >= settings.warning_items or (owed and waited >= settings.warning_wait_seconds):
         counts = ", ".join(f"{category}={count}" for category, count in owed.items())
         found.append(("model_queue_backlog", f"owed {sum(owed.values())}: {counts}; oldest waited {waited:.0f}s"))
-    if state.down() and state.unreachable_since is not None:
-        later = "" if state.retry_at is None else f"; next attempt at {state.retry_at.isoformat()}"
-        found.append(
-            (
-                "model_queue_backoff",
-                f"model unreachable since {state.unreachable_since.isoformat()}; failures={state.failures}{later}",
-            )
-        )
     crossed = {category: count for category, count in state.crossed.items() if count and owed.get(category)}
     if crossed:
         detail = ", ".join(f"{category}×{count}" for category, count in sorted(crossed.items()))

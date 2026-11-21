@@ -16,9 +16,10 @@ from habitus.foundation.observability import (
     Observer,
     record_observation,
 )
-from habitus.model_client.config import RerankModelConfig
-from habitus.model_client.contracts import ModelClientError, ModelResponseError
-from habitus.model_client.retry import normalize_provider_error, retry_delay
+from habitus.model_client.breaker import CircuitBreaker
+from habitus.model_client.config import CallFailureConfig, RerankModelConfig
+from habitus.model_client.errors import ModelClientError, ModelErrorRule, ModelResponseError
+from habitus.model_client.failures import classify_failure, retry_delay
 
 _ASYNC_RERANK_SEMAPHORES: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop,
@@ -73,9 +74,13 @@ class RerankClient:
         provider: RerankProvider,
         *,
         async_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        failures: CallFailureConfig | None = None,
     ) -> None:
         self.config = config
         self.provider = provider
+        self.failures = failures or CallFailureConfig()
+        #: 重排这一种能力的熔断（裁定 108）。
+        self.breaker = CircuitBreaker(self.failures, name="rerank")
         self._async_sleep = async_sleep
 
     @property
@@ -115,30 +120,35 @@ class RerankClient:
         if len(normalized_documents) > self.config.max_documents:
             raise ValueError("rerank documents exceed the configured count bound")
 
-        for attempt in range(self.config.route.max_retries + 1):
-            failure: ModelClientError | None = None
-            source_error: Exception | None = None
-            semaphore = _async_rerank_semaphore(self.config.route.max_concurrent)
-            await semaphore.acquire()
-            try:
-                scores = await asyncio.wait_for(
-                    self.provider.rerank(normalized_query, normalized_documents),
-                    timeout=self.config.route.timeout_seconds,
-                )
-                return self._scores(scores, expected=len(normalized_documents))
-            except Exception as exc:
-                failure = normalize_provider_error(exc)
-                source_error = exc
-            finally:
-                semaphore.release()
-
-            if failure is None or source_error is None:  # pragma: no cover
-                raise AssertionError("rerank provider failure was not captured")
-            if failure.retryable and attempt < self.config.route.max_retries:
-                await self._async_sleep(self._retry_delay(attempt, failure))
-                continue
-            raise failure from source_error
+        probe = self.breaker.before_call()
+        try:
+            for attempt in range(self.config.route.max_retries + 1):
+                try:
+                    scores = await self._attempt(normalized_query, normalized_documents)
+                except Exception as exc:
+                    failure = classify_failure(exc)
+                    if failure.rule is ModelErrorRule.WAIT and attempt < self.config.route.max_retries:
+                        await self._async_sleep(self._retry_delay(attempt, failure))
+                        continue
+                    self.breaker.record_failure(failure)
+                    raise failure from exc
+                self.breaker.record_success()
+                return scores
+        finally:
+            if probe:
+                self.breaker.release_probe()
         raise AssertionError("rerank retry loop exhausted without a result")  # pragma: no cover
+
+    async def _attempt(self, query: str, documents: tuple[str, ...]) -> tuple[float, ...]:
+        semaphore = _async_rerank_semaphore(self.config.route.max_concurrent)
+        await semaphore.acquire()
+        try:
+            scores = await asyncio.wait_for(
+                self.provider.rerank(query, documents), timeout=self.config.route.timeout_seconds
+            )
+            return self._scores(scores, expected=len(documents))
+        finally:
+            semaphore.release()
 
     async def aclose(self) -> None:
         """释放 Provider 持有的连接池；重复调用由 Provider 保证幂等。"""
@@ -171,12 +181,7 @@ class RerankClient:
         return normalized
 
     def _retry_delay(self, attempt: int, failure: ModelClientError) -> float:
-        return retry_delay(
-            attempt,
-            base_delay=self.config.route.retry_base_delay_seconds,
-            max_delay=self.config.route.retry_max_delay_seconds,
-            error=failure,
-        )
+        return retry_delay(attempt, route=self.config.route, failures=self.failures, error=failure)
 
 
 class ObservedReranker:
@@ -197,6 +202,10 @@ class ObservedReranker:
     @property
     def is_remote(self) -> bool:
         return self.reranker.is_remote
+
+    @property
+    def breaker(self) -> CircuitBreaker | None:
+        return getattr(self.reranker, "breaker", None)
 
     async def rerank(self, query: str, documents: Sequence[str]) -> tuple[float, ...]:
         started = time.monotonic()

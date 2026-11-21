@@ -37,14 +37,13 @@ from habitus.model_client.config import ChatModelConfig
 from habitus.model_client.contracts import (
     ChatMessage,
     ChatRequest,
-    ModelConfigurationError,
     ModelResponse,
-    ModelResponseError,
     ModelStreamEvent,
     PreparedChatRequest,
     ProviderCapabilities,
     ToolDefinition,
 )
+from habitus.model_client.errors import ModelConfigurationError, ModelResponseError
 from habitus.model_client.http_clients import async_http_client, sync_http_client
 from habitus.model_client.json_parser import parse_json_response
 

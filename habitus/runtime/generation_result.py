@@ -10,7 +10,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
-from habitus.model_client import MODEL_UNUSABLE, ModelUnreachable
+from habitus.model_client import MODEL_UNAVAILABLE, ModelUnreachable
 from habitus.runtime.generation_summary import UNREACHABLE, reason_code
 
 CALENDAR, RETRY, SETTLE = "calendar", "retry", "settle"
@@ -68,7 +68,7 @@ FALLBACKS = (
 )
 
 #: 线上任何一处调模型碰到它就是模型整个调不通：触点抛的 ``ModelUnreachable``，以及模型客户端原样抛出的"整个用不了"。
-UNREACHABLE_ERRORS: tuple[type[BaseException], ...] = (ModelUnreachable, *MODEL_UNUSABLE)
+UNREACHABLE_ERRORS: tuple[type[BaseException], ...] = (ModelUnreachable, *MODEL_UNAVAILABLE)
 
 
 @dataclass(frozen=True)

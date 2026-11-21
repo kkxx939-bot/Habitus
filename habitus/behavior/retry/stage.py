@@ -9,10 +9,9 @@
 - **能重试的才试**（``RetryCause.retried``）：内容安全拦下的、我们自己处理不了的不白试，留在堆里，封口时按类计数进健康面
   （树上照旧是「错误」）。
 - **一项抛了是 bug，只拦这一项**：记成我们自己处理不了的（树上照旧是「错误」、计数报出），后面的项照试、这一支照常归约。
-- **模型此刻用不了的那一次不算试过**（报告的 ``stuck_items`` 记下卡在它上面的项，模型队列下一遍可以 ``skip`` 掉它们、
-  先试别的）：会话轮排在前面，试到"模型用不了"就不再试别的（不逐条等超时），这一项留着；这一支
+- **模型此刻用不了的那一次不算试过**：会话轮排在前面，试到"模型用不了"就不再试别的（不逐条等超时），这一项留着；这一支
   已写回的照常归约后收工；这一支的归约里碰到模型整个用不了（``Reduction.UNREACHABLE``）也一样，没补回的项留着。报告的
-  ``unreachable`` 为真，模型队列据它整体退避。
+  ``unreachable`` 为真，模型队列据它把这一项留到下一轮（熔断开着时等试探，裁定 108）。
 - **锁被另一进程拿着**不是错误、更不是模型调不通，是**还没准备好**（裁定 94 第 9 条）：一项的锁被占（``Attempt.BUSY``）不删、
   这一支归约的锁被占（``Reduction.BUSY``）写回的那几项也不删，报告记下这一支在等（``waiting``）；下一次等归约的那几项不再试、
   直接归约。
@@ -35,7 +34,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
@@ -103,9 +102,6 @@ class RetryReport:
     waiting: tuple[str, ...] = field(default_factory=tuple)
     #: 某一支的归约碰到模型整个用不了。
     reduction_unreachable: bool = False
-    #: 就近试因"模型用不了"停下来时，卡在它上面的那几项（试到的那一项，或归约没落成的那几项）；没停下来是空。模型队列
-    #: 据它只让这几项等着（下一遍 ``skip`` 掉），别的照试。
-    stuck_items: tuple[str, ...] = field(default_factory=tuple, compare=False)
 
     @property
     def dropped(self) -> int:
@@ -113,7 +109,7 @@ class RetryReport:
 
     @property
     def unreachable(self) -> bool:
-        """就近试时试到了"模型整个用不了"（一项、或一支的归约）：模型队列据它整体退避。重试收尾的报告里 ``unavailable``
+        """就近试时试到了"模型此刻用不了"（一项、或一支的归约）：模型队列据它把这一项留到下一轮。重试收尾的报告里 ``unavailable``
         是到封口还没补回的项数，不看这个属性。"""
 
         return self.unavailable > 0 or self.reduction_unreachable
@@ -137,7 +133,6 @@ class _Tally:
     #: 试到模型整个用不了：不再试别的项、别的支。
     halted: bool = False
     reduction_unreachable: bool = False
-    stuck_items: tuple[str, ...] = ()
 
     def report(self, waiting: Sequence[str]) -> RetryReport:
         return RetryReport(
@@ -150,7 +145,6 @@ class _Tally:
             refused=self.refused,
             waiting=tuple(waiting),
             reduction_unreachable=self.reduction_unreachable,
-            stuck_items=self.stuck_items,
         )
 
 
@@ -161,8 +155,6 @@ class RetryStage:
         self._waiting: dict[str, tuple[RetryItem, ...]] = {}
         #: 就近试出的结果按项所属的那一天攒着（只在这个进程里），那一天封口时并进重试收尾的报告。
         self._tried: dict[date, _Tally] = {}
-        #: 这一遍不试的项（``run_once`` 的 ``skip``）。
-        self._skip: frozenset[str] = frozenset()
 
     def due(self, *, through: date) -> tuple[RetryItem, ...]:
         """就近要试的项：各支堆里属于还没封口的日子（不晚于 ``through``）、能重试、有处理器的（写回了在等归约的也在里面）。"""
@@ -177,10 +169,9 @@ class RetryStage:
             )
         return tuple(found)
 
-    async def run_once(self, *, through: date, skip: Collection[str] = ()) -> RetryReport:
-        """就近试一遍（见模块文档串）。``skip`` 里的项这一遍不试（模型队列按重试账退避着的：上一次卡在传输类上的那几项）。"""
+    async def run_once(self, *, through: date) -> RetryReport:
+        """就近试一遍（见模块文档串）。"""
 
-        self._skip = frozenset(skip)
         tally = _Tally()
         waiting: list[str] = []
         for branch in self.branches:
@@ -276,7 +267,7 @@ class RetryStage:
         backlog = branch.backlog
         # 上一次写回、等归约的那几项：不再试（会话轮重试会重新描述、再问一次模型），直接归约
         written: list[RetryItem] = list(self._waiting.pop(branch.name, ()))
-        known = {item.item_id for item in written} | self._skip
+        known = {item.item_id for item in written}
         closed = backlog.through()
         batch = backlog.snapshot(through=through)
         if batch.unreadable:
@@ -316,9 +307,9 @@ class RetryStage:
                 continue  # 归约之后问过成没成再删；在那之前一直占着
             backlog.release(item.item_id)
             if outcome is Attempt.UNAVAILABLE:
-                # 模型用不了：这一次不算试过、项留着，别的不再试；记下是哪一项，模型队列只让它等着
+                # 模型用不了：这一次不算试过、项留着，别的不再试
                 tally.unavailable += 1
-                tally.halted, tally.stuck_items = True, (item.item_id,)
+                tally.halted = True
                 break
             if outcome is Attempt.BUSY:
                 busy = True
@@ -342,7 +333,6 @@ class RetryStage:
         down = reduction is Reduction.UNREACHABLE
         if down:
             tally.halted = tally.reduction_unreachable = True
-        stuck: list[str] = []
         for item in written:
             backlog.release(item.item_id)
             if _closed(backlog, item):
@@ -351,12 +341,10 @@ class RetryStage:
                 self._settled(item, "recovered", tally)
             elif down:
                 tally.unavailable += 1  # 归类时模型用不了：这一次不算试过，项留着
-                stuck.append(item.item_id)
                 continue
             else:
                 self._settled(item, "deterministic", tally)
             backlog.discard((item.item_id,))
-        tally.stuck_items = (*tally.stuck_items, *stuck)
         return True
 
 

@@ -150,6 +150,21 @@ models:
     allow_json_repair: true
     validation_retries: 1
 
+  # 模型调用失败的处理（裁定 108）。失败先归成固定的几类，每类处理定死：
+  # - 等一等可能好（服务故障、网络故障、限流、认不出的）：按各路由的 max_retries / retry_*_delay_seconds 重试，限流用下面
+  #   的限流间隔；仍失败交回调用方，由各条链"下一次还会再来"接着做。
+  # - 要人处理（密钥错、没权限、额度用完、模型或地址不存在、不支持、网络设置）：不重试，熔断直接打开，降到试探的节奏，
+  #   健康检查显示原因；改好配置或额度恢复后，下一次试探成功就自己接上，不用重启。
+  # - 这一条输入有问题（请求不合法、太长、内容安全）：同一份输入不重发、不计入熔断；长期记忆跳过这一段。
+  # 对话、向量、重排各一个熔断，共用这组数：连着 breaker_failure_threshold 次调用失败（每次已按路由重试过）打开，
+  # breaker_reset_base_seconds 后放一个请求试探，试探失败等待加倍、封顶 breaker_reset_max_seconds。
+  call_failures:
+    rate_limit_retry_base_delay_seconds: 5.0
+    rate_limit_retry_max_delay_seconds: 120.0
+    breaker_failure_threshold: 3
+    breaker_reset_base_seconds: 60.0
+    breaker_reset_max_seconds: 3600.0
+
 conversation:
   journal:
     max_file_bytes: 67108864

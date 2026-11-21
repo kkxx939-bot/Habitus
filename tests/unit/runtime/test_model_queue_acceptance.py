@@ -37,7 +37,8 @@ from habitus.config import ConfigError
 from habitus.config.scene import SceneConfig
 from habitus.foundation.lifecycle import BackoffPolicy
 from habitus.infrastructure.lifecycle import RetryLedger
-from habitus.model_client import ModelResponse, ModelTransportError
+from habitus.model_client import CallFailureConfig, ModelResponse, ModelTransportError
+from habitus.model_client.breaker import CircuitBreaker
 from habitus.runtime import health as health_module
 from habitus.runtime.foresight import build_foresight_nightly
 from habitus.runtime.foresight_days import DayReport
@@ -70,6 +71,7 @@ from habitus.runtime.model_queue import (
     UNFINISHED,
     UNREACHABLE,
     ModelQueue,
+    ModelQueueState,
     QueueJournal,
     QueueSettings,
 )
@@ -111,7 +113,7 @@ def scene_on(root: Path, site, *, catalog=None, advice: bool = False):  # type: 
         client, advisor = answering_client()
         scene.advice = RelationAdvice(
             store=AdviceStore(root / "scene"),
-            prior=PriorAdvisor(client, config=PriorConfig(transient_retry_delay_seconds=0.0)),
+            prior=PriorAdvisor(client, config=PriorConfig()),
         )
     return scene, provider, advisor
 
@@ -165,6 +167,19 @@ def disk(root: Path) -> dict[str, bytes]:
 
 def done(report) -> list[tuple[str, str]]:  # type: ignore[no-untyped-def]
     return [(item.category, item.outcome) for item in report.done]
+
+
+def chat_breaker(scene, clock: list, threshold: int = 1, cap: float = 3_600.0) -> CircuitBreaker:  # type: ignore[no-untyped-def,type-arg]
+    """先验那个对话客户端的熔断换成时间跟着测试钟走的一个（裁定 108：队列的整体退避就是它）；返回它，队列状态读它。"""
+
+    breaker = CircuitBreaker(
+        CallFailureConfig(
+            breaker_failure_threshold=threshold, breaker_reset_base_seconds=60.0, breaker_reset_max_seconds=cap
+        ),
+        monotonic=lambda: (clock[0] - NOW).total_seconds(),
+    )
+    scene.advice.prior.client.client.breaker = breaker
+    return breaker
 
 
 def sealed_day(scene, day) -> bool:  # type: ignore[no-untyped-def]
@@ -484,11 +499,12 @@ def timing_out_advisor(tmp_path):  # type: ignore[no-untyped-def]
     return site, scene, provider, advisor, traces
 
 
-def test_a1_7_a_timed_out_model_call_backs_off_only_its_item_and_the_queue_moves_on(tmp_path) -> None:
-    """A1-7 / G2（"一次模型调用超时：这一项退避；队列接着做下一项"）：先验的调用一直超时——这一项在进程里退避（模型调用失败
-    不记落盘的重试账、不会被放弃），队列不进整体退避；退避期内再 ``drain`` 不重问。没有探针（通用规则：只看连着几项没成）。
+def test_a1_7_a_timed_out_model_call_keeps_its_item_and_it_is_tried_again_next_time(tmp_path) -> None:
+    """A1-7 / G2（"一次模型调用超时：这一项留着；队列接着做下一项"）：先验的调用一直超时——客户端按路由有界重试后交回，
+    这一项留着（模型调用失败不记落盘的重试账、不会被放弃），熔断没到阈值时队列照常；下一趟再试（队列不按项在进程里退避，
+    裁定 108）。
 
-    撤回即失败：一项报调不通就整体退避，``state.down()`` 为真、``backing_off_until`` 不是 None。"""
+    撤回即失败：一次调用失败就让队列停下，``state.down()`` 为真、``backing_off_until`` 不是 None。"""
 
     site, scene, _provider, advisor, traces = timing_out_advisor(tmp_path)
     queue = queue_on(tmp_path, scene, site, traces=traces)
@@ -500,7 +516,7 @@ def test_a1_7_a_timed_out_model_call_backs_off_only_its_item_and_the_queue_moves
     assert queue.retries.size() == 0  # 模型失败不进落盘的重试账
     asked = advisor.calls
     again = asyncio.run(queue.drain())
-    assert advisor.calls == asked and again.owed[ADVICE] >= 1 and not queue.state.down()  # 退避期内不重问
+    assert advisor.calls > asked and again.owed[ADVICE] >= 1 and not queue.state.down()  # 下一趟照试、还欠着
 
 
 def test_a1_7_a_timed_out_model_call_is_counted_on_the_trace(tmp_path) -> None:
@@ -531,13 +547,13 @@ def masked(files: dict[str, bytes]) -> dict[str, bytes]:
     return found
 
 
-def test_a1_8_an_unreachable_model_backs_the_whole_queue_off_and_nothing_is_lost(tmp_path) -> None:
-    """A1-8（方案第 4 节"模型整个调不通时队列整体退避，不逐条等超时"）：做到一半模型断了（第一次调模型起整个调不通）——
-    连着配置的项数都失败（这里配成 1 项，线上默认 3），队列整体退避、这一趟后面的项不再试；退避期内再 ``drain`` 一次模型都
-    不碰；到点接着做、头一项又失败——退避加倍、封顶；欠着的项一个不少。模型恢复后做完，盘面与没断过的相同（除完成章上的
-    盖章时刻）。
+def test_a1_8_an_unreachable_model_opens_the_breaker_pauses_the_queue_and_nothing_is_lost(tmp_path) -> None:
+    """A1-8（方案第 4 节"模型整个调不通时队列整体退避，不逐条等超时"；裁定 108 起整体退避就是对话熔断）：做到一半模型断了
+    （第一次调模型起整个调不通）——连着配置的次数都失败（这里配成 1 次，线上默认 3），熔断打开，队列这一趟后面的项不再试；
+    熔断开着时再 ``drain`` 一次模型都不碰；到试探的时候放一个请求、又失败——等待加倍、封顶；欠着的项一个不少。模型恢复后
+    试探成功、做完，盘面与没断过的相同（除完成章上的盖章时刻）。
 
-    撤回即失败：模型整个调不通时不整体退避（当成普通的一项失败接着做），"退避期内不碰模型"与"这一趟后面的项不再试"变红。
+    撤回即失败：熔断开着时队列照样逐项去试，"熔断开着时不碰模型"与"这一趟后面的项不再试"变红。
 
     一轮里头一项是先验（队列里会调模型的只有它）。"""
 
@@ -562,13 +578,8 @@ def test_a1_8_an_unreachable_model_backs_the_whole_queue_off_and_nothing_is_lost
 
     outage(provider)
     outage(advisor)
-    queue = queue_on(
-        root,
-        scene,
-        site,
-        clock=lambda: clock[0],
-        settings=QueueSettings(backoff_base_seconds=60.0, backoff_max_seconds=100.0, unreachable_after_failures=1),
-    )
+    breaker = chat_breaker(scene, clock, threshold=1, cap=100.0)
+    queue = queue_on(root, scene, site, clock=lambda: clock[0], state=ModelQueueState(breaker))
     first = asyncio.run(queue.drain())
     assert done(first) == [(ADVICE, UNREACHABLE)] and queue.state.down()
     assert first.backing_off_until == NOW + timedelta(seconds=60)
@@ -582,16 +593,15 @@ def test_a1_8_an_unreachable_model_backs_the_whole_queue_off_and_nothing_is_lost
 
     clock[0] = NOW + timedelta(seconds=61)
     second = asyncio.run(queue.drain())
-    assert done(second) == [(ADVICE, UNREACHABLE)] and advisor.calls > asked_advice  # 到点接着做：头一项又失败
+    assert done(second) == [(ADVICE, UNREACHABLE)] and advisor.calls > asked_advice  # 试探的那一项又失败
     assert second.backing_off_until == clock[0] + timedelta(seconds=100)  # 加倍（120）被封顶压到 100
-    assert queue.state.failures == 2 and queue.state.backoffs == 2 and second.owed[ADVICE] >= 1
-    names = [name for name, _detail in health_module.queue_problems(queue.state, queue.settings, clock[0])]
-    assert "model_queue_backoff" in names
+    assert breaker.snapshot().open and second.owed[ADVICE] >= 1
+    assert health_module.queue_problems(queue.state, queue.settings, clock[0]) == []  # 原因在 model_chat 那一项
 
     armed[0] = down[0] = False
     clock[0] = NOW + timedelta(seconds=200)
     final = asyncio.run(queue.drain())
-    assert final.clear and not queue.state.down() and queue.state.failures == 0 and final.backing_off_until is None
+    assert final.clear and not queue.state.down() and final.backing_off_until is None
     assert masked(disk(root)) == expected
     assert health_module.queue_problems(queue.state, queue.settings, clock[0]) == []
 
@@ -600,19 +610,15 @@ def test_a1_8_an_unreachable_model_backs_the_whole_queue_off_and_nothing_is_lost
 
 
 def test_a1_9_a_generation_during_the_backoff_writes_no_relation_table_and_uses_the_previous_one(tmp_path) -> None:
-    """A1-9（裁定 96、立项第二部分第 2 节末）：第一天队列做完、换代写出关系表；第二天模型整个调不通，队列进了整体退避——
-    第二天这一代照样 complete，但不写这一代的关系表，机会表用上一代的那一晚，``relations_previous`` 计 1。退避状态是真的队列
-    自己跑出来的（不是手填的布尔值）：靠"连着几项模型调用失败"进整体退避，这里配成 1 项（线上默认 3）。"""
+    """A1-9（裁定 96、立项第二部分第 2 节末）：第一天队列做完、换代写出关系表；第二天模型整个调不通，对话熔断打开——
+    第二天这一代照样 complete，但不写这一代的关系表，机会表用上一代的那一晚，``relations_previous`` 计 1。熔断是真的调用
+    跑出来的（不是手填的布尔值）：连着几次模型调用失败就打开，这里配成 1 次（线上默认 3，裁定 108）。"""
 
     site, scene, _provider, advisor = fresh(tmp_path, advice=True)
     clock = [NOW]
+    breaker = chat_breaker(scene, clock)
     queue = queue_on(
-        tmp_path,
-        scene,
-        site,
-        clock=lambda: clock[0],
-        sealed=lambda: clock[0].date(),
-        settings=QueueSettings(unreachable_after_failures=1),
+        tmp_path, scene, site, clock=lambda: clock[0], sealed=lambda: clock[0].date(), state=ModelQueueState(breaker)
     )
     assert asyncio.run(queue.drain()).clear
     built = foresight_components(tmp_path, site)
@@ -673,7 +679,7 @@ def test_a1_10_todays_retryable_item_is_tried_the_same_day_kept_while_the_model_
     """A1-10（方案第 4 节"出错重试就近""模型此刻用不了不算试过，留到下一次；那天封口时还没成的才丢"）：
 
     - 今天进堆的可重试项，队列当天就试（不等那天封口），补回了就从堆里删掉；
-    - 试的时候模型用不了：这一次不算试过，项还在堆里、在进程里等着（按通用规则改过：单独一项失败不再整体退避）；
+    - 试的时候模型用不了：这一次不算试过，项还在堆里，下一趟再试（裁定 108：队列不按项在进程里退避）；
     - 那天封口后，换代的重试收尾把还没成的丢掉、撤回、计一项没补回——换代自己不试。
 
     撤回即失败：队列不试今天的项（只留给换代），第一段 ``attempted`` 是空。"""
@@ -702,10 +708,10 @@ def test_a1_10_todays_retryable_item_is_tried_the_same_day_kept_while_the_model_
     queue = queue_on(tmp_path / "down", scene, site, retry=stage, clock=lambda: clock[0], sealed=lambda: None)
     report = asyncio.run(queue.drain())
     assert done(report) == [(RETRY, UNREACHABLE)] and not queue.state.down()
-    assert asyncio.run(queue.drain()).done == ()  # 这一项在等：不每一趟都重问
+    assert done(asyncio.run(queue.drain())) == [(RETRY, UNREACHABLE)]  # 下一趟照试，仍不算试过
     assert backlog.count() == 1 and report.owed[RETRY] == 1 and chains.abandoned == []
     tried = len(chains.attempted)
-    assert tried == 1
+    assert tried == 2
 
     # 那天封口了：换代的重试收尾丢掉没成的，自己不试
     clock[0] = NOW + timedelta(days=1)
@@ -774,8 +780,6 @@ def test_a1_11_health_degrades_on_a_backlog_with_counts_and_the_oldest_wait_and_
 
 QUEUE_FIELDS = (
     "model_queue_poll_seconds",
-    "model_queue_backoff_base_seconds",
-    "model_queue_backoff_max_seconds",
     "model_queue_shutdown_timeout_seconds",
     "model_queue_backlog_warning_items",
     "model_queue_backlog_warning_seconds",
@@ -783,7 +787,8 @@ QUEUE_FIELDS = (
 
 
 def test_a1_12_the_queue_settings_are_in_the_example_yaml_with_their_defaults_and_bad_ones_are_refused() -> None:
-    """A1-12：新字段逐个列在示例 YAML 里、写的值就是代码里的默认值；未知字段、越界、类型不对都被拒；合法值进得来。"""
+    """A1-12：新字段逐个列在示例 YAML 里、写的值就是代码里的默认值；未知字段、越界、类型不对都被拒；合法值进得来。
+    整体退避的几个字段并进了 ``models.call_failures``（裁定 108），在语义树这一段按未知字段拒收。"""
 
     example = (Path(__file__).resolve().parents[3] / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8")
     listed = {}
@@ -805,9 +810,6 @@ def test_a1_12_the_queue_settings_are_in_the_example_yaml_with_their_defaults_an
         ("model_queue_poll_seconds", True),
         ("model_queue_poll_seconds", "60"),
         ("model_queue_poll_seconds", 86_401),
-        ("model_queue_backoff_base_seconds", 0.5),
-        ("model_queue_backoff_base_seconds", 3_601.0),  # 起点超过封顶
-        ("model_queue_backoff_max_seconds", 86_401.0),
         ("model_queue_shutdown_timeout_seconds", 0),
         ("model_queue_shutdown_timeout_seconds", 3_601),
         ("model_queue_backlog_warning_items", 0),
@@ -818,7 +820,14 @@ def test_a1_12_the_queue_settings_are_in_the_example_yaml_with_their_defaults_an
     ):
         with pytest.raises(ConfigError):
             SceneConfig.from_mapping({name: bad})
-    for unknown in ("model_queue_poll", "model_queue_backoff_seconds", "model_queue_enabled"):
+    for unknown in (
+        "model_queue_poll",
+        "model_queue_backoff_seconds",
+        "model_queue_enabled",
+        "model_queue_backoff_base_seconds",
+        "model_queue_backoff_max_seconds",
+        "model_queue_unreachable_after_failures",
+    ):
         with pytest.raises(ConfigError):
             SceneConfig.from_mapping({unknown: 60})
 
@@ -1221,17 +1230,13 @@ def test_g7_items_left_by_a_kill_are_tried_again_after_a_restart_not_dropped_as_
 
 
 def test_h2_a_round_cut_short_by_the_backoff_still_records_what_every_category_owes(tmp_path) -> None:
-    """H2：整体退避让一轮中途到此为止（这里第一项模型调用失败、配成 1 项就整体退避）——排在后面的各类"还欠几项"仍从盘上认
-    一遍再记：健康面与换代报告读到的不是上一次的旧数。（原来的触发方式是这一轮开头探针不通；探针已去掉。）"""
+    """H2：熔断打开让一轮中途到此为止（这里第一项模型调用失败、熔断配成 1 次就开，裁定 108）——排在后面的各类"还欠几项"
+    仍从盘上认一遍再记：健康面与换代报告读到的不是上一次的旧数。"""
 
     site, scene, _provider, _advisor = fresh(tmp_path, advice=True)
-    queue = queue_on(
-        tmp_path,
-        scene,
-        site,
-        unsealed=FakeBridge(failure=ModelTransportError("connection refused")),
-        settings=QueueSettings(unreachable_after_failures=1),
-    )
+    breaker = chat_breaker(scene, [NOW])
+    bridge = FakeBridge(failure=ModelTransportError("connection refused"), breaker=breaker)
+    queue = queue_on(tmp_path, scene, site, unsealed=bridge, state=ModelQueueState(breaker))
     report = asyncio.run(queue.drain())
     assert done(report) == [("unsealed", UNREACHABLE)] and queue.state.down()
     # 排在后面的两类这一轮没做，"还欠几项"照样从盘上认过、记下了
@@ -1243,9 +1248,16 @@ class FakeBridge:
 
     unavailable = None
 
-    def __init__(self, *, broken: list[bool] | None = None, failure: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        broken: list[bool] | None = None,
+        failure: BaseException | None = None,
+        breaker: CircuitBreaker | None = None,
+    ) -> None:
         self.broken = broken if broken is not None else [False]
         self.failure = failure
+        self.breaker = breaker  # 给了就像选词的客户端那样，把这次失败记进同一个对话熔断
 
     def unclassified(self) -> int:
         if self.broken[0]:
@@ -1254,6 +1266,8 @@ class FakeBridge:
 
     async def prepare(self, *, until):  # type: ignore[no-untyped-def]
         assert self.failure is not None
+        if self.breaker is not None and isinstance(self.failure, ModelTransportError):
+            self.breaker.record_failure(self.failure)
         raise self.failure
 
 
@@ -1272,10 +1286,10 @@ class PerItemChains(CountingChains):
 def test_h3_a_retry_item_stuck_on_timeouts_is_kept_and_does_not_stop_the_others_or_the_later_categories(
     tmp_path,
 ) -> None:
-    """H3：出错重试里一项一直卡在"模型用不了"上（不分起因）——这一项留在堆里、不算试过、在进程里退避（不进落盘的重试账）；
-    同一趟里补问照做，堆里别的项也照试；退避期内不重问那一项。
+    """H3：出错重试里一项一直卡在"模型用不了"上（不分起因）——熔断没开时这一项留在堆里、不算试过、不进落盘的重试账；
+    同一趟里补问照做，堆里别的项也照试；下一趟照试那一项（裁定 108：队列不按项在进程里退避）。
 
-    撤回即失败：出错重试一报"模型用不了"就整体退避，补问这一趟做不到。"""
+    撤回即失败：出错重试一报"模型用不了"就让队列停下，补问这一趟做不到。"""
 
     site, scene, _provider, advisor = fresh(tmp_path / "timeout", advice=True)
     chains = PerItemChains({"一直超时的链": Attempt.UNAVAILABLE, "好的链": Attempt.RESTORED})
@@ -1296,7 +1310,7 @@ def test_h3_a_retry_item_stuck_on_timeouts_is_kept_and_does_not_stop_the_others_
     assert report.owed[RETRY] == 1 and queue.retries.size() == 0
     tried = chains.attempted.count(stuck.item_id)
     again = asyncio.run(queue.drain())
-    assert chains.attempted.count(stuck.item_id) == tried and again.done == ()  # 退避期内不重问
+    assert chains.attempted.count(stuck.item_id) == tried + 1 and done(again) == [(RETRY, UNREACHABLE)]  # 下一趟照试
     clock[0] = NOW + timedelta(hours=2)
     chains.outcomes["一直超时的链"] = Attempt.RESTORED
     final = asyncio.run(queue.drain())
@@ -1308,11 +1322,10 @@ def test_h3_a_retry_item_stuck_on_timeouts_is_kept_and_does_not_stop_the_others_
 
 
 def test_a_classification_timeout_swallowed_by_the_reduction_does_not_back_the_whole_queue_off(tmp_path) -> None:
-    """复验 A：出错重试里放回的链，归约给它归类时超时——归约不抛，只在报告里记"模型用不了"。按一次模型调用失败算：
-    只卡住的那一项在进程里退避，队列不进整体退避；140 分钟里一趟一趟来，补问第一趟就做完，那一项一直留在堆里、
-    没有被放弃。
+    """复验 A：出错重试里放回的链，归约给它归类时超时——归约不抛，只在报告里记"模型用不了"。熔断没开时（归约里的调用经过的
+    那个熔断才管整体）队列不停；140 分钟里一趟一趟来，补问第一趟就做完，那一项一直留在堆里、每一趟照试、没有被放弃。
 
-    撤回即失败：归约报出的"模型用不了"直接让队列整体退避，补问一项都做不到。"""
+    撤回即失败：归约报出的"模型用不了"直接让队列停下，补问一项都做不到。"""
 
     from types import SimpleNamespace
 
@@ -1344,14 +1357,14 @@ def test_a_classification_timeout_swallowed_by_the_reduction_does_not_back_the_w
         assert not queue.state.down() and report.backing_off_until is None, minutes
         assert report.owed[RETRY] == 1 and report.owed[ADVICE] == 0, minutes
     assert backlog.count() == 1 and chains.abandoned == [] and queue.retries.size() == 0  # 留着，没有被放弃
-    assert 1 < len(reductions) < 14  # 退避逐次加倍：不是每一趟都重问
+    assert len(reductions) >= 15  # 每一趟都照试（队列不按项退避；整体的等待交给熔断）
 
 
 @pytest.mark.parametrize("kind", ["transport", "quota"])
 def test_twenty_minutes_of_failing_calls_give_nothing_up_and_everything_is_done_afterwards(tmp_path, kind: str) -> None:
-    """复验 B，按那一条通用规则：所有模型调用都失败（不分错误种类——429 / 503 那一类与额度那一类各跑一遍）持续二十分钟，
-    每分钟看一次——没有一项被记到放弃（重试账是空的），连着几项没成之后队列整体退避（不逐条去撞），恢复后那一晚的补问
-    做完，盘面与没出过事的相同。
+    """复验 B：所有模型调用都失败（服务故障那一类与额度那一类各跑一遍）持续二十分钟，每分钟看一次——没有一项被记到放弃
+    （重试账是空的），熔断打开后队列停在试探之前（不逐条去撞；试探失败等待加倍，裁定 108），恢复后试探成功、那一晚的
+    补问做完，盘面与没出过事的相同。
 
     撤回即失败：模型调用失败按重试账记这一项，次数用完后补问被放弃，恢复后不补。"""
 
@@ -1374,7 +1387,8 @@ def test_twenty_minutes_of_failing_calls_give_nothing_up_and_everything_is_done_
         return await good_advice(request)
 
     advisor.complete_async = advice_answer
-    queue = queue_on(root, scene, site, clock=lambda: clock[0], settings=QueueSettings(unreachable_after_failures=1))
+    breaker = chat_breaker(scene, clock)
+    queue = queue_on(root, scene, site, clock=lambda: clock[0], state=ModelQueueState(breaker))
     backed_off = False
     tries = 0
     for minute in range(0, 21):
@@ -1385,7 +1399,7 @@ def test_twenty_minutes_of_failing_calls_give_nothing_up_and_everything_is_done_
         assert report.owed[ADVICE] >= 1 and not report.clear, minute  # 一直欠着、看得见
         assert queue.retries.size() == 0, minute  # 模型调用失败不进落盘的重试账
     assert backed_off
-    # 整体退避 + 各项退避：不是每分钟都去撞一次（数"试了几项"）
+    # 熔断开着时不去撞：试探在 1、3、7、15 分钟（逐次加倍），不是每分钟一次（数"试了几项"）
     assert tries < 21
 
     out[0] = False

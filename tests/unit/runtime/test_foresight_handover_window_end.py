@@ -92,7 +92,7 @@ class RecordingJudge(Judge):
 
     def __init__(self) -> None:
         client, self.provider = recording_client([LIKE, LIKE])
-        super().__init__(client, retries=0, delay_seconds=0.0)
+        super().__init__(client)
         self.packages: list[Package] = []
 
     async def judge(self, package: Package) -> Judgement:

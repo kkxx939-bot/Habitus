@@ -23,8 +23,6 @@ FIELDS = {
     "false_alarm_rate",
     "generation_margin_slots",
     "half_life_opportunities",
-    "judge_transient_retries",
-    "judge_transient_retry_delay_seconds",
     "open_reminders_judged",
     "outlet_claim_limit",
     "outlet_lease_minutes",

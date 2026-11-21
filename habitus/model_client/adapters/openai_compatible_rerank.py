@@ -14,7 +14,7 @@ from habitus.foundation.network import OutboundSettings
 from habitus.foundation.validation import is_int, is_number
 from habitus.model_client.adapters._http import is_remote_url, post_json_object
 from habitus.model_client.config import RerankModelConfig
-from habitus.model_client.contracts import ModelConfigurationError, ModelResponseError
+from habitus.model_client.errors import ModelConfigurationError, ModelResponseError
 from habitus.model_client.http_clients import async_http_client
 
 _RESERVED_REQUEST_FIELDS = {

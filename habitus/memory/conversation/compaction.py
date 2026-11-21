@@ -21,6 +21,7 @@ from habitus.infrastructure.store.filesystem import (
     durable_unlink,
     read_regular_bytes,
 )
+from habitus.memory.conversation.compaction_refusals import ConversationCompactionRefusals, input_refusal, refusal_key
 from habitus.memory.conversation.field_validation import summary_content_from_operations
 from habitus.memory.conversation.layout import ConversationAddress, ConversationLayout
 from habitus.memory.conversation.messages import ConversationMessageJournal
@@ -80,13 +81,7 @@ class ConversationSummaryUseReader(Protocol):
 
     def delete_many(self, references: tuple[ConversationSummaryReference, ...]) -> int: ...
 
-    def delete_coverage(
-        self,
-        address: ConversationAddress,
-        *,
-        start_sequence: int,
-        end_sequence: int,
-    ) -> int: ...
+    def delete_coverage(self, address: ConversationAddress, *, start_sequence: int, end_sequence: int) -> int: ...
 
 
 class ConversationSummaryCompactionError(RuntimeError):
@@ -236,7 +231,7 @@ class ConversationSummaryCompactionPlan:
 
     @property
     def source_refs(self) -> tuple[ConversationSummarySourceRef, ...]:
-        return tuple(ConversationSummarySourceRef.from_summary(source) for source in self.sources)
+        return _refs(self.sources)
 
 
 @dataclass(frozen=True)
@@ -401,6 +396,7 @@ class ConversationSummaryCompactionPlanner:
         *,
         now: datetime,
         protected_source_ids: frozenset[str] = frozenset(),
+        refused: frozenset[str] = frozenset(),
     ) -> ConversationSummaryCompactionPlan | None:
         current_time = _utc_datetime(now, "summary compaction now")
         stage_config = self.config.stage(stage)
@@ -413,6 +409,9 @@ class ConversationSummaryCompactionPlanner:
             stage_config=stage_config,
             protected_source_ids=protected_source_ids,
         )
+        chains = tuple(
+            chain for chain in chains if refusal_key(stage, _refs(chain)) not in refused
+        )  # 拒收过的组不再排（裁定 108）
         for chain in chains:
             if len(chain) >= stage_config.min_source_count:
                 return ConversationSummaryCompactionPlan(
@@ -577,6 +576,7 @@ class ConversationSummaryCompactor:
         self.use_store = use_store
         self.config = config or ConversationSummaryCompactionConfig()
         self.planner = ConversationSummaryCompactionPlanner(self.config)
+        self.refusals = ConversationCompactionRefusals(journal.layout)
 
     def frontier(self, address: ConversationAddress) -> ConversationSummaryFrontier:
         """由不可变父子绑定实时重建正常检索所需的唯一活跃前沿。"""
@@ -616,56 +616,47 @@ class ConversationSummaryCompactor:
         plan = self._plan_under_lock(address, current_time)
         if plan is None:
             return ConversationSummaryCompactionResult(None, False, "no eligible contiguous summary range")
-
-        generated = await self.generator.generate(plan)
-        with self._conversation_lock(address) as guard:
-            with guard.fenced():
-                current_plan = self._plan(address, current_time)
-                if (
-                    current_plan is None
-                    or current_plan.stage is not plan.stage
-                    or current_plan.source_refs != plan.source_refs
-                ):
-                    existing = self.range_store.try_read(address, generated.stage, generated.range_id)
-                    if existing is not None:
-                        existing.require_matches_sources(plan.sources)
-                        return ConversationSummaryCompactionResult(
-                            existing,
-                            False,
-                            "an equivalent immutable range summary already exists",
-                        )
-                    return ConversationSummaryCompactionResult(
-                        None,
-                        False,
-                        "summary frontier changed before commit",
-                    )
-                committed, created = self.range_store.create(address, generated, plan.sources)
+        try:
+            generated = await self.generator.generate(plan)
+        except Exception as exc:
+            if (kind := input_refusal(exc)) is None:
+                raise
+            self.refusals.record(address, refusal_key(plan.stage, plan.source_refs), kind=kind, at=current_time)
+            return ConversationSummaryCompactionResult(None, False, f"model rejected the sources: {kind}")
+        with self._conversation_lock(address) as guard, guard.fenced():
+            current_plan = self._plan(address, current_time)
+            if current_plan is None or (current_plan.stage, current_plan.source_refs) != (plan.stage, plan.source_refs):
+                existing = self.range_store.try_read(address, generated.stage, generated.range_id)
+                if existing is None:
+                    return ConversationSummaryCompactionResult(None, False, "summary frontier changed before commit")
+                existing.require_matches_sources(plan.sources)
                 return ConversationSummaryCompactionResult(
-                    committed,
-                    created,
-                    "created immutable range summary" if created else "reused immutable range summary",
+                    existing, False, "an equivalent immutable range summary already exists"
                 )
+            committed, created = self.range_store.create(address, generated, plan.sources)
+            reason = "created immutable range summary" if created else "reused immutable range summary"
+            return ConversationSummaryCompactionResult(committed, created, reason)
 
     def _plan_under_lock(
         self,
         address: ConversationAddress,
         now: datetime,
     ) -> ConversationSummaryCompactionPlan | None:
-        with self._conversation_lock(address) as guard:
-            with guard.fenced():
-                return self._plan(address, now)
+        with self._conversation_lock(address) as guard, guard.fenced():
+            return self._plan(address, now)
 
     def _plan(
         self,
         address: ConversationAddress,
         now: datetime,
     ) -> ConversationSummaryCompactionPlan | None:
-        frontier = self.frontier(address)
+        frontier, refused = self.frontier(address), self.refusals.keys(address)
         archive_plan = self.planner.plan(
             frontier,
             ConversationRangeSummaryStage.ARCHIVE,
             now=now,
             protected_source_ids=self._protected_source_ids(address, frontier.ranges, now),
+            refused=refused,
         )
         if archive_plan is not None:
             return archive_plan
@@ -674,6 +665,7 @@ class ConversationSummaryCompactor:
             ConversationRangeSummaryStage.RANGE,
             now=now,
             protected_source_ids=self._protected_source_ids(address, frontier.segments, now),
+            refused=refused,
         )
 
     def _protected_source_ids(
@@ -746,6 +738,10 @@ def _validate_stage_config(
     _bounded_integer("max_source_chars", max_source_chars, minimum=1_024, maximum=16_000_000)
     if min_source_count > max_source_count:
         raise ValueError("summary compaction min_source_count cannot exceed max_source_count")
+
+
+def _refs(sources: tuple[SummarySource, ...]) -> tuple[ConversationSummarySourceRef, ...]:
+    return tuple(ConversationSummarySourceRef.from_summary(source) for source in sources)
 
 
 __all__ = [

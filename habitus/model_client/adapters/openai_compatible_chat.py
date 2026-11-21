@@ -3,25 +3,28 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import threading
 import time
 import weakref
 from collections.abc import AsyncIterator, Iterator, Mapping
-from urllib.parse import urlsplit
 
 import httpx
 
 from habitus.foundation.integrity import canonical_json
 from habitus.foundation.network import OutboundSettings
+from habitus.model_client.adapters._http import (
+    HTTPStatusError,
+    error_code,
+    error_message,
+    is_remote_url,
+    raise_for_status,
+)
 from habitus.model_client.config import ChatModelConfig
 from habitus.model_client.contracts import (
     ChatMessage,
     ChatRequest,
-    ModelConfigurationError,
     ModelResponse,
-    ModelResponseError,
     ModelStreamEvent,
     PreparedChatRequest,
     ProviderCapabilities,
@@ -29,6 +32,7 @@ from habitus.model_client.contracts import (
     ToolCall,
     ToolDefinition,
 )
+from habitus.model_client.errors import ModelConfigurationError, ModelResponseError
 from habitus.model_client.http_clients import async_http_client, sync_http_client
 from habitus.model_client.json_parser import parse_json_response
 
@@ -63,7 +67,7 @@ class OpenAICompatibleChatProvider:
         self.config = config
         self.provider_name = config.route.provider
         self.model = config.route.model
-        self.is_remote = _is_remote_url(config.route.base_url)
+        self.is_remote = is_remote_url(config.route.base_url)
         self.capabilities = ProviderCapabilities(
             async_completion=True,
             streaming=True,
@@ -315,20 +319,7 @@ class OpenAICompatibleChatProvider:
 
     @staticmethod
     def _require_success(response: httpx.Response, content: bytes) -> None:
-        if 200 <= response.status_code < 300:
-            return
-        raise _HTTPStatusError(
-            _error_message(content, response.status_code),
-            status_code=response.status_code,
-            retry_after=_retry_after(response.headers),
-        )
-
-
-class _HTTPStatusError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int, retry_after: float | None) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.retry_after = retry_after
+        raise_for_status(response, content, label="model")
 
 
 class _SSEDecoder:
@@ -533,7 +524,7 @@ def _normalize_stream_chunk(
     source: Mapping[str, object],
 ) -> tuple[ModelStreamEvent, ...]:
     if "error" in source:
-        raise ModelResponseError("model stream returned an error payload")
+        raise _stream_error(source)
     events: list[ModelStreamEvent] = []
     choices = source.get("choices")
     usage = source.get("usage")
@@ -755,29 +746,16 @@ async def _read_limited_async(chunks: AsyncIterator[bytes], maximum: int) -> byt
     return b"".join(result)
 
 
-def _error_message(content: bytes, status_code: int) -> str:
-    fallback = f"model provider request failed with HTTP {status_code}"
-    try:
-        payload = json.loads(content)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return fallback
-    if not isinstance(payload, Mapping):
-        return fallback
-    error = payload.get("error")
-    message = error.get("message") if isinstance(error, Mapping) else None
-    if not isinstance(message, str) or not message.strip():
-        message = payload.get("message")
-    return message.strip()[:2048] if isinstance(message, str) and message.strip() else fallback
+def _stream_error(source: Mapping[str, object]) -> HTTPStatusError:
+    """流里的错误载荷：带上协议的错误代码，由 ``failures.classify_failure`` 归类。"""
 
-
-def _retry_after(headers: Mapping[str, str]) -> float | None:
-    raw = headers.get("Retry-After")
-    if raw is None:
-        return None
-    try:
-        return max(0.0, float(raw))
-    except (TypeError, ValueError):
-        return None
+    message = error_message(canonical_json(source).encode("utf-8"), 0, label="model")
+    return HTTPStatusError(
+        f"model stream returned an error payload: {message}",
+        status_code=None,
+        retry_after=None,
+        provider_code=error_code(source),
+    )
 
 
 def _optional_text(source: object) -> str | None:
@@ -794,16 +772,6 @@ def _non_negative_int(source: object) -> int:
 
 def _mapping_int(source: object, key: str) -> int:
     return _non_negative_int(source.get(key)) if isinstance(source, Mapping) else 0
-
-
-def _is_remote_url(url: str) -> bool:
-    hostname = str(urlsplit(url).hostname or "").casefold()
-    if hostname == "localhost":
-        return False
-    try:
-        return not ipaddress.ip_address(hostname).is_loopback
-    except ValueError:
-        return True
 
 
 __all__ = ["OpenAICompatibleChatProvider"]

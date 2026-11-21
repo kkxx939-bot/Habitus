@@ -12,7 +12,7 @@ from habitus.behavior.fusion.errors import BehaviorFusionLimitError
 from habitus.behavior.fusion.lanes.session import TurnDisposition, split_turns
 from habitus.behavior.fusion.lanes.session.model import decode_turn
 from habitus.behavior.retry import RetryCause, RetryKind
-from habitus.model_client import MODEL_UNAVAILABLE
+from habitus.model_client import MODEL_UNAVAILABLE, ModelCircuitOpenError, ModelErrorKind
 from tests.unit.behavior.session_fixtures import Stores, description, lane, prompt, reply
 
 CONVERSATION = "codex-rollout-unreadable"
@@ -358,6 +358,8 @@ def test_a_turn_the_model_cannot_take_now_is_unreadable_and_kept_for_the_nightly
     real = session.describer.describe
 
     async def unavailable(_turn, _reminders=()):
+        if error is ModelCircuitOpenError:  # 熔断开着（裁定 108）：带着打开它的那类错误
+            raise ModelCircuitOpenError("paused", opened_by=ModelErrorKind.QUOTA, retry_after_seconds=60.0)
         raise error("quota exhausted")
 
     monkeypatch.setattr(session.describer, "describe", unavailable)

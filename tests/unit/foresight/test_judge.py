@@ -130,7 +130,7 @@ def test_the_judge_asks_twice_and_keeps_only_what_both_answers_agree_on() -> Non
     client, provider = recording_client(
         [{"verdicts": [verdict(1)], "order": [1]}, {"verdicts": [verdict(1, basis=5)], "order": [1]}]
     )
-    judgement = asyncio.run(Judge(client, retries=0, delay_seconds=0.0).judge(package))
+    judgement = asyncio.run(Judge(client).judge(package))
     assert not judgement.failed and judgement.calls == 2 and judgement.order == (expectation.expectation_id,)
     found = judgement.verdicts[expectation.expectation_id]
     assert found.like is True and found.text == "往常讨论完你会改代码"
@@ -140,13 +140,13 @@ def test_the_judge_asks_twice_and_keeps_only_what_both_answers_agree_on() -> Non
     client, _ = recording_client(
         [{"verdicts": [verdict(1)], "order": [1]}, {"verdicts": [verdict(1, like="no")], "order": []}]
     )
-    judgement = asyncio.run(Judge(client, retries=0, delay_seconds=0.0).judge(package))
+    judgement = asyncio.run(Judge(client).judge(package))
     found = judgement.verdicts[expectation.expectation_id]
     assert found.like is None and found.kept
     assert judgement.order == (expectation.expectation_id,) and any("像不像" in s for s in judgement.signals)
     # 两遍都说不像：去掉
     client, _ = recording_client([{"verdicts": [verdict(1, like="no")], "order": []}])
-    judgement = asyncio.run(Judge(client, retries=0, delay_seconds=0.0).judge(package))
+    judgement = asyncio.run(Judge(client).judge(package))
     assert judgement.verdicts[expectation.expectation_id].like is False and judgement.order == ()
 
 
@@ -163,16 +163,14 @@ def test_model_failures_degrade_to_the_algorithm_order() -> None:
     from tests.unit.foresight.scripted_model import model_config
 
     provider = Broken([])
-    judge = Judge(
-        StructuredChatClient(ChatClient(model_config(), provider), validation_retries=0), retries=1, delay_seconds=0.0
-    )
+    judge = Judge(StructuredChatClient(ChatClient(model_config(), provider), validation_retries=0))
     judgement = asyncio.run(judge.judge(package))
     assert judgement.failed and judgement.verdicts == {} and judgement.order == (expectation.expectation_id,)
     # 传输重试用完是"模型整个用不了"：判决在白天，只算这一次没判成（不停线，停线只属于夜里那条线，裁定 94 第 8 条）
     assert judgement.signals[0].startswith("model unreachable: model: ModelTransportError") and provider.calls >= 2
     # 答复不合格两轮都不过：也是失败，信号说出哪条核对不过
     client, _ = recording_client([{"verdicts": [], "order": []}])
-    judgement = asyncio.run(Judge(client, retries=0, delay_seconds=0.0).judge(package))
+    judgement = asyncio.run(Judge(client).judge(package))
     assert judgement.failed and "verdicts missing" in judgement.signals[0]
 
 
@@ -346,5 +344,5 @@ def test_a_wording_rejected_in_the_first_answer_falls_back_to_the_second_answers
             {"verdicts": [verdict(1)], "order": [1]},
         ]
     )
-    judgement = asyncio.run(Judge(client, retries=0, delay_seconds=0.0).judge(package))
+    judgement = asyncio.run(Judge(client).judge(package))
     assert judgement.verdicts[expectation.expectation_id].text == "往常讨论完你会改代码"

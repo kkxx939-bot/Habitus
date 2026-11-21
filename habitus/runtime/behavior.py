@@ -78,7 +78,7 @@ from habitus.foundation.observability import (
 )
 from habitus.infrastructure.lifecycle import RetryLedger
 from habitus.infrastructure.store.contracts.lock import LockStore
-from habitus.model_client import MODEL_DETERMINISTIC, MODEL_UNUSABLE, ModelUnreachable, StructuredChatClient
+from habitus.model_client import MODEL_DETERMINISTIC, MODEL_UNAVAILABLE, ModelUnreachable, StructuredChatClient
 from habitus.runtime.behavior_kinds import vocabulary_parts
 from habitus.runtime.lifecycle_retry import retry_ledger
 from habitus.runtime.resident import ResidentWorker
@@ -511,7 +511,7 @@ def rereader_of(branch: BehaviorRuntimeComponents) -> Callable[[datetime, dateti
 
 
 #: 重试段的归约碰到它就是模型用不了（与模型队列同一口径，``runtime.generation_result``）。
-_UNREACHABLE: tuple[type[BaseException], ...] = (ModelUnreachable, *MODEL_UNUSABLE)
+_UNREACHABLE: tuple[type[BaseException], ...] = (ModelUnreachable, *MODEL_UNAVAILABLE)
 
 
 def _reduce(branch: BehaviorRuntimeComponents) -> Callable[[], Awaitable[Reduction]]:

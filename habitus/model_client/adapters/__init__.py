@@ -7,7 +7,7 @@ from habitus.model_client.adapters.openai_compatible_chat import OpenAICompatibl
 from habitus.model_client.adapters.openai_compatible_embedding import OpenAICompatibleEmbeddingProvider
 from habitus.model_client.adapters.openai_compatible_rerank import OpenAICompatibleRerankProvider
 from habitus.model_client.config import ChatModelConfig, EmbeddingModelConfig, RerankModelConfig
-from habitus.model_client.contracts import ModelConfigurationError
+from habitus.model_client.errors import ModelConfigurationError
 from habitus.model_client.factory import ProviderBuildContext, ProviderFactory
 
 _Config = TypeVar("_Config", ChatModelConfig, EmbeddingModelConfig, RerankModelConfig)

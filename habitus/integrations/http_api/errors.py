@@ -36,15 +36,10 @@ from habitus.memory.retrieval import MemorySearchError
 from habitus.memory.tree import MemoryTreeConsistencyError, MemoryTreeIntegrityError
 from habitus.memory.workflow import MemoryJobBlockedError, MemoryJobError, MemoryJobNotReadyError
 from habitus.model_client import (
-    ModelAuthenticationError,
+    ModelCircuitOpenError,
     ModelClientError,
-    ModelConfigurationError,
-    ModelContentSafetyError,
-    ModelInputTooLargeError,
-    ModelPermissionError,
-    ModelQuotaError,
-    ModelRateLimitError,
-    ModelTransportError,
+    ModelErrorKind,
+    ModelErrorRule,
 )
 from habitus.runtime import (
     MemoryConsistencyTimeoutError,
@@ -122,59 +117,32 @@ def _exception_chain(exc: BaseException) -> tuple[BaseException, ...]:
 
 
 def _model_error_spec(exc: ModelClientError) -> HTTPErrorSpec:
+    """按模型层统一的三条规则映射（裁定 108）：等一等可能好 → 可重试；要人处理 → 前置条件不满足（额度用完 → 资源耗尽）；
+    这一条输入有问题 → 前置条件不满足；不是调用失败的（结构化输出不合格）→ 内部错误。"""
+
     retry_after = _bounded_retry_after(exc.retry_after_seconds)
-    if isinstance(exc, ModelRateLimitError):
+    kind = exc.opened_by if isinstance(exc, ModelCircuitOpenError) else exc.kind
+    if kind is None:
+        return HTTPErrorSpec(HTTPErrorCode.INTERNAL, "Model operation failed", False)
+    if kind is ModelErrorKind.RATE_LIMIT:
         return HTTPErrorSpec(
             HTTPErrorCode.RESOURCE_EXHAUSTED,
             "Model provider rate limit exceeded",
             True,
             retry_after_seconds=retry_after,
         )
-    if isinstance(exc, ModelQuotaError):
-        return HTTPErrorSpec(
-            HTTPErrorCode.RESOURCE_EXHAUSTED,
-            "Model provider quota is exhausted",
-            False,
-        )
-    if isinstance(exc, ModelTransportError):
+    if kind.rule is ModelErrorRule.WAIT:
         return HTTPErrorSpec(
             HTTPErrorCode.UNAVAILABLE,
             "Model provider is temporarily unavailable",
             True,
             retry_after_seconds=retry_after,
         )
-    if isinstance(exc, ModelAuthenticationError | ModelPermissionError):
-        return HTTPErrorSpec(
-            HTTPErrorCode.FAILED_PRECONDITION,
-            "Model provider credentials cannot authorize this operation",
-            False,
-        )
-    if isinstance(exc, ModelConfigurationError):
-        return HTTPErrorSpec(
-            HTTPErrorCode.FAILED_PRECONDITION,
-            "Model provider is not configured for this operation",
-            False,
-        )
-    if isinstance(exc, ModelInputTooLargeError):
-        return HTTPErrorSpec(
-            HTTPErrorCode.FAILED_PRECONDITION,
-            "Model input exceeds the configured provider capacity",
-            False,
-        )
-    if isinstance(exc, ModelContentSafetyError):
-        return HTTPErrorSpec(
-            HTTPErrorCode.FAILED_PRECONDITION,
-            "Model provider rejected the operation under its content policy",
-            False,
-        )
-    if exc.retryable:
-        return HTTPErrorSpec(
-            HTTPErrorCode.UNAVAILABLE,
-            "Model operation is temporarily unavailable",
-            True,
-            retry_after_seconds=retry_after,
-        )
-    return HTTPErrorSpec(HTTPErrorCode.INTERNAL, "Model operation failed", False)
+    if kind is ModelErrorKind.QUOTA:
+        return HTTPErrorSpec(HTTPErrorCode.RESOURCE_EXHAUSTED, "Model provider quota is exhausted", False)
+    if kind.rule is ModelErrorRule.OPERATOR:
+        return HTTPErrorSpec(HTTPErrorCode.FAILED_PRECONDITION, f"Model provider needs attention: {kind.value}", False)
+    return HTTPErrorSpec(HTTPErrorCode.FAILED_PRECONDITION, f"Model provider rejected this input: {kind.value}", False)
 
 
 def _vector_error_spec(exc: VectorStoreError) -> HTTPErrorSpec:

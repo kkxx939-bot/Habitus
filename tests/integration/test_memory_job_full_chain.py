@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -1117,12 +1118,13 @@ def test_vector_store_or_embedding_outage_longer_than_max_attempts_waits_and_com
         monkeypatch.setattr(EmbeddingProvider, "embed", unreachable_embed)
     _enqueue(runtime, "conversation-outage", date(2026, 7, 1), closed_turn())
 
-    waiting, result = _run_through_outage(
-        runtime,
-        outages=max_attempts + 2,
-        clock=clock,
-        restore=lambda: down.__setitem__(0, False),
-    )
+    breaker = runtime.components.models.embedder.breaker  # type: ignore[attr-defined]
+
+    def restore() -> None:
+        down[0] = False
+        breaker._monotonic = lambda: time.monotonic() + 86_400.0  # 到了熔断试探的时候（裁定 108）
+
+    waiting, result = _run_through_outage(runtime, outages=max_attempts + 2, clock=clock, restore=restore)
 
     assert waiting is not None and waiting.status is MemoryJobStatus.QUEUED
     assert waiting.attempts == 0 and waiting.model_waits == max_attempts + 2

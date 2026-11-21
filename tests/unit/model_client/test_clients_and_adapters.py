@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from habitus.model_client import (
+    CallFailureConfig,
     ChatClient,
     ChatMessage,
     ChatModelConfig,
@@ -20,8 +21,10 @@ from habitus.model_client import (
     ModelRateLimitError,
     ModelResponse,
     ModelResponseError,
+    ModelServiceError,
     ModelStreamEvent,
     ModelTransportError,
+    ModelUnknownError,
     PreparedChatRequest,
     ProviderCapabilities,
     ProviderConfig,
@@ -32,7 +35,7 @@ from habitus.model_client import (
 )
 from habitus.model_client.adapters.openai_compatible_chat import OpenAICompatibleChatProvider
 from habitus.model_client.adapters.openai_compatible_embedding import OpenAICompatibleEmbeddingProvider
-from habitus.model_client.retry import normalize_provider_error, retry_delay
+from habitus.model_client.failures import classify_failure, retry_delay
 from tests.model_helpers import prepare_chat_request
 
 
@@ -208,30 +211,26 @@ class StatusError(RuntimeError):
     [
         (StatusError(401, "bad key"), ModelAuthenticationError),
         (StatusError(429, "too many", 2.0), ModelRateLimitError),
-        (StatusError(503, "offline"), ModelTransportError),
+        (StatusError(503, "offline"), ModelServiceError),
         (TimeoutError("timeout"), ModelTransportError),
         # DeepSeek 余额不足：402 + "Insufficient Balance"，是额度问题、不是答坏了（裁定 80 问题 2）
         (StatusError(402, "Insufficient Balance"), ModelQuotaError),
-        (RuntimeError("Insufficient Balance"), ModelQuotaError),
+        # 报错文字不参与归类（裁定 108）：认不出的就是认不出
+        (RuntimeError("Insufficient Balance"), ModelUnknownError),
     ],
 )
 def test_provider_errors_are_normalized_by_status_and_transport(error: Exception, expected: type[Exception]) -> None:
-    assert isinstance(normalize_provider_error(error), expected)
+    assert isinstance(classify_failure(error), expected)
 
 
 def test_retry_delay_honors_bounded_retry_after_and_deterministic_jitter() -> None:
-    error = ModelRateLimitError("limited", retry_after_seconds=100)
-    assert retry_delay(0, base_delay=1, max_delay=10, error=error) == 10
-    assert (
-        retry_delay(
-            2,
-            base_delay=1,
-            max_delay=10,
-            error=ModelTransportError("temporary"),
-            uniform=lambda low, high: 1.0,
-        )
-        == 4
-    )
+    routed = route("openai_compatible_chat", retry_base_delay_seconds=1, retry_max_delay_seconds=10)
+    failures = CallFailureConfig(rate_limit_retry_base_delay_seconds=5, rate_limit_retry_max_delay_seconds=50)
+    limited = ModelRateLimitError("limited", retry_after_seconds=100)
+    assert retry_delay(0, route=routed, failures=failures, error=limited) == 50  # 限流按限流的封顶
+    one = lambda low, high: 1.0  # noqa: E731
+    assert retry_delay(1, route=routed, failures=failures, error=ModelRateLimitError("x"), uniform=one) == 10
+    assert retry_delay(2, route=routed, failures=failures, error=ModelTransportError("temporary"), uniform=one) == 4
 
 
 def test_openai_compatible_adapter_sends_messages_tools_schema_and_normalizes_response() -> None:

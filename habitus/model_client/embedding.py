@@ -12,9 +12,10 @@ from typing import Protocol
 
 from habitus.foundation.embedding import EmbeddingVector
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
-from habitus.model_client.config import EmbeddingModelConfig
-from habitus.model_client.contracts import ModelClientError, ModelResponseError
-from habitus.model_client.retry import normalize_provider_error, retry_delay
+from habitus.model_client.breaker import CircuitBreaker
+from habitus.model_client.config import CallFailureConfig, EmbeddingModelConfig
+from habitus.model_client.errors import ModelCircuitOpenError, ModelClientError, ModelErrorRule, ModelResponseError
+from habitus.model_client.failures import classify_failure, retry_delay
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +77,13 @@ class EmbeddingClient:
         async_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic: Callable[[], float] = time.monotonic,
         observer: Observer | None = None,
+        failures: CallFailureConfig | None = None,
     ) -> None:
         self.config = config
         self.provider = provider
+        self.failures = failures or CallFailureConfig()
+        #: 向量这一种能力的熔断（裁定 108）。
+        self.breaker = CircuitBreaker(self.failures, name="embedding")
         self._async_sleep = async_sleep
         self._monotonic = monotonic
         self._observer = observer or NullObserver()
@@ -120,68 +125,72 @@ class EmbeddingClient:
     async def _embed_one(self, text: str, *, is_query: bool) -> EmbeddingVector:
         operation = "embed_query" if is_query else "embed_document"
         operation_started = self._monotonic()
-        for attempt in range(self.config.route.max_retries + 1):
-            failure: ModelClientError | None = None
-            source_error: Exception | None = None
-            semaphore = _async_embed_semaphore(self.config.route.max_concurrent)
-            wait_started = self._monotonic()
-            await semaphore.acquire()
-            wait_seconds = self._monotonic() - wait_started
-            started = self._monotonic()
-            try:
-                vector = await asyncio.wait_for(
-                    self.provider.embed(text, is_query=is_query),
-                    timeout=self.config.route.timeout_seconds,
-                )
-                self._validate_vector(vector)
-                self._observer.record(
-                    ObservationEvent(
-                        category="model",
-                        operation=operation,
-                        status=ObservationStatus.SUCCESS,
-                        duration_seconds=max(0.0, self._monotonic() - operation_started),
-                        attributes={
-                            "provider": self.provider_name,
-                            "model": self.model,
-                            "retry_count": attempt,
-                        },
-                    )
-                )
+        try:
+            probe = self.breaker.before_call()
+        except ModelCircuitOpenError as exc:
+            self._observe_outcome(operation, operation_started, 0, exc)
+            raise
+        try:
+            for attempt in range(self.config.route.max_retries + 1):
+                try:
+                    vector = await self._attempt(text, is_query=is_query, operation=operation, attempt=attempt)
+                except Exception as exc:
+                    failure = classify_failure(exc)
+                    if failure.rule is ModelErrorRule.WAIT and attempt < self.config.route.max_retries:
+                        await self._async_sleep(self._retry_delay(attempt, failure))
+                        continue
+                    self.breaker.record_failure(failure)
+                    self._observe_outcome(operation, operation_started, attempt, failure)
+                    raise failure from exc
+                self.breaker.record_success()
+                self._observe_outcome(operation, operation_started, attempt, None)
                 return vector
-            except Exception as exc:
-                failure = normalize_provider_error(exc)
-                source_error = exc
-            finally:
-                duration_seconds = self._monotonic() - started
-                semaphore.release()
-                self._observe_call(
-                    operation=operation,
-                    attempt=attempt,
-                    wait_seconds=wait_seconds,
-                    duration_seconds=duration_seconds,
-                )
-
-            if failure is None or source_error is None:  # pragma: no cover
-                raise AssertionError("embedding provider failure was not captured")
-            if failure.retryable and attempt < self.config.route.max_retries:
-                await self._async_sleep(self._retry_delay(attempt, failure))
-                continue
-            self._observer.record(
-                ObservationEvent(
-                    category="model",
-                    operation=operation,
-                    status=ObservationStatus.FAILURE,
-                    duration_seconds=max(0.0, self._monotonic() - operation_started),
-                    attributes={
-                        "provider": self.provider_name,
-                        "model": self.model,
-                        "error_code": failure.code,
-                        "retry_count": attempt,
-                    },
-                )
-            )
-            raise failure from source_error
+        finally:
+            if probe:
+                self.breaker.release_probe()
         raise AssertionError("embedding retry loop exhausted without a result")  # pragma: no cover
+
+    async def _attempt(self, text: str, *, is_query: bool, operation: str, attempt: int) -> EmbeddingVector:
+        """一次请求：取共享并发槽、带超时调用适配器、校验维度。"""
+
+        semaphore = _async_embed_semaphore(self.config.route.max_concurrent)
+        wait_started = self._monotonic()
+        await semaphore.acquire()
+        wait_seconds = self._monotonic() - wait_started
+        started = self._monotonic()
+        try:
+            vector = await asyncio.wait_for(
+                self.provider.embed(text, is_query=is_query),
+                timeout=self.config.route.timeout_seconds,
+            )
+            self._validate_vector(vector)
+            return vector
+        finally:
+            semaphore.release()
+            self._observe_call(
+                operation=operation,
+                attempt=attempt,
+                wait_seconds=wait_seconds,
+                duration_seconds=self._monotonic() - started,
+            )
+
+    def _observe_outcome(self, operation: str, started: float, attempt: int, failure: ModelClientError | None) -> None:
+        attributes: dict[str, str | int | float | bool] = {
+            "provider": self.provider_name,
+            "model": self.model,
+            "retry_count": attempt,
+        }
+        if failure is not None:
+            attributes["error_code"] = failure.code
+        self._observer.record(
+            ObservationEvent(
+                category="model",
+                operation=operation,
+                status=ObservationStatus.SUCCESS if failure is None else ObservationStatus.FAILURE,
+                duration_seconds=max(0.0, self._monotonic() - started),
+                attributes=attributes,
+            )
+        )
 
     def _validate_vector(self, vector: object) -> None:
         if not isinstance(vector, EmbeddingVector):
@@ -202,12 +211,7 @@ class EmbeddingClient:
         return model_input
 
     def _retry_delay(self, attempt: int, failure: ModelClientError) -> float:
-        return retry_delay(
-            attempt,
-            base_delay=self.config.route.retry_base_delay_seconds,
-            max_delay=self.config.route.retry_max_delay_seconds,
-            error=failure,
-        )
+        return retry_delay(attempt, route=self.config.route, failures=self.failures, error=failure)
 
     def _observe_call(
         self,

@@ -12,6 +12,7 @@ from habitus.foundation.network import OutboundSettings, OutboundSettingsError
 from habitus.foundation.observability import Observer
 from habitus.model_client.client import ChatClient
 from habitus.model_client.config import (
+    CallFailureConfig,
     CapabilityConfig,
     ChatModelConfig,
     EmbeddingModelConfig,
@@ -19,8 +20,9 @@ from habitus.model_client.config import (
     ProviderConfig,
     RerankModelConfig,
 )
-from habitus.model_client.contracts import ChatProvider, ModelConfigurationError
+from habitus.model_client.contracts import ChatProvider
 from habitus.model_client.embedding import Embedder, EmbeddingClient, EmbeddingProvider
+from habitus.model_client.errors import ModelConfigurationError
 from habitus.model_client.rerank import ObservedReranker, RerankClient, Reranker, RerankProvider
 
 _ADAPTER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
@@ -137,11 +139,13 @@ class ProviderFactory:
         credentials: Mapping[str, str] | None = None,
         observer: Observer | None = None,
         outbound: OutboundSettings | None = None,
+        failures: CallFailureConfig | None = None,
     ) -> ChatClient:
         return ChatClient(
             config,
             self.create_chat_provider(config, api_key=api_key, credentials=credentials, outbound=outbound),
             observer=observer,
+            failures=failures,
         )
 
     def create_embedder(
@@ -152,12 +156,13 @@ class ProviderFactory:
         credentials: Mapping[str, str] | None = None,
         observer: Observer | None = None,
         outbound: OutboundSettings | None = None,
+        failures: CallFailureConfig | None = None,
     ) -> Embedder:
         provider = cast(
             EmbeddingProvider,
             self.create(config, api_key=api_key, credentials=credentials, outbound=outbound),
         )
-        return EmbeddingClient(config, provider, observer=observer)
+        return EmbeddingClient(config, provider, observer=observer, failures=failures)
 
     def create_reranker(
         self,
@@ -167,10 +172,11 @@ class ProviderFactory:
         credentials: Mapping[str, str] | None = None,
         observer: Observer | None = None,
         outbound: OutboundSettings | None = None,
+        failures: CallFailureConfig | None = None,
     ) -> Reranker:
         component = self.create(config, api_key=api_key, credentials=credentials, outbound=outbound)
         provider = cast(RerankProvider, component)
-        reranker: Reranker = RerankClient(config, provider)
+        reranker: Reranker = RerankClient(config, provider, failures=failures)
         return reranker if observer is None else ObservedReranker(reranker, observer=observer)
 
     @staticmethod

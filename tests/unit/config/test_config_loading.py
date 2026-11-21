@@ -312,16 +312,15 @@ def test_behavior_kinds_fields_are_typed_and_derived_by_prefix() -> None:
     domain = {field.name for field in fields(BehaviorKindConfig)}
     exposed = {field.name.removeprefix("kinds_") for field in fields(BehaviorConfig) if field.name.startswith("kinds_")}
     assert exposed == domain  # 每个门槛都能从配置调（裁定 6），而且不多出领域里没有的字段
-    config = BehaviorConfig(kinds_active_cap=5, kinds_active_min_days=3, kinds_transient_retry_delay_seconds=0.5)
+    config = BehaviorConfig(kinds_active_cap=5, kinds_active_min_days=3, kinds_pick_retries=1)
     overrides = config.overrides_for("kinds_")
-    assert overrides == {"active_cap": 5, "active_min_days": 3, "transient_retry_delay_seconds": 0.5}
+    assert overrides == {"active_cap": 5, "active_min_days": 3, "pick_retries": 1}
     assert BehaviorKindConfig(**overrides).active_cap == 5
     # 配置层只查类型；值域归 BehaviorKindConfig，越界的值在组装时拒（见 test_out_of_range_overrides_are_refused_at_startup）
     assert BehaviorConfig(kinds_active_cap=0).overrides_for("kinds_") == {"active_cap": 0}
     for kwargs, match in (
         ({"kinds_active_cap": 1.5}, "kinds_active_cap must be an integer"),
         ({"kinds_pick_retries": True}, "kinds_pick_retries must be an integer"),
-        ({"kinds_transient_retry_delay_seconds": "5"}, "kinds_transient_retry_delay_seconds must be a number"),
     ):
         with pytest.raises(ValueError, match=match):
             BehaviorConfig(**kwargs)
@@ -438,8 +437,6 @@ def test_foresight_carries_the_loss_ratios_and_protective_limits_and_needs_both_
         "daily_reminder_cap",
         "open_reminders_judged",
         "unit_prior_share",
-        "judge_transient_retries",
-        "judge_transient_retry_delay_seconds",
         "tick_interval_seconds",
         "worker_shutdown_timeout_seconds",
         "unwatched_tolerance_slots",
@@ -462,8 +459,6 @@ def test_foresight_carries_the_loss_ratios_and_protective_limits_and_needs_both_
         ("daily_reminder_cap", 0),
         ("open_reminders_judged", 0),
         ("shadow_uses_unestablished", "yes"),
-        ("judge_transient_retries", -1),
-        ("judge_transient_retry_delay_seconds", -1.0),
         ("worker_shutdown_timeout_seconds", 0),
         ("unseen_day_types", "guess"),
         ("outlet_liveness_hours", 0.5),
@@ -538,16 +533,14 @@ def test_the_generation_has_no_clock_time_only_operating_numbers() -> None:
 
 
 def test_the_model_queue_operating_numbers_are_validated_and_listed_in_the_example() -> None:
-    """实时化阶段 2（A1）：模型队列的运维数（隔多久看一眼、整体退避的起点与封顶、停机等多久、欠账报出的两个阈值）住语义树
-    那一段，越界、类型不对、未知字段都硬拒；示例 YAML 里逐项列出。"""
+    """实时化阶段 2（A1）：模型队列的运维数（隔多久看一眼、停机等多久、欠账报出的两个阈值）住语义树那一段，越界、类型不对、
+    未知字段都硬拒；示例 YAML 里逐项列出。整体退避并进了模型层的熔断（``models.call_failures``，裁定 108），旧字段拒收。"""
 
     from habitus.config.scene import SceneConfig
 
     config = SceneConfig()
     defaults = {
         "model_queue_poll_seconds": 60.0,
-        "model_queue_backoff_base_seconds": 60.0,
-        "model_queue_backoff_max_seconds": 3600.0,
         "model_queue_shutdown_timeout_seconds": 30.0,
         "model_queue_backlog_warning_items": 50,
         "model_queue_backlog_warning_seconds": 21600.0,
@@ -558,9 +551,6 @@ def test_the_model_queue_operating_numbers_are_validated_and_listed_in_the_examp
     for field_name, bad in (
         ("model_queue_poll_seconds", 0.5),
         ("model_queue_poll_seconds", "60"),
-        ("model_queue_backoff_base_seconds", 0.5),
-        ("model_queue_backoff_base_seconds", 7200.0),  # 起点不能超过封顶
-        ("model_queue_backoff_max_seconds", 100_000.0),
         ("model_queue_shutdown_timeout_seconds", 0.5),
         ("model_queue_backlog_warning_items", 0),
         ("model_queue_backlog_warning_items", 1.5),
@@ -568,8 +558,9 @@ def test_the_model_queue_operating_numbers_are_validated_and_listed_in_the_examp
     ):
         with pytest.raises(ConfigError, match="scene.model_queue_"):
             SceneConfig.from_mapping({field_name: bad})
-    with pytest.raises(ConfigError, match="model_queue_backoff_seconds"):
-        SceneConfig.from_mapping({"model_queue_backoff_seconds": 60.0})  # 未知字段
+    for retired in ("model_queue_backoff_base_seconds", "model_queue_unreachable_after_failures"):
+        with pytest.raises(ConfigError, match=retired):
+            SceneConfig.from_mapping({retired: 60})  # 未知字段
 
 
 def test_the_ledger_read_cache_size_loads_is_bounded_and_listed_in_the_example(tmp_path) -> None:
@@ -633,11 +624,6 @@ def startup_yaml(tmp_path: Path, *, behavior: dict[str, object], scene: dict[str
     ("behavior", "scene", "key"),
     [
         ({"primary_subject": "用户", "kinds_active_cap": 0}, {}, "config.behavior.kinds_active_cap"),
-        (
-            {"primary_subject": "用户", "kinds_transient_retry_delay_seconds": 601.0},
-            {},
-            "config.behavior.kinds_transient_retry_delay_seconds",
-        ),
         # 选词重问次数受结构化客户端的上限（0–5）约束：越界在组装时拒、点得出写了的那一项
         ({"primary_subject": "用户", "kinds_pick_retries": 6}, {}, "config.behavior.kinds_pick_retries"),
         # 行为侧没开：写错的值照样在启动时拒，不被静默收下

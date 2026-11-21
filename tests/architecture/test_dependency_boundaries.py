@@ -1331,33 +1331,36 @@ def test_input_too_large_and_content_safety_are_classified_only_through_model_de
     )
     assert users == [
         "behavior/fusion/lanes/session/service.py",
-        "behavior/kinds/calls.py",
         "runtime/behavior.py",
     ]
 
 
 def test_model_unavailable_is_classified_only_through_the_shared_group() -> None:
-    """"模型此刻用不了、等它恢复"只定义一处（``model_client.MODEL_UNAVAILABLE``）：记忆 Job 的长退避、会话 lane 的重试堆都从
-    这一组取，记忆侧不再各自点名其中的异常（以前记忆只看 ``retryable``，余额不足、鉴权失效一次就 FAILED，裁定 80 问题 2）。"""
+    """模型调用失败只在模型层归类一处、按三条规则分组（裁定 108）：模型层之外不点名具体的调用失败异常，只用统一的判定入口
+    （``model_failure`` / ``model_failure_rule``）或按规则分好的组（``MODEL_UNAVAILABLE`` / ``MODEL_DETERMINISTIC`` /
+    ``MODEL_REFUSED``）。例外两处：配置向导认"没配好"、记忆抽取把本地的输入预算检查换成自己的容量错误。"""
 
-    named = (
-        "ModelTransportError",
-        "ModelRateLimitError",
-        "ModelQuotaError",
-        "ModelAuthenticationError",
-        "ModelPermissionError",
-        "ModelResponseError",
-    )
+    named = {
+        f"Model{name}Error"
+        for name in (
+            "Service", "Response", "Transport", "RateLimit", "Unknown", "Authentication", "Permission", "Quota",
+            "NotFound", "Configuration", "Dependency", "TLS", "ProxyAuth", "InvalidRequest", "InputTooLarge",
+            "ContentSafety",
+        )
+    }  # fmt: skip
     offenders = sorted(
-        f"{path.relative_to(SRC)}:{node.lineno}"
-        for path in (SRC / "memory").rglob("*.py")
-        if "__pycache__" not in path.parts
+        f"{path.relative_to(SRC).as_posix()}:{alias.name}"
+        for path in SRC.rglob("*.py")
+        if "__pycache__" not in path.parts and path.relative_to(SRC).parts[0] != "model_client"
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
-        if (isinstance(node, ast.Name) and node.id in named)
-        or (isinstance(node, ast.Attribute) and node.attr in named)
-        or (isinstance(node, ast.ImportFrom) and any(alias.name in named for alias in node.names))
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name in named
     )
-    assert offenders == []
+    assert offenders == [
+        "integrations/local_service/setup_chat_profiles.py:ModelConfigurationError",
+        "memory/editor/extraction/loop.py:ModelInputTooLargeError",
+    ]
     users = sorted(
         path.relative_to(SRC).as_posix()
         for root in ("memory", "behavior")
@@ -1365,14 +1368,14 @@ def test_model_unavailable_is_classified_only_through_the_shared_group() -> None
         if "__pycache__" not in path.parts
         and any(
             isinstance(node, ast.ImportFrom)
-            and any(alias.name in {"MODEL_UNAVAILABLE", "MODEL_UNUSABLE"} for alias in node.names)
+            and any(alias.name in {"MODEL_UNAVAILABLE", "model_failure", "model_failure_rule"} for alias in node.names)
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
         )
     )
-    # ``MODEL_UNUSABLE`` = 这一组 + 没配好：行为侧"模型整个用不了"（停线、放一边等当晚）从它取（裁定 94 第 8 条）
     assert users == [
         "behavior/fusion/lanes/session/service.py",
         "behavior/kinds/calls.py",
+        "memory/conversation/compaction_refusals.py",
         "memory/workflow/failure.py",
     ]
 

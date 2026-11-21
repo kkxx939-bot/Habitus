@@ -15,7 +15,12 @@ from habitus.memory.indexing import PersistentMemoryVectorIndex
 from habitus.memory.semantic import MemorySemanticRefresher
 from habitus.memory.workflow.completion import MemoryCommittedJobFinalizer, MemoryRecallStateCleaner
 from habitus.memory.workflow.execution import MemoryJobExecutor
-from habitus.memory.workflow.failure import MemoryJobFailureKind, memory_job_failure_kind
+from habitus.memory.workflow.failure import (
+    MemoryJobFailureKind,
+    MemoryJobSkipped,
+    memory_job_failure_kind,
+    model_wait_seconds,
+)
 from habitus.memory.workflow.jobs import (
     MemoryJob,
     MemoryJobError,
@@ -172,19 +177,32 @@ class MemoryJobRunner:
                 )
             except MemoryJobLeaseLostError:
                 raise
+            except MemoryJobSkipped as skipped:
+                return await self._skipped(lease, skipped.reason)
             except Exception as exc:
-                kind = memory_job_failure_kind(exc)
-                failed = self.store.fail(
-                    lease,
-                    exc,
-                    retryable=kind is not MemoryJobFailureKind.PERMANENT,
-                    waits_for_model=kind is MemoryJobFailureKind.WAITS_FOR_MODEL,
-                    before_settlement=lambda: self.transaction_recovery.discard_uncommitted(source),
-                )
+                failed = self._record_failure(lease, exc, source)
                 raise MemoryJobExecutionError(
                     f"memory job {failed.memory_sequence} failed with status {failed.status.value}",
                     job=failed,
                 ) from exc
+
+    async def _skipped(self, lease: MemoryJobLease, reason: str) -> MemoryJobRunResult:
+        """这一段的输入有问题，跳过（裁定 108）：长期记忆不动，任务进 SKIPPED，后面的序号照常往下走。"""
+
+        job = await self.committed_finalizer.finalize_skipped(lease, reason)
+        return MemoryJobRunResult(job=job, commit=None, summary_indexed=True, journal_cleaned=False)
+
+    def _record_failure(self, lease: MemoryJobLease, exc: Exception, source: MemoryChangeSource) -> MemoryJob:
+        kind = memory_job_failure_kind(exc)
+        waits = kind is MemoryJobFailureKind.WAITS_FOR_MODEL
+        return self.store.fail(
+            lease,
+            exc,
+            retryable=kind is not MemoryJobFailureKind.PERMANENT,
+            waits_for_model=waits,
+            wait_seconds=model_wait_seconds(exc) if waits else None,
+            before_settlement=lambda: self.transaction_recovery.discard_uncommitted(source),
+        )
 
 
 __all__ = ["MemoryJobClaim", "MemoryJobRunResult", "MemoryJobRunner"]

@@ -39,7 +39,7 @@
   "habitus/memory/workflow/jobs/model.py": 3,
   "habitus/memory/workflow/planning.py": 2,
   "habitus/model_client/adapters/__init__.py": 1,
-  "habitus/model_client/client.py": 5,
+  "habitus/model_client/client.py": 4,
   "habitus/model_client/config.py": 4,
   "habitus/model_client/embedding.py": 3,
   "habitus/model_client/rerank.py": 4,

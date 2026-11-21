@@ -4,8 +4,9 @@
 - 欠账每一轮从盘上现算：做到一半停下，换一个全新的队列对象接着做，结果相同；
 - 已封口的日子的活在还不能做时不算欠着；
 - 一项没做成按重试账退避，队列接着做下一项；锁被占是还没准备好；
-- 模型调用失败：这一项在进程里等、不放弃，别的照做；连着几项都失败就整体退避（逐次加倍），期间不逐项试、项一个不少；
-- 健康面：欠账过多、正在整体退避、有活欠着跨过了换代。
+- 模型调用失败：这一项留着、下一轮再试、不放弃，别的照做；"整体退避"并进了对话熔断（裁定 108）：熔断开着时不逐项试、
+  到试探的时候接着做，项一个不少；
+- 健康面：欠账过多、有活欠着跨过了换代（模型此刻用不了看 ``model_chat``，不在队列这几项里）。
 """
 
 from __future__ import annotations
@@ -19,7 +20,14 @@ import pytest
 from habitus.behavior.retry import RetryReport
 from habitus.foundation.lifecycle import BackoffPolicy
 from habitus.infrastructure.lifecycle import RetryLedger
-from habitus.model_client import ModelQuotaError, ModelTransportError, ModelUnreachable
+from habitus.model_client import (
+    CallFailureConfig,
+    ModelClientError,
+    ModelQuotaError,
+    ModelTransportError,
+    ModelUnreachable,
+)
+from habitus.model_client.breaker import CircuitBreaker
 from habitus.runtime.generation_lease import Lease
 from habitus.runtime.generation_marks import GenerationMark, GenerationMarks
 from habitus.runtime.model_queue import (
@@ -182,15 +190,40 @@ class _Entered:
     entered_at = NOW - timedelta(hours=1)
 
 
-def _failing_sync(scene, error):  # type: ignore[no-untyped-def]
-    """同步词表那一项调模型时报 ``error``（``error`` 换成 None 之后照常做）；返回装着它的那个格子。"""
+def _breaker(clock: list, threshold: int = 3) -> CircuitBreaker:  # type: ignore[type-arg]
+    """对话熔断，时间跟着测试的钟走（起点 NOW）。"""
+
+    return CircuitBreaker(
+        CallFailureConfig(
+            breaker_failure_threshold=threshold, breaker_reset_base_seconds=60.0, breaker_reset_max_seconds=600.0
+        ),
+        monotonic=lambda: (clock[0] - NOW).total_seconds(),
+    )
+
+
+def _model_call(breaker: CircuitBreaker | None, error: Exception | None) -> None:
+    """替模型客户端走一遍熔断：先问能不能发（开着就抛 ``ModelCircuitOpenError``），再按结局记成功 / 失败。"""
+
+    if breaker is None:
+        if error is not None:
+            raise error
+        return
+    breaker.before_call()
+    cause = error.__cause__ if error is not None and error.__cause__ is not None else error
+    if isinstance(cause, ModelClientError):
+        breaker.record_failure(cause)
+        raise error  # type: ignore[misc]
+    breaker.record_success()
+
+
+def _failing_sync(scene, error, breaker=None):  # type: ignore[no-untyped-def]
+    """同步词表那一项调模型时报 ``error``（``error`` 换成 None 之后照常做）；给了熔断就像客户端那样经过它。返回装着它的那个格子。"""
 
     real = scene.syncing.run
     holder = [error]
 
     async def run(*args, **kwargs):  # type: ignore[no-untyped-def]
-        if holder[0] is not None:
-            raise holder[0]
+        _model_call(breaker, holder[0])
         return await real(*args, **kwargs)
 
     scene.syncing.run = run  # type: ignore[method-assign]
@@ -205,9 +238,9 @@ def _unreachable_from(cause: Exception) -> ModelUnreachable:
     return error
 
 
-def test_one_item_that_keeps_failing_on_the_model_waits_alone_and_is_never_given_up(tmp_path) -> None:
-    """模型调用失败的那一条规则，前一半：单独一项一直失败——只有它在等（进程内的退避，逐次加倍），不记落盘的重试账、失败
-    多少次都不放弃，退避期内不重问；模型好了就做完。队列不进整体退避。"""
+def test_one_item_that_keeps_failing_on_the_model_is_kept_tried_every_round_and_never_given_up(tmp_path) -> None:
+    """模型调用失败的规则（裁定 108），熔断没开时：单独一项一直失败——这一项留着、仍算欠着，不记落盘的重试账，下一轮从盘上
+    重新认出来再试（队列不再按项在进程里退避），失败多少次都不放弃；模型好了就做完。"""
 
     site, scene, _provider = site_and_scene(tmp_path)
     clock = [NOW]
@@ -217,30 +250,32 @@ def test_one_item_that_keeps_failing_on_the_model_waits_alone_and_is_never_given
     report = asyncio.run(queue.drain())
     assert outcomes(report) == [(SYNC, UNREACHABLE)] and not queue.state.down()
     assert queue.retries.entry(key) is None and report.owed[SYNC] == 1 and not report.clear  # 不记重试账，仍算欠着
-    assert asyncio.run(queue.drain()).done == ()  # 退避期内不重问
-    for attempt in range(1, 8):  # 比重试账的次数上限（3）多得多：不放弃，退避逐次加倍
-        clock[0] += timedelta(seconds=60 * 2**attempt)
+    for attempt in range(7):  # 比重试账的次数上限（3）多得多：不放弃
+        clock[0] += timedelta(minutes=1)
         again = asyncio.run(queue.drain())
         assert outcomes(again) == [(SYNC, UNREACHABLE)] and not queue.state.down(), attempt
-        assert queue.retries.entry(key) is None and queue.state.waits[key][0] == attempt + 1
+        assert queue.retries.entry(key) is None
     failing[0] = None
-    clock[0] += timedelta(hours=2)
-    assert asyncio.run(queue.drain()).clear and key not in queue.state.waits
+    clock[0] += timedelta(minutes=1)
+    assert asyncio.run(queue.drain()).clear
 
 
 class _FlakyRetry:
-    """出错重试的替身：一项在堆里，``failing`` 时试到"模型用不了"（卡在它上面），否则补回、堆空了。"""
+    """出错重试的替身：一项在堆里，``failing`` 时试到"模型用不了"，否则补回、堆空了；给了熔断就像客户端那样经过它。"""
 
-    def __init__(self, failing: list[bool]) -> None:
+    def __init__(self, failing: list[bool], breaker: CircuitBreaker | None = None) -> None:
         self.failing = failing
+        self.breaker = breaker
         self.pending = True
 
     def due(self, *, through):  # type: ignore[no-untyped-def]
         return (object.__new__(_Entered),) if self.pending else ()
 
-    async def run_once(self, *, through, skip=()):  # type: ignore[no-untyped-def]
-        if self.failing[0]:
-            return RetryReport(taken=1, unavailable=1, stuck_items=(_Entered.item_id,))
+    async def run_once(self, *, through):  # type: ignore[no-untyped-def]
+        try:
+            _model_call(self.breaker, ModelTransportError("503 service unavailable") if self.failing[0] else None)
+        except ModelClientError:
+            return RetryReport(taken=1, unavailable=1)
         self.pending = False
         return RetryReport(taken=1, recovered=1)
 
@@ -250,10 +285,10 @@ class _FlakyRetry:
     [ModelTransportError("503 service unavailable"), ModelQuotaError("insufficient balance")],
     ids=["transport", "quota"],
 )
-def test_every_call_failing_backs_the_whole_queue_off_after_n_items_and_nothing_is_given_up(tmp_path, error) -> None:  # type: ignore[no-untyped-def]
-    """后一半：所有调用都失败（不分错误种类，这里超时类与额度类各跑一遍）——连着配置的项数（不同的项：出错重试那一项与同步
-    词表那一项）都失败、中间没有一项做成，整体退避（期间不逐项试）；到点接着做，头一项又失败就再退、时长加倍；有一项做成
-    才清零、算恢复。没有一项被放弃，恢复后做完，盘面与没出过事的相同。"""
+def test_a_model_outage_opens_the_chat_breaker_pauses_the_queue_and_nothing_is_given_up(tmp_path, error) -> None:  # type: ignore[no-untyped-def]
+    """所有调用都失败：熔断打开（"等一等可能好"连着到阈值、额度这类"要人处理"一次就开，裁定 108），队列这一轮到此为止，
+    熔断开着期间不逐项试；到试探的时候放一个请求，又失败就再开、等待加倍；试探成功就关上、接着做。没有一项被放弃，
+    恢复后做完，盘面与没出过事的相同。"""
 
     recovered_at = NOW + timedelta(seconds=400)
     site, scene, _provider = site_and_scene(tmp_path / "straight")
@@ -261,73 +296,72 @@ def test_every_call_failing_backs_the_whole_queue_off_after_n_items_and_nothing_
     asyncio.run(queue_for(tmp_path / "straight", scene, site, retry=straight, clock=lambda: recovered_at).drain())
 
     site, scene, _provider = site_and_scene(tmp_path / "outage")
-    failing = _failing_sync(scene, _unreachable_from(error))
-    down = [True]
-    retry = _FlakyRetry(down)
     clock = [NOW]
+    breaker = _breaker(clock, threshold=2)
+    failing = _failing_sync(scene, _unreachable_from(error), breaker)
+    down = [True]
+    retry = _FlakyRetry(down, breaker)
     queue = queue_for(
-        tmp_path / "outage",
-        scene,
-        site,
-        retry=retry,
-        clock=lambda: clock[0],
-        settings=QueueSettings(backoff_base_seconds=60.0, backoff_max_seconds=600.0, unreachable_after_failures=2),
+        tmp_path / "outage", scene, site, retry=retry, clock=lambda: clock[0], state=ModelQueueState(breaker)
     )
-    report = asyncio.run(queue.drain())  # 连着两项（不同的项）失败、中间没有一项做成：整体退避
+    report = asyncio.run(queue.drain())
+    # 出错重试那一项超时（熔断记 1 次），同步词表那一项再失败：超时类到阈值 2、额度类一次就开
     assert outcomes(report) == [(RETRY, UNREACHABLE), (SYNC, UNREACHABLE)] and queue.state.down()
     assert report.owed[SYNC] == 1 and report.owed[RETRY] == 1
     assert report.backing_off_until == clock[0] + timedelta(seconds=60)
-    assert asyncio.run(queue.drain()).done == ()  # 整体退避期内不试
+    assert asyncio.run(queue.drain()).done == ()  # 熔断开着、没到试探：不试
     clock[0] += timedelta(seconds=61)
-    report = asyncio.run(queue.drain())  # 到点接着做：头一项又失败——马上再次整体退避、加倍
-    assert outcomes(report) == [(RETRY, UNREACHABLE)] and queue.state.failures == 2
+    report = asyncio.run(queue.drain())  # 试探的那一项又失败：再开、等待加倍
+    assert outcomes(report) == [(RETRY, UNREACHABLE)] and queue.state.down()
     assert report.backing_off_until == clock[0] + timedelta(seconds=120)
-    assert [name for name, _detail in queue_problems(queue.state, queue.settings, clock[0])] == ["model_queue_backoff"]
+    snapshot = breaker.snapshot()
+    assert snapshot.open and snapshot.reason is not None
+    assert queue_problems(queue.state, queue.settings, clock[0]) == []  # 原因在 model_chat，不在队列这几项里
+    assert snapshot.reason.value == "network_error"  # 最近一次失败是出错重试那一项的超时
     failing[0] = None
     down[0] = False
     clock[0] = recovered_at
     report = asyncio.run(queue.drain())
-    assert report.clear and not queue.state.down() and queue.state.streak == set() and queue.state.failures == 0
+    assert report.clear and not queue.state.down()
     assert queue.retries.size() == 0  # 没有一项进过落盘的重试账
     assert settled_files(tmp_path / "outage") == settled_files(tmp_path / "straight")
 
 
-def test_a_retry_item_stuck_on_the_model_waits_alone_and_the_later_work_is_done(tmp_path) -> None:
-    """出错重试里一项卡在"模型用不了"上（会话轮没描述成、或归约归类时模型没答，归约自己吞了只在报告里记）：按一次模型
-    调用失败算——只卡住的那一项在进程里等（留在堆里、仍算欠着、退避期内不重问），队列不进整体退避，排在后面的类照做。"""
+def test_a_retry_item_stuck_on_the_model_is_kept_and_the_later_work_is_done(tmp_path) -> None:
+    """出错重试里一项卡在"模型用不了"上（会话轮没描述成、或归约归类时模型没答）：熔断没开时这一项留在堆里、仍算欠着，
+    排在后面的类照做；下一轮照试（队列不按项在进程里退避，裁定 108）。"""
 
     site, scene, _provider = site_and_scene(tmp_path)
-    asked: list[object] = []
+    asked: list[int] = []
 
     class Retry:
         def due(self, *, through):  # type: ignore[no-untyped-def]
             return (object.__new__(_Entered),)
 
-        async def run_once(self, *, through, skip=()):  # type: ignore[no-untyped-def]
-            asked.append(frozenset(skip))
-            return RetryReport(taken=1, unavailable=1, stuck_items=(_Entered.item_id,))
+        async def run_once(self, *, through):  # type: ignore[no-untyped-def]
+            asked.append(1)
+            return RetryReport(taken=1, unavailable=1)
 
     clock = [NOW]
     queue = queue_for(tmp_path, scene, site, retry=Retry(), clock=lambda: clock[0])
     report = asyncio.run(queue.drain())
     assert outcomes(report)[0] == (RETRY, UNREACHABLE) and not queue.state.down()
     assert (SYNC, DONE) in outcomes(report)  # 后面的类照做
-    assert queue.state.waiting(f"retry:{_Entered.item_id}", clock[0]) and report.owed[RETRY] == 1  # 项还欠着
-    assert asyncio.run(queue.drain()).done == () and len(asked) == 1  # 退避期内不重问
-    clock[0] = NOW + timedelta(seconds=61)
-    assert outcomes(asyncio.run(queue.drain())) == [(RETRY, UNREACHABLE)] and len(asked) == 2  # 退避到点再试
+    assert report.owed[RETRY] == 1  # 项还欠着
+    tried = len(asked)  # 后面有一项做成，这一趟又来了一轮：出错重试那一项在那一轮里也照试了
+    assert outcomes(asyncio.run(queue.drain())) == [(RETRY, UNREACHABLE)] and len(asked) == tried + 1  # 下一趟照试
     assert not queue.state.down()
 
 
-def test_a_queue_halted_by_the_backoff_still_counts_what_the_later_categories_owe(tmp_path) -> None:
-    """复验 H2：整体退避、一轮中途返回时，排在后面的各类也从盘上认一遍"还欠几项"（只认、不做）——换代报告的 ``queue_owed``
+def test_a_queue_halted_by_the_open_breaker_still_counts_what_the_later_categories_owe(tmp_path) -> None:
+    """复验 H2：熔断开了、一轮中途返回时，排在后面的各类也从盘上认一遍"还欠几项"（只认、不做）——换代报告的 ``queue_owed``
     与健康面读到的才是全的。"""
 
     site, scene, _provider = site_and_scene(tmp_path)
     synced = scene.concepts.synced_version()
-    queue = queue_for(
-        tmp_path, scene, site, retry=_FlakyRetry([True]), settings=QueueSettings(unreachable_after_failures=1)
-    )
+    clock = [NOW]
+    breaker = _breaker(clock, threshold=1)
+    queue = queue_for(tmp_path, scene, site, retry=_FlakyRetry([True], breaker), state=ModelQueueState(breaker))
     report = asyncio.run(queue.drain())
     assert outcomes(report) == [(RETRY, UNREACHABLE)] and queue.state.down()
     assert report.owed[SYNC] == 1 and queue.state.owed_now()[SYNC] == 1  # 排在后面的同步词表：认出来了，没做
