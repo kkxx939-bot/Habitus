@@ -23,6 +23,7 @@ from habitus.infrastructure.store.filesystem.durable_io import (
     atomic_temporary_destination,
     durable_unlink,
     read_regular_bytes,
+    regular_file_exists,
 )
 from habitus.memory.conversation.ingress import (
     ConversationIngressError,
@@ -96,42 +97,27 @@ class ConversationSealStatus(str, Enum):
     UNCHANGED = "unchanged"
 
 
-_JOURNAL_STATE_SCHEMA = "conversation_journal_state_v1"
+_JOURNAL_STATE_SCHEMA = "conversation_journal_state_v2"
 
 
 @dataclass(frozen=True)
 class ConversationJournalState:
-    """在 History 物理删除后仍保持全局消息序号与释放边界的耐久游标。"""
+    """在 History 按段释放后仍保持全局消息序号的耐久游标。"""
 
     conversation_id: str
     archived_through_sequence: int | None
-    released_through_sequence: int | None
     latest_segment_id: str | None
     latest_segment_digest: str | None
 
     def __post_init__(self) -> None:
         if not self.conversation_id:
             raise ConversationJournalError("journal state conversation_id must be non-empty text")
-        for name in ("archived_through_sequence", "released_through_sequence"):
-            value = getattr(self, name)
-            if value is not None and value < 0:
-                raise ConversationJournalError(f"journal state {name} must be null or non-negative")
+        if self.archived_through_sequence is not None and self.archived_through_sequence < 0:
+            raise ConversationJournalError("journal state archived_through_sequence must be null or non-negative")
         if self.archived_through_sequence is None:
-            if any(
-                value is not None
-                for value in (
-                    self.released_through_sequence,
-                    self.latest_segment_id,
-                    self.latest_segment_digest,
-                )
-            ):
+            if self.latest_segment_id is not None or self.latest_segment_digest is not None:
                 raise ConversationJournalError("empty journal state cannot contain archive metadata")
             return
-        if (
-            self.released_through_sequence is not None
-            and self.released_through_sequence > self.archived_through_sequence
-        ):
-            raise ConversationJournalError("released history cannot exceed the archive high-watermark")
         if not self.latest_segment_id:
             raise ConversationJournalError("journal state requires latest_segment_id")
         _start, end = ConversationLayout.segment_range(self.latest_segment_id)
@@ -144,13 +130,9 @@ class ConversationJournalState:
     def next_sequence(self) -> int:
         return 0 if self.archived_through_sequence is None else self.archived_through_sequence + 1
 
-    @property
-    def released_through(self) -> int:
-        return -1 if self.released_through_sequence is None else self.released_through_sequence
-
     @classmethod
     def empty(cls, conversation_id: str) -> ConversationJournalState:
-        return cls(conversation_id, None, None, None, None)
+        return cls(conversation_id, None, None, None)
 
 
 @dataclass(frozen=True)
@@ -659,7 +641,7 @@ class ConversationMessageJournal:
                 return self._load_state(address, self._history_references(address))
 
     def list_history(self, address: ConversationAddress) -> tuple[ConversationSegment, ...]:
-        """按序读取仍未被生命周期游标逻辑释放的 History Segment。"""
+        """按序读取还没释放的 History Segment；原文按段到期释放，序号之间可能有空档。"""
 
         return self._retained_history_and_live(address)[0]
 
@@ -685,8 +667,7 @@ class ConversationMessageJournal:
                     live_messages=live_messages,
                     state=state,
                 )
-                active = tuple(reference for reference in references if reference.end_sequence > state.released_through)
-                history = tuple(self.read_segment(address, reference.segment_id) for reference in active)
+                history = tuple(self.read_segment(address, reference.segment_id) for reference in references)
                 return history, self._read_live_messages(address)
 
     def read_editor_turn(
@@ -732,22 +713,10 @@ class ConversationMessageJournal:
                 raise ConversationJournalError("editor input logical turn has no final completion")
         return ConversationEditorTurn(segments=selected, source_index=position - start, unsealed=unsealed)
 
-    def release_history_prefix(
-        self,
-        address: ConversationAddress,
-        segments: tuple[ConversationSegment, ...],
-    ) -> tuple[str, ...]:
-        """先耐久推进释放游标，再幂等删除已经验证的最旧连续原文前缀。"""
+    def release_history(self, address: ConversationAddress, segment_id: str, digest: str) -> bool:
+        """删除一段已经到期的 History 原文；文件已经不在返回 False。原文按段各算各的，不要求从最旧的开始连续。"""
 
-        if any(
-            not same_path_identity(
-                segment.conversation_id,
-                address.conversation_id,
-                "conversation_id",
-            )
-            for segment in segments
-        ):
-            raise ValueError("history release segments belong to another conversation")
+        start_sequence, end_sequence = self.layout.segment_range(segment_id)
         with self.path_lock.acquire(
             self.layout.lock_key(address),
             ttl_seconds=self.config.lock_ttl_seconds,
@@ -757,57 +726,28 @@ class ConversationMessageJournal:
             with guard.fenced():
                 references = self._history_references(address)
                 state = self._load_state(address, references)
-                active = tuple(reference for reference in references if reference.end_sequence > state.released_through)
-                expected = active[: len(segments)]
-                if tuple(item.segment_id for item in expected) != tuple(item.segment_id for item in segments):
-                    raise ConversationWriteConflictError(
-                        "history release must select the oldest unreleased contiguous prefix"
-                    )
-                for reference, expected_segment in zip(expected, segments, strict=True):
-                    current = self.read_segment(address, reference.segment_id)
-                    if current.digest != expected_segment.digest:
-                        raise ConversationWriteConflictError("history segment changed before lifecycle release")
-                if segments:
-                    final = segments[-1]
-                    updated = ConversationJournalState(
-                        conversation_id=state.conversation_id,
-                        archived_through_sequence=state.archived_through_sequence,
-                        released_through_sequence=final.end_sequence,
-                        latest_segment_id=state.latest_segment_id,
-                        latest_segment_digest=state.latest_segment_digest,
-                    )
-                    self._write_state(address, updated)
-                for reference in expected:
-                    durable_unlink(reference.path, artifact_root=self.layout.root)
-                return tuple(reference.segment_id for reference in expected)
+                reference = next((item for item in references if item.segment_id == segment_id), None)
+                if reference is None:
+                    return False
+                archived = -1 if state.archived_through_sequence is None else state.archived_through_sequence
+                if end_sequence > archived or start_sequence != reference.start_sequence:
+                    raise ConversationWriteConflictError("history release targets a segment that is not sealed")
+                if self.read_segment(address, segment_id).digest != digest:
+                    raise ConversationWriteConflictError("history segment changed before lifecycle release")
+                return durable_unlink(reference.path, artifact_root=self.layout.root)
 
-    def purge_released_history(
-        self,
-        address: ConversationAddress,
-        *,
-        max_items: int,
-    ) -> tuple[str, ...]:
-        """恢复上次中断的物理删除；游标已经释放的文件不再对外可见。"""
+    def history_retained(self, address: ConversationAddress, segment_id: str) -> bool:
+        """这一段的 History 原文还在不在（释放后不在）。"""
 
-        if max_items <= 0:
-            raise ValueError("max_items must be a positive integer")
-        with self.path_lock.acquire(
-            self.layout.lock_key(address),
-            ttl_seconds=self.config.lock_ttl_seconds,
-            wait_timeout_seconds=self.config.lock_wait_timeout_seconds,
-            retry_delay_seconds=self.config.lock_retry_delay_seconds,
-        ) as guard:
-            with guard.fenced():
-                references = self._history_references(address)
-                state = self._load_state(address, references)
-                stale = tuple(
-                    reference for reference in references if reference.end_sequence <= state.released_through
-                )[:max_items]
-                deleted: list[str] = []
-                for reference in stale:
-                    if durable_unlink(reference.path, artifact_root=self.layout.root):
-                        deleted.append(reference.segment_id)
-                return tuple(deleted)
+        self.layout.segment_range(segment_id)
+        return regular_file_exists(self.layout.history_path(address, segment_id), artifact_root=self.layout.root)
+
+    def retained_history_ranges(self, address: ConversationAddress) -> tuple[tuple[int, int], ...]:
+        """还在的 History 原文覆盖的消息序号范围（摘要压缩判断能不能跨过空档用）。"""
+
+        return tuple(
+            (reference.start_sequence, reference.end_sequence) for reference in self._history_references(address)
+        )
 
     def _read_ingress(self, address: ConversationAddress, delivery_id: str) -> ConversationIngressReceipt | None:
         try:
@@ -979,8 +919,6 @@ class ConversationMessageJournal:
         for reference in references:
             if reference.start_sequence <= archived < reference.end_sequence:
                 raise ConversationJournalError("history segment crosses the archive high-watermark")
-            if reference.start_sequence <= state.released_through < reference.end_sequence:
-                raise ConversationJournalError("history segment crosses the release high-watermark")
 
         newer = tuple(reference for reference in references if reference.start_sequence > archived)
         if newer:
@@ -993,27 +931,15 @@ class ConversationMessageJournal:
             state = ConversationJournalState(
                 conversation_id=state.conversation_id,
                 archived_through_sequence=latest.end_sequence,
-                released_through_sequence=state.released_through_sequence,
                 latest_segment_id=latest.segment_id,
                 latest_segment_digest=latest.digest,
             )
             self._write_state(address, state)
 
-        archived = -1 if state.archived_through_sequence is None else state.archived_through_sequence
-        active = tuple(
-            reference for reference in references if state.released_through < reference.end_sequence <= archived
-        )
-        if archived > state.released_through:
-            if not active or active[0].start_sequence != state.released_through + 1:
-                raise ConversationJournalError("retained history does not start after the release high-watermark")
-            for previous, current in zip(active, active[1:], strict=False):
-                if current.start_sequence != previous.end_sequence + 1:
-                    raise ConversationJournalError("retained history contains a sequence gap")
-            if active[-1].end_sequence != archived:
-                raise ConversationJournalError("retained history does not reach the archive high-watermark")
-            if active[-1].segment_id != state.latest_segment_id:
-                raise ConversationJournalError("retained history tail differs from journal state")
-            latest = self.read_segment(address, active[-1].segment_id)
+        # 原文按段到期释放（裁定 111），保留下来的段之间可以有空档；最新一段还在时核对它的摘要值
+        retained_latest = next((item for item in references if item.segment_id == state.latest_segment_id), None)
+        if retained_latest is not None:
+            latest = self.read_segment(address, retained_latest.segment_id)
             if latest.digest != state.latest_segment_digest:
                 raise ConversationJournalError("retained history tail digest differs from journal state")
         return state
@@ -1031,18 +957,20 @@ class ConversationMessageJournal:
             raw = json.loads(encoded)
         except json.JSONDecodeError as exc:
             raise ConversationJournalError("conversation journal state is invalid JSON") from exc
+        if isinstance(raw, Mapping) and raw.get("schema") != _JOURNAL_STATE_SCHEMA:
+            raise ConversationJournalError(
+                f"conversation journal state uses schema {raw.get('schema')!r}, this Habitus only reads "
+                f"{_JOURNAL_STATE_SCHEMA!r}; old conversation state is not migrated"
+            )
         expected_fields = {"schema", *(field.name for field in fields(ConversationJournalState))}
         if not isinstance(raw, Mapping) or set(raw) != expected_fields:
             raise ConversationJournalError("conversation journal state has an invalid shape")
-        if raw["schema"] != _JOURNAL_STATE_SCHEMA:
-            raise ConversationJournalError("conversation journal state has an unsupported schema")
         conversation_id = raw["conversation_id"]
         if not isinstance(conversation_id, str):
             raise ConversationJournalError("journal state conversation_id must be non-empty text")
         state = ConversationJournalState(
             conversation_id=conversation_id,
             archived_through_sequence=_stored_sequence(raw, "archived_through_sequence"),
-            released_through_sequence=_stored_sequence(raw, "released_through_sequence"),
             latest_segment_id=_stored_text(raw["latest_segment_id"], "journal state requires latest_segment_id"),
             latest_segment_digest=_stored_text(raw["latest_segment_digest"], _STATE_DIGEST_MESSAGE),
         )
@@ -1073,7 +1001,6 @@ class ConversationMessageJournal:
                     "schema": _JOURNAL_STATE_SCHEMA,
                     "conversation_id": state.conversation_id,
                     "archived_through_sequence": state.archived_through_sequence,
-                    "released_through_sequence": state.released_through_sequence,
                     "latest_segment_id": state.latest_segment_id,
                     "latest_segment_digest": state.latest_segment_digest,
                 }
@@ -1087,15 +1014,14 @@ class ConversationMessageJournal:
         state: ConversationJournalState,
         references: tuple[_HistoryReference, ...],
     ) -> ConversationSegment | None:
-        if state.archived_through_sequence is None or state.archived_through_sequence <= state.released_through:
+        if state.archived_through_sequence is None:
             return None
         latest = next(
             (reference for reference in reversed(references) if reference.segment_id == state.latest_segment_id),
             None,
         )
-        if latest is None:
-            raise ConversationJournalError("journal state points to missing retained history")
-        return self.read_segment(address, latest.segment_id)
+        # 最新一段的原文已经到期释放：没有可核对的封存尾巴，live 从高水位之后接着记
+        return None if latest is None else self.read_segment(address, latest.segment_id)
 
     def _history_references(self, address: ConversationAddress) -> tuple[_HistoryReference, ...]:
         directory = self.layout.history_directory(address)
@@ -1198,10 +1124,6 @@ class ConversationMessageJournal:
     ) -> tuple[ConversationMessage, ...]:
         """为一次可能跨多个新 Segment 的重放恢复仍可验证的事实范围。"""
 
-        if batch.start_sequence < expected_next and batch.start_sequence <= state.released_through:
-            raise ConversationWriteConflictError(
-                f"append replay from sequence {batch.start_sequence} predates released history"
-            )
         known_by_sequence = {item.sequence: item for item in self._known_tail(latest, live_messages)}
         if batch.start_sequence < expected_next:
             for reference in references:

@@ -1,4 +1,4 @@
-"""跨 Conversation 全局有序 Job、耐久租约、退避和人工恢复入口测试。"""
+"""跨 Conversation 全局有序 Job、耐久租约、退避、失败不挡后面与人工恢复入口测试。"""
 
 import json
 from datetime import date, timedelta
@@ -12,6 +12,7 @@ from habitus.memory.workflow.jobs import (
     MemoryJobBlockedError,
     MemoryJobConfig,
     MemoryJobError,
+    MemoryJobLease,
     MemoryJobLeaseLostError,
     MemoryJobNotReadyError,
     MemoryJobStatus,
@@ -122,7 +123,9 @@ def test_retryable_failure_uses_exponential_backoff_then_exhausts_and_manual_ret
     second_lease = jobs.claim(retry, "worker-1")
     failed = jobs.fail(second_lease, RuntimeError("still broken"), retryable=True)
     assert failed.status is MemoryJobStatus.FAILED
-    with pytest.raises(MemoryJobBlockedError, match="exhausted"):
+    # 判了失败就是终态：队列里不再有它，也不能再认领
+    assert jobs.oldest_unfinished() is None
+    with pytest.raises(MemoryJobError, match="oldest unfinished"):
         jobs.claim(failed, "worker-1")
 
     reopened = jobs.retry_failed(failed)
@@ -146,7 +149,7 @@ def test_non_retryable_failure_blocks_immediately_and_high_watermark_survives_cl
     assert not jobs.discard_committed(committed)
 
 
-def test_explicit_abandonment_is_durable_idempotent_and_releases_later_sequence(tmp_path: Path) -> None:
+def test_explicit_abandonment_is_durable_idempotent_and_deletes_the_failed_job(tmp_path: Path) -> None:
     clock = Clock()
     jobs = store(tmp_path, clock)
     first_address = ConversationAddress("conversation-a", date(2026, 7, 1))
@@ -163,7 +166,8 @@ def test_explicit_abandonment_is_durable_idempotent_and_releases_later_sequence(
     assert jobs.abandon_failed(failed, reason="重复请求不会覆盖原始决定") == record
     with pytest.raises(MemoryJobBlockedError, match="abandonment decision"):
         jobs.retry_failed(failed)
-    assert jobs.oldest_uncommitted() == second
+    assert jobs.failed() == ()
+    assert jobs.oldest_unfinished() == second
     assert jobs.claim(second, "worker-2").job.memory_sequence == 2
 
 
@@ -181,7 +185,7 @@ def test_durable_failed_job_without_error_is_rejected_as_corrupt_state(tmp_path:
     job_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(MemoryJobError, match="fields are invalid"):
-        jobs.oldest_uncommitted()
+        jobs.oldest_unfinished()
 
 
 def test_retry_delay_is_bounded_exponential() -> None:
@@ -210,7 +214,7 @@ def test_waiting_for_the_model_uses_its_own_long_backoff_and_never_exhausts_atte
         clock.advance(seconds=int(delays[-1]))
         job = waiting
     assert delays[:4] == [60, 120, 240, 480] and delays[-1] == 86_400
-    assert jobs.oldest_uncommitted() == job  # 落盘后读回同一份（含 model_waits）
+    assert jobs.oldest_unfinished() == job  # 落盘后读回同一份（含 model_waits）
 
     # 恢复之后别的失败：等模型清零，照旧按 max_attempts 收
     retried = jobs.fail(jobs.claim(job, "worker"), RuntimeError("temporary"), retryable=True)
@@ -228,7 +232,6 @@ def test_waiting_for_the_model_uses_its_own_long_backoff_and_never_exhausts_atte
         ("conversation_id", 1, "conversation_id must be non-empty normalized text"),
         ("segment_id", None, "segment_id must be non-empty normalized text"),
         ("source_segment_digest", 1, "source_segment_digest must be lowercase SHA-256 text"),
-        ("transaction_id", None, "transaction_id must be 32 lowercase hexadecimal characters"),
         ("attempts", 1.0, "memory job attempts must be non-negative"),
         ("claim_id", 5, "running memory job requires a claim_id"),
         ("claim_generation", "1", "memory job claim_generation must be non-negative"),
@@ -250,7 +253,7 @@ def test_job_file_with_wrongly_typed_field_is_rejected_by_the_decoder(
     job_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(MemoryJobError, match="fields are invalid") as caught:
-        jobs.oldest_uncommitted()
+        jobs.oldest_unfinished()
     assert isinstance(caught.value.__cause__, ValueError)
     assert message in str(caught.value.__cause__)
 
@@ -279,7 +282,126 @@ def test_job_file_with_wrongly_typed_time_is_rejected_by_the_decoder(tmp_path: P
     job_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(MemoryJobError, match="fields are invalid"):
-        jobs.oldest_uncommitted()
+        jobs.oldest_unfinished()
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("cards_written", 1, "memory job cards_written must be a boolean"),
+        ("changed_uris", "memory://profile.md", "memory job changed_uris must be a list of URIs"),
+        ("deleted_uris", [1], "memory job deleted_uris must be a list of URIs"),
+    ],
+)
+def test_job_file_with_wrongly_typed_written_stage_is_rejected_by_the_decoder(
+    tmp_path: Path, field: str, bad: object, message: str
+) -> None:
+    jobs = store(tmp_path, Clock())
+    jobs.stage(ConversationAddress("conversation-a", date(2026, 7, 1)), source("conversation-a", 0))
+    job_path = next(path for path in jobs.jobs_root.glob("*.json") if path.name != "state.json")
+    payload = json.loads(job_path.read_text(encoding="utf-8"))
+    payload[field] = bad
+    job_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MemoryJobError, match="fields are invalid") as caught:
+        jobs.oldest_unfinished()
+    assert message in str(caught.value.__cause__)
+
+
+def test_old_memory_job_v4_file_is_rejected_with_a_readable_schema_message(tmp_path: Path) -> None:
+    """（9）旧格式任务文件不迁移：报错点出文件用的 schema 与这一版只认的 schema。"""
+
+    jobs = store(tmp_path, Clock())
+    jobs.stage(ConversationAddress("conversation-a", date(2026, 7, 1)), source("conversation-a", 0))
+    job_path = next(path for path in jobs.jobs_root.glob("*.json") if path.name != "state.json")
+    payload = json.loads(job_path.read_text(encoding="utf-8"))
+    payload["schema"] = "memory_job_v4"
+    payload["transaction_id"] = "b" * 32
+    for name in ("cards_written", "changed_uris", "deleted_uris"):
+        payload.pop(name)
+    job_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MemoryJobError, match="memory_job_v4") as caught:
+        jobs.initialize()
+    assert "memory_job_v5" in str(caught.value)
+    assert "not migrated" in str(caught.value)
+
+
+def test_exhausted_failure_no_longer_holds_later_jobs_but_automatic_retry_still_does(tmp_path: Path) -> None:
+    """（6）自动重试期间（QUEUED、退避未到）后面的任务等着；重试用完判 FAILED 后，后面的任务照常认领、做成。"""
+
+    clock = Clock()
+    jobs = store(tmp_path, clock, max_attempts=2)
+    first = jobs.activate(
+        jobs.stage(ConversationAddress("conversation-a", date(2026, 7, 1)), source("conversation-a", 0))
+    )
+    second = jobs.activate(
+        jobs.stage(ConversationAddress("conversation-b", date(2026, 7, 1)), source("conversation-b", 0))
+    )
+
+    retrying = jobs.fail(jobs.claim(first, "worker"), RuntimeError("temporary"), retryable=True)
+    assert retrying.status is MemoryJobStatus.QUEUED
+    assert jobs.oldest_unfinished() == retrying
+    with pytest.raises(MemoryJobNotReadyError):
+        jobs.claim(retrying, "worker")
+    with pytest.raises(MemoryJobError, match="oldest unfinished"):
+        jobs.claim(second, "worker")
+
+    clock.advance(seconds=1)
+    failed = jobs.fail(jobs.claim(retrying, "worker"), RuntimeError("still broken"), retryable=True)
+    assert failed.status is MemoryJobStatus.FAILED
+    assert jobs.oldest_unfinished() == second
+    committed = jobs.complete(jobs.claim(second, "worker"))
+    assert committed.status is MemoryJobStatus.COMMITTED
+    assert jobs.failed() == (failed,)
+    assert jobs.observability_snapshot().failed == 1
+
+
+def test_manual_retry_while_a_later_job_runs_waits_for_it_without_breaking_its_lease(tmp_path: Path) -> None:
+    """（7）更晚的任务正在跑（租约有效）时人工重试更早的失败任务：能重开；认领要等那条做完，那条续约、完成都不受影响。"""
+
+    clock = Clock()
+    jobs = store(tmp_path, clock)
+    first = jobs.activate(
+        jobs.stage(ConversationAddress("conversation-a", date(2026, 7, 1)), source("conversation-a", 0))
+    )
+    second = jobs.activate(
+        jobs.stage(ConversationAddress("conversation-b", date(2026, 7, 1)), source("conversation-b", 0))
+    )
+    failed = jobs.fail(jobs.claim(first, "worker"), ValueError("permanent"), retryable=False)
+    running = jobs.claim(second, "worker")
+
+    reopened = jobs.retry_failed(failed)
+    assert reopened.status is MemoryJobStatus.QUEUED
+    assert jobs.oldest_unfinished() == reopened
+    with pytest.raises(MemoryJobBlockedError, match="active worker lease"):
+        jobs.claim(reopened, "worker")
+
+    renewed = jobs.renew(running)
+    assert jobs.complete(renewed).status is MemoryJobStatus.COMMITTED
+    assert jobs.claim(reopened, "worker").job.memory_sequence == first.memory_sequence
+
+
+def test_record_written_keeps_the_stage_and_addresses_through_retry_and_completion(tmp_path: Path) -> None:
+    """"卡片已写完"与改动地址跟着失败重试保留下来，直到完成。"""
+
+    clock = Clock()
+    jobs = store(tmp_path, clock)
+    queued = jobs.activate(
+        jobs.stage(ConversationAddress("conversation-a", date(2026, 7, 1)), source("conversation-a", 0))
+    )
+    lease = jobs.claim(queued, "worker")
+    written = jobs.record_written(
+        lease,
+        changed_uris=("memory://preferences/b.md", "memory://preferences/a.md"),
+        deleted_uris=("memory://tools/x.md",),
+    )
+    assert written.cards_written
+    assert written.changed_uris == ("memory://preferences/a.md", "memory://preferences/b.md")
+    retry = jobs.fail(jobs.renew(MemoryJobLease(written)), RuntimeError("refresh failed"), retryable=True)
+    assert retry.cards_written and retry.deleted_uris == ("memory://tools/x.md",)
+    clock.advance(seconds=1)
+    assert jobs.complete(jobs.claim(retry, "worker")).changed_uris == written.changed_uris
 
 
 @pytest.mark.parametrize("bad", [True, "3", 3.0, None])
@@ -302,7 +424,6 @@ def test_sequence_state_with_wrongly_typed_high_watermark_is_rejected(tmp_path: 
         ("conversation_id", None, "conversation_id must be non-empty normalized text"),
         ("segment_id", 1, "segment_id must be non-empty normalized text"),
         ("source_segment_digest", None, "source_segment_digest must be lowercase SHA-256 text"),
-        ("transaction_id", 1, "transaction_id must be 32 lowercase hexadecimal characters"),
         ("attempts", True, "attempts must be a positive integer"),
         ("last_error", None, "last_error must be non-empty bounded text"),
         ("reason", ["原因"], "reason must be non-empty bounded text"),

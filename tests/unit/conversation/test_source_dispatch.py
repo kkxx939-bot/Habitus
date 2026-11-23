@@ -173,7 +173,6 @@ def test_memory_output_codec_restores_full_ingest_result_including_jobs(tmp_path
         started_on=source_value.started_on,
         segment_id="0-0",
         source_segment_digest=canonical_digest("segment"),
-        transaction_id="a" * 32,
         status=MemoryJobStatus.QUEUED,
         attempts=0,
         claim_id=None,

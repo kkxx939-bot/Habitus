@@ -37,9 +37,9 @@ from habitus.integrations.http_api.remember_parts import (
 from habitus.integrations.http_api.request_id import REQUEST_ID_HEADER, RequestIDMiddleware
 from habitus.integrations.http_api.schemas import (
     AuditListResult,
-    BlockedJobResult,
     ConversationCursorResult,
     ConversationIdText,
+    FailedJobsResult,
     FlushRequest,
     FlushResult,
     HealthResult,
@@ -122,10 +122,7 @@ async def _remember_request(handlers: RuntimeHTTPHandlers, observer: Observer, b
         delivery_id=body.delivery_id,
     )
     for job in outcome.accepted_jobs:
-        with bind_observation_context(
-            memory_sequence=job.memory_sequence,
-            transaction_id=job.transaction_id,
-        ):
+        with bind_observation_context(memory_sequence=job.memory_sequence):
             observer.record(
                 ObservationEvent(
                     category="http",
@@ -288,11 +285,14 @@ def _register_job_routes(router: APIRouter, handlers: RuntimeHTTPHandlers) -> No
         return _success(request, result)
 
     @router.get(
-        "/memory/jobs/blocked",
-        response_model=SuccessResponse[BlockedJobResult],
+        "/memory/jobs/failed",
+        response_model=SuccessResponse[FailedJobsResult],
     )
-    async def blocked_job(request: Request) -> SuccessResponse[object]:
-        result = await handlers.blocked_job()
+    async def failed_jobs(
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> SuccessResponse[object]:
+        result = await handlers.failed_jobs(limit=limit)
         return _success(request, result)
 
     @router.get("/memory/jobs/{memory_sequence}", response_model=SuccessResponse[JobStatusResult])

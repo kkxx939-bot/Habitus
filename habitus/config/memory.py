@@ -15,7 +15,6 @@ from habitus.memory.editor import (
     MemoryCommitConfig,
     MemoryExtractionConfig,
     MemoryRetrievalConfig,
-    MemoryTransactionJournalConfig,
 )
 from habitus.memory.recall import (
     MemoryRecallLifecycleConfig,
@@ -39,7 +38,6 @@ class MemoryConfig:
     editor_retrieval: MemoryRetrievalConfig = field(default_factory=MemoryRetrievalConfig)
     extraction: MemoryExtractionConfig = field(default_factory=MemoryExtractionConfig)
     commit: MemoryCommitConfig = field(default_factory=MemoryCommitConfig)
-    transaction_journal: MemoryTransactionJournalConfig = field(default_factory=MemoryTransactionJournalConfig)
     semantic: MemorySemanticConfig = field(default_factory=MemorySemanticConfig)
 
     @classmethod
@@ -95,11 +93,6 @@ class MemoryConfig:
                 MemoryCommitConfig,
                 data.get("commit", {}),
                 "config.memory.commit",
-            ),
-            transaction_journal=construct_config(
-                MemoryTransactionJournalConfig,
-                data.get("transaction_journal", {}),
-                "config.memory.transaction_journal",
             ),
             semantic=construct_config(
                 MemorySemanticConfig,

@@ -120,7 +120,7 @@ class MemoryCatalogReader:
         now: datetime,
         on_recall_failure: Callable[[BaseException], None],
     ) -> MemoryCatalog:
-        """读全部目录概览；会因记忆任务提交窗口抛 ``MemoryTreeConsistencyError``，由调用方短暂重试。"""
+        """读全部目录概览。"""
 
         cards: list[CatalogCard] = []
         omitted: list[tuple[MemoryDirectory, int]] = []

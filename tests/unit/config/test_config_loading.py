@@ -264,6 +264,36 @@ def test_removed_vector_and_rerank_sections_are_named_instead_of_reported_as_typ
     assert "did you mean" not in str(error.value)
 
 
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("memory", "transaction_journal"), {}),
+        (("workflow", "receipts"), {}),
+        (("workflow", "lifecycle", "committed_receipt_retention_days"), 365),
+        (("memory", "search_service", "catalog_retries"), 3),
+    ],
+)
+def test_removed_write_transaction_and_receipt_settings_are_named(tmp_path, path: tuple[str, ...], value) -> None:
+    """去掉多文件事务日志与回执之后：旧配置里还留着这些项时明确指出是哪一项、该删掉，不当成拼写错误。"""
+
+    payload = valid_mapping(tmp_path)
+    target = payload
+    for name in path[:-1]:
+        target = target.setdefault(name, {})
+    target[path[-1]] = value
+    with pytest.raises(ConfigError, match="多文件事务日志和变更回执") as error:
+        HabitusConfig.from_mapping(payload)
+    assert "config." + ".".join(path) in str(error.value)
+    assert "did you mean" not in str(error.value)
+
+
+def test_history_retention_defaults_to_ten_days_and_job_retention_to_thirty() -> None:
+    from habitus.memory.workflow import MemoryWorkflowLifecycleConfig
+
+    config = MemoryWorkflowLifecycleConfig()
+    assert (config.history_retention_days, config.job_retention_days) == (10, 30)
+
+
 def test_behavior_config_enforces_its_scalar_bounds() -> None:
     """行为组的手写边界校验逐条钉死：bool 拒收、上下界、5 分钟默认值（用户裁定的落点）。"""
 

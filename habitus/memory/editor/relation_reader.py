@@ -4,12 +4,9 @@ from __future__ import annotations
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
 from habitus.memory.document import MemoryDocument
-from habitus.memory.editor.identity import (
-    MemoryFinalIdentityMap,
-    MemoryNodeDisposition,
-)
+from habitus.memory.editor.identity import MemoryFinalIdentityMap
 from habitus.memory.editor.link import MemoryResolvedRelation
-from habitus.memory.editor.link_plan import MemoryRelationReadSet
+from habitus.memory.editor.link_plan import MemoryRelationReadSet, one_hop, relation_endpoints
 from habitus.memory.snapshot import MemorySnapshotBatch, MemorySnapshotReader
 
 
@@ -18,7 +15,7 @@ class MemoryRelationReadConflictError(ValueError):
 
 
 class MemoryRelationReadSetLoader:
-    """读取操作端点、结构变更节点及其全部一跳邻居。"""
+    """读取操作端点、要写的节点、结构变更节点及其全部一跳邻居。"""
 
     def __init__(self, reader: MemorySnapshotReader) -> None:
         self.reader = reader
@@ -29,21 +26,9 @@ class MemoryRelationReadSetLoader:
         identities: MemoryFinalIdentityMap,
         operations: tuple[MemoryResolvedRelation, ...],
     ) -> MemoryRelationReadSet:
-        """重读完整闭包并校验与抽取、字段规划快照没有发生漂移。"""
+        """重读要写节点及其一跳邻居，并校验与抽取、字段规划快照没有发生漂移。"""
 
-        structural_sources = {
-            str(entry.source_uri)
-            for entry in identities.entries
-            if entry.disposition in {MemoryNodeDisposition.MERGE, MemoryNodeDisposition.DELETE}
-            and entry.source_uri is not None
-        }
-        required = set(structural_sources)
-        required.update(
-            str(entry.final_uri)
-            for entry in identities.entries
-            if entry.disposition is MemoryNodeDisposition.MERGE and entry.final_uri is not None
-        )
-        required.update(str(uri) for operation in operations for uri in (operation.from_uri, operation.to_uri))
+        required = relation_endpoints(identities, operations)
         if not required:
             return MemoryRelationReadSet.build(
                 SnapshotBatch(snapshots=(), total_bytes=0),
@@ -53,14 +38,10 @@ class MemoryRelationReadSetLoader:
 
         endpoints = self.reader.read_many(required)
         self._require_unchanged(known_snapshots, endpoints)
-        for source in structural_sources:
-            snapshot = endpoints.get(source)
-            if snapshot is None or not snapshot.exists:
-                raise MemoryRelationReadConflictError("structural relation source disappeared before planning")
-            if snapshot.value is None:
-                raise MemoryRelationReadConflictError("structural relation source is not a complete memory document")
-            required.update(str(link.to_uri) for link in snapshot.value.links)
-            required.update(str(backlink.from_uri) for backlink in snapshot.value.backlinks)
+        for snapshot in endpoints.snapshots:
+            if snapshot.exists:
+                assert isinstance(snapshot.value, MemoryDocument)
+                required |= one_hop(snapshot.value)
 
         closure = self.reader.read_many(required)
         self._require_unchanged(known_snapshots, closure)

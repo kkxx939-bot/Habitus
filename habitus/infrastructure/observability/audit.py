@@ -43,7 +43,6 @@ class AuditRecord:
     status: str
     request_id: str | None
     memory_sequence: int | None
-    transaction_id: str | None
     attributes: dict[str, str | int | float | bool]
 
 
@@ -79,7 +78,6 @@ class AuditStore:
                       status TEXT NOT NULL,
                       request_id TEXT,
                       memory_sequence INTEGER,
-                      transaction_id TEXT,
                       attributes_json TEXT NOT NULL
                     )
                     """
@@ -98,8 +96,8 @@ class AuditStore:
                 """
                 INSERT INTO audit_events(
                   audit_id, occurred_at, category, operation, status,
-                  request_id, memory_sequence, transaction_id, attributes_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  request_id, memory_sequence, attributes_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     uuid4().hex,
@@ -109,7 +107,6 @@ class AuditStore:
                     event.status.value,
                     event.context.request_id,
                     event.context.memory_sequence,
-                    event.context.transaction_id,
                     json.dumps(attributes, separators=(",", ":"), sort_keys=True),
                 ),
             )
@@ -162,7 +159,6 @@ class AuditStore:
             status=str(row["status"]),
             request_id=None if row["request_id"] is None else str(row["request_id"]),
             memory_sequence=(None if row["memory_sequence"] is None else int(row["memory_sequence"])),
-            transaction_id=(None if row["transaction_id"] is None else str(row["transaction_id"])),
             attributes=attributes,
         )
 

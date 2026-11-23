@@ -18,9 +18,9 @@ from habitus.integrations.http_api import app as app_module
 from habitus.integrations.http_api.handlers import RememberOutcome
 from habitus.integrations.http_api.schemas import (
     AuditListResult,
-    BlockedJobResult,
     CapabilitiesResult,
     ConversationCursorResult,
+    FailedJobsResult,
     FlushResult,
     HealthResult,
     JobListResult,
@@ -53,7 +53,7 @@ class CollectingObserver:
         self.events.append(event)
 
 
-def _job(sequence: int = 7, *, status: str = "failed", blocking: bool = True) -> JobStatusResult:
+def _job(sequence: int = 7, *, status: str = "failed") -> JobStatusResult:
     return JobStatusResult.model_validate(
         {
             "memory_sequence": sequence,
@@ -65,8 +65,7 @@ def _job(sequence: int = 7, *, status: str = "failed", blocking: bool = True) ->
             "attempts": 2,
             "next_attempt_at": None,
             "last_failure": {"message": "model unavailable"} if status == "failed" else None,
-            "blocking": blocking,
-            "manual_action_required": status == "failed" and blocking,
+            "manual_action_required": status == "failed",
             "version": "a" * 64,
             "created_at": "2026-07-30T01:00:00Z",
             "updated_at": "2026-07-30T01:01:00Z",
@@ -75,7 +74,7 @@ def _job(sequence: int = 7, *, status: str = "failed", blocking: bool = True) ->
 
 
 def _accepted_job(conversation_id: str, started_on: date) -> MemoryJob:
-    """路由只从受理的 Job 上取观测关联用的事务身份，内部字段不进响应。"""
+    """路由只从受理的 Job 上取观测关联用的序号，内部字段不进响应。"""
 
     moment = datetime(2026, 7, 30, 1, tzinfo=UTC)
     return MemoryJob(
@@ -84,7 +83,6 @@ def _accepted_job(conversation_id: str, started_on: date) -> MemoryJob:
         started_on=started_on,
         segment_id="internal-segment",
         source_segment_digest="b" * 64,
-        transaction_id="7" * 32,
         status=MemoryJobStatus.QUEUED,
         attempts=0,
         claim_id=None,
@@ -166,9 +164,9 @@ class CapabilityHandlers:
         self.calls.append(("list_jobs", values))
         return JobListResult(jobs=[_job()], next_before_sequence=None)
 
-    async def blocked_job(self) -> BlockedJobResult:
-        self.calls.append(("blocked_job", None))
-        return BlockedJobResult(job=_job())
+    async def failed_jobs(self, *, limit: int = 50) -> FailedJobsResult:
+        self.calls.append(("failed_jobs", limit))
+        return FailedJobsResult(count=1, jobs=[_job()])
 
     async def job_status(self, sequence: int, **values: object) -> JobStatusResult:
         self.calls.append(("job_status", {"sequence": sequence, **values}))
@@ -178,7 +176,7 @@ class CapabilityHandlers:
         self.calls.append(("retry_failed_job", {"sequence": sequence, **values}))
         return RetryJobResult(
             previous=_job(sequence),
-            job=_job(sequence, status="queued", blocking=False),
+            job=_job(sequence, status="queued"),
             worker_restarted=True,
         )
 
@@ -290,7 +288,7 @@ def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeyp
             "/api/v1/memory/jobs",
             params={"conversation_id": "conversation-http", "started_on": "2026-07-30"},
         )
-        blocked = client.get("/api/v1/memory/jobs/blocked")
+        failed = client.get("/api/v1/memory/jobs/failed", params={"limit": 5})
         status = client.get(
             "/api/v1/memory/jobs/7",
             params={"conversation_id": "conversation-http", "started_on": "2026-07-30"},
@@ -298,7 +296,7 @@ def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeyp
 
     assert all(
         response.status_code == 200
-        for response in (capabilities, remembered, cursor, flushed, recalled, jobs, blocked, status)
+        for response in (capabilities, remembered, cursor, flushed, recalled, jobs, failed, status)
     )
     assert capabilities.json()["result"] == {
         "api_version": "1.0",
@@ -320,7 +318,9 @@ def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeyp
     assert flushed.json()["result"] == {"jobs": [], "consistency": []}
     assert recalled.json()["result"]["memories"][0]["uri"].startswith("memory://")
     assert jobs.json()["result"]["jobs"][0]["manual_action_required"] is True
-    assert blocked.json()["result"]["job"]["blocking"] is True
+    assert failed.json()["result"]["count"] == 1
+    assert "blocking" not in failed.json()["result"]["jobs"][0]  # 失败任务不再挡后面，没有"阻塞中"这一说
+    assert ("failed_jobs", 5) in handlers.calls
     assert status.json()["result"]["memory_sequence"] == 7
     remember_call = next(value for name, value in handlers.calls if name == "remember")
     assert isinstance(remember_call, dict)
@@ -331,7 +331,6 @@ def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeyp
     assert any(name == "flush" for name, _value in handlers.calls)
     accepted = next(event for event in observer.events if event.operation == "job_accepted")
     assert accepted.context.memory_sequence == 7
-    assert accepted.context.transaction_id == "7" * 32
     request_events = [event for event in observer.events if event.operation == "request"]
     assert request_events
     assert all(event.attributes["http_route"] != "/__unmatched__" for event in request_events)

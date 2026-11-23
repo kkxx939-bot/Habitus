@@ -159,9 +159,7 @@ def test_memory_workflow_state_is_injected_from_the_configured_workflow_root(tmp
     lifecycle = runtime.components.memory.lifecycle
     sibling = lifecycle.tree.root.parent / "workflow"
     assert config.workflow_root == sibling
-    journal = lifecycle.committer.transaction.journal
-    assert journal.root == sibling / "transactions"
-    assert lifecycle.tree.visibility_journal is journal
+    assert lifecycle.committer.writer is runtime.components.memory.editor.writer
     assert lifecycle.recovery_store.root == sibling / "lifecycle" / "l2_recovery"
     assert lifecycle.operation_store.root == sibling / "lifecycle" / "l2_operations"
     assert lifecycle.scan_store.path == sibling / "lifecycle" / "l2_scan_state.json"
@@ -213,7 +211,6 @@ def test_initialize_is_idempotent_and_creates_only_local_durable_roots(tmp_path:
     second = runtime.initialize()
 
     assert first is second
-    assert first.recovered_transaction_ids == ()
     assert first.memory_root == config.memory_root
     assert runtime.state is RuntimeState.READY
     assert config.memory_root.is_dir()
@@ -1121,3 +1118,32 @@ def test_refreshing_observability_publishes_worker_and_source_gauges_and_a_snaps
         assert {"queue_queued", "queue_high_watermark", "active_locks", "hanging_locks"} <= set(event.attributes)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("old_directory", ["transactions", "receipts"])
+def test_initialize_refuses_an_old_transaction_or_receipt_directory(tmp_path: Path, old_directory: str) -> None:
+    """阶段 3 去掉多文件事务日志与变更回执，不迁移：工作目录里还有旧目录，启动时就明确报错、点出目录。"""
+
+    from habitus.runtime.runtime_lifecycle import WriteLayoutError
+
+    config = runtime_config(tmp_path)
+    runtime = build_runtime(config, providers=runtime_dependencies(), path_lock=PathLock(ProcessLocalLockStore()))
+    (config.workflow_root / old_directory).mkdir(parents=True)
+
+    with pytest.raises(WriteLayoutError, match=old_directory):
+        runtime.initialize()
+
+
+def test_initialize_refuses_an_old_format_job_file(tmp_path: Path) -> None:
+    """旧格式任务文件（memory_job_v4）在启动时就报出看得懂的错。"""
+
+    import json
+
+    config = runtime_config(tmp_path)
+    runtime = build_runtime(config, providers=runtime_dependencies(), path_lock=PathLock(ProcessLocalLockStore()))
+    jobs_root = config.workflow_root / "jobs"
+    jobs_root.mkdir(parents=True)
+    (jobs_root / f"{'a' * 64}.json").write_text(json.dumps({"schema": "memory_job_v4"}), encoding="utf-8")
+
+    with pytest.raises(Exception, match="memory_job_v4.*not migrated"):
+        runtime.initialize()

@@ -55,17 +55,20 @@ def test_a_job_waiting_for_the_model_blocks_writes_but_not_recall(
     assert report.ready is False and report.recall_ready is True
 
 
-def test_a_failed_job_reads_as_failed_and_still_leaves_recall_ready(
+def test_a_failed_job_no_longer_blocks_the_queue_and_is_reported_on_its_own(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # 裁定 111：判了失败的任务是终态，不挡后面；健康面单独报失败条数与最早一条，不影响就绪
     runtime, service = _service(tmp_path, monkeypatch, recall_side=RuntimeHealthStatus.HEALTHY)
     jobs, job = _job(runtime)
     jobs.fail(jobs.claim(job, "worker"), ValueError("bad data"), retryable=False)
 
     report = asyncio.run(service.report("running"))
     queue = next(check for check in report.checks if check.name == "memory_queue")
-    assert queue.detail == "failed:1"
-    assert report.ready is False and report.recall_ready is True
+    failed = next(check for check in report.checks if check.name == "memory_failed_jobs")
+    assert queue.detail == "empty"
+    assert failed.detail.startswith("failed=1;oldest=1:") and failed.critical is False
+    assert report.ready is True and report.recall_ready is True
 
 
 def test_a_recall_side_problem_makes_recall_not_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

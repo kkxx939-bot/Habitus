@@ -15,7 +15,6 @@ from habitus.benchmark.model import BenchmarkDataset, BenchmarkQuestion, Benchma
 from habitus.benchmark.runner import BenchmarkRunError, conversation_batch
 from habitus.config import HabitusConfig
 from habitus.memory.conversation import ConversationAddress
-from habitus.memory.workflow import MemoryJobStatus
 from habitus.pre.conversation import ConversationBatch
 from habitus.runtime import Runtime, build_runtime
 
@@ -128,7 +127,7 @@ class RuntimeLoadBenchmark:
                 "job_drain_latency_ms": drain_latency_ms,
                 "memory_job_high_watermark": jobs,
                 "memory_document_count": len(memories),
-                "blocked_job": _blocked_job(runtime),
+                "failed_job": _failed_job(runtime),
             }
             _write_json(self.output_directory / "summary.json", summary)
             _write_jsonl(self.output_directory / "events.jsonl", events)
@@ -218,13 +217,14 @@ class RuntimeLoadBenchmark:
     async def _wait_for_drain(self, runtime: Runtime) -> None:
         deadline = time.monotonic() + self.drain_timeout_seconds
         while time.monotonic() < deadline:
-            oldest = await asyncio.to_thread(runtime.components.workflow.jobs.oldest_uncommitted)
+            failed = await asyncio.to_thread(runtime.components.workflow.jobs.failed)
+            if failed:
+                raise BenchmarkRunError(
+                    f"runtime load benchmark hit FAILED job {failed[0].memory_sequence}: {failed[0].last_error}"
+                )
+            oldest = await asyncio.to_thread(runtime.components.workflow.jobs.oldest_unfinished)
             if oldest is None and not runtime.components.workflow.worker.busy:
                 return
-            if oldest is not None and oldest.status is MemoryJobStatus.FAILED:
-                raise BenchmarkRunError(
-                    f"runtime load benchmark blocked by FAILED job {oldest.memory_sequence}: {oldest.last_error}"
-                )
             await asyncio.sleep(0.05)
         raise TimeoutError("runtime load benchmark did not drain MemoryJobs before timeout")
 
@@ -262,10 +262,11 @@ def _phase_summary(events: Sequence[Mapping[str, object]], *, wall_latency_ms: f
     }
 
 
-def _blocked_job(runtime: Runtime) -> Mapping[str, object] | None:
-    job = runtime.components.workflow.jobs.oldest_uncommitted()
-    if job is None:
+def _failed_job(runtime: Runtime) -> Mapping[str, object] | None:
+    failed = runtime.components.workflow.jobs.failed()
+    if not failed:
         return None
+    job = failed[0]
     return {
         "memory_sequence": job.memory_sequence,
         "status": job.status.value,

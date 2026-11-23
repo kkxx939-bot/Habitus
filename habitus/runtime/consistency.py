@@ -9,10 +9,6 @@ from enum import Enum
 
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 from habitus.memory.workflow import (
-    MemoryChangeReceipt,
-    MemoryChangeReceiptState,
-    MemoryChangeReceiptStore,
-    MemoryChangeSource,
     MemoryJob,
     MemoryJobAbandonment,
     MemoryJobStatus,
@@ -42,12 +38,11 @@ class MemoryConsistencyTimeoutError(TimeoutError):
 
 @dataclass(frozen=True)
 class MemoryConsistencySnapshot:
-    """一个写入句柄在队列、回执和人工处置记录中的一致快照。"""
+    """一个写入句柄在队列和人工处置记录中的一致快照。"""
 
     state: MemoryConsistencyState
     requested_job: MemoryJob
     current_job: MemoryJob | None
-    receipt: MemoryChangeReceipt | None
     abandonment: MemoryJobAbandonment | None
 
     @property
@@ -67,12 +62,10 @@ class MemoryConsistencyService:
     def __init__(
         self,
         jobs: MemoryJobStore,
-        receipts: MemoryChangeReceiptStore,
         *,
         observer: Observer | None = None,
     ) -> None:
         self.jobs = jobs
-        self.receipts = receipts
         self.observer = observer or NullObserver()
 
     def inspect(self, requested_job: MemoryJob) -> MemoryConsistencySnapshot:
@@ -84,33 +77,25 @@ class MemoryConsistencyService:
             requested_job.segment_id,
             requested_job.source_segment_digest,
         )
-        source = MemoryChangeSource.from_job(requested_job)
-        receipt = self.receipts.try_read(source)
         abandonment = self.jobs.try_read_abandonment(requested_job)
-        receipt_committed = receipt is not None and receipt.state is MemoryChangeReceiptState.COMMITTED
         if current is not None:
             if current.status is MemoryJobStatus.FAILED:
                 state = MemoryConsistencyState.FAILED
             elif current.status is MemoryJobStatus.SKIPPED:
                 state = MemoryConsistencyState.SKIPPED
             elif current.status is MemoryJobStatus.COMMITTED:
-                # Receipt 只证明 L2 事务已提交；Job 终态还要求 Summary、L0/L1 和
-                # 远程向量投影全部完成。两者必须同时成立才能对外宣告最终一致。
-                state = MemoryConsistencyState.COMMITTED if receipt_committed else MemoryConsistencyState.UNKNOWN
+                state = MemoryConsistencyState.COMMITTED
             else:
                 state = MemoryConsistencyState.PENDING
         elif abandonment is not None:
             state = MemoryConsistencyState.ABANDONED
-        elif receipt_committed:
-            # 生命周期可以先清理已完成 Job，而更长期保留审计 Receipt。
-            state = MemoryConsistencyState.COMMITTED
         else:
+            # 任务已过保留期删掉了（裁定 111 去掉回执后不再有更长期的记录），看不出当时的结果
             state = MemoryConsistencyState.UNKNOWN
         return MemoryConsistencySnapshot(
             state=state,
             requested_job=requested_job,
             current_job=current,
-            receipt=receipt,
             abandonment=abandonment,
         )
 

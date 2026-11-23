@@ -1,7 +1,6 @@
 """按 ``memory://`` 地址浏览记忆树的公开只读视图（方案 36 第 2 步 ``habitus memory``）。
 
-对外只用 URI 说位置——与召回命中里给的 ``memory://`` 同一套——不给本机文件路径。读走记忆树自己的公开读取：
-跨正在发布的多文档事务读不到一致视图时报 ``MemoryTreeConsistencyError``（稍后重试即可）。
+对外只用 URI 说位置——与召回命中里给的 ``memory://`` 同一套——不给本机文件路径。读走记忆树自己的公开读取。
 """
 
 from __future__ import annotations

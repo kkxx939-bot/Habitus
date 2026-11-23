@@ -23,7 +23,7 @@ from habitus.memory.compaction import (
     MemoryRecoveryStore,
 )
 from habitus.memory.compaction.scan import MemoryCompactionKeep, MemoryLifecycleScanStateError
-from habitus.memory.editor import MemoryCommitTransaction, MemoryTransactionJournal
+from habitus.memory.editor import MemoryCommitWriter
 from habitus.memory.model import MemoryKind
 from habitus.memory.recall import (
     MemoryRecallLifecycle,
@@ -46,13 +46,7 @@ def manager(tmp_path, responses, *, maintenance_config=None, recall_config=None)
     reader = MemorySnapshotReader(tree)
     path_lock = PathLock(ProcessLocalLockStore())
     workflow_root = tmp_path / "workflow"
-    transaction = MemoryCommitTransaction(
-        tree,
-        reader,
-        path_lock,
-        MemoryTransactionJournal(workflow_root / "transactions", tree.document_codec),
-        clock=lambda: current[0],
-    )
+    writer = MemoryCommitWriter(tree, reader, path_lock, clock=lambda: current[0])
     config = recall_config or MemoryRecallLifecycleConfig(
         preference_half_life_days=1,
         preference_retire_days=30,
@@ -74,7 +68,7 @@ def manager(tmp_path, responses, *, maintenance_config=None, recall_config=None)
         recall,
         MemoryFieldCompactor(structured(provider)),
         MemoryRecoveryStore(tree, workflow_root),
-        MemoryLifecycleCommitter(transaction, reader),
+        MemoryLifecycleCommitter(writer, reader),
         MemoryLifecycleOperationStore(tree, path_lock, workflow_root),
         MemoryLifecycleScanStore(tree, path_lock, workflow_root),
         config=maintenance_config,
@@ -216,7 +210,7 @@ def test_actual_use_does_not_restore_stale_recovery_over_newer_semantic_update(t
     assert refreshed == [(uri,)]
 
 
-def test_retired_marker_retries_transactional_delete_after_interruption(
+def test_retired_marker_retries_delete_after_interruption(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1250,3 +1244,41 @@ def test_scan_state_with_wrongly_typed_fields_is_rejected_when_read_back(
     with pytest.raises(MemoryLifecycleScanStateError, match="failed to read L2 lifecycle scan state") as raised:
         store.initialize()
     assert message in str(raised.value.__cause__)
+
+
+def test_retirement_interrupted_after_neighbour_write_finishes_on_rerun(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """退休一张卡片先清邻居的关联再删它（阶段 3 裁定）；删之前中断，邻居已经写成、卡片还在，留下一条只有一边的关联。
+    再跑一次时这条单边关联被跳过，卡片删掉、邻居上不留悬空关联。"""
+
+    from habitus.memory.document import MemoryDocumentMetadata, MemoryLinkType, MemoryStoredLink
+    from habitus.memory.editor import MemoryCommitError
+
+    value, _recall, _current, _refreshed = manager(tmp_path, [])
+    metadata = MemoryDocumentMetadata(revision=1, created_at=NOW, updated_at=NOW)
+    retired_fields = {"topic": "旧偏好", "content": "- 偏好旧格式"}
+    neighbour_fields = {"topic": "新偏好", "content": "- 偏好新格式"}
+    retired_uri = MemoryURI.from_address(document(MemoryKind.PREFERENCE, fields=retired_fields).address)
+    neighbour_uri = MemoryURI.from_address(document(MemoryKind.PREFERENCE, fields=neighbour_fields).address)
+    link = MemoryStoredLink(from_uri=retired_uri, to_uri=neighbour_uri, link_type=MemoryLinkType.DERIVED_FROM)
+    value.tree.write(codec().build(MemoryKind.PREFERENCE, retired_fields, metadata=metadata, links=(link,)))
+    value.tree.write(codec().build(MemoryKind.PREFERENCE, neighbour_fields, metadata=metadata, backlinks=(link,)))
+
+    original_delete = value.tree.delete
+
+    def interrupted(_address):
+        raise RuntimeError("interrupted before delete")
+
+    monkeypatch.setattr(value.tree, "delete", interrupted)
+    with pytest.raises(MemoryCommitError, match="part-way"):
+        value.committer.delete(value.snapshot_reader.read(retired_uri))
+    assert value.tree.read(neighbour_uri.to_address()).backlinks == ()
+    assert value.tree.read(retired_uri.to_address()).links == (link,)
+
+    monkeypatch.setattr(value.tree, "delete", original_delete)
+    value.committer.delete(value.snapshot_reader.read(retired_uri))
+    assert not value.tree.exists(retired_uri.to_address())
+    neighbour = value.tree.read(neighbour_uri.to_address())
+    assert (neighbour.links, neighbour.backlinks) == ((), ())

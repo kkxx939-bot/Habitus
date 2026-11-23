@@ -212,8 +212,6 @@ memory:
     time_limit_seconds: 12.0
     accounting_reserve_seconds: 1.0
     max_rounds: 2
-    catalog_retries: 3
-    catalog_retry_delay_seconds: 0.2
     max_catalog_chars: 40000
     max_reads_per_round: 8
     max_unlisted_scan: 1000
@@ -286,12 +284,9 @@ memory:
     grader_max_output_tokens: 1000
     candidate_max_output_tokens: 8000
 
+  # 写一批卡片：把要碰的地址（含关联的另一端）排好序一次拿齐锁，锁里核对版本，再逐个文件原子写；没有多文件事务。
   commit:
     lock_ttl_seconds: 30
-
-  transaction_journal:
-    max_record_bytes: 33554432
-    max_records: 1000
 
   # 目录概览按模板拼出，不调模型：每张卡片一行（名字、一小段说明、更新时间、版本）；一个目录超出
   # max_direct_entries 条或 max_overview_chars 字时只列最新的，末尾写明还有多少张没列出。
@@ -302,6 +297,7 @@ memory:
     max_abstract_chars: 800
     lock_ttl_seconds: 120
 
+# 记忆任务按全局序号一个一个做。自动重试（max_attempts 次、退避）期间挡着后面的任务；重试用完判失败，后面照常往下走。
 workflow:
   jobs:
     max_attempts: 5
@@ -316,12 +312,11 @@ workflow:
     lock_ttl_seconds: 30
     lock_wait_timeout_seconds: 5.0
     lock_retry_delay_seconds: 0.01
-  receipts:
-    max_file_bytes: 4194304
-    max_files: 100000
+  # 一段对话的记忆任务到了终态（做成、跳过、判失败）或被人工放弃后，这一段的原文再留 history_retention_days 天就删，
+  # 每段各算各的；任务到终态满 job_retention_days 天、且原文已经删了，就删。人工放弃记录随这一段的原文一起删。原文还在的失败任务不按时间删（人工还能重试）。
   lifecycle:
-    committed_job_retention_days: 30
-    committed_receipt_retention_days: 365
+    history_retention_days: 10
+    job_retention_days: 30
     cleanup_batch_size: 100
   worker:
     poll_interval_seconds: 0.2

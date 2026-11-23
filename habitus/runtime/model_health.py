@@ -3,6 +3,7 @@
 - ``model_chat``：对话能力（唯一的模型能力）的熔断此刻的样子。开着时写打开它的那类错误的那句话、
   多久之后再试一次；"要人处理"的改好配置或额度恢复后，下一次试探成功自己消掉。都是 non-critical：读写各条链自己会等。
 - ``memory_skipped``：长期记忆里输入有问题、跳过了的段（仍在保留期里的）：条数、各类几段、最近一段的那句话。
+- ``memory_failed_jobs``：重试用完判了失败的记忆任务（裁定 111：不再挡后面的任务）：条数与最早一条，等人决定重试还是放弃。
 """
 
 from __future__ import annotations
@@ -18,6 +19,15 @@ from habitus.runtime.health_model import RuntimeHealthCheck, RuntimeHealthStatus
 
 def model_checks(components: RuntimeComponents) -> list[RuntimeHealthCheck]:
     checks = [breaker_check("model_chat", components.models.chat.breaker)]
+    try:
+        failed = components.workflow.jobs.failed()
+    except Exception as exc:  # noqa: BLE001 - 健康检查只报不抛
+        checks.append(RuntimeHealthCheck("memory_failed_jobs", RuntimeHealthStatus.DEGRADED, type(exc).__name__, False))
+    else:
+        components.infrastructure.observability.set_gauge("memory_failed_jobs", len(failed))
+        if failed:
+            detail = f"failed={len(failed)};oldest={failed[0].memory_sequence}:{failed[0].last_error or ''}"
+            checks.append(RuntimeHealthCheck("memory_failed_jobs", RuntimeHealthStatus.DEGRADED, detail[:500], False))
     try:
         skipped = components.workflow.jobs.skipped()
     except Exception as exc:  # noqa: BLE001 - 健康检查只报不抛

@@ -31,7 +31,6 @@ from habitus.integrations.http_api import create_http_app
 from habitus.memory.conversation import ConversationAddress, ConversationWriteConflictError
 from habitus.memory.conversation.summary_reference import ConversationSummaryReference, ConversationSummaryStage
 from habitus.memory.workflow.jobs.store import MemoryJobStore
-from habitus.memory.workflow.receipt.model import MemoryChangeSource
 from habitus.pre.conversation import ConversationBatch
 from habitus.runtime import build_runtime
 from habitus.runtime.session_lane import session_turns
@@ -68,17 +67,6 @@ def _envelope(conversation_id: str, *, start_sequence: int = 0, prompt: str = "�
     )
 
 
-def _change_source(conversation_id: str) -> MemoryChangeSource:
-    return MemoryChangeSource(
-        memory_sequence=1,
-        transaction_id="b" * 32,
-        conversation_id=conversation_id,
-        started_on=DAY,
-        segment_id=SEGMENT,
-        source_segment_digest=DIGEST,
-    )
-
-
 def _keys(conversation_id: str) -> dict[str, object]:
     """一个会话号在各处算出来的身份键。"""
 
@@ -92,7 +80,6 @@ def _keys(conversation_id: str) -> dict[str, object]:
         )[0],
         "source_id": ConversationSourceEnvelope.source_identity(conversation_id, DAY, "c" * 64),
         "job_key": MemoryJobStore._source_key_values(address, SEGMENT, DIGEST),
-        "receipt_id": _change_source(conversation_id).receipt_id,
         "summary_identity": ConversationSummaryReference(address, ConversationSummaryStage.SEGMENT, SEGMENT).identity,
         "summary_scope": ConversationSummaryReference(
             address, ConversationSummaryStage.SEGMENT, SEGMENT
@@ -125,7 +112,6 @@ def test_lowercase_uuid_keys_are_byte_for_byte_what_they_were_before() -> None:
         {"schema": "conversation_source_address_v1", "conversation_id": UUID, "started_on": DAY.isoformat()}
     )[:32]
     assert keys["job_key"] == hashlib.sha256(f"{UUID}\0{DAY.isoformat()}\0{SEGMENT}\0{DIGEST}".encode()).hexdigest()
-    assert keys["receipt_id"] == hashlib.sha256(f"{UUID}\0{DAY.isoformat()}\0{SEGMENT}\0{DIGEST}".encode()).hexdigest()
     assert keys["source_id"] == canonical_digest(
         {
             "schema_version": "conversation_source_identity_v1",
@@ -152,7 +138,6 @@ def test_the_original_conversation_id_is_kept_verbatim_in_records() -> None:
     assert address.to_dict() == {"conversation_id": "Conv-ABC", "started_on": DAY.isoformat()}
     assert SourceAddress.from_dict(address.to_dict()).conversation_id == "Conv-ABC"
     assert _envelope("Conv-ABC").to_dict()["conversation_id"] == "Conv-ABC"
-    assert _change_source("Conv-ABC").to_dict()["conversation_id"] == "Conv-ABC"
     (turn,) = session_turns(_envelope("Conv-ABC"))  # 行为侧的轮记录也保留原文，只有轮的身份按归一身份
     assert (turn.conversation_id, turn.key) == ("Conv-ABC", "conv-abc#0-1")
 

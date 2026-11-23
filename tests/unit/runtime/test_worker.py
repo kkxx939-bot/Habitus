@@ -329,9 +329,8 @@ def failed_job(tmp_path: Path):
     return store.fail(lease, RuntimeError("exhausted"), retryable=False)
 
 
-def loop_worker(error_factory, *, oldest=None) -> MemoryWorker:
+def loop_worker(error_factory) -> MemoryWorker:
     store = LeaseStore()
-    store.oldest_uncommitted = lambda: oldest
     worker = MemoryWorker(
         fake_runner(store, None),
         WorkerConfig(poll_interval_seconds=0.001, heartbeat_interval_seconds=0.5),
@@ -345,13 +344,16 @@ def loop_worker(error_factory, *, oldest=None) -> MemoryWorker:
         if calls == 1:
             raise error_factory()
         worker._stop_requested.set()
+        worker.calls = calls  # type: ignore[attr-defined]
         return MemoryJobRunResult(job=None, commit=None)
 
     worker._run_once = run_once
     return worker
 
 
-def test_background_loop_blocks_on_terminal_execution_failure(tmp_path: Path) -> None:
+def test_background_loop_keeps_going_after_a_job_is_judged_failed(tmp_path: Path) -> None:
+    """（8）判了失败的任务是终态、不挡后面：Worker 记下错误后接着认领下一条，不停下。"""
+
     failed = failed_job(tmp_path)
     worker = loop_worker(
         lambda: MemoryJobExecutionError("failed", job=failed),
@@ -362,8 +364,10 @@ def test_background_loop_blocks_on_terminal_execution_failure(tmp_path: Path) ->
         await worker.wait_stopped()
 
     asyncio.run(scenario())
-    assert worker.state is MemoryWorkerState.BLOCKED
+    assert worker.calls == 2  # type: ignore[attr-defined]
+    assert worker.state is MemoryWorkerState.STOPPED
     assert isinstance(worker.last_error, MemoryJobExecutionError)
+    assert not hasattr(MemoryWorkerState, "BLOCKED")
 
 
 @pytest.mark.parametrize(
@@ -386,22 +390,9 @@ def test_background_loop_retries_transient_job_states(error_factory) -> None:
     assert worker.last_error is None
 
 
-def test_background_loop_blocks_when_queue_head_is_failed(tmp_path: Path) -> None:
-    failed = failed_job(tmp_path)
-    worker = loop_worker(lambda: MemoryJobBlockedError("blocked"), oldest=failed)
-
-    async def scenario() -> None:
-        await worker.start()
-        await worker.wait_stopped()
-
-    asyncio.run(scenario())
-    assert worker.state is MemoryWorkerState.BLOCKED
-    assert isinstance(worker.last_error, MemoryJobBlockedError)
-
-
 def test_background_loop_retries_nonterminal_queue_block() -> None:
     async def scenario() -> MemoryWorker:
-        worker = loop_worker(lambda: MemoryJobBlockedError("held"), oldest=None)
+        worker = loop_worker(lambda: MemoryJobBlockedError("held"))
         await worker.start()
         await worker.wait_stopped()
         return worker

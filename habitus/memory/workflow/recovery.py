@@ -5,12 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
-from habitus.memory.editor.transaction import MemoryCommitTransaction
-from habitus.memory.editor.transaction_log import (
-    MemoryTransactionJournalError,
-    MemoryTransactionJournalRecord,
-    MemoryTransactionJournalState,
-)
 from habitus.memory.workflow.jobs import (
     MemoryJob,
     MemoryJobError,
@@ -18,11 +12,6 @@ from habitus.memory.workflow.jobs import (
     MemoryJobNotReadyError,
     MemoryJobStatus,
     MemoryJobStore,
-)
-from habitus.memory.workflow.receipt import (
-    MemoryChangeReceiptState,
-    MemoryChangeReceiptStore,
-    MemoryChangeSource,
 )
 from habitus.pre.conversation import ConversationSegment
 
@@ -80,69 +69,4 @@ class MemoryStagedJobRecovery:
             ) from exc
 
 
-class MemoryJobTransactionRecovery:
-    """恢复事务日志并清理尚未进入正常执行的 Receipt 状态。"""
-
-    def __init__(
-        self,
-        transaction: MemoryCommitTransaction,
-        change_receipts: MemoryChangeReceiptStore,
-    ) -> None:
-        if change_receipts.codec is not transaction.tree.document_codec:
-            raise ValueError("transaction recovery requires one shared document codec")
-        self.transaction = transaction
-        self.change_receipts = change_receipts
-
-    def recover_pending(self) -> tuple[str, ...]:
-        """恢复所有 PREPARED 事务，同时保留终态日志供 Job 完成后续步骤。"""
-
-        return self.transaction.recover_pending(discard_terminal=False)
-
-    def inspect(self, job: MemoryJob) -> MemoryTransactionJournalRecord | None:
-        """返回可继续补完的 COMMITTED 日志；其他可恢复状态清理后返回 None。"""
-
-        source = MemoryChangeSource.from_job(job)
-        journal = self.transaction.journal.try_read(job.transaction_id)
-        if journal is not None and journal.state is MemoryTransactionJournalState.COMMITTED:
-            return journal
-        if journal is not None and journal.state is MemoryTransactionJournalState.ROLLED_BACK:
-            self.change_receipts.discard_prepared(source)
-            self.transaction.journal.discard_terminal(job.transaction_id)
-        elif journal is None:
-            current_receipt = self.change_receipts.try_read(source)
-            if current_receipt is not None:
-                if current_receipt.state is MemoryChangeReceiptState.COMMITTED:
-                    raise MemoryJobError("committed change receipt exists without its recoverable transaction journal")
-                self.change_receipts.discard_prepared(source)
-        return None
-
-    def discard_uncommitted(self, source: MemoryChangeSource) -> None:
-        """正常执行失败后只清理确定不会提交的准备态回执。
-
-        COMMITTED 日志与 PREPARED 日志都保留回执：PREPARED 表示 L2 是否已写完尚未确定，
-        下一次执行先由 `recover_pending` 判定，提交了就靠这份回执补完，回滚了再由 `inspect` 清理。
-        """
-
-        journal = self.transaction.journal.try_read(source.transaction_id)
-        if journal is not None and journal.state in {
-            MemoryTransactionJournalState.COMMITTED,
-            MemoryTransactionJournalState.PREPARED,
-        }:
-            return
-        current = self.change_receipts.try_read(source)
-        if current is not None and current.state is MemoryChangeReceiptState.PREPARED:
-            self.change_receipts.discard_prepared(source)
-        if journal is not None and journal.state is MemoryTransactionJournalState.ROLLED_BACK:
-            self.transaction.journal.discard_terminal(source.transaction_id)
-
-    def discard_terminal(self, transaction_id: str) -> bool:
-        """尽力清理已经完成的事务日志，并报告是否成功。"""
-
-        try:
-            self.transaction.journal.discard_terminal(transaction_id)
-        except MemoryTransactionJournalError:
-            return False
-        return True
-
-
-__all__ = ["MemoryJobTransactionRecovery", "MemoryStagedJobRecovery", "staged_job_segment"]
+__all__ = ["MemoryStagedJobRecovery", "staged_job_segment"]

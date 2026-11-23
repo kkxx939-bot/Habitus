@@ -28,12 +28,11 @@ class ObservationContext:
 
     request_id: str | None = None
     memory_sequence: int | None = None
-    transaction_id: str | None = None
     worker_id: str | None = None
     attempt: int | None = None
 
     def __post_init__(self) -> None:
-        for name in ("request_id", "transaction_id", "worker_id"):
+        for name in ("request_id", "worker_id"):
             value = getattr(self, name)
             if value is not None and _IDENTITY.fullmatch(value) is None:
                 raise ValueError(f"{name} must be a bounded normalized identity or None")
@@ -60,7 +59,6 @@ def bind_observation_context(
     *,
     request_id: str | None = None,
     memory_sequence: int | None = None,
-    transaction_id: str | None = None,
     worker_id: str | None = None,
     attempt: int | None = None,
 ) -> Iterator[ObservationContext]:
@@ -71,7 +69,6 @@ def bind_observation_context(
         current,
         request_id=current.request_id if request_id is None else request_id,
         memory_sequence=(current.memory_sequence if memory_sequence is None else memory_sequence),
-        transaction_id=(current.transaction_id if transaction_id is None else transaction_id),
         worker_id=current.worker_id if worker_id is None else worker_id,
         attempt=current.attempt if attempt is None else attempt,
     )

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Protocol, TypeVar, cast
 
 from habitus.foundation.ids import canonical_path_identity
 from habitus.infrastructure.store.filesystem import (
@@ -36,21 +35,6 @@ class MemoryTreeIntegrityError(ValueError):
     """记忆树包含路径逃逸、符号链接或不符合目录结构的条目。"""
 
 
-class MemoryTreeConsistencyError(RuntimeError):
-    """公开读取无法跨越正在发布的多文档事务形成一致视图。"""
-
-
-_VisibleValue = TypeVar("_VisibleValue")
-
-
-class _VisibilityJournal(Protocol):
-    root: Path
-
-    def visibility_generation(self) -> int: ...
-
-    def pending(self) -> tuple[object, ...]: ...
-
-
 class MemoryTree:
     """安全持久化结构化 L2 文档和可重建的目录语义层。"""
 
@@ -75,7 +59,6 @@ class MemoryTree:
         self._document_codec = document_codec
         self.document_config = document_config or MemoryDocumentConfig()
         self.tree_config = tree_config or MemoryTreeConfig()
-        self._visibility_journal: _VisibilityJournal | None = None
 
     @property
     def document_codec(self) -> MemoryDocumentCodec:
@@ -83,29 +66,8 @@ class MemoryTree:
 
         return self._document_codec
 
-    @property
-    def visibility_journal(self) -> _VisibilityJournal | None:
-        """返回由事务层绑定的可见性日志，不赋予物理存储提交职责；未绑定时为 ``None``，公开读取不跨事务核对。"""
-
-        return self._visibility_journal
-
-    def bind_visibility_journal(self, journal: object) -> None:
-        """让同一 ``MemoryTree`` 上后来创建的公开 Reader 共享提交边界。"""
-
-        root = getattr(journal, "root", None)
-        if (
-            not isinstance(root, Path)
-            or not callable(getattr(journal, "visibility_generation", None))
-            or not callable(getattr(journal, "pending", None))
-        ):
-            raise TypeError("journal must implement the memory visibility journal contract")
-        current_root = getattr(self._visibility_journal, "root", None)
-        if current_root is not None and current_root != root:
-            raise ValueError("memory tree is already bound to another visibility journal")
-        self._visibility_journal = cast(_VisibilityJournal, journal)
-
     def require_outside(self, path: str | Path) -> Path:
-        """把树外工作目录（事务日志、生命周期状态）规范成绝对路径；落在 L2 记忆树内的位置一律拒绝。"""
+        """把树外工作目录（任务、生命周期状态）规范成绝对路径；落在 L2 记忆树内的位置一律拒绝。"""
 
         resolved = Path(path).expanduser().resolve(strict=False)
         if resolved.is_relative_to(self.root):
@@ -242,7 +204,7 @@ class MemoryTree:
         if not abstract.strip() or not overview.strip():
             raise ValueError("memory semantic layers must be non-empty")
         directory_path = self._existing_directory_path(directory)
-        if not self._directory_exists_physical(directory):
+        if not self.directory_exists(directory):
             raise MemoryTreeIntegrityError("memory path is not a safe directory")
         overview_path = directory_path / MemoryLevel.OVERVIEW.sidecar_filename
         abstract_path = directory_path / MemoryLevel.ABSTRACT.sidecar_filename
@@ -253,21 +215,14 @@ class MemoryTree:
     def read(self, address: MemoryAddress) -> MemoryDocument:
         """读取并完整验证一个结构化 L2 文档。"""
 
-        return self._read_visible(lambda: self._read_physical(address))
-
-    def _read_physical(self, address: MemoryAddress) -> MemoryDocument:
-        """仅供持有事务 fencing 租约的提交和恢复流程读取物理状态。"""
-
         return self._read_document(address)
 
     def read_layer(self, directory: MemoryDirectory, level: MemoryLevel) -> str:
         """读取目录 L0 或 L1 的 UTF-8 Markdown 原文。"""
 
-        return self._read_visible(
-            lambda: self._read_utf8(
-                self._existing_layer_path(directory, level),
-                label="memory semantic layer",
-            )
+        return self._read_utf8(
+            self._existing_layer_path(directory, level),
+            label="memory semantic layer",
         )
 
     def read_layer_bounded(
@@ -281,18 +236,13 @@ class MemoryTree:
 
         if max_bytes <= 0:
             raise ValueError("max_bytes must be a positive integer")
-        return self._read_visible(
-            lambda: self._read_utf8(
-                self._existing_layer_path(directory, level),
-                label="memory semantic layer",
-                max_bytes=max_bytes,
-            )
+        return self._read_utf8(
+            self._existing_layer_path(directory, level),
+            label="memory semantic layer",
+            max_bytes=max_bytes,
         )
 
     def exists(self, address: MemoryAddress) -> bool:
-        return self._read_visible(lambda: self._exists_physical(address))
-
-    def _exists_physical(self, address: MemoryAddress) -> bool:
         try:
             return regular_file_exists(
                 self._existing_document_path(address),
@@ -302,9 +252,6 @@ class MemoryTree:
             raise MemoryTreeIntegrityError("memory file cannot be inspected safely") from exc
 
     def layer_exists(self, directory: MemoryDirectory, level: MemoryLevel) -> bool:
-        return self._read_visible(lambda: self._layer_exists_physical(directory, level))
-
-    def _layer_exists_physical(self, directory: MemoryDirectory, level: MemoryLevel) -> bool:
         try:
             return regular_file_exists(
                 self._existing_layer_path(directory, level),
@@ -314,9 +261,6 @@ class MemoryTree:
             raise MemoryTreeIntegrityError("memory semantic layer cannot be inspected safely") from exc
 
     def directory_exists(self, directory: MemoryDirectory) -> bool:
-        return self._read_visible(lambda: self._directory_exists_physical(directory))
-
-    def _directory_exists_physical(self, directory: MemoryDirectory) -> bool:
         try:
             return real_directory_exists(
                 self._existing_directory_path(directory),
@@ -361,18 +305,9 @@ class MemoryTree:
     ) -> tuple[MemoryAddress, ...]:
         """有界枚举目录中直接存在的 L2 地址，不递归进入子目录。"""
 
-        return self._read_visible(lambda: self._direct_addresses_physical(directory, limit=limit))
-
-    def _direct_addresses_physical(
-        self,
-        directory: MemoryDirectory,
-        *,
-        limit: int,
-    ) -> tuple[MemoryAddress, ...]:
-
         maximum = self._directory_limit(limit)
         path = self._existing_directory_path(directory)
-        if not self._directory_exists_physical(directory):
+        if not self.directory_exists(directory):
             return ()
         parts = directory.parts
         addresses: tuple[MemoryAddress, ...]
@@ -410,18 +345,9 @@ class MemoryTree:
     ) -> tuple[MemoryDirectory, ...]:
         """有界枚举目录的直接子目录，不读取更深层内容。"""
 
-        return self._read_visible(lambda: self._child_directories_physical(directory, limit=limit))
-
-    def _child_directories_physical(
-        self,
-        directory: MemoryDirectory,
-        *,
-        limit: int,
-    ) -> tuple[MemoryDirectory, ...]:
-
         maximum = self._directory_limit(limit)
         path = self._existing_directory_path(directory)
-        if not self._directory_exists_physical(directory):
+        if not self.directory_exists(directory):
             return ()
         parts = directory.parts
         if not parts:
@@ -432,7 +358,7 @@ class MemoryTree:
             if any(child.is_dir() for child in self._content_children(path)):
                 raise MemoryTreeIntegrityError("memory leaf directory cannot contain subdirectories")
             children = ()
-        existing = tuple(child for child in children if self._directory_exists_physical(child))
+        existing = tuple(child for child in children if self.directory_exists(child))
         if len(existing) > maximum:
             raise MemoryTreeIntegrityError("memory directory exceeded its child directory bound")
         return existing
@@ -446,16 +372,6 @@ class MemoryTree:
     ) -> tuple[MemoryAddress, ...]:
         """按固定类型顺序和路径字典序，从可选游标之后有界枚举。"""
 
-        return self._read_visible(lambda: self._list_addresses_physical(kind, limit=limit, after=after))
-
-    def _list_addresses_physical(
-        self,
-        kind: MemoryKind | None,
-        *,
-        limit: int,
-        after: MemoryAddress | None,
-    ) -> tuple[MemoryAddress, ...]:
-
         if limit <= 0 or limit > 10_000:
             raise ValueError("memory tree list limit must be between 1 and 10000")
         selected_kind = None if kind is None else MemoryKind(kind)
@@ -463,7 +379,7 @@ class MemoryTree:
             raise ValueError("memory tree list cursor kind does not match the selected kind")
         after_key = None if after is None else self._address_order_key(after)
         maximum = limit
-        if not self._directory_exists_physical(MemoryDirectory.root()):
+        if not self.directory_exists(MemoryDirectory.root()):
             return ()
         kinds = (selected_kind,) if selected_kind is not None else tuple(MemoryKind)
         result: list[MemoryAddress] = []
@@ -608,22 +524,6 @@ class MemoryTree:
         except (MemoryDocumentIntegrityError, MemoryDocumentLimitError) as exc:
             raise MemoryTreeIntegrityError("memory L2 document failed integrity validation") from exc
 
-    def _read_visible(self, load: Callable[[], _VisibleValue]) -> _VisibleValue:
-        journal = self.visibility_journal
-        if journal is None:
-            return load()
-        for _attempt in range(16):
-            generation_before = journal.visibility_generation()
-            pending_before = journal.pending()
-            if pending_before:
-                raise MemoryTreeConsistencyError("memory tree has a prepared multi-document transaction")
-            value = load()
-            pending_after = journal.pending()
-            generation_after = journal.visibility_generation()
-            if generation_before == generation_after and pending_before == pending_after and not pending_after:
-                return value
-        raise MemoryTreeConsistencyError("memory transactions changed continuously during a public tree read")
-
     def _atomic_write(self, path: Path, payload: bytes) -> None:
         try:
             atomic_replace_bytes(path, payload, artifact_root=self.root)
@@ -664,4 +564,4 @@ class MemoryTree:
         return limit
 
 
-__all__ = ["MemoryTree", "MemoryTreeConsistencyError", "MemoryTreeIntegrityError"]
+__all__ = ["MemoryTree", "MemoryTreeIntegrityError"]

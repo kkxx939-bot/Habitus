@@ -82,7 +82,7 @@ class Tracer:
 
 
 def _event() -> ObservationEvent:
-    with bind_observation_context(request_id="otel-request", memory_sequence=3, transaction_id="otel-tx"):
+    with bind_observation_context(request_id="otel-request", memory_sequence=3):
         return ObservationEvent(
             category="http",
             operation="request",

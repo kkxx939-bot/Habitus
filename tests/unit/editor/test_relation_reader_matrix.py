@@ -14,6 +14,7 @@ from habitus.memory.editor import (
     MemoryNodeDisposition,
     MemoryRelationAction,
     MemoryRelationIntegrityError,
+    MemoryRelationPlanner,
     MemoryRelationReadConflictError,
     MemoryRelationReadSetLoader,
     MemoryResolvedRelation,
@@ -177,7 +178,8 @@ def test_structural_source_disappearance_is_reported_before_planning(tmp_path: P
     _tree, snapshot_reader = reader(tmp_path)
     known = snapshot_reader.read_many((source_uri,))
 
-    with pytest.raises(MemoryRelationReadConflictError, match="source disappeared"):
+    # 要删的旧节点在规划前就不见了：照样明确失败，不静默当成没有关联
+    with pytest.raises(MemoryRelationIntegrityError, match="does not exist"):
         MemoryRelationReadSetLoader(snapshot_reader).load(known, identities, ())
 
 
@@ -198,7 +200,10 @@ def test_known_revision_change_is_reported_before_relation_planning(tmp_path: Pa
         MemoryRelationReadSetLoader(snapshot_reader).load(known, identities, ())
 
 
-def test_inconsistent_one_hop_pair_is_rejected_after_complete_closure_read(tmp_path: Path) -> None:
+def test_a_one_sided_pair_on_a_deleted_node_is_planned_without_failing(tmp_path: Path) -> None:
+    """关联两边分开写、不保证一致（阶段 3）：要删的节点对邻居只有正向、邻居没记反向，读集照常建、规划照常做，
+    邻居身上没有要清的东西就不写它。"""
+
     source, target, _relation = linked_documents(backlink=False)
     source_uri = MemoryURI.from_address(source.address)
     target_uri = MemoryURI.from_address(target.address)
@@ -210,12 +215,15 @@ def test_inconsistent_one_hop_pair_is_rejected_after_complete_closure_read(tmp_p
     )
     _tree, snapshot_reader = reader(tmp_path, source, target)
 
-    with pytest.raises(MemoryRelationIntegrityError, match="backlink"):
-        MemoryRelationReadSetLoader(snapshot_reader).load(
-            snapshot_reader.read_many((source_uri,)),
-            identities,
-            (),
-        )
+    read_set = MemoryRelationReadSetLoader(snapshot_reader).load(
+        snapshot_reader.read_many((source_uri,)),
+        identities,
+        (),
+    )
+    plan = MemoryRelationPlanner().plan(identities, (), read_set)
+
+    assert read_set.snapshots.get(str(target_uri)) is not None
+    assert plan.update_for(target_uri) is None
 
 
 @pytest.mark.parametrize(

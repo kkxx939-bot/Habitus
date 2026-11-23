@@ -1,4 +1,4 @@
-"""Conversation 解析到统一记忆事务的领域编排入口。"""
+"""Conversation 解析到记忆写入的领域编排入口。"""
 
 from __future__ import annotations
 
@@ -6,17 +6,17 @@ from dataclasses import dataclass
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
 from habitus.memory.document import MemoryDocument
+from habitus.memory.editor.commit import (
+    MemoryCommitPlan,
+    MemoryCommitResult,
+    MemoryCommitWriter,
+)
 from habitus.memory.editor.extraction import MemoryExtractionLoop, MemoryExtractionResult, MemoryTurnContext
 from habitus.memory.editor.identity import MemoryFinalIdentityMap, MemoryIdentityPlanner
 from habitus.memory.editor.link_plan import MemoryRelationPlan, MemoryRelationReadSet
 from habitus.memory.editor.mutation import MemoryMutationPlan, MemoryMutationReadSet
 from habitus.memory.editor.relation_reader import MemoryRelationReadSetLoader
 from habitus.memory.editor.relationship import MemoryRelationshipEditor
-from habitus.memory.editor.transaction import (
-    MemoryCommitPlan,
-    MemoryCommitResult,
-    MemoryCommitTransaction,
-)
 from habitus.pre.conversation import ConversationSegment
 
 
@@ -71,20 +71,20 @@ class MemoryEditorPlan:
 
 
 class MemoryEditor:
-    """严格串联提取、字段规划、最终身份、关系规划和统一提交。"""
+    """严格串联提取、字段规划、最终身份、关系规划和写入。"""
 
     def __init__(
         self,
         *,
         extraction_loop: MemoryExtractionLoop,
         identity_planner: MemoryIdentityPlanner,
-        transaction: MemoryCommitTransaction,
+        writer: MemoryCommitWriter,
         relation_reader: MemoryRelationReadSetLoader | None = None,
         relationship_editor: MemoryRelationshipEditor | None = None,
     ) -> None:
         self.extraction_loop = extraction_loop
         self.identity_planner = identity_planner
-        self.transaction = transaction
+        self.writer = writer
         self.relation_reader = relation_reader or MemoryRelationReadSetLoader(extraction_loop.mutation_reader.reader)
         self.relationship_editor = relationship_editor or MemoryRelationshipEditor()
 
@@ -130,36 +130,15 @@ class MemoryEditor:
             commit=commit,
         )
 
-    async def edit(
-        self,
-        segment: ConversationSegment,
-        *,
-        transaction_id: str | None = None,
-        retain_transaction_journal: bool = False,
-    ) -> MemoryCommitResult:
-        """先完成全部语义规划，再由唯一事务发布。"""
+    async def edit(self, segment: ConversationSegment) -> MemoryCommitResult:
+        """先完成全部语义规划，再逐个写进记忆树。"""
 
-        plan = await self.plan(segment)
-        return self.commit(
-            plan,
-            transaction_id=transaction_id,
-            retain_transaction_journal=retain_transaction_journal,
-        )
+        return self.commit(await self.plan(segment))
 
-    def commit(
-        self,
-        plan: MemoryEditorPlan,
-        *,
-        transaction_id: str | None = None,
-        retain_transaction_journal: bool = False,
-    ) -> MemoryCommitResult:
-        """发布已经完成语义提取和关系规划的统一计划。"""
+    def commit(self, plan: MemoryEditorPlan) -> MemoryCommitResult:
+        """写入已经完成语义提取和关系规划的统一计划。"""
 
-        return self.transaction.commit(
-            plan.commit,
-            transaction_id=transaction_id,
-            retain_journal=retain_transaction_journal,
-        )
+        return self.writer.commit(plan.commit)
 
     @staticmethod
     def _merge_snapshots(

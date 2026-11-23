@@ -17,12 +17,10 @@ from habitus.memory.conversation import (
     ConversationSummaryStore,
     summary_reference,
 )
-from habitus.memory.editor import MemoryTransactionJournal
 from habitus.memory.workflow.archive_retirement import ArchiveRetirementOutcome, ConversationArchiveRetirementRunner
-from habitus.memory.workflow.committed_cleanup import CommittedWorkflowCleanup
 from habitus.memory.workflow.jobs import MemoryJobStore
 from habitus.memory.workflow.lifecycle_errors import ConversationLifecycleError
-from habitus.memory.workflow.receipt import MemoryChangeReceiptStore
+from habitus.memory.workflow.retention import MemoryWorkflowRetention
 from habitus.pre.conversation import (
     ConversationRangeSummary,
     ConversationRangeSummaryStage,
@@ -33,27 +31,22 @@ from habitus.pre.conversation import (
 
 @dataclass(frozen=True)
 class MemoryWorkflowLifecycleConfig:
-    """终态 Job、回执与一次维护操作的明确生命周期边界。"""
+    """History 原文、终态 Job 与一次维护操作的生命周期边界（裁定 111）。"""
 
-    committed_job_retention_days: int = 30
-    committed_receipt_retention_days: int = 365
+    #: 一段的记忆任务到终态（做成、跳过、判失败）或被人工放弃后，原文再留多少天
+    history_retention_days: int = 10
+    #: 任务到终态满多少天（且原文已经释放）就删
+    job_retention_days: int = 30
     cleanup_batch_size: int = 100
 
     def __post_init__(self) -> None:
         for name, value, minimum, maximum in (
-            ("committed_job_retention_days", self.committed_job_retention_days, 0, 3_650),
-            (
-                "committed_receipt_retention_days",
-                self.committed_receipt_retention_days,
-                1,
-                36_500,
-            ),
+            ("history_retention_days", self.history_retention_days, 0, 3_650),
+            ("job_retention_days", self.job_retention_days, 0, 3_650),
             ("cleanup_batch_size", self.cleanup_batch_size, 1, 10_000),
         ):
             if not minimum <= value <= maximum:
                 raise ValueError(f"workflow lifecycle {name} must be between {minimum} and {maximum}")
-        if self.committed_receipt_retention_days < self.committed_job_retention_days:
-            raise ValueError("committed receipt retention cannot be shorter than committed job retention")
 
 
 @dataclass(frozen=True)
@@ -61,22 +54,18 @@ class ConversationLifecycleMaintenanceResult:
     """一次显式维护的压缩结果与各层实际物理清理结果。"""
 
     compaction: ConversationSummaryCompactionResult
-    purged_history_segment_ids: tuple[str, ...]
     released_history_segment_ids: tuple[str, ...]
     deleted_segment_summary_ids: tuple[str, ...]
     deleted_range_summary_ids: tuple[str, ...]
     deleted_archive_summary_ids: tuple[str, ...]
     deleted_memory_job_sequences: tuple[int, ...]
-    deleted_memory_receipt_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
         for name in (
-            "purged_history_segment_ids",
             "released_history_segment_ids",
             "deleted_segment_summary_ids",
             "deleted_range_summary_ids",
             "deleted_archive_summary_ids",
-            "deleted_memory_receipt_ids",
         ):
             values = getattr(self, name)
             if any(not value for value in values):
@@ -86,7 +75,7 @@ class ConversationLifecycleMaintenanceResult:
 
 
 class ConversationLifecycleManager:
-    """生成不可变父摘要；来源链只在 Archive 终态退休时统一清理。"""
+    """按段到期释放原文、生成不可变父摘要；摘要来源链只在 Archive 终态退休时统一清理。"""
 
     def __init__(
         self,
@@ -95,8 +84,6 @@ class ConversationLifecycleManager:
         segment_store: ConversationSummaryStore,
         range_store: ConversationRangeSummaryStore,
         jobs: MemoryJobStore,
-        receipts: MemoryChangeReceiptStore,
-        transaction_journal: MemoryTransactionJournal,
         retirement_store: ConversationSummaryRetirementStore,
         *,
         summary_config: ConversationSummaryCompactionConfig | None = None,
@@ -108,8 +95,6 @@ class ConversationLifecycleManager:
             and compactor.range_store is range_store
         ):
             raise ValueError("lifecycle manager must reuse the compactor Conversation stores")
-        if receipts.codec is not transaction_journal.codec:
-            raise ValueError("lifecycle receipts and transaction journal must share one codec")
         resolved_summary_config = compactor.config if summary_config is None else summary_config
         if resolved_summary_config != compactor.config:
             raise ValueError("lifecycle manager and compactor must share one lifecycle config")
@@ -118,26 +103,16 @@ class ConversationLifecycleManager:
         self.segment_store = segment_store
         self.range_store = range_store
         self.jobs = jobs
-        self.receipts = receipts
-        self.transaction_journal = transaction_journal
         self.retirement_store = retirement_store
         self.summary_config = resolved_summary_config
         self.workflow_config = workflow_config or MemoryWorkflowLifecycleConfig()
-        self.committed_cleanup = CommittedWorkflowCleanup(
-            journal,
-            jobs,
-            receipts,
-            transaction_journal,
-            self.workflow_config,
-        )
+        self.retention = MemoryWorkflowRetention(journal, jobs, self.workflow_config)
         self.archive_retirement = ConversationArchiveRetirementRunner(
             compactor,
             journal,
             segment_store,
             range_store,
             retirement_store,
-            self.committed_cleanup,
-            cleanup_batch_size=resolved_summary_config.cleanup_batch_size,
         )
 
     async def maintain_once(
@@ -146,9 +121,10 @@ class ConversationLifecycleManager:
         *,
         now: datetime | None = None,
     ) -> ConversationLifecycleMaintenanceResult:
-        """每次至多生成一个父摘要；普通阶段不做不可逆来源清理。"""
+        """先释放到期的原文，再至多生成一个父摘要，最后续跑 Archive 退休与删过期任务。"""
 
         current_time = _utc_datetime(now or datetime.now(UTC))
+        released = self.retention.release_expired_history(address, current_time)
         pending_retirement = self.retirement_store.for_address(address)
         if len(pending_retirement) > 1:
             raise ConversationLifecycleError("one Conversation has multiple retiring Archives")
@@ -160,20 +136,15 @@ class ConversationLifecycleManager:
             )
         else:
             compaction = await self.compactor.compact_once(address, now=current_time)
-        purged, released, deleted_segments, deleted_ranges, deleted_archives = await self._retire_archive_chain(
-            address, current_time
-        )
-        deleted_jobs = self.committed_cleanup.delete_expired_jobs(address, current_time)
-        deleted_receipts = self.committed_cleanup.delete_expired_receipts(address, current_time)
+        deleted_segments, deleted_ranges, deleted_archives = await self._retire_archive_chain(address, current_time)
+        deleted_jobs = self.retention.delete_expired_jobs(address, current_time)
         return ConversationLifecycleMaintenanceResult(
             compaction=compaction,
-            purged_history_segment_ids=purged,
             released_history_segment_ids=released,
             deleted_segment_summary_ids=deleted_segments,
             deleted_range_summary_ids=deleted_ranges,
             deleted_archive_summary_ids=deleted_archives,
             deleted_memory_job_sequences=deleted_jobs,
-            deleted_memory_receipt_ids=deleted_receipts,
         )
 
     async def _retire_archive_chain(
@@ -181,7 +152,7 @@ class ConversationLifecycleManager:
         address: ConversationAddress,
         now: datetime,
     ) -> ArchiveRetirementOutcome:
-        """Archive 只在长期未用且宽限期结束后，按原文前缀分批执行终态删除。"""
+        """Archive 只在长期未用且宽限期结束后执行终态删除；覆盖范围内的原文要已经全部释放。"""
 
         pending = self.retirement_store.for_address(address)
         if len(pending) > 1:
@@ -196,14 +167,12 @@ class ConversationLifecycleManager:
             "delete_coverage",
         )
         if use_store is None or any(not callable(getattr(use_store, name, None)) for name in required):
-            return (), (), (), (), ()
+            return (), (), ()
         archives = self.range_store.list(address, ConversationRangeSummaryStage.ARCHIVE)
-        state = self.journal.read_state(address)
+        retained = self.journal.retained_history_ranges(address)
         for archive in archives:
-            if archive.end_sequence <= state.released_through:
-                pass
-            elif archive.start_sequence != state.released_through + 1:
-                continue
+            if any(start <= archive.end_sequence and archive.start_sequence <= end for start, end in retained):
+                continue  # 覆盖范围里还有没到期的原文：先不退休，免得认领后卡住这个会话的压缩
             reference = summary_reference(address, archive)
             states = use_store.read_many((reference,))
             use_state = states[0] if states else None
@@ -214,7 +183,7 @@ class ConversationLifecycleManager:
             candidate_at = None if use_state is None else use_state.retire_candidate_at
             if candidate_at is None:
                 use_store.mark_retire_candidate(reference, marked_at=now)
-                return (), (), (), (), ()
+                return (), (), ()
             if now - candidate_at < timedelta(days=self.summary_config.archive_retire_grace_days):
                 continue
 
@@ -229,7 +198,7 @@ class ConversationLifecycleManager:
                 prepared_at=now,
             )
             return await self.archive_retirement.resume(manifest, now)
-        return (), (), (), (), ()
+        return (), (), ()
 
     def _archive_sources(
         self,

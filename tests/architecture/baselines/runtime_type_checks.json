@@ -29,7 +29,6 @@
   "habitus/memory/editor/extraction/model.py": 2,
   "habitus/memory/editor/mutation/model.py": 1,
   "habitus/memory/editor/page_id.py": 1,
-  "habitus/memory/editor/transaction.py": 2,
   "habitus/memory/workflow/jobs/model.py": 3,
   "habitus/memory/workflow/planning.py": 2,
   "habitus/model_client/adapters/__init__.py": 1,

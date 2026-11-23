@@ -21,7 +21,6 @@ from habitus.memory.conversation import (
     ConversationSealStatus,
     ConversationWriteConflictError,
 )
-from habitus.memory.conversation import messages as conversation_messages
 from habitus.pre.conversation import ConversationBatch
 from tests.helpers import closed_turn
 from tests.lock_store import ProcessLocalLockStore
@@ -114,7 +113,7 @@ def test_delivery_id_survives_history_release_and_rejects_rebinding(tmp_path: Pa
     ingress = ConversationIngressRequest("c" * 64, "d" * 64)
     store.append(address(), batch, ingress=ingress)
     archived = store.seal(address(), through_sequence=1).segment
-    store.release_history_prefix(address(), (archived,))
+    assert store.release_history(address(), archived.segment_id, archived.digest)
 
     replay = store.append(address(), batch, ingress=ingress)
     assert replay.status is ConversationAppendStatus.UNCHANGED
@@ -161,7 +160,6 @@ def test_ingress_receipt_read_rejects_wrongly_typed_fields(
     [
         ("conversation_id", 1, "journal state conversation_id must be non-empty text"),
         ("archived_through_sequence", "1", "journal state archived_through_sequence must be null or non-negative"),
-        ("released_through_sequence", False, "journal state released_through_sequence must be null or non-negative"),
         ("latest_segment_id", 3, "journal state requires latest_segment_id"),
         ("latest_segment_digest", ["a"], "journal state latest_segment_digest must be lowercase SHA-256"),
     ],
@@ -216,7 +214,8 @@ def test_outbox_callback_runs_before_history_publish_and_failure_leaves_live_int
     assert store.read_live(address()) == batch
 
 
-def test_history_release_requires_oldest_prefix_and_preserves_high_watermark_after_delete(tmp_path: Path) -> None:
+def test_history_release_is_per_segment_and_preserves_high_watermark(tmp_path: Path) -> None:
+    # 原文按段到期各自释放（阶段 3 裁定）：后一段可以先于前一段释放，释放后高水位不回退、照常往后追加
     store = journal(tmp_path)
     store.append(
         address(),
@@ -224,42 +223,43 @@ def test_history_release_requires_oldest_prefix_and_preserves_high_watermark_aft
     )
     first = store.seal(address(), through_sequence=1).segment
     second = store.seal(address(), through_sequence=3).segment
-    with pytest.raises(ConversationWriteConflictError, match="oldest"):
-        store.release_history_prefix(address(), (second,))
 
-    assert store.release_history_prefix(address(), (first,)) == (first.segment_id,)
-    assert store.list_history(address()) == (second,)
-    state = store.read_state(address())
-    assert state.released_through_sequence == 1
-    assert state.archived_through_sequence == 3
+    assert store.release_history(address(), second.segment_id, second.digest)
+    assert store.list_history(address()) == (first,)
+    assert store.retained_history_ranges(address()) == ((0, 1),)
+    assert not store.history_retained(address(), second.segment_id)
+    assert store.read_state(address()).archived_through_sequence == 3
+    assert store.release_history(address(), second.segment_id, second.digest) is False
 
     next_batch = ConversationBatch("conversation-1", closed_turn(start_sequence=4))
-    assert store.append(address(), next_batch).status is ConversationAppendStatus.EXTENDED
+    appended = store.append(address(), next_batch)
+    assert (appended.appended_count, appended.next_sequence) == (2, 6)
+    assert store.release_history(address(), first.segment_id, first.digest)
+    assert store.list_history(address()) == ()
 
 
-def test_purge_released_history_recovers_physical_file_left_by_interrupted_unlink(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_history_release_rejects_changed_digest(tmp_path: Path) -> None:
     store = journal(tmp_path)
     store.append(address(), ConversationBatch("conversation-1", closed_turn()))
     archived = store.seal(address(), through_sequence=1).segment
-    history_path = store.layout.history_path(address(), archived.segment_id)
-    original_unlink = conversation_messages.durable_unlink
-    monkeypatch.setattr(
-        conversation_messages,
-        "durable_unlink",
-        lambda _path, *, artifact_root: False,
-    )
+    with pytest.raises(ConversationWriteConflictError, match="changed"):
+        store.release_history(address(), archived.segment_id, "0" * 64)
+    assert store.history_retained(address(), archived.segment_id)
 
-    assert store.release_history_prefix(address(), (archived,)) == (archived.segment_id,)
-    assert history_path.exists()
-    assert store.list_history(address()) == ()
 
-    monkeypatch.setattr(conversation_messages, "durable_unlink", original_unlink)
-    assert store.purge_released_history(address(), max_items=1) == (archived.segment_id,)
-    assert not history_path.exists()
-    assert store.read_state(address()).released_through_sequence == archived.end_sequence
+def test_journal_state_from_before_per_segment_release_is_rejected_with_a_clear_error(tmp_path: Path) -> None:
+    # 旧盘面（带 released_through_sequence 的 v1 状态文件）不迁移：报出看得懂的错
+    store = journal(tmp_path)
+    store.append(address(), ConversationBatch("conversation-1", closed_turn()))
+    store.seal(address(), through_sequence=1)
+    path = store.layout.state_path(address())
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["schema"] = "conversation_journal_state_v1"
+    value["released_through_sequence"] = None
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(ConversationJournalError, match="conversation_journal_state_v1.*not migrated"):
+        store.read_state(address())
 
 
 def test_address_enumeration_is_sorted_and_rejects_unknown_tree_entries(tmp_path: Path) -> None:

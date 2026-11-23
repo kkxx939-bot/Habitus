@@ -42,7 +42,6 @@ from habitus.memory.tree import MemoryTree
 from habitus.memory.workflow import (
     ConversationLifecycleManager,
     ConversationMemoryEnqueuer,
-    MemoryChangeReceiptStore,
     MemoryConversationConsumer,
     MemoryConversationOutputStore,
     MemoryJobRunner,
@@ -198,7 +197,7 @@ class RuntimeMemory:
             raise ValueError("memory browser must use the shared memory tree")
         if self.search.catalog.tree is not self.tree or self.search.snapshot_reader.tree is not self.tree:
             raise ValueError("memory search must use the shared memory tree")
-        if self.editor.transaction.tree is not self.tree:
+        if self.editor.writer.tree is not self.tree:
             raise ValueError("memory editor must use the shared memory tree")
         if self.semantic_refresher.tree is not self.tree:
             raise ValueError("semantic refresher must use the shared memory tree")
@@ -211,7 +210,6 @@ class RuntimeWorkflow:
     """Conversation 到有序记忆提交的耐久工作流入口。"""
 
     jobs: MemoryJobStore
-    receipts: MemoryChangeReceiptStore
     enqueuer: ConversationMemoryEnqueuer
     conversation_consumer: MemoryConversationConsumer
     lifecycle: ConversationLifecycleManager
@@ -224,10 +222,8 @@ class RuntimeWorkflow:
             raise ValueError("memory workflow must share one job store")
         if self.conversation_consumer.enqueuer is not self.enqueuer:
             raise ValueError("memory workflow must share one Conversation enqueuer")
-        if self.lifecycle.jobs is not self.jobs or self.lifecycle.receipts is not self.receipts:
+        if self.lifecycle.jobs is not self.jobs:
             raise ValueError("conversation lifecycle must share workflow stores")
-        if self.runner.transaction_recovery.change_receipts is not self.receipts:
-            raise ValueError("memory workflow must share one receipt store")
         if self.worker.runner is not self.runner:
             raise ValueError("memory workflow must share one runner with its worker")
         chains = [

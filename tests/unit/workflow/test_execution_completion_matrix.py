@@ -1,9 +1,8 @@
-"""MemoryJob 规划、执行与完成三阶段的编排和错误边界矩阵。"""
+"""MemoryJob 规划、执行（写卡片、记下"卡片已写完"）与完成三阶段的编排和错误边界矩阵。"""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -11,15 +10,13 @@ import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.memory.conversation import ConversationAddress
-from habitus.memory.editor import MemoryTransactionJournalState
 from habitus.memory.model import MemoryKind
 from habitus.memory.recall import (
     MemoryRecallTarget,
 )
 from habitus.memory.uri import MemoryURI
-from habitus.memory.workflow import MemoryChangeReceiptState, MemoryChangeSource, MemoryJobError, MemoryJobStatus
-from habitus.memory.workflow.completion import MemoryJobCompletion
-from habitus.memory.workflow.execution import MemoryJobCommit
+from habitus.memory.workflow import MemoryJobError, MemoryJobStatus
+from habitus.memory.workflow.execution import MemoryJobWrite
 from habitus.pre.conversation import ConversationBatch
 from habitus.runtime import build_runtime
 from tests.helpers import BASE_TIME, closed_turn, document, segment, segment_summary
@@ -58,15 +55,8 @@ def execution_result(tmp_path: Path):
 
 
 def completion_result(tmp_path: Path):
-    value, lease, commit = execution_result(tmp_path)
-    completed = asyncio.run(
-        value.components.workflow.runner.committed_finalizer.finalize(
-            lease,
-            commit.journal,
-            summary_generated=commit.summary_generated,
-        )
-    )
-    return value, completed
+    value, lease, _written = execution_result(tmp_path)
+    return value, asyncio.run(value.components.workflow.runner.committed_finalizer.finalize(lease))
 
 
 def test_product_builder_propagates_editor_failure_after_summary_branch_finishes(
@@ -100,82 +90,34 @@ def test_product_builder_propagates_editor_failure_after_summary_branch_finishes
     assert summary_finished
 
 
-@pytest.mark.parametrize("clock_value", [BASE_TIME.replace(tzinfo=None)])
-def test_executor_clock_must_return_timezone_aware_datetime(tmp_path: Path, clock_value: object) -> None:
-    executor = runtime(tmp_path).components.workflow.runner.executor
-    executor.clock = lambda: clock_value
-    with pytest.raises((TypeError, ValueError), match="clock must return"):
-        executor._timestamp()
-
-
-def test_executor_commits_l2_but_leaves_job_running_for_completion_phase(tmp_path: Path) -> None:
+def test_executor_writes_cards_and_records_the_stage_but_leaves_job_running_for_completion(tmp_path: Path) -> None:
     value, lease, result = execution_result(tmp_path)
-    assert isinstance(result, MemoryJobCommit)
-    assert result.journal.state is MemoryTransactionJournalState.COMMITTED
-    assert result.commit.transaction_id == lease.job.transaction_id
-    assert value.components.workflow.jobs.assert_current(lease).status is MemoryJobStatus.RUNNING
+    assert isinstance(result, MemoryJobWrite)
+    assert result.job.cards_written
+    assert result.job.changed_uris == tuple(str(uri) for uri in result.commit.written_uris)
+    current = value.components.workflow.jobs.assert_current(lease)
+    assert current.status is MemoryJobStatus.RUNNING and current.cards_written
     assert result.summary_generated
 
 
-def test_job_commit_rejects_non_committed_or_foreign_journal(tmp_path: Path) -> None:
-    _value, _lease, valid = execution_result(tmp_path)
-    with pytest.raises(ValueError, match="COMMITTED"):
-        MemoryJobCommit(
-            valid.commit,
-            replace(valid.journal, state=MemoryTransactionJournalState.PREPARED),
-            valid.summary_generated,
-        )
-    with pytest.raises(ValueError, match="identities differ"):
-        MemoryJobCommit(
-            valid.commit,
-            replace(valid.journal, transaction_id="f" * 32),
-            valid.summary_generated,
-        )
+def test_job_write_requires_a_job_whose_cards_are_written(tmp_path: Path) -> None:
+    _value, lease, valid = execution_result(tmp_path)
+    with pytest.raises(ValueError, match="cards are written"):
+        MemoryJobWrite(valid.commit, lease.job, valid.summary_generated)
 
 
-def test_finalizer_rejects_non_committed_or_foreign_journal(tmp_path: Path) -> None:
-    value, lease, commit = execution_result(tmp_path)
-    finalizer = value.components.workflow.runner.committed_finalizer
-    with pytest.raises(MemoryJobError, match="COMMITTED"):
-        asyncio.run(
-            finalizer.finalize(
-                lease,
-                replace(commit.journal, state=MemoryTransactionJournalState.PREPARED),
-            )
-        )
-    with pytest.raises(MemoryJobError, match="does not belong"):
-        asyncio.run(finalizer.finalize(lease, replace(commit.journal, transaction_id="f" * 32)))
+def test_finalizer_rejects_a_job_whose_cards_are_not_written(tmp_path: Path) -> None:
+    value = runtime(tmp_path)
+    _address, job = queued_job(value)
+    lease = value.components.workflow.jobs.claim(job, "matrix-worker")
+    with pytest.raises(MemoryJobError, match="cards are written"):
+        asyncio.run(value.components.workflow.runner.committed_finalizer.finalize(lease))
 
 
-def test_semantic_refresh_requires_committed_receipt(tmp_path: Path) -> None:
-    value, lease, commit = execution_result(tmp_path)
-    finalizer = value.components.workflow.runner.committed_finalizer
-    receipt = value.components.workflow.receipts.read(MemoryChangeSource.from_job(lease.job))
-    assert receipt.state is MemoryChangeReceiptState.PREPARED
-    with pytest.raises(MemoryJobError, match="COMMITTED"):
-        finalizer._refresh_semantic_layers(receipt)
-
-
-def test_full_completion_result_is_strict_and_all_durable_steps_are_true(tmp_path: Path) -> None:
+def test_full_completion_commits_the_job_and_keeps_the_written_addresses(tmp_path: Path) -> None:
     _value, result = completion_result(tmp_path)
-    assert isinstance(result, MemoryJobCompletion)
-    assert result.job.status is MemoryJobStatus.COMMITTED
-    assert result.change_receipt.state is MemoryChangeReceiptState.COMMITTED
-    assert result.summary_generated and result.journal_cleaned
-
-
-def test_execution_receipt_audits_the_exact_editor_segment(tmp_path: Path) -> None:
-    value, lease, _commit = execution_result(tmp_path)
-    source = MemoryChangeSource.from_job(lease.job)
-    receipt = value.components.workflow.receipts.read(source)
-    address = ConversationAddress(lease.job.conversation_id, lease.job.started_on)
-    conversations = value.components.workflow.runner.executor.conversations
-    trigger = conversations.read_segment(address, lease.job.segment_id)
-    editor_segment = None if trigger.ends_mid_turn else conversations.read_editor_turn(address, trigger).whole
-
-    assert editor_segment is not None
-    assert receipt.source.editor_segment_id == editor_segment.segment_id
-    assert receipt.source.editor_segment_digest == editor_segment.digest
+    assert result.status is MemoryJobStatus.COMMITTED
+    assert result.cards_written
 
 
 def test_finalizer_forgets_retired_recall_state_and_cleanup_failure_is_non_blocking(tmp_path: Path) -> None:

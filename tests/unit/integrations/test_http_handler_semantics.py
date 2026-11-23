@@ -53,7 +53,6 @@ def _job(sequence: int, status: MemoryJobStatus, *, updated_offset: int = 0) -> 
         started_on=date(2026, 7, 30),
         segment_id=f"segment-{sequence}",
         source_segment_digest=f"{sequence:064x}",
-        transaction_id=f"{sequence:032x}",
         status=status,
         attempts=2 if failed else 0,
         claim_id=None,
@@ -67,17 +66,18 @@ def _job(sequence: int, status: MemoryJobStatus, *, updated_offset: int = 0) -> 
     )
 
 
-def _job_runtime(jobs: tuple[MemoryJob, ...], *, blocked: MemoryJob | None) -> Runtime:
+def _job_runtime(jobs: tuple[MemoryJob, ...]) -> Runtime:
     runtime = object.__new__(Runtime)
     runtime.list_memory_jobs = AsyncMock(return_value=jobs)  # type: ignore[method-assign]
-    runtime.failed_memory_job = AsyncMock(return_value=blocked)  # type: ignore[method-assign]
+    failed = tuple(job for job in jobs if job.status is MemoryJobStatus.FAILED)
+    runtime.failed_memory_jobs = AsyncMock(return_value=failed)  # type: ignore[method-assign]
 
     async def consistency(job: MemoryJob) -> MemoryConsistencySnapshot:
         state = {
             MemoryJobStatus.FAILED: MemoryConsistencyState.FAILED,
             MemoryJobStatus.COMMITTED: MemoryConsistencyState.COMMITTED,
         }.get(job.status, MemoryConsistencyState.PENDING)
-        return MemoryConsistencySnapshot(state, job, job, None, None)
+        return MemoryConsistencySnapshot(state, job, job, None)
 
     runtime.memory_consistency = consistency  # type: ignore[method-assign]
     return runtime
@@ -108,7 +108,7 @@ def test_job_queries_apply_reverse_pagination_filtering_and_safe_failure_details
         _job(2, MemoryJobStatus.QUEUED),
         _job(3, MemoryJobStatus.FAILED, updated_offset=3),
     )
-    handler = RuntimeHTTPHandlers(_job_runtime(jobs, blocked=jobs[-1]))
+    handler = RuntimeHTTPHandlers(_job_runtime(jobs))
 
     first_page = asyncio.run(
         handler.list_jobs(
@@ -133,7 +133,7 @@ def test_job_queries_apply_reverse_pagination_filtering_and_safe_failure_details
             limit=10,
         )
     )
-    blocked = asyncio.run(handler.blocked_job())
+    failed = asyncio.run(handler.failed_jobs())
     status = asyncio.run(
         handler.job_status(
             3,
@@ -146,8 +146,7 @@ def test_job_queries_apply_reverse_pagination_filtering_and_safe_failure_details
     assert first_page.next_before_sequence == 2
     assert [item.memory_sequence for item in queued.jobs] == [2]
     assert [item.memory_sequence for item in older.jobs] == [1]
-    assert blocked.job is not None and blocked.job.memory_sequence == 3
-    assert status.blocking is True
+    assert failed.count == 1 and [item.memory_sequence for item in failed.jobs] == [3]
     assert status.manual_action_required is True
     failure = status.last_failure
     assert failure is not None
@@ -156,10 +155,10 @@ def test_job_queries_apply_reverse_pagination_filtering_and_safe_failure_details
     assert "[PATH]" in failure.message
 
 
-def test_retry_requires_exact_current_blocker_version_and_returns_reopened_job() -> None:
+def test_retry_requires_the_exact_failed_version_and_returns_reopened_job() -> None:
     failed = _job(3, MemoryJobStatus.FAILED, updated_offset=3)
     reopened = _job(3, MemoryJobStatus.QUEUED, updated_offset=4)
-    runtime = _job_runtime((failed,), blocked=failed)
+    runtime = _job_runtime((failed,))
     runtime.retry_failed_memory_job = AsyncMock(  # type: ignore[method-assign]
         return_value=SimpleNamespace(reopened_job=reopened, worker_restarted=True)
     )
@@ -264,7 +263,7 @@ def test_readiness_maps_an_unready_runtime_to_503(ready: bool, status_code: int)
 
 def test_job_list_gives_no_next_page_cursor_when_the_page_holds_every_match() -> None:
     jobs = (_job(1, MemoryJobStatus.COMMITTED), _job(2, MemoryJobStatus.QUEUED))
-    handler = RuntimeHTTPHandlers(_job_runtime(jobs, blocked=None))
+    handler = RuntimeHTTPHandlers(_job_runtime(jobs))
 
     for limit in (2, 10):
         page = asyncio.run(
@@ -274,23 +273,58 @@ def test_job_list_gives_no_next_page_cursor_when_the_page_holds_every_match() ->
         assert page.next_before_sequence is None
 
 
-def test_retry_refuses_a_failed_job_that_is_not_the_current_blocker() -> None:
+def test_retry_accepts_any_failed_job_not_only_the_oldest() -> None:
+    """失败不再挡后面、没有"当前阻塞"的那一条：任何一条 FAILED 都能按版本重试。"""
+
     older = _job(2, MemoryJobStatus.FAILED, updated_offset=2)
-    blocker = _job(3, MemoryJobStatus.FAILED, updated_offset=3)
-    runtime = _job_runtime((older, blocker), blocked=blocker)
-    runtime.retry_failed_memory_job = AsyncMock()  # type: ignore[method-assign]
+    newer = _job(3, MemoryJobStatus.FAILED, updated_offset=3)
+    runtime = _job_runtime((older, newer))
+    runtime.retry_failed_memory_job = AsyncMock(  # type: ignore[method-assign]
+        return_value=SimpleNamespace(reopened_job=_job(3, MemoryJobStatus.QUEUED, updated_offset=4), worker_restarted=False)
+    )
     handler = RuntimeHTTPHandlers(runtime)
 
-    with pytest.raises(HTTPMemoryJobConflictError, match="not the current blocking failed job"):
+    asyncio.run(
+        handler.retry_failed_job(
+            3,
+            conversation_id="conversation-handler",
+            started_on=date(2026, 7, 30),
+            expected_version=handler._job_version(newer),
+        )
+    )
+
+    runtime.retry_failed_memory_job.assert_awaited_once_with(newer)
+
+
+def test_retry_refuses_a_job_that_is_not_failed_and_maps_a_released_history_to_conflict() -> None:
+    from habitus.runtime import RuntimeStateError
+
+    queued = _job(2, MemoryJobStatus.QUEUED)
+    failed = _job(3, MemoryJobStatus.FAILED, updated_offset=3)
+    runtime = _job_runtime((queued, failed))
+    runtime.retry_failed_memory_job = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeStateError("this failed memory job cannot be retried: its conversation history has already been released")
+    )
+    handler = RuntimeHTTPHandlers(runtime)
+
+    with pytest.raises(HTTPMemoryJobConflictError, match="not in a failed state"):
         asyncio.run(
             handler.retry_failed_job(
                 2,
                 conversation_id="conversation-handler",
                 started_on=date(2026, 7, 30),
-                expected_version=handler._job_version(older),
+                expected_version=handler._job_version(queued),
             )
         )
-    runtime.retry_failed_memory_job.assert_not_awaited()
+    with pytest.raises(HTTPMemoryJobConflictError, match="history has already been released"):
+        asyncio.run(
+            handler.retry_failed_job(
+                3,
+                conversation_id="conversation-handler",
+                started_on=date(2026, 7, 30),
+                expected_version=handler._job_version(failed),
+            )
+        )
 
 
 def test_job_version_changes_when_only_the_last_error_changes() -> None:

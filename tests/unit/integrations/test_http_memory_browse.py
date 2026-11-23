@@ -11,7 +11,6 @@ from habitus.integrations.http_api import create_http_app
 from habitus.integrations.http_api.handlers import RuntimeHTTPHandlers
 from habitus.memory.browse import MemoryBrowseNotFoundError, MemoryLayerText, MemoryListing
 from habitus.memory.model import MemoryDirectory, MemoryKind, MemoryLevel
-from habitus.memory.tree import MemoryTreeConsistencyError
 from habitus.memory.uri import MemoryURI
 from habitus.runtime import Runtime
 from tests.helpers import document
@@ -59,13 +58,11 @@ def test_listing_and_reading_return_uris_only_and_the_feature_is_advertised() ->
     runtime.list_memory.assert_awaited_once_with("memory://preferences")  # type: ignore[attr-defined]
 
 
-def test_missing_nodes_are_404_and_a_publication_in_flight_is_a_retryable_503() -> None:
+def test_missing_nodes_are_404() -> None:
     runtime = _runtime()
     runtime.read_memory = AsyncMock(  # type: ignore[method-assign]
-        side_effect=[MemoryBrowseNotFoundError("no memory document at memory://tools/x.md"), MemoryTreeConsistencyError("busy")]
+        side_effect=[MemoryBrowseNotFoundError("no memory document at memory://tools/x.md")]
     )
     with TestClient(create_http_app(runtime), base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
         missing = client.get("/api/v1/memory/document", params={"uri": "memory://tools/x.md"})
         assert missing.status_code == 404
-        busy = client.get("/api/v1/memory/document", params={"uri": "memory://tools/x.md"})
-        assert busy.status_code == 503 and busy.json()["error"]["retryable"] is True

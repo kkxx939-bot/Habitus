@@ -1,4 +1,4 @@
-"""Conversation、Summary、Job、Receipt 联合生命周期的安全门槛测试。"""
+"""Conversation、Summary、Job 联合生命周期的安全门槛测试。"""
 
 import asyncio
 from datetime import date, timedelta
@@ -19,11 +19,9 @@ from habitus.memory.conversation import (
     SQLiteConversationSummaryUseStore,
 )
 from habitus.memory.conversation.summary_reference import summary_reference
-from habitus.memory.editor import MemoryTransactionJournal
 from habitus.memory.retrieval import ConversationSearchContextReader
 from habitus.memory.workflow import (
     ConversationLifecycleManager,
-    MemoryChangeReceiptStore,
     MemoryJobStore,
     MemoryWorkflowLifecycleConfig,
 )
@@ -33,7 +31,7 @@ from habitus.pre.conversation import (
     ConversationRangeSummaryStage,
     ConversationSummarySourceRef,
 )
-from tests.helpers import BASE_TIME, closed_turn, codec, segment_summary, summary_content
+from tests.helpers import BASE_TIME, closed_turn, segment_summary, summary_content
 from tests.lock_store import ProcessLocalLockStore
 from tests.unit.conversation.test_summary_generation import RecordingProvider, structured
 
@@ -44,7 +42,10 @@ def lifecycle_manager(
     compaction_enabled: bool,
     compaction_config: ConversationSummaryCompactionConfig | None = None,
     use_store: SQLiteConversationSummaryUseStore | None = None,
+    workflow_config: MemoryWorkflowLifecycleConfig | None = None,
 ):
+    """任务存储的时钟固定在 ``BASE_TIME``：任务到终态的时刻就是 ``BASE_TIME``，原文保留期从这里起算。"""
+
     path_lock = PathLock(ProcessLocalLockStore())
     journal = ConversationMessageJournal(tmp_path / "conversation", path_lock)
     segment_store = ConversationSummaryStore(journal.layout)
@@ -62,25 +63,29 @@ def lifecycle_manager(
         config=compaction_config,
     )
     retirements = ConversationSummaryRetirementStore(tmp_path / "workflow")
-    document_codec = codec()
     jobs = MemoryJobStore(
         tmp_path / "workflow",
         path_lock,
         memory_root=tmp_path / "memory",
+        clock=lambda: BASE_TIME,
     )
-    receipts = MemoryChangeReceiptStore(tmp_path / "workflow", document_codec)
     manager = ConversationLifecycleManager(
         compactor,
         journal,
         segment_store,
         range_store,
         jobs,
-        receipts,
-        MemoryTransactionJournal(tmp_path / "workflow" / "transactions", document_codec),
         retirements,
         summary_config=compaction_config,
+        workflow_config=workflow_config,
     )
     return manager
+
+
+def commit_job(manager, queued) -> None:
+    """把一个 QUEUED Job 推到 COMMITTED（终态时刻是 ``BASE_TIME``）。"""
+
+    manager.jobs.complete(manager.jobs.claim(queued, "worker"))
 
 
 def test_empty_lifecycle_cycle_is_idempotent(tmp_path: Path) -> None:
@@ -90,9 +95,8 @@ def test_empty_lifecycle_cycle_is_idempotent(tmp_path: Path) -> None:
     result = asyncio.run(manager.maintain_once(address, now=BASE_TIME))
 
     assert result.compaction.summary is None
-    assert result.purged_history_segment_ids == ()
+    assert result.released_history_segment_ids == ()
     assert result.deleted_memory_job_sequences == ()
-    assert result.deleted_memory_receipt_ids == ()
 
 
 def test_retained_history_without_bound_summary_is_kept_without_ordinary_cleanup(tmp_path: Path) -> None:
@@ -107,12 +111,11 @@ def test_retained_history_without_bound_summary_is_kept_without_ordinary_cleanup
     assert manager.journal.list_history(address) == (segment,)
 
 
-def test_receipt_retention_cannot_be_shorter_than_job_retention() -> None:
-    with pytest.raises(ValueError, match="cannot be shorter"):
-        MemoryWorkflowLifecycleConfig(
-            committed_job_retention_days=30,
-            committed_receipt_retention_days=29,
-        )
+def test_workflow_lifecycle_defaults_and_bounds() -> None:
+    config = MemoryWorkflowLifecycleConfig()
+    assert (config.history_retention_days, config.job_retention_days) == (10, 30)
+    with pytest.raises(ValueError, match="history_retention_days"):
+        MemoryWorkflowLifecycleConfig(history_retention_days=-1)
 
 
 def test_archive_retirement_waits_for_actual_use_window_and_grace_then_deletes_chain(
@@ -141,6 +144,7 @@ def test_archive_retirement_waits_for_actual_use_window_and_grace_then_deletes_c
         source = manager.journal.seal(address, through_sequence=start + 1).segment
         summary = segment_summary(source)
         manager.segment_store.create(address, source, summary)
+        commit_job(manager, manager.jobs.activate(manager.jobs.stage(address, source)))
         summaries.append(summary)
 
     content = summary_content()
@@ -173,9 +177,9 @@ def test_archive_retirement_waits_for_actual_use_window_and_grace_then_deletes_c
     manager.range_store.create(address, archive, (first_range, second_range))
     archive_reference = summary_reference(address, archive)
     use_store.record_use((archive_reference,), used_at=BASE_TIME + timedelta(days=10))
-    monkeypatch.setattr(manager.committed_cleanup, "is_committed", lambda _address, _segment: True)
-
+    # 第 10.5 天：四段的任务到终态已满 10 天，原文先按段释放；Archive 刚被用过，仍受保护
     protected = asyncio.run(manager.maintain_once(address, now=BASE_TIME + timedelta(days=10, hours=12)))
+    assert len(protected.released_history_segment_ids) == 4
     assert protected.deleted_archive_summary_ids == ()
     assert use_store.read_many((archive_reference,))[0].retire_candidate_at is None
 
@@ -232,7 +236,6 @@ def test_archive_retirement_waits_for_actual_use_window_and_grace_then_deletes_c
     assert retired.deleted_range_summary_ids == ()
     assert retired.deleted_segment_summary_ids == ()
     assert retired.released_history_segment_ids == ()
-    assert retired.purged_history_segment_ids == ()
     assert manager.journal.list_history(address) == ()
     assert manager.segment_store.list(address) == ()
     assert manager.range_store.list(address, ConversationRangeSummaryStage.RANGE) == ()

@@ -1,7 +1,7 @@
-"""FAILED MemoryJob 的人工运维：重试与显式放弃，带 MemoryWorker 状态门。
+"""FAILED MemoryJob 的人工运维：重试与显式放弃（裁定 111）。
 
-Runtime 在 RUNNING 时只允许在 MemoryWorker 已因该 Job 进入 BLOCKED 且无活跃执行后处置，处置完重新启动 Worker；
-READY 状态只重新开放 Job，不隐式启动 Worker。入口仍在 Runtime 门面，这里只承载处置本身。
+FAILED 已是终态、不挡后面的任务，处置不再要求 Worker 被挡住：重试把它按序号排回队列，由正在跑的单并发 Worker
+照常执行（Runtime 在 RUNNING 时顺手唤醒 Worker）；原文已经释放的不能重试。入口仍在 Runtime 门面。
 """
 
 from __future__ import annotations
@@ -12,11 +12,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from habitus.foundation.observability import ObservationStatus, bind_observation_context
-from habitus.memory.editor import MemoryTransactionJournalState
-from habitus.memory.workflow import MemoryChangeSource, MemoryJob, MemoryJobAbandonment, MemoryJobStatus
+from habitus.memory.conversation import ConversationAddress
+from habitus.memory.workflow import MemoryJob, MemoryJobAbandonment, MemoryJobStatus
 from habitus.runtime.components import RuntimeComponents
 from habitus.runtime.runtime_state import RuntimeStateError
-from habitus.runtime.worker import MemoryWorkerState
 
 #: Runtime 的观测出口：(类别, 操作, 状态, 起始单调时刻, 属性)。
 Observe = Callable[[str, str, ObservationStatus, float, dict[str, str | int | float | bool]], None]
@@ -24,7 +23,7 @@ Observe = Callable[[str, str, ObservationStatus, float, dict[str, str | int | fl
 
 @dataclass(frozen=True)
 class MemoryJobRetryResult:
-    """一次人工重试的失败快照、新状态和 Worker 恢复结果。"""
+    """一次人工重试的失败快照、新状态和是否唤醒了正在跑的 Worker。"""
 
     failed_job: MemoryJob
     reopened_job: MemoryJob
@@ -59,34 +58,26 @@ class FailedMemoryJobOperations:
         self._observe = observe
 
     async def retry(self, failed_job: MemoryJob) -> MemoryJobRetryResult:
-        """以完整失败快照重新开放最早 Job，并恢复被它阻塞的常驻 Worker。"""
+        """以完整失败快照重新开放一条 FAILED Job；这一段的原文已经释放就拒绝（没有东西可重做）。"""
 
         started = time.monotonic()
-        with bind_observation_context(
-            memory_sequence=failed_job.memory_sequence,
-            transaction_id=failed_job.transaction_id,
-        ):
+        with bind_observation_context(memory_sequence=failed_job.memory_sequence):
             try:
-                worker = self.components.workflow.worker
-                restart_worker = self._running()
-                if restart_worker:
-                    if worker.state is not MemoryWorkerState.BLOCKED or worker.busy:
-                        raise RuntimeStateError(
-                            "running runtime can only retry a failed job after its memory worker is blocked and idle"
-                        )
-                    await worker.wait_stopped()
-
-                reopened = await asyncio.to_thread(
-                    self.components.workflow.jobs.retry_failed,
-                    failed_job,
-                )
-                if restart_worker:
-                    await worker.start()
-                result = MemoryJobRetryResult(
-                    failed_job=failed_job,
-                    reopened_job=reopened,
-                    worker_restarted=restart_worker,
-                )
+                # 没封存过的（STAGED 阶段就失败、原文还在 live 里）照常能重试：重开后由 STAGED 恢复补发 History
+                address = ConversationAddress(failed_job.conversation_id, failed_job.started_on)
+                archived = (
+                    await asyncio.to_thread(self.components.conversation.journal.read_state, address)
+                ).archived_through_sequence
+                retention = self.components.workflow.lifecycle.retention
+                if await asyncio.to_thread(retention.history_released, address, failed_job.segment_id, archived):
+                    raise RuntimeStateError(
+                        "this failed memory job cannot be retried: its conversation history has already been released"
+                    )
+                reopened = await asyncio.to_thread(self.components.workflow.jobs.retry_failed, failed_job)
+                wake = self._running()
+                if wake:
+                    self.components.workflow.worker.wake()
+                result = MemoryJobRetryResult(failed_job=failed_job, reopened_job=reopened, worker_restarted=wake)
             except Exception as exc:
                 self._observe(
                     "operations",
@@ -106,34 +97,14 @@ class FailedMemoryJobOperations:
             return result
 
     async def abandon(self, failed_job: MemoryJob, *, reason: str) -> MemoryJobAbandonResult:
-        """显式放弃无法修复的最早 Job；有任何未决或已提交副作用时拒绝执行。"""
+        """显式放弃一条不再重试的 FAILED Job：写下处置记录、删掉任务；原文照同一条规则到期释放。"""
 
-        source = MemoryChangeSource.from_job(failed_job)
-        receipt = await asyncio.to_thread(self.components.workflow.receipts.try_read, source)
-        if receipt is not None:
-            raise RuntimeStateError("a failed job with a prepared or committed receipt cannot be abandoned")
-        journal = await asyncio.to_thread(
-            self.components.memory.editor.transaction.journal.try_read,
-            failed_job.transaction_id,
-        )
-        if journal is not None and journal.state is not MemoryTransactionJournalState.ROLLED_BACK:
-            raise RuntimeStateError("a failed job with a pending or committed transaction cannot be abandoned")
-        worker = self.components.workflow.worker
-        restart_worker = self._running()
-        if restart_worker:
-            if worker.state is not MemoryWorkerState.BLOCKED or worker.busy:
-                raise RuntimeStateError(
-                    "running runtime can only abandon a failed job after its memory worker is blocked and idle"
-                )
-            await worker.wait_stopped()
         abandonment = await asyncio.to_thread(
             self.components.workflow.jobs.abandon_failed,
             failed_job,
             reason=reason,
         )
-        if restart_worker:
-            await worker.start()
-        return MemoryJobAbandonResult(failed_job, abandonment, restart_worker)
+        return MemoryJobAbandonResult(failed_job, abandonment, False)
 
 
 __all__ = ["FailedMemoryJobOperations", "MemoryJobAbandonResult", "MemoryJobRetryResult"]

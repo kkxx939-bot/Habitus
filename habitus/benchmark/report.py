@@ -183,8 +183,8 @@ def _ingestion(records: Sequence[Mapping[str, object]]) -> Mapping[str, object]:
         "session_count": sum(_integer(item.get("session_count", 0), "session_count") for item in records),
         "message_count": sum(_integer(item.get("message_count", 0), "message_count") for item in records),
         "job_count": sum(_integer(item.get("job_count", 0), "job_count") for item in records),
-        "committed_receipt_count": sum(
-            _integer(item.get("committed_receipt_count", 0), "committed_receipt_count") for item in records
+        "committed_job_count": sum(
+            _integer(item.get("committed_job_count", 0), "committed_job_count") for item in records
         ),
         "memory_document_count": sum(
             _integer(item.get("memory_document_count", 0), "memory_document_count") for item in records

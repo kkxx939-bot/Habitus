@@ -146,7 +146,7 @@ def reading_turn(pairs: int, *, lines: int = 330, start: int = 0):
 
 def drain(runtime) -> None:
     while True:
-        oldest = runtime.components.workflow.jobs.oldest_uncommitted()
+        oldest = runtime.components.workflow.jobs.oldest_unfinished()
         if oldest is None or oldest.status is not MemoryJobStatus.QUEUED:
             return
         result = asyncio.run(runtime.run_next())

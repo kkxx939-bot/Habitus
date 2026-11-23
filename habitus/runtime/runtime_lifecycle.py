@@ -52,6 +52,25 @@ def refuse_vector_layout(config: HabitusConfig) -> None:
         )
 
 
+class WriteLayoutError(RuntimeError):
+    """盘上还有已删的多文件事务日志或变更回执目录（裁定 111 去掉，不迁移、不读）。"""
+
+
+def refuse_write_layout(config: HabitusConfig) -> None:
+    """工作目录下还有旧的 ``transactions/``（事务日志）或 ``receipts/``（变更回执）目录：明确报错、点出目录。"""
+
+    found = [
+        path for path in (config.workflow_root / "transactions", config.workflow_root / "receipts") if path.exists()
+    ]
+    if found:
+        raise WriteLayoutError(
+            "memory writes no longer keep transaction journals or change receipts and old workflow state is not "
+            "migrated; start from an empty workflow directory (remove "
+            + ", ".join(str(path) for path in found)
+            + " and the old memory_job_v4 job files) and restart"
+        )
+
+
 class RuntimeLifecycle:
     """``observe`` 是 Runtime 的观测出口；本类不持有也不改变 Runtime 状态。"""
 
@@ -60,11 +79,12 @@ class RuntimeLifecycle:
         self.components = components
         self._observe = observe
 
-    def initialize_stores(self) -> tuple[Path, tuple[str, ...]]:
-        """初始化树与各存储；无任务时恢复孤儿事务，有任务时留给租约持有者恢复。返回（记忆根, 恢复的事务）。"""
+    def initialize_stores(self) -> Path:
+        """初始化树与各存储，返回记忆根。旧的向量库、事务日志、回执目录与旧格式任务文件在这里就报错。"""
 
         self.components.infrastructure.initialize()
         refuse_vector_layout(self.config)
+        refuse_write_layout(self.config)
         memory_root = self.components.memory.tree.initialize()
         self.components.workflow.jobs.initialize()
         self.components.memory.lifecycle.initialize()
@@ -87,9 +107,7 @@ class RuntimeLifecycle:
             advice = item.scene.advice
             if advice is not None:
                 advice.store.refuse_proposal_books()
-        oldest_job = self.components.workflow.jobs.oldest_uncommitted()
-        recovered = self.components.workflow.runner.transaction_recovery.recover_pending() if oldest_job is None else ()
-        return memory_root, recovered
+        return memory_root
 
     async def start(self, started: float) -> None:
         """恢复交付，依次启动 Job Worker、生命周期维护 Worker 与可选的后台循环。"""

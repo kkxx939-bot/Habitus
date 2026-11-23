@@ -354,12 +354,11 @@ async def _wait_for_drain(runtime: Runtime, *, timeout_seconds: float) -> tuple[
     while time.monotonic() < deadline:
         snapshot = await asyncio.to_thread(runtime.components.workflow.jobs.observability_snapshot)
         if snapshot.failed:
-            job = await asyncio.to_thread(runtime.components.workflow.jobs.oldest_uncommitted)
-            return False, None if job is None else job.status.value
+            return False, "failed"
         if snapshot.staged + snapshot.queued + snapshot.running == 0 and not runtime.components.workflow.worker.busy:
             return True, None
         await asyncio.sleep(0.05)
-    job = await asyncio.to_thread(runtime.components.workflow.jobs.oldest_uncommitted)
+    job = await asyncio.to_thread(runtime.components.workflow.jobs.oldest_unfinished)
     return False, None if job is None else job.status.value
 
 

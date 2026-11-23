@@ -39,7 +39,7 @@ from habitus.pre.conversation import ConversationBatch, ConversationMessage
 
 # TODO(conversation-source): 修改 ConversationMemoryIngestResult Codec 或输出记录结构时，
 # 必须同步提升本版本，避免新旧快照共享同一 output_id 身份空间。
-MEMORY_CONVERSATION_OUTPUT_SCHEMA_VERSION = "memory_conversation_output_v2"
+MEMORY_CONVERSATION_OUTPUT_SCHEMA_VERSION = "memory_conversation_output_v3"
 MEMORY_CONVERSATION_OUTPUT_KIND = "memory_conversation_output"
 _OUTPUT_FILE = re.compile(r"^(?P<output_id>[0-9a-f]{64})\.json$")
 _NORMALIZED_MESSAGE = "{} must be non-empty normalized text"
@@ -94,7 +94,6 @@ def _job_to_dict(value: MemoryJob) -> dict[str, Any]:
             "started_on": value.started_on.isoformat(),
             "segment_id": value.segment_id,
             "source_segment_digest": value.source_segment_digest,
-            "transaction_id": value.transaction_id,
             "status": value.status.value,
             "attempts": value.attempts,
             "claim_id": value.claim_id,
@@ -116,7 +115,6 @@ def _job_from_dict(value: object) -> MemoryJob:
         "started_on",
         "segment_id",
         "source_segment_digest",
-        "transaction_id",
         "status",
         "attempts",
         "claim_id",
@@ -146,9 +144,6 @@ def _job_from_dict(value: object) -> MemoryJob:
         segment_id=text_field(value["segment_id"], _NORMALIZED_MESSAGE.format("segment_id")),
         source_segment_digest=text_field(
             value["source_segment_digest"], "source_segment_digest must be lowercase SHA-256 text"
-        ),
-        transaction_id=text_field(
-            value["transaction_id"], "transaction_id must be 32 lowercase hexadecimal characters"
         ),
         status=status,
         attempts=int_field(value["attempts"], "memory job attempts must be non-negative"),

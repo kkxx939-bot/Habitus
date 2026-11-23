@@ -1,8 +1,7 @@
-"""耐久 Job、lease、变更来源、节点变更与 Receipt 状态机契约矩阵。"""
+"""耐久 Job、lease、"卡片已写完"阶段与 Memory Consumer 输出的契约矩阵。"""
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -11,10 +10,6 @@ import pytest
 
 from habitus.conversation.source import ConversationSourceError
 from habitus.foundation.integrity import canonical_json
-from habitus.memory.document import MemoryLinkType, MemoryStoredLink
-from habitus.memory.editor import MemoryIdentityProposalBasis, MemoryNodeDisposition
-from habitus.memory.model import MemoryAddress, MemoryKind
-from habitus.memory.uri import MemoryURI
 from habitus.memory.workflow import (
     ConversationMemoryIngestResult,
     MemoryConversationOutput,
@@ -29,22 +24,11 @@ from habitus.memory.workflow.jobs import (
     MemoryJobStatus,
 )
 from habitus.memory.workflow.jobs.model import MEMORY_JOB_ERROR_MAX_CHARS
-from habitus.memory.workflow.receipt import (
-    MemoryChangeReceipt,
-    MemoryChangeReceiptError,
-    MemoryChangeReceiptState,
-    MemoryChangeSource,
-    MemoryIdentityChange,
-    MemoryNodeChange,
-    MemoryNodeChangeAction,
-    MemoryPreparedNodeChange,
-)
-from tests.helpers import BASE_TIME, segment
+from tests.helpers import BASE_TIME
 from tests.unit.conversation.source_v2_helpers import NOW, ingest_result
 from tests.unit.conversation.source_v2_helpers import source as conversation_source
 
 DIGEST = "a" * 64
-TRANSACTION_ID = "b" * 32
 CLAIM_ID = "c" * 32
 
 
@@ -56,7 +40,6 @@ def _job(status: MemoryJobStatus, **overrides: object) -> MemoryJob:
         "started_on": date(2026, 7, 1),
         "segment_id": "000000000000-000000000001",
         "source_segment_digest": DIGEST,
-        "transaction_id": TRANSACTION_ID,
         "status": status,
         "attempts": 1 if status is MemoryJobStatus.FAILED else 0,
         "claim_id": CLAIM_ID if running else None,
@@ -70,19 +53,6 @@ def _job(status: MemoryJobStatus, **overrides: object) -> MemoryJob:
     }
     values.update(overrides)
     return MemoryJob(**values)  # type: ignore[arg-type]
-
-
-def _source(**overrides: object) -> MemoryChangeSource:
-    values: dict[str, object] = {
-        "memory_sequence": 1,
-        "transaction_id": TRANSACTION_ID,
-        "conversation_id": "conversation-1",
-        "started_on": date(2026, 7, 1),
-        "segment_id": "000000000000-000000000001",
-        "source_segment_digest": segment(segment_id="000000000000-000000000001").digest,
-    }
-    values.update(overrides)
-    return MemoryChangeSource(**values)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("attempts", range(1, 13))
@@ -130,11 +100,9 @@ def test_job_started_on_requires_calendar_date_not_datetime(value: object) -> No
         _job(MemoryJobStatus.STAGED, started_on=value)
 
 
-@pytest.mark.parametrize("field", ["source_segment_digest", "transaction_id"])
+@pytest.mark.parametrize("field", ["source_segment_digest"])
 @pytest.mark.parametrize("value", ["", "0", "G" * 64, "A" * 64, None, 1, True])
 def test_job_rejects_invalid_lowercase_hex_identities(field: str, value: object) -> None:
-    if field == "transaction_id" and isinstance(value, str) and len(value) == 64:
-        value = value[:32]
     with pytest.raises(ValueError):
         _job(MemoryJobStatus.STAGED, **{field: value})
 
@@ -256,336 +224,58 @@ def test_job_execution_error_optionally_carries_failed_job(job: MemoryJob | None
     assert error.job is job
 
 
-@pytest.mark.parametrize("sequence", [1, 2, 2**31])
-def test_change_source_round_trip_and_receipt_identity_are_deterministic(sequence: int) -> None:
-    source = _source(memory_sequence=sequence, transaction_id=f"{sequence:032x}")
-    restored = MemoryChangeSource.from_dict(source.to_dict())
-    assert restored == source
-    assert len(source.receipt_id) == 64
-    assert source.receipt_id == restored.receipt_id
+PREFERENCE_URI = "memory://preferences/回答风格.md"
+TOOL_URI = "memory://tools/read_file.md"
 
 
-def test_change_source_binds_and_round_trips_the_complete_editor_segment() -> None:
-    editor_segment = segment(segment_id="000000000000-000000000001")
-    job = _job(
-        MemoryJobStatus.STAGED,
-        source_segment_digest=editor_segment.digest,
-    )
-    source = MemoryChangeSource.from_job(job, editor_segment=editor_segment)
+@pytest.mark.parametrize("status", [MemoryJobStatus.QUEUED, MemoryJobStatus.RUNNING, MemoryJobStatus.FAILED, MemoryJobStatus.COMMITTED])
+def test_written_cards_stage_is_kept_through_retry_and_completion_states(status: MemoryJobStatus) -> None:
+    """"卡片已写完"可以跟着任务排回队列、再执行、判失败或完成；地址清单原样保留。"""
 
-    assert source.editor_segment_id == editor_segment.segment_id
-    assert source.editor_segment_digest == editor_segment.digest
-    restored = MemoryChangeSource.from_dict(source.to_dict())
-    assert restored == source
-    assert restored.to_dict() == source.to_dict()
-
-    mismatched = segment(
-        conversation_id="another-conversation",
-        segment_id=editor_segment.segment_id,
-    )
-    with pytest.raises(ValueError, match="another conversation"):
-        MemoryChangeSource.from_job(job, editor_segment=mismatched)
+    job = _job(status, cards_written=True, changed_uris=(PREFERENCE_URI,), deleted_uris=(TOOL_URI,))
+    assert job.cards_written
+    assert job.changed_uris == (PREFERENCE_URI,)
+    assert job.deleted_uris == (TOOL_URI,)
 
 
-@pytest.mark.parametrize("field", ["editor_segment_id", "editor_segment_digest"])
-def test_change_source_rejects_partial_editor_segment_provenance(field: str) -> None:
-    value = _source().to_dict()
-    value[field] = "a" * 64
-    with pytest.raises(ValueError, match="invalid shape|present together"):
-        MemoryChangeSource.from_dict(value)
+@pytest.mark.parametrize("status", [MemoryJobStatus.STAGED, MemoryJobStatus.SKIPPED])
+def test_staged_or_skipped_job_cannot_have_written_cards(status: MemoryJobStatus) -> None:
+    with pytest.raises(ValueError, match="cannot have written cards"):
+        _job(status, cards_written=True)
+
+
+def test_written_uris_require_the_written_stage() -> None:
+    with pytest.raises(ValueError, match="before its cards are written"):
+        _job(MemoryJobStatus.QUEUED, changed_uris=(PREFERENCE_URI,))
 
 
 @pytest.mark.parametrize(
-    "field",
-    ["memory_sequence", "transaction_id", "conversation_id", "started_on", "segment_id", "source_segment_digest"],
-)
-def test_change_source_parser_rejects_each_missing_field(field: str) -> None:
-    value = _source().to_dict()
-    value.pop(field)
-    with pytest.raises(ValueError):
-        MemoryChangeSource.from_dict(value)
-
-
-@pytest.mark.parametrize("unknown", ["uri", "owner", "revision", "job_id", "evidence"])
-def test_change_source_parser_rejects_unknown_fields(unknown: str) -> None:
-    value = _source().to_dict()
-    value[unknown] = "forbidden"
-    with pytest.raises(ValueError):
-        MemoryChangeSource.from_dict(value)
-
-
-def test_change_source_requires_exact_segment_identity_and_digest() -> None:
-    source_segment = segment(segment_id="000000000000-000000000001")
-    source = _source(source_segment_digest=source_segment.digest)
-    source.require_segment(source_segment)
-    for wrong in (
-        segment(conversation_id="other", segment_id=source_segment.segment_id),
-        segment(segment_id="000000000002-000000000003"),
-    ):
-        with pytest.raises(MemoryChangeReceiptError, match="does not match"):
-            source.require_segment(wrong)
-
-
-@pytest.mark.parametrize("action", [MemoryNodeDisposition.MERGE, MemoryNodeDisposition.DELETE])
-def test_identity_change_round_trips_merge_and_delete(action: MemoryNodeDisposition) -> None:
-    source_uri = MemoryURI.from_address(MemoryAddress.preference("旧主题"))
-    if action is MemoryNodeDisposition.MERGE:
-        value = MemoryIdentityChange(
-            action,
-            source_uri,
-            MemoryURI.from_address(MemoryAddress.preference("新主题")),
-            MemoryIdentityProposalBasis.DUPLICATE_IDENTITY,
-        )
-    else:
-        value = MemoryIdentityChange(
-            action,
-            source_uri,
-            None,
-            MemoryIdentityProposalBasis.EXPLICIT_FORGET,
-        )
-    assert MemoryIdentityChange.from_dict(value.to_dict()) == value
-
-
-@pytest.mark.parametrize(
-    "action", [MemoryNodeDisposition.CREATE, MemoryNodeDisposition.UPDATE, MemoryNodeDisposition.NOOP]
-)
-def test_identity_change_rejects_non_retirement_dispositions(action: MemoryNodeDisposition) -> None:
-    with pytest.raises(ValueError, match="merge or delete"):
-        MemoryIdentityChange(
-            action,
-            MemoryURI.from_address(MemoryAddress.preference("旧主题")),
-            None,
-            MemoryIdentityProposalBasis.EXPLICIT_FORGET,
-        )
-
-
-@pytest.mark.parametrize("action", tuple(MemoryNodeChangeAction))
-@pytest.mark.parametrize("kind", tuple(MemoryKind))
-def test_prepared_node_change_accepts_coherent_action_for_every_memory_kind(
-    action: MemoryNodeChangeAction,
-    kind: MemoryKind,
-) -> None:
-    uri = MemoryURI.from_address(
-        {
-            MemoryKind.PROFILE: MemoryAddress.profile(),
-            MemoryKind.PREFERENCE: MemoryAddress.preference("主题"),
-            MemoryKind.ENTITY: MemoryAddress.entity("分类", "实体"),
-            MemoryKind.TOOL: MemoryAddress.tool("tool.name"),
-        }[kind]
-    )
-    values = {
-        MemoryNodeChangeAction.CREATE: (None, "a" * 64),
-        MemoryNodeChangeAction.UPDATE: ("a" * 64, "b" * 64),
-        MemoryNodeChangeAction.DELETE: ("a" * 64, None),
-    }[action]
-    prepared = MemoryPreparedNodeChange(action, uri, *values)
-    assert MemoryPreparedNodeChange.from_dict(prepared.to_dict()) == prepared
-
-
-@pytest.mark.parametrize("action", tuple(MemoryNodeChangeAction))
-@pytest.mark.parametrize(
-    ("before", "after"),
-    [(None, None), ("a" * 64, None), (None, "b" * 64), ("a" * 64, "b" * 64)],
-)
-def test_prepared_node_change_enforces_action_specific_before_after_shape(
-    action: MemoryNodeChangeAction,
-    before: str | None,
-    after: str | None,
-) -> None:
-    valid = {
-        MemoryNodeChangeAction.CREATE: before is None and after is not None,
-        MemoryNodeChangeAction.UPDATE: before is not None and after is not None,
-        MemoryNodeChangeAction.DELETE: before is not None and after is None,
-    }[action]
-    uri = MemoryURI.from_address(MemoryAddress.profile())
-    if valid:
-        MemoryPreparedNodeChange(action, uri, before, after)
-    else:
-        with pytest.raises(ValueError):
-            MemoryPreparedNodeChange(action, uri, before, after)
-
-
-@pytest.mark.parametrize("action", tuple(MemoryNodeChangeAction))
-@pytest.mark.parametrize(
-    ("before_revision", "after_revision", "before_digest", "after_digest"),
+    "uris",
     [
-        (None, 1, None, "b" * 64),
-        (1, 2, "a" * 64, "b" * 64),
-        (1, None, "a" * 64, None),
+        (TOOL_URI, PREFERENCE_URI),  # 没排序
+        (PREFERENCE_URI, PREFERENCE_URI),  # 重复
+        ("memory://preferences",),  # 目录不是卡片
+        ("viking://preferences/回答风格.md",),  # 不是 memory:// 协议
     ],
 )
-def test_committed_node_change_accepts_only_action_matching_physical_state(
-    action: MemoryNodeChangeAction,
-    before_revision: int | None,
-    after_revision: int | None,
-    before_digest: str | None,
-    after_digest: str | None,
-) -> None:
-    expected_action = {
-        (None, 1, None, "b" * 64): MemoryNodeChangeAction.CREATE,
-        (1, 2, "a" * 64, "b" * 64): MemoryNodeChangeAction.UPDATE,
-        (1, None, "a" * 64, None): MemoryNodeChangeAction.DELETE,
-    }[(before_revision, after_revision, before_digest, after_digest)]
-    uri = MemoryURI.from_address(MemoryAddress.profile())
-    if action is expected_action:
-        value = MemoryNodeChange(action, uri, before_revision, after_revision, before_digest, after_digest)
-        assert MemoryNodeChange.from_dict(value.to_dict()) == value
-    else:
-        with pytest.raises(ValueError):
-            MemoryNodeChange(action, uri, before_revision, after_revision, before_digest, after_digest)
-
-
-@pytest.mark.parametrize("field", ["before_revision", "after_revision"])
-@pytest.mark.parametrize("value", [0, -1])
-def test_node_change_rejects_invalid_non_null_revision(field: str, value: int) -> None:
-    kwargs = {
-        "action": MemoryNodeChangeAction.UPDATE,
-        "uri": MemoryURI.from_address(MemoryAddress.profile()),
-        "before_revision": 1,
-        "after_revision": 2,
-        "before_digest": "a" * 64,
-        "after_digest": "b" * 64,
-    }
-    kwargs[field] = value
+def test_written_uris_must_be_sorted_unique_canonical_card_uris(uris: tuple[str, ...]) -> None:
     with pytest.raises(ValueError):
-        MemoryNodeChange(**kwargs)  # type: ignore[arg-type]
+        _job(MemoryJobStatus.COMMITTED, cards_written=True, changed_uris=uris)
 
 
-def _prepared_receipt(**overrides: object) -> MemoryChangeReceipt:
-    uri = MemoryURI.from_address(MemoryAddress.profile())
-    prepared = MemoryPreparedNodeChange(MemoryNodeChangeAction.CREATE, uri, None, "b" * 64)
-    values: dict[str, object] = {
-        "source": _source(),
-        "state": MemoryChangeReceiptState.PREPARED,
-        "prepared_at": BASE_TIME,
-        "committed_at": None,
-        "expected_created_uris": (uri,),
-        "expected_updated_uris": (),
-        "expected_deleted_uris": (),
-        "unchanged_uris": (),
-        "prepared_node_changes": (prepared,),
-        "identity_changes": (),
-        "added_relations": (),
-        "removed_relations": (),
-        "node_changes": (),
-    }
-    values.update(overrides)
-    return MemoryChangeReceipt(**values)  # type: ignore[arg-type]
+def test_one_uri_cannot_be_both_written_and_deleted() -> None:
+    with pytest.raises(ValueError, match="both written and deleted"):
+        _job(MemoryJobStatus.COMMITTED, cards_written=True, changed_uris=(PREFERENCE_URI,), deleted_uris=(PREFERENCE_URI,))
 
 
-def test_prepared_and_committed_receipt_round_trip_exactly() -> None:
-    prepared = _prepared_receipt()
-    assert MemoryChangeReceipt.from_dict(prepared.to_dict()) == prepared
-    uri = prepared.expected_created_uris[0]
-    committed = replace(
-        prepared,
-        state=MemoryChangeReceiptState.COMMITTED,
-        committed_at=BASE_TIME + timedelta(seconds=1),
-        node_changes=(MemoryNodeChange(MemoryNodeChangeAction.CREATE, uri, None, 1, None, "c" * 64),),
-    )
-    assert MemoryChangeReceipt.from_dict(committed.to_dict()) == committed
-    assert committed.changed_uris == (uri,)
+@pytest.mark.parametrize("status", [MemoryJobStatus.COMMITTED, MemoryJobStatus.SKIPPED, MemoryJobStatus.FAILED])
+def test_committed_skipped_and_failed_are_terminal_and_no_longer_hold_later_sequences(status: MemoryJobStatus) -> None:
+    assert status.terminal
 
 
-@pytest.mark.parametrize(
-    "field",
-    [
-        "schema_version",
-        "source",
-        "state",
-        "prepared_at",
-        "committed_at",
-        "expected_created_uris",
-        "expected_updated_uris",
-        "expected_deleted_uris",
-        "unchanged_uris",
-        "prepared_node_changes",
-        "identity_changes",
-        "added_relations",
-        "removed_relations",
-        "node_changes",
-    ],
-)
-def test_receipt_parser_rejects_each_missing_field(field: str) -> None:
-    value = _prepared_receipt().to_dict()
-    value.pop(field)
-    with pytest.raises(ValueError):
-        MemoryChangeReceipt.from_dict(value)
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "expected_created_uris",
-        "expected_updated_uris",
-        "expected_deleted_uris",
-        "unchanged_uris",
-        "prepared_node_changes",
-        "identity_changes",
-        "added_relations",
-        "removed_relations",
-        "node_changes",
-    ],
-)
-@pytest.mark.parametrize("value", [None, (), {}, "items", 1, True])
-def test_receipt_parser_requires_json_arrays_for_every_collection(field: str, value: object) -> None:
-    raw = _prepared_receipt().to_dict()
-    raw[field] = value
-    with pytest.raises(ValueError):
-        MemoryChangeReceipt.from_dict(raw)
-
-
-@pytest.mark.parametrize(
-    "field", ["expected_created_uris", "expected_updated_uris", "expected_deleted_uris", "unchanged_uris"]
-)
-def test_receipt_uri_collections_must_be_unique_and_sorted(field: str) -> None:
-    profile = MemoryURI.from_address(MemoryAddress.profile())
-    preference = MemoryURI.from_address(MemoryAddress.preference("主题"))
-    values = tuple(reversed(sorted((profile, preference), key=str)))
-    with pytest.raises(ValueError, match="unique and sorted"):
-        _prepared_receipt(**{field: values})
-
-
-def test_receipt_expected_change_sets_are_disjoint() -> None:
-    uri = MemoryURI.from_address(MemoryAddress.profile())
-    with pytest.raises(ValueError, match="disjoint"):
-        _prepared_receipt(expected_updated_uris=(uri,))
-
-
-def test_prepared_receipt_rejects_commit_time_or_node_changes() -> None:
-    uri = MemoryURI.from_address(MemoryAddress.profile())
-    change = MemoryNodeChange(MemoryNodeChangeAction.CREATE, uri, None, 1, None, "a" * 64)
-    with pytest.raises(ValueError, match="prepared"):
-        _prepared_receipt(committed_at=BASE_TIME)
-    with pytest.raises(ValueError, match="prepared"):
-        _prepared_receipt(node_changes=(change,))
-
-
-@pytest.mark.parametrize("committed_at", [None, BASE_TIME - timedelta(seconds=1)])
-def test_committed_receipt_requires_non_backward_commit_time(committed_at: datetime | None) -> None:
-    prepared = _prepared_receipt()
-    uri = prepared.expected_created_uris[0]
-    change = MemoryNodeChange(MemoryNodeChangeAction.CREATE, uri, None, 1, None, "a" * 64)
-    with pytest.raises(ValueError, match="committed_at"):
-        replace(prepared, state=MemoryChangeReceiptState.COMMITTED, committed_at=committed_at, node_changes=(change,))
-
-
-@pytest.mark.parametrize("state", tuple(MemoryChangeReceiptState))
-def test_receipt_rejects_same_relation_in_added_and_removed_sets(state: MemoryChangeReceiptState) -> None:
-    left = MemoryURI.from_address(MemoryAddress.profile())
-    right = MemoryURI.from_address(MemoryAddress.preference("主题"))
-    relation = MemoryStoredLink(left, right, MemoryLinkType.RELATED_TO)
-    kwargs: dict[str, object] = {"added_relations": (relation,), "removed_relations": (relation,)}
-    if state is MemoryChangeReceiptState.COMMITTED:
-        prepared = _prepared_receipt()
-        uri = prepared.expected_created_uris[0]
-        kwargs.update(
-            state=state,
-            committed_at=BASE_TIME,
-            node_changes=(MemoryNodeChange(MemoryNodeChangeAction.CREATE, uri, None, 1, None, "a" * 64),),
-        )
-    with pytest.raises(ValueError, match="same relation"):
-        _prepared_receipt(**kwargs)
+@pytest.mark.parametrize("status", [MemoryJobStatus.STAGED, MemoryJobStatus.QUEUED, MemoryJobStatus.RUNNING])
+def test_unfinished_statuses_still_hold_later_sequences(status: MemoryJobStatus) -> None:
+    assert not status.terminal
 
 
 _INGEST = ("ingest_result_snapshot",)
@@ -594,7 +284,7 @@ BAD_OUTPUT_FIELDS: list[tuple[tuple[str | int, ...], object, type[Exception], st
     ((*_INGEST, "append", "next_sequence"), True, ValueError, "next_sequence must be a non-negative integer"),
     ((*_INGEST, "jobs", 0, "memory_sequence"), "1", ValueError, "memory_sequence must be a positive integer"),
     ((*_INGEST, "jobs", 0, "conversation_id"), 1, ValueError, "conversation_id must be non-empty normalized"),
-    ((*_INGEST, "jobs", 0, "transaction_id"), None, ValueError, "transaction_id must be 32 lowercase"),
+    ((*_INGEST, "jobs", 0, "segment_id"), None, ValueError, "segment_id must be non-empty normalized"),
     ((*_INGEST, "jobs", 0, "attempts"), 1.0, ValueError, "memory job attempts must be non-negative"),
     ((*_INGEST, "jobs", 0, "claim_id"), 1, ValueError, "running memory job requires a claim_id"),
     ((*_INGEST, "jobs", 0, "last_error"), 1, ValueError, "memory job last_error is invalid"),

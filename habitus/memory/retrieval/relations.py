@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 
 from habitus.memory.document import MemoryDocument, MemoryStoredLink
@@ -13,6 +14,8 @@ from habitus.memory.retrieval.model import (
 )
 from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.uri import MemoryURI
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class RelationExpander:
@@ -69,8 +72,13 @@ class RelationExpander:
                 document = direct_documents.get(neighbor) or neighbor_documents.get(neighbor)
                 if document is None:
                     document = self._read_neighbor(neighbor)
+                    if document is None:
+                        _LOGGER.warning("memory relation points to a missing L2 document, skipped: %s", neighbor)
+                        continue
                     neighbor_documents[neighbor] = document
-                self._require_reciprocal(memory.document, document, relation)
+                if not self._reciprocal(memory.document, document, relation):
+                    _LOGGER.warning("one-sided memory relation between %s and %s, skipped", memory.uri, neighbor)
+                    continue
                 if len(selected_relations[memory.uri]) >= self.config.max_relation_neighbors_per_match:
                     break
                 if len(assigned_relations) >= self.config.max_relation_neighbors_total:
@@ -81,13 +89,13 @@ class RelationExpander:
                 break
         return selected_relations
 
-    def _read_neighbor(self, neighbor: MemoryURI) -> MemoryDocument:
+    def _read_neighbor(self, neighbor: MemoryURI) -> MemoryDocument | None:
         try:
             snapshot = self.snapshot_reader.read(neighbor)
         except Exception as exc:
             raise MemorySearchError("failed to read one-hop related memory document") from exc
         if not snapshot.exists or snapshot.value is None:
-            raise MemorySearchError("memory relation points to a missing L2 document")
+            return None
         return snapshot.value
 
     def _attach(
@@ -111,21 +119,20 @@ class RelationExpander:
         return tuple(expanded)
 
     @staticmethod
-    def _require_reciprocal(
+    def _reciprocal(
         seed: MemoryDocument,
         neighbor: MemoryDocument,
         relation: MemoryStoredLink,
-    ) -> None:
+    ) -> bool:
+        """另一边也记着这条关联；两边分开写、可能不一致（裁定 111），不一致的跳过。"""
+
         seed_uri = MemoryURI.from_address(seed.address)
         neighbor_uri = MemoryURI.from_address(neighbor.address)
         if {seed_uri, neighbor_uri} != {relation.from_uri, relation.to_uri}:
             raise MemorySearchError("memory relation endpoint does not match the loaded documents")
         if relation.from_uri == seed_uri:
-            valid = relation in seed.links and relation in neighbor.backlinks
-        else:
-            valid = relation in seed.backlinks and relation in neighbor.links
-        if not valid:
-            raise MemorySearchError("memory relation Links/Backlinks are inconsistent")
+            return relation in seed.links and relation in neighbor.backlinks
+        return relation in seed.backlinks and relation in neighbor.links
 
 
 __all__ = ["RelationExpander"]

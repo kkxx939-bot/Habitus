@@ -40,7 +40,7 @@ def _event(
 def test_audit_store_records_only_security_and_operations_with_safe_fields(tmp_path) -> None:
     store = AuditStore(tmp_path / "audit" / "events.sqlite3", retention_days=14, max_records=2)
     now = datetime(2026, 7, 30, tzinfo=UTC)
-    with bind_observation_context(request_id="request-audit", memory_sequence=7, transaction_id="tx-audit"):
+    with bind_observation_context(request_id="request-audit", memory_sequence=7):
         store.record(
             _event(
                 "retrieval",
@@ -84,7 +84,7 @@ def test_json_logging_redacts_secrets_and_posix_paths_but_keeps_correlation() ->
         args=(),
         exc_info=None,
     )
-    with bind_observation_context(request_id="request-log", memory_sequence=9, transaction_id="tx-log"):
+    with bind_observation_context(request_id="request-log", memory_sequence=9):
         payload = json.loads(formatter.format(record))
 
     assert "secret-token" not in payload["message"]
@@ -92,7 +92,7 @@ def test_json_logging_redacts_secrets_and_posix_paths_but_keeps_correlation() ->
     assert "/Users/alice" not in payload["message"]
     assert payload["request_id"] == "request-log"
     assert payload["memory_sequence"] == 9
-    assert payload["transaction_id"] == "tx-log"
+    assert "transaction_id" not in payload  # 阶段 3 去掉事务后关联字段里不再有事务身份
 
 
 @pytest.mark.parametrize(

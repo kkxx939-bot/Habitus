@@ -44,8 +44,18 @@ _REMOVED_SECTIONS = (
 )
 
 
+_REMOVED_WRITE_FIELDS = (
+    ("memory", "transaction_journal"),
+    ("workflow", "receipts"),
+    ("workflow", "lifecycle", "committed_receipt_retention_days"),
+    ("memory", "search_service", "catalog_retries"),
+    ("memory", "search_service", "catalog_retry_delay_seconds"),
+)
+
+
 def _reject_removed_sections(value: object) -> None:
-    """向量与重排已从 Habitus 移除：旧配置里还留着这些段时，指明是哪一段、该怎么改，不当作拼写错误。"""
+    """向量与重排、多文件写入事务与回执已从 Habitus 移除：旧配置里还留着这些段时，指明是哪一段、该怎么改，
+    不当作拼写错误。"""
 
     if not isinstance(value, Mapping):
         return
@@ -59,6 +69,21 @@ def _reject_removed_sections(value: object) -> None:
             "这些配置段对应的向量检索与重排已经从 Habitus 移除，请从配置文件里删掉它们（连同 credentials 里只给它们用的"
             "凭据）后重启：" + "、".join(found)
         )
+    write_fields = [".".join(("config", *path)) for path in _REMOVED_WRITE_FIELDS if _has_path(value, path)]
+    if write_fields:
+        raise ConfigError(
+            "记忆写入已经不用多文件事务日志和变更回执（裁定 111），这些配置项随之移除，请从配置文件里删掉后重启："
+            + "、".join(write_fields)
+        )
+
+
+def _has_path(value: Mapping[str, object], path: tuple[str, ...]) -> bool:
+    current: object = value
+    for name in path:
+        if not isinstance(current, Mapping) or name not in current:
+            return False
+        current = current[name]
+    return True
 
 
 @dataclass(frozen=True)
@@ -124,15 +149,9 @@ class HabitusConfig:
 
     @property
     def workflow_root(self) -> Path:
-        """返回 Job、Receipt 和事务日志的树外工作目录。"""
+        """返回记忆任务与生命周期状态的树外工作目录。"""
 
         return self.storage_root / "workflow"
-
-    @property
-    def transaction_root(self) -> Path:
-        """返回多文档提交恢复日志目录。"""
-
-        return self.workflow_root / "transactions"
 
     @classmethod
     def from_mapping(cls, value: object) -> HabitusConfig:
@@ -234,10 +253,6 @@ def _require_storage_bounds(config: HabitusConfig) -> None:
         raise ConfigError("conversation segmentation byte limits cannot exceed conversation.journal.max_file_bytes")
     if memory.semantic.max_direct_entries + 2 > memory.tree.max_children_per_directory:
         raise ConfigError("memory direct-entry limits cannot exceed memory.tree.max_children_per_directory")
-    if memory.transaction_journal.max_record_bytes < memory.snapshot.max_total_bytes * 2:
-        raise ConfigError(
-            "memory.transaction_journal.max_record_bytes must be at least twice memory.snapshot.max_total_bytes"
-        )
     initial_items = _FIXED_RETRIEVAL_DOCUMENTS + memory.editor_retrieval.max_tool_uris
     if initial_items > memory.snapshot.max_items:
         raise ConfigError("memory.editor_retrieval can exceed memory.snapshot.max_items")
@@ -302,8 +317,6 @@ def _require_workflow_bounds(config: HabitusConfig) -> None:
         raise ConfigError("workflow.worker.heartbeat_interval_seconds must be at most one third of the job lease TTL")
     if workflow.lifecycle.cleanup_batch_size > workflow.jobs.max_files:
         raise ConfigError("workflow lifecycle cleanup batch cannot exceed workflow.jobs.max_files")
-    if workflow.lifecycle.cleanup_batch_size > workflow.receipts.max_files:
-        raise ConfigError("workflow lifecycle cleanup batch cannot exceed workflow.receipts.max_files")
     if conversation.lifecycle.max_conversations_per_cycle > conversation.journal.max_conversation_tree_entries:
         raise ConfigError("conversation lifecycle batch cannot exceed the Conversation tree enumeration bound")
     if conversation.lifecycle.idle_scan_batch_conversations > conversation.journal.max_conversation_tree_entries:

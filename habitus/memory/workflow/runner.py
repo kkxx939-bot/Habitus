@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from asyncio import to_thread
 from dataclasses import dataclass
 
-from habitus.foundation.observability import NullObserver, Observer, bind_observation_context, observe_operation
+from habitus.foundation.observability import NullObserver, Observer, bind_observation_context
 from habitus.memory.conversation import ConversationMessageJournal
 from habitus.memory.conversation.summary import ConversationSummaryService
-from habitus.memory.editor import MemoryEditor
-from habitus.memory.editor.transaction import MemoryCommitResult
+from habitus.memory.editor import MemoryCommitResult, MemoryEditor
 from habitus.memory.semantic import MemorySemanticRefresher
 from habitus.memory.workflow.completion import MemoryCommittedJobFinalizer, MemoryRecallStateCleaner
 from habitus.memory.workflow.execution import MemoryJobExecutor
@@ -28,17 +26,12 @@ from habitus.memory.workflow.jobs import (
     MemoryJobStatus,
     MemoryJobStore,
 )
-from habitus.memory.workflow.receipt import (
-    MemoryChangeReceipt,
-    MemoryChangeReceiptStore,
-    MemoryChangeSource,
-)
-from habitus.memory.workflow.recovery import MemoryJobTransactionRecovery, MemoryStagedJobRecovery
+from habitus.memory.workflow.recovery import MemoryStagedJobRecovery
 
 
 @dataclass(frozen=True)
 class MemoryJobClaim:
-    """Worker 已认领的任务以及是否只能继续已提交事务。"""
+    """Worker 已认领的任务，以及过期租约接管时尝试次数是否已经用完。"""
 
     lease: MemoryJobLease
     expired_attempts_exhausted: bool = False
@@ -50,11 +43,10 @@ class MemoryJobRunResult:
 
     job: MemoryJob | None
     commit: MemoryCommitResult | None
+    #: 卡片在之前某次执行里已经写完，这一次只补了后面的步骤（没有调模型提取）
     recovered: bool = False
     semantic_refreshed: bool = False
-    journal_cleaned: bool = True
     summary_generated: bool = False
-    change_receipt: MemoryChangeReceipt | None = None
 
 
 class MemoryJobRunner:
@@ -67,45 +59,33 @@ class MemoryJobRunner:
         editor: MemoryEditor,
         semantic_refresher: MemorySemanticRefresher,
         summary_service: ConversationSummaryService,
-        change_receipts: MemoryChangeReceiptStore,
         recall_state_cleaner: MemoryRecallStateCleaner,
         *,
         observer: Observer | None = None,
     ) -> None:
-        if store.memory_root != editor.transaction.tree.root:
+        if store.memory_root != editor.writer.tree.root:
             raise ValueError("MemoryJobStore is bound to another memory root")
-        if change_receipts.root != store.root:
-            raise ValueError("change receipt store and MemoryJobStore must use the same root")
         self.store = store
         self.observer = observer or NullObserver()
         self.staged_recovery = MemoryStagedJobRecovery(conversations, store)
-        self.transaction_recovery = MemoryJobTransactionRecovery(
-            editor.transaction,
-            change_receipts,
-        )
         self.executor = MemoryJobExecutor(
             conversations,
             editor,
             summary_service,
-            change_receipts,
             store,
             observer=self.observer,
         )
         self.committed_finalizer = MemoryCommittedJobFinalizer(
             store,
-            conversations,
-            summary_service,
-            change_receipts,
             semantic_refresher,
-            self.transaction_recovery,
             recall_state_cleaner,
             observer=self.observer,
         )
 
     def claim_next(self, worker_id: str) -> MemoryJobClaim | None:
-        """先取得最早 Job 的 durable lease，再接触它的事务恢复状态。"""
+        """认领最早还没到终态的 Job（STAGED 先补完 history 发布）。"""
 
-        job = self.store.oldest_uncommitted()
+        job = self.store.oldest_unfinished()
         if job is None:
             return None
         job = self.staged_recovery.recover(job)
@@ -118,69 +98,41 @@ class MemoryJobRunner:
         )
 
     async def run_claimed(self, claim: MemoryJobClaim) -> MemoryJobRunResult:
-        """只执行已经由 Worker 认领并持续维持心跳的 Job。"""
+        """只执行已经由 Worker 认领并持续维持心跳的 Job。
+
+        任务文件里记着"卡片已写完"的，只补刷概览、清冷热状态和标完成，不再调模型提取；没有就整条重做。
+        """
 
         lease = claim.lease
         job = self.store.assert_current(lease)
-        source = MemoryChangeSource.from_job(job)
-        observer = getattr(self, "observer", None) or NullObserver()
-        with bind_observation_context(
-            memory_sequence=job.memory_sequence,
-            transaction_id=job.transaction_id,
-            attempt=job.attempts,
-        ):
+        with bind_observation_context(memory_sequence=job.memory_sequence, attempt=job.attempts):
             try:
-                with observe_operation(observer, "workflow", "transaction_recovery"):
-                    await to_thread(self.transaction_recovery.recover_pending)
-                self.store.assert_current(lease)
-                with observe_operation(observer, "workflow", "transaction_inspection"):
-                    journal = await to_thread(self.transaction_recovery.inspect, job)
-                if claim.expired_attempts_exhausted and journal is None:
-                    raise MemoryJobError("expired worker lease exhausted attempts without a committed transaction")
-                if journal is not None:
-                    completion = await self.committed_finalizer.finalize(lease, journal)
-                    return MemoryJobRunResult(
-                        job=completion.job,
-                        commit=None,
-                        recovered=True,
-                        semantic_refreshed=True,
-                        journal_cleaned=completion.journal_cleaned,
-                        summary_generated=completion.summary_generated,
-                        change_receipt=completion.change_receipt,
-                    )
-
+                if job.cards_written:
+                    completed = await self.committed_finalizer.finalize(lease)
+                    return MemoryJobRunResult(job=completed, commit=None, recovered=True, semantic_refreshed=True)
+                if claim.expired_attempts_exhausted:
+                    raise MemoryJobError("expired worker lease exhausted attempts before the cards were written")
                 execution = await self.executor.execute(lease)
-                completion = await self.committed_finalizer.finalize(
-                    lease,
-                    execution.journal,
-                    summary_generated=execution.summary_generated,
-                )
+                completed = await self.committed_finalizer.finalize(lease)
                 return MemoryJobRunResult(
-                    job=completion.job,
+                    job=completed,
                     commit=execution.commit,
                     semantic_refreshed=True,
-                    journal_cleaned=completion.journal_cleaned,
-                    summary_generated=completion.summary_generated,
-                    change_receipt=completion.change_receipt,
+                    summary_generated=execution.summary_generated,
                 )
             except MemoryJobLeaseLostError:
                 raise
             except MemoryJobSkipped as skipped:
-                return await self._skipped(lease, skipped.reason)
+                job = await self.committed_finalizer.finalize_skipped(lease, skipped.reason)
+                return MemoryJobRunResult(job=job, commit=None)
             except Exception as exc:
-                failed = self._record_failure(lease, exc, source)
+                failed = self._record_failure(lease, exc)
                 raise MemoryJobExecutionError(
                     f"memory job {failed.memory_sequence} failed with status {failed.status.value}",
                     job=failed,
                 ) from exc
 
-    async def _skipped(self, lease: MemoryJobLease, reason: str) -> MemoryJobRunResult:
-        """这一段的输入有问题，跳过（裁定 108）：长期记忆不动，任务进 SKIPPED，后面的序号照常往下走。"""
-
-        job = await self.committed_finalizer.finalize_skipped(lease, reason)
-        return MemoryJobRunResult(job=job, commit=None, journal_cleaned=False)
-
-    def _record_failure(self, lease: MemoryJobLease, exc: Exception, source: MemoryChangeSource) -> MemoryJob:
+    def _record_failure(self, lease: MemoryJobLease, exc: Exception) -> MemoryJob:
         kind = memory_job_failure_kind(exc)
         waits = kind is MemoryJobFailureKind.WAITS_FOR_MODEL
         return self.store.fail(
@@ -189,7 +141,6 @@ class MemoryJobRunner:
             retryable=kind is not MemoryJobFailureKind.PERMANENT,
             waits_for_model=waits,
             wait_seconds=model_wait_seconds(exc) if waits else None,
-            before_settlement=lambda: self.transaction_recovery.discard_uncommitted(source),
         )
 
 

@@ -29,15 +29,15 @@
 | 受控提取循环 | 检索不足仍继续、候选带病提交、无限再生成 | `unit/editor/test_extraction_*` | ReAct、审查、再生成、耗尽失败 |
 | 节点变更与身份 | 同址覆盖、字段策略失真、误 MERGE/DELETE | `unit/editor/test_mutation_and_identity.py`, `test_identity_planner_rules.py` | CREATE/UPDATE/NOOP、同类合并、跨类/事件拒绝、整节点删除、PATCH/REPLACE |
 | Links/Backlinks | 单边关系、删除未迁移、自环、显式 REMOVE 误用 | `unit/editor/test_relationships.py` | ADD/REMOVE、双向派生、MERGE 迁移、损坏拒绝 |
-| 事务提交 | 内容与关系分批发布、旧快照覆盖新状态、日志残留 | `integration/test_memory_commit_chain.py`, `test_transaction_recovery.py` | CREATE/UPDATE/MERGE/DELETE、部分发布回滚、完整发布恢复、未知后续状态拒绝 |
+| 写入（裁定 111） | 写之前文件被改、写到一半停下、合并目标没写成就删来源、悬空与单边关联 | `integration/test_memory_commit_chain.py`, `unit/workflow/test_light_write.py`, `integration/test_memory_job_full_chain.py` | 锁内版本比对、固定写入顺序、中途失败不回滚可重做、关联跳过与修复 |
 | L0/L1 与 Memory Vector | 派生层混入权威字段、索引与树不一致 | `unit/semantic/` | 刷新、重建、增量、过滤、陈旧源 |
 | 记忆检索 SearchService | Summary 抢占 Memory、kinds 截断关系、completed 占名额 | `unit/retrieval/` | 主召回、多查询失败、一跳非递归、关系损坏拒绝、充分性判断、条件后备 |
-| Job/Receipt | 跨会话乱序、租约 ABA、失败跳过、回执与实写不一致 | `unit/workflow/`, `integration/test_change_receipt_chain.py`, `integration/test_memory_job_full_chain.py` | 顺序、lease、退避、STAGED/COMMITTED 恢复、实际事务回执、人工恢复、History 释放后过期 Job/Receipt 清理 |
+| Job | 跨会话乱序、租约 ABA、失败不挡后面、卡片已写完后崩溃 | `unit/workflow/`, `integration/test_memory_job_full_chain.py` | 顺序、lease、退避、自动重试期间挡后面、判失败后放行、STAGED 恢复、"卡片已写完"阶段续做、人工重试与放弃、原文按段到期释放与过期 Job 清理 |
 | Worker/Runtime | 重复启动、无心跳执行、失败 Job 无运维入口、错误组装 | `unit/runtime/`, `integration/test_runtime_assembly.py` | Job Worker、LifecycleWorker、全局 lease、耐久游标、局部失败、共享依赖、Runtime 启停/重启/关闭 |
 | 架构边界 | 旧 Evidence/Context 复活、领域反向依赖、双轨 Schema | `architecture/` | 源码静态约束 |
 | 提醒出口（方案 32） | 「待取」后名额双计、租约过期丢「说了」、两个会话各写一条「说了」、Desktop 晚来的作答写不出回话、出口挪到 lane 之后 | `unit/runtime/test_foresight_outlet.py`, `unit/runtime/test_foresight_delivery.py`, `unit/integrations/test_http_reminders.py`, `integration/test_reminder_outlet_consumer.py`, `integration/test_reminder_outlet_chain.py` | 取 / 租约 / 放回计数 / 时限、认提问四种会话与作答三种写法、HTTP 契约、出口先于 lane、四条样例到结算反馈 |
 | Conversation 主链 | History 已发布但 Job 丢失，或 Job 重复 | `integration/test_conversation_to_job.py` | afterTurn、outbox、重放、flush |
-| 完整 MemoryJob 主链 | 组件分别正确但发布顺序或恢复边界错误 | `integration/test_memory_job_full_chain.py` | Summary/Editor 并行、Receipt、事务、双向量 checkpoint、Job 终态、Journal 清理、L2 已提交后向量超时的无重规划恢复 |
+| 完整 MemoryJob 主链 | 组件分别正确但写入顺序或续做边界错误 | `integration/test_memory_job_full_chain.py` | Summary/Editor 并行、摘要生成即落盘、写卡片、记"卡片已写完"、刷概览失败后不重新提取、Job 终态 |
 
 ## 主链验收顺序
 
@@ -45,7 +45,7 @@
 2. 只在完整轮次边界封存不可变 History，先 STAGED、后 QUEUED。
 3. 同一 Segment 独立生成过程 Summary 和长期记忆计划；任一失败不发布 L2。
 4. 旧记忆读取、候选审查、字段计划、身份裁决和关系计划全部完成后才提交。
-5. L2 内容与 Links/Backlinks 在一笔可恢复事务中发布，随后刷新 L0/L1 和远程索引。
+5. L2 内容与 Links/Backlinks 拿齐锁、核对版本后逐个原子写（没有多文件事务，裁定 111），随后刷新 L0/L1。
 6. Memory 是检索主结果；只有 Memory 不足时，Summary 才作为单独的历史细节后备。
 7. Job、Receipt、History、Summary 和 Transaction Journal 按安全门槛清理，不允许时间直接改变记忆业务语义。
 

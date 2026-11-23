@@ -56,7 +56,7 @@ def test_after_turn_seals_only_old_complete_turn_and_activates_matching_job(tmp_
     assert job.segment_id == history[0].segment_id
     assert job.source_segment_digest == history[0].digest
     assert tuple(message.sequence for message in journal.read_live(address).messages) == (2, 3)
-    assert jobs.oldest_uncommitted() == job
+    assert jobs.oldest_unfinished() == job
 
 
 def test_replaying_same_append_does_not_duplicate_history_or_job(tmp_path: Path) -> None:
@@ -70,7 +70,7 @@ def test_replaying_same_append_does_not_duplicate_history_or_job(tmp_path: Path)
     first = enqueuer.append_and_maybe_enqueue(address, batch, after_turn=True)
     replay = enqueuer.append_and_maybe_enqueue(address, batch, after_turn=True)
 
-    assert first.jobs[0] == jobs.oldest_uncommitted()
+    assert first.jobs[0] == jobs.oldest_unfinished()
     assert replay.jobs == ()
     assert len(journal.list_history(address)) == 1
     assert jobs.high_watermark() == 1
@@ -248,7 +248,7 @@ def test_flush_completes_staged_job_left_before_history_publish_before_sealing_a
         (2, history[1].segment_id, MemoryJobStatus.QUEUED),
     )
     assert tuple(job.source_segment_digest for job in result.jobs) == tuple(item.digest for item in history)
-    assert jobs.claim(jobs.oldest_uncommitted(), "worker").job.memory_sequence == 1
+    assert jobs.claim(jobs.oldest_unfinished(), "worker").job.memory_sequence == 1
 
 
 def test_after_turn_activates_staged_job_whose_history_was_published_before_its_activation(
@@ -284,7 +284,7 @@ def test_after_turn_activates_staged_job_whose_history_was_published_before_its_
         (1, "000000000000-000000000001", MemoryJobStatus.QUEUED),
         (2, "000000000002-000000000003", MemoryJobStatus.QUEUED),
     )
-    assert jobs.claim(jobs.oldest_uncommitted(), "worker").job.memory_sequence == 1
+    assert jobs.claim(jobs.oldest_unfinished(), "worker").job.memory_sequence == 1
 
 
 def _exhaust_a_staged_job(journal: ConversationMessageJournal, jobs: MemoryJobStore, enqueuer, address) -> None:  # type: ignore[no-untyped-def]
@@ -301,7 +301,7 @@ def _exhaust_a_staged_job(journal: ConversationMessageJournal, jobs: MemoryJobSt
             enqueuer.seal_and_enqueue(address, through_sequence=1)
     finally:
         journal._publish_seal = publish  # type: ignore[method-assign]
-    job = jobs.oldest_uncommitted()
+    job = jobs.oldest_unfinished()
     while job.status is MemoryJobStatus.STAGED:
         job = jobs.record_staged_failure(job, OSError(28, "No space left on device"))
     assert job.status is MemoryJobStatus.FAILED and job.claim_generation == 0
@@ -331,7 +331,8 @@ def test_a_staged_job_that_exhausted_its_retries_is_not_bypassed_by_a_new_bounda
     assert tuple((job.memory_sequence, job.segment_id, job.status) for job in result.jobs) == (
         (2, "000000000002-000000000003", MemoryJobStatus.QUEUED),
     )
-    failed = jobs.oldest_uncommitted()
+    # FAILED 是终态、不挡后面（阶段 3）：它不再是"最早未完成"，从失败清单里取
+    (failed,) = jobs.failed()
     assert (failed.memory_sequence, failed.status) == (1, MemoryJobStatus.FAILED)
 
     retried = jobs.retry_failed(failed)
@@ -340,7 +341,7 @@ def test_a_staged_job_that_exhausted_its_retries_is_not_bypassed_by_a_new_bounda
 
     assert recovered.status is MemoryJobStatus.QUEUED
     assert recovered.source_segment_digest == journal.list_history(address)[0].digest
-    assert jobs.claim(jobs.oldest_uncommitted(), "worker").job.memory_sequence == 1
+    assert jobs.claim(jobs.oldest_unfinished(), "worker").job.memory_sequence == 1
 
 
 def test_a_retried_staged_job_whose_history_is_behind_newer_segments_is_activated_by_the_foreground(
@@ -358,7 +359,7 @@ def test_a_retried_staged_job_whose_history_is_behind_newer_segments_is_activate
     enqueuer.append_and_maybe_enqueue(
         address, ConversationBatch("conversation-1", closed_turn(start_sequence=4)), after_turn=True
     )
-    jobs.retry_failed(jobs.oldest_uncommitted())
+    jobs.retry_failed(jobs.failed()[0])
 
     result = enqueuer.append_and_maybe_enqueue(
         address, ConversationBatch("conversation-1", closed_turn(start_sequence=6)), after_turn=True

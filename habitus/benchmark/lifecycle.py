@@ -117,12 +117,10 @@ class LifecycleBenchmark:
                         if maintenance.compaction.summary is not None
                         else None
                     ),
-                    "purged_history": len(maintenance.purged_history_segment_ids),
                     "released_history": len(maintenance.released_history_segment_ids),
                     "deleted_segment_summaries": len(maintenance.deleted_segment_summary_ids),
                     "deleted_range_summaries": len(maintenance.deleted_range_summary_ids),
                     "deleted_jobs": len(maintenance.deleted_memory_job_sequences),
-                    "deleted_receipts": len(maintenance.deleted_memory_receipt_ids),
                 }
                 events.append(event)
                 if not _changed(event):
@@ -167,7 +165,6 @@ def _snapshot(runtime: Runtime, address: ConversationAddress) -> dict[str, int]:
         "range_summaries": len(compactor.range_store.list(address, ConversationRangeSummaryStage.RANGE)),
         "archive_summaries": len(compactor.range_store.list(address, ConversationRangeSummaryStage.ARCHIVE)),
         "jobs": len(runtime.components.workflow.jobs.list_for_conversation(address)),
-        "receipts": len(runtime.components.workflow.receipts.list_for_conversation(address)),
     }
 
 
@@ -177,12 +174,10 @@ def _changed(event: Mapping[str, object]) -> bool:
         or any(
             _integer(event[name], name) > 0
             for name in (
-                "purged_history",
                 "released_history",
                 "deleted_segment_summaries",
                 "deleted_range_summaries",
                 "deleted_jobs",
-                "deleted_receipts",
             )
         )
     )
@@ -226,8 +221,8 @@ def _lifecycle_benchmark_config(config: HabitusConfig, source_count: int) -> Hab
         config.workflow,
         lifecycle=replace(
             config.workflow.lifecycle,
-            committed_job_retention_days=0,
-            committed_receipt_retention_days=1,
+            history_retention_days=0,
+            job_retention_days=0,
         ),
     )
     return replace(config, conversation=conversation, workflow=workflow)

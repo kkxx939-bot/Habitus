@@ -28,6 +28,7 @@ from habitus.config import HabitusConfig
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.model import MemoryKind
 from habitus.memory.uri import MemoryURI
+from habitus.memory.workflow import MemoryJobStatus
 from habitus.model_client import ChatCallContext, ChatMessage, ChatRequest
 from habitus.pre.conversation import (
     ConversationBatch,
@@ -231,7 +232,7 @@ class BenchmarkRunner:
         started = time.perf_counter()
         job_count = 0
         message_count = 0
-        committed_receipts = 0
+        committed_jobs = 0
         for session in sample.sessions:
             address = ConversationAddress(
                 conversation_id=f"{sample.sample_id}-{session.session_id}",
@@ -255,8 +256,7 @@ class BenchmarkRunner:
                 result = await runtime.run_next()
                 if result.job is None:
                     break
-                if result.change_receipt is not None:
-                    committed_receipts += 1
+                committed_jobs += result.job.status is MemoryJobStatus.COMMITTED
 
         addresses = runtime.components.memory.tree.list_addresses(limit=10_000)
         kinds: dict[str, int] = {}
@@ -271,7 +271,7 @@ class BenchmarkRunner:
             "session_count": len(sample.sessions),
             "message_count": message_count,
             "job_count": job_count,
-            "committed_receipt_count": committed_receipts,
+            "committed_job_count": committed_jobs,
             "memory_document_count": len(addresses),
             "memory_documents_by_kind": dict(sorted(kinds.items())),
             "ingest_latency_ms": (time.perf_counter() - started) * 1_000,

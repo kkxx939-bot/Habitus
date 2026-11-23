@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from enum import Enum
 
+from habitus.memory.editor.commit import MemoryCommitError
 from habitus.memory.editor.extraction.model import MemoryExtractionPermanentError
-from habitus.memory.editor.transaction import MemoryCommitConflictError
 from habitus.memory.workflow.jobs import MemoryJobError, MemoryJobLeaseLostError
 from habitus.model_client import ModelClientError, ModelErrorRule, ModelStructuredOutputError, model_failure
 
@@ -24,12 +24,13 @@ class MemoryJobFailureKind(str, Enum):
     """一次 Job 失败之后怎么处置。"""
 
     #: 依赖此刻用不了：模型（统一规则里的"等一等可能好"用尽、"要人处理"、熔断开着）。
-    #: 不计入尝试次数，排回队列等依赖恢复、挡住后面的序号（裁定 80 问题 2、裁定 82 第 3 条、裁定 108）。
+    #: 不计入尝试次数，排回队列等依赖恢复；等的期间挡住后面的序号（裁定 80 问题 2、裁定 82 第 3 条、裁定 108）。
     WAITS_FOR_MODEL = "waits_for_model"
-    #: 明确瞬态、答复用完结构纠错仍不合格（模型回答的正常波动，裁定 80 第 4 条）或未知运行时故障：有界退避重试，
-    #: 到 ``max_attempts`` 进 FAILED。
+    #: 明确瞬态、写之前文件被别人改了、写到一半停下、答复用完结构纠错仍不合格（模型回答的正常波动，裁定 80 第 4 条）
+    #: 或未知运行时故障：有界退避整条重做，重试期间挡住后面的序号；到 ``max_attempts`` 进 FAILED，后面照常往下走。
     RETRYABLE = "retryable"
-    #: 再试也一样（长期记忆写成之后才碰到的输入问题、永久抽取错误、完整性错误……）：第一次就 FAILED，挡住后面等人处理。
+    #: 再试也一样（长期记忆写成之后才碰到的输入问题、永久抽取错误、完整性错误……）：第一次就 FAILED，后面照常往下走，
+    #: 等人决定重试还是放弃（裁定 111）。
     PERMANENT = "permanent"
 
 
@@ -81,7 +82,7 @@ def _known_failure_kind(error: BaseException, *, outermost: bool) -> MemoryJobFa
         )
     if isinstance(error, ModelStructuredOutputError):
         return MemoryJobFailureKind.RETRYABLE
-    if isinstance(error, MemoryCommitConflictError | TimeoutError):
+    if isinstance(error, MemoryCommitError | TimeoutError):
         return MemoryJobFailureKind.RETRYABLE
     if isinstance(error, MemoryExtractionPermanentError):
         return MemoryJobFailureKind.PERMANENT

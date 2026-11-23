@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import Enum
 
+from habitus.memory.uri import MemoryURI
+
 MEMORY_JOB_ERROR_MAX_CHARS = 2_000
 _WORKER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
@@ -16,7 +18,7 @@ class MemoryJobError(RuntimeError):
 
 
 class MemoryJobBlockedError(MemoryJobError):
-    """最早任务失败、尚未就绪或由另一有效租约持有。"""
+    """最早任务尚未就绪，或另一条任务正由有效租约持有。"""
 
 
 class MemoryJobNotReadyError(MemoryJobBlockedError):
@@ -51,6 +53,7 @@ class MemoryJobStatus(str, Enum):
     STAGED = "staged"
     QUEUED = "queued"
     RUNNING = "running"
+    #: 自动重试用完判了失败：终态，后面的序号照常往下走（裁定 111）；人工可以重试（原文还在时）或放弃。
     FAILED = "failed"
     COMMITTED = "committed"
     #: 这一段的输入有问题（请求不合法、太长、内容安全），记不进长期记忆：终态，后面的序号照常往下走（裁定 108）。
@@ -59,9 +62,9 @@ class MemoryJobStatus(str, Enum):
 
     @property
     def terminal(self) -> bool:
-        """写完了或跳过了：不再阻挡后面的序号。"""
+        """写完了、跳过了或判了失败：不再阻挡后面的序号。"""
 
-        return self in {MemoryJobStatus.COMMITTED, MemoryJobStatus.SKIPPED}
+        return self in {MemoryJobStatus.COMMITTED, MemoryJobStatus.SKIPPED, MemoryJobStatus.FAILED}
 
 
 @dataclass(frozen=True)
@@ -73,13 +76,12 @@ class MemoryJobAbandonment:
     started_on: date
     segment_id: str
     source_segment_digest: str
-    transaction_id: str
     attempts: int
     last_error: str
     reason: str
     abandoned_at: datetime
 
-    SCHEMA_VERSION = "memory_job_abandonment_v1"
+    SCHEMA_VERSION = "memory_job_abandonment_v2"
 
     def __post_init__(self) -> None:
         if self.memory_sequence <= 0:
@@ -92,8 +94,6 @@ class MemoryJobAbandonment:
             raise ValueError("started_on must be a calendar date")
         if not MemoryJob._hex(self.source_segment_digest, 64):
             raise ValueError("source_segment_digest must be lowercase SHA-256 text")
-        if not MemoryJob._hex(self.transaction_id, 32):
-            raise ValueError("transaction_id must be 32 lowercase hexadecimal characters")
         if self.attempts <= 0:
             raise ValueError("attempts must be a positive integer")
         for name, maximum in (("last_error", MEMORY_JOB_ERROR_MAX_CHARS), ("reason", 2_000)):
@@ -122,7 +122,6 @@ class MemoryJobAbandonment:
             started_on=job.started_on,
             segment_id=job.segment_id,
             source_segment_digest=job.source_segment_digest,
-            transaction_id=job.transaction_id,
             attempts=job.attempts,
             last_error=job.last_error,
             reason=reason,
@@ -213,7 +212,6 @@ class MemoryJob:
     started_on: date
     segment_id: str
     source_segment_digest: str
-    transaction_id: str
     status: MemoryJobStatus
     attempts: int
     claim_id: str | None
@@ -226,6 +224,12 @@ class MemoryJob:
     updated_at: datetime
     #: 最近连着几次因为模型此刻用不了而失败、在长退避里等模型恢复（这几次不计入 ``attempts``）；别的结果清零
     model_waits: int = 0
+    #: 卡片已经全部写进记忆树（裁定 111）：之后崩溃或失败重来，只补刷概览、清冷热状态和标完成，不再调模型提取
+    cards_written: bool = False
+    #: 这一次写到的地址（新建、更新、只改关联的邻居）与删掉的地址，``memory://`` 规范形式、排序去重；
+    #: 完成时据此刷概览、清冷热状态，看板据此显示卡片来自哪一段对话
+    changed_uris: tuple[str, ...] = ()
+    deleted_uris: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.memory_sequence <= 0:
@@ -240,8 +244,6 @@ class MemoryJob:
             raise ValueError("memory job model_waits must be non-negative")
         if not self._hex(self.source_segment_digest, 64):
             raise ValueError("source_segment_digest must be lowercase SHA-256 text")
-        if not self._hex(self.transaction_id, 32):
-            raise ValueError("transaction_id must be 32 lowercase hexadecimal characters")
         try:
             status = MemoryJobStatus(self.status)
         except ValueError as exc:
@@ -279,6 +281,7 @@ class MemoryJob:
                 raise ValueError("retried staged memory job requires its last error")
         if status in {MemoryJobStatus.FAILED, MemoryJobStatus.SKIPPED} and self.last_error is None:
             raise ValueError("failed memory job requires its last error")
+        self._validate_written(status)
         if self.last_error is not None and (not self.last_error or len(self.last_error) > MEMORY_JOB_ERROR_MAX_CHARS):
             raise ValueError("memory job last_error is invalid")
         for name in ("created_at", "updated_at"):
@@ -303,6 +306,25 @@ class MemoryJob:
         """排着队、在长退避里等模型恢复（不是失败）。"""
 
         return self.status is MemoryJobStatus.QUEUED and self.model_waits > 0
+
+    def _validate_written(self, status: MemoryJobStatus) -> None:
+        for name in ("changed_uris", "deleted_uris"):
+            values = tuple(getattr(self, name))
+            for value in values:
+                MemoryURI.parse(value).to_address()
+                if str(MemoryURI.parse(value)) != value:
+                    raise ValueError(f"memory job {name} must hold canonical memory:// URIs")
+            if values != tuple(sorted(set(values))):
+                raise ValueError(f"memory job {name} must be unique and sorted")
+            object.__setattr__(self, name, values)
+        if not self.cards_written:
+            if self.changed_uris or self.deleted_uris:
+                raise ValueError("memory job cannot list written URIs before its cards are written")
+            return
+        if status in {MemoryJobStatus.STAGED, MemoryJobStatus.SKIPPED}:
+            raise ValueError("staged or skipped memory job cannot have written cards")
+        if set(self.changed_uris) & set(self.deleted_uris):
+            raise ValueError("one URI cannot be both written and deleted by a memory job")
 
     def _normalize_optional_time(self, name: str) -> None:
         value = getattr(self, name)

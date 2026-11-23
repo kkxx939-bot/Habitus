@@ -45,12 +45,10 @@ from habitus.memory.editor import (
     MemoryCommitConfig,
     MemoryExtractionConfig,
     MemoryRetrievalConfig,
-    MemoryTransactionJournalConfig,
 )
 from habitus.memory.semantic import MemorySemanticConfig
 from habitus.memory.tree import MemoryTreeConfig
 from habitus.memory.workflow import (
-    MemoryChangeReceiptStoreConfig,
     MemoryJobConfig,
     MemoryWorkflowLifecycleConfig,
 )
@@ -78,7 +76,6 @@ CONFIG_INSTANCES = (
     MemoryDocumentConfig(),
     MemoryExtractionConfig(),
     MemoryCommitConfig(),
-    MemoryTransactionJournalConfig(),
     MemoryRetrievalConfig(),
     MemoryRecallLifecycleConfig(),
     MemorySearchServiceConfig(),
@@ -86,7 +83,6 @@ CONFIG_INSTANCES = (
     MemoryTreeConfig(),
     MemoryJobConfig(),
     MemoryWorkflowLifecycleConfig(),
-    MemoryChangeReceiptStoreConfig(),
     SnapshotReadConfig(),
     SQLiteLockStoreConfig(),
 )

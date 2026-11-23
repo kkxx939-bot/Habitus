@@ -1,10 +1,9 @@
-"""已提交 L2 事务的后续完成阶段。"""
+"""卡片写完之后的完成阶段：清冷热状态、刷目录概览、标完成。"""
 
 from __future__ import annotations
 
 import time
 from asyncio import to_thread
-from dataclasses import dataclass
 from typing import Protocol
 
 from habitus.foundation.observability import (
@@ -14,130 +13,55 @@ from habitus.foundation.observability import (
     Observer,
     observe_operation,
 )
-from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
-from habitus.memory.conversation.summary import ConversationSummaryService
-from habitus.memory.editor.transaction_log import (
-    MemoryTransactionJournalRecord,
-    MemoryTransactionJournalState,
-)
 from habitus.memory.semantic import MemorySemanticRefresher, MemorySemanticRefreshResult
 from habitus.memory.uri import MemoryURI
 from habitus.memory.workflow.jobs import (
     MemoryJob,
     MemoryJobError,
     MemoryJobLease,
-    MemoryJobStatus,
     MemoryJobStore,
 )
-from habitus.memory.workflow.receipt import (
-    MemoryChangeReceipt,
-    MemoryChangeReceiptState,
-    MemoryChangeReceiptStore,
-    MemoryChangeSource,
-)
-from habitus.memory.workflow.recovery import MemoryJobTransactionRecovery
 
 
 class MemoryRecallStateCleaner(Protocol):
     def forget(self, uris: tuple[MemoryURI, ...]) -> int: ...
 
 
-@dataclass(frozen=True)
-class MemoryJobCompletion:
-    """一笔已提交 L2 事务完成全部后续耐久步骤后的结果。"""
-
-    job: MemoryJob
-    change_receipt: MemoryChangeReceipt
-    summary_generated: bool
-    journal_cleaned: bool
-
-    def __post_init__(self) -> None:
-        if self.job.status is not MemoryJobStatus.COMMITTED:
-            raise ValueError("completed workflow result requires a COMMITTED MemoryJob")
-        if self.change_receipt.state is not MemoryChangeReceiptState.COMMITTED:
-            raise ValueError("completed workflow result requires a COMMITTED receipt")
-
-
 class MemoryCommittedJobFinalizer:
-    """补齐 Summary、变更回执、语义层和 Job 终态。"""
+    """按任务文件里记下的改动地址补齐冷热状态、语义层和 Job 终态；可以幂等重放。"""
 
     def __init__(
         self,
         store: MemoryJobStore,
-        conversations: ConversationMessageJournal,
-        summary_service: ConversationSummaryService,
-        change_receipts: MemoryChangeReceiptStore,
         semantic_refresher: MemorySemanticRefresher,
-        transaction_recovery: MemoryJobTransactionRecovery,
         recall_state_cleaner: MemoryRecallStateCleaner,
         *,
         observer: Observer | None = None,
     ) -> None:
-        if summary_service.store.layout.root != conversations.layout.root:
-            raise ValueError("summary service and conversations must use one conversation root")
-        if change_receipts.root != store.root:
-            raise ValueError("change receipts and MemoryJobStore must use one workflow root")
         if semantic_refresher.tree.root != store.memory_root:
             raise ValueError("semantic refresher and MemoryJobStore must use one memory root")
-        if transaction_recovery.transaction.tree.root != store.memory_root:
-            raise ValueError("transaction recovery and MemoryJobStore must use one memory root")
         self.store = store
-        self.conversations = conversations
-        self.summary_service = summary_service
-        self.change_receipts = change_receipts
         self.semantic_refresher = semantic_refresher
-        self.transaction_recovery = transaction_recovery
         self.recall_state_cleaner = recall_state_cleaner
         self.observer = observer or NullObserver()
 
-    async def finalize(
-        self,
-        lease: MemoryJobLease,
-        journal: MemoryTransactionJournalRecord,
-        *,
-        summary_generated: bool | None = None,
-    ) -> MemoryJobCompletion:
-        """对已提交事务执行可幂等重放的后续步骤，并最后结束 Job。"""
+    async def finalize(self, lease: MemoryJobLease) -> MemoryJob:
+        """卡片已写完的任务：清掉删除卡片的冷热状态、刷改动所在目录的概览，最后标 COMMITTED。"""
 
         job = self.store.assert_current(lease)
-        if journal.state is not MemoryTransactionJournalState.COMMITTED:
-            raise MemoryJobError("job finalization requires a COMMITTED transaction journal")
-        if journal.transaction_id != job.transaction_id:
-            raise MemoryJobError("transaction journal does not belong to the claimed MemoryJob")
-
-        address = ConversationAddress(job.conversation_id, job.started_on)
-        segment = self.conversations.read_segment(address, job.segment_id)
-        if segment.digest != job.source_segment_digest:
-            raise MemoryJobError("sealed ConversationSegment digest does not match its MemoryJob")
-        summary_existed = self.summary_service.store.try_read(address, segment) is not None
-        with observe_operation(self.observer, "workflow", "summary_persist"):
-            summary = await self.summary_service.get_or_create(address, segment)
-        summary.require_matches_source(segment)
-        self.store.assert_current(lease)
-        resolved_summary_generated = not summary_existed if summary_generated is None else summary_generated
-
-        source = MemoryChangeSource.from_job(job)
-        with observe_operation(self.observer, "workflow", "receipt_finalize"):
-            change_receipt = self.change_receipts.finalize(source, journal)
-        self.store.assert_current(lease)
-        await self._forget_retired_recall_state(change_receipt.expected_deleted_uris)
+        if not job.cards_written:
+            raise MemoryJobError("job finalization requires a job whose cards are written")
+        deleted = tuple(MemoryURI.parse(uri) for uri in job.deleted_uris)
+        await self._forget_retired_recall_state(deleted)
         with observe_operation(self.observer, "workflow", "semantic_refresh"):
-            await to_thread(self._refresh_semantic_layers, change_receipt)
+            await to_thread(self._refresh_semantic_layers, job)
         self.store.assert_current(lease)
         with observe_operation(self.observer, "workflow", "job_complete"):
-            committed = self.store.complete(lease)
-        with observe_operation(self.observer, "workflow", "transaction_cleanup"):
-            journal_cleaned = self.transaction_recovery.discard_terminal(job.transaction_id)
-        return MemoryJobCompletion(
-            job=committed,
-            change_receipt=change_receipt,
-            summary_generated=resolved_summary_generated,
-            journal_cleaned=journal_cleaned,
-        )
+            return self.store.complete(lease)
 
     async def finalize_skipped(self, lease: MemoryJobLease, reason: str) -> MemoryJob:
-        """这一段跳过了（裁定 108）：长期记忆不动、没有回执；摘要要是已经做出来了，检索直接从摘要文件读到它。
-        任务记成 SKIPPED。摘要也没做出来的，这一段的原文不释放（没有摘要接替它）。"""
+        """这一段跳过了（裁定 108）：长期记忆不动；摘要要是已经做出来了，检索直接从摘要文件读到它。任务记成 SKIPPED，
+        原文照同一条规则到期释放（裁定 111）。"""
 
         self.store.assert_current(lease)
         with observe_operation(self.observer, "workflow", "job_skip"):
@@ -176,14 +100,9 @@ class MemoryCommittedJobFinalizer:
             )
         )
 
-    def _refresh_semantic_layers(
-        self,
-        receipt: MemoryChangeReceipt,
-    ) -> tuple[MemorySemanticRefreshResult, ...]:
-        if receipt.state is not MemoryChangeReceiptState.COMMITTED:
-            raise MemoryJobError("semantic refresh requires a COMMITTED memory change receipt")
-        addresses = tuple(uri.to_address() for uri in receipt.changed_uris)
+    def _refresh_semantic_layers(self, job: MemoryJob) -> tuple[MemorySemanticRefreshResult, ...]:
+        addresses = tuple(MemoryURI.parse(uri).to_address() for uri in (*job.changed_uris, *job.deleted_uris))
         return self.semantic_refresher.refresh_for_many(addresses)
 
 
-__all__ = ["MemoryCommittedJobFinalizer", "MemoryJobCompletion", "MemoryRecallStateCleaner"]
+__all__ = ["MemoryCommittedJobFinalizer", "MemoryRecallStateCleaner"]

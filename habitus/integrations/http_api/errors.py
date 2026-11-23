@@ -27,7 +27,7 @@ from habitus.integrations.http_api.schemas import ErrorInfo, ErrorResponse, HTTP
 from habitus.memory.browse import MemoryBrowseNotFoundError
 from habitus.memory.conversation import ConversationJournalError, ConversationWriteConflictError
 from habitus.memory.retrieval import MemorySearchError
-from habitus.memory.tree import MemoryTreeConsistencyError, MemoryTreeIntegrityError
+from habitus.memory.tree import MemoryTreeIntegrityError
 from habitus.memory.workflow import MemoryJobBlockedError, MemoryJobError, MemoryJobNotReadyError
 from habitus.model_client import (
     ModelCircuitOpenError,
@@ -195,13 +195,6 @@ def _search_error_spec(exc: MemorySearchError) -> HTTPErrorSpec:
 _EXCEPTION_SPECS: tuple[tuple[type[BaseException], Callable[[Any], HTTPErrorSpec]], ...] = (
     (HTTPMemoryJobNotFoundError, _message_spec(HTTPErrorCode.NOT_FOUND)),
     (MemoryBrowseNotFoundError, _message_spec(HTTPErrorCode.NOT_FOUND)),
-    # 正赶上一次多文档发布：稍后重读就是一致的
-    (
-        MemoryTreeConsistencyError,
-        lambda _exc: HTTPErrorSpec(
-            HTTPErrorCode.UNAVAILABLE, "Memory tree is being updated", True, retry_after_seconds=1
-        ),
-    ),
     # 记忆树里有不合规的条目：是存储的问题，不是请求参数的问题（它是 ValueError 的子类，必须排在下面之前）
     (
         MemoryTreeIntegrityError,

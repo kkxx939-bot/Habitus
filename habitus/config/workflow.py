@@ -5,11 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from habitus.config.loader import construct_config, group_fields
-from habitus.memory.workflow import (
-    MemoryChangeReceiptStoreConfig,
-    MemoryJobConfig,
-    MemoryWorkflowLifecycleConfig,
-)
+from habitus.memory.workflow import MemoryJobConfig, MemoryWorkflowLifecycleConfig
 
 
 @dataclass(frozen=True)
@@ -35,7 +31,6 @@ class WorkflowConfig:
     """跨 Conversation 任务与常驻执行器的统一配置。"""
 
     jobs: MemoryJobConfig = field(default_factory=MemoryJobConfig)
-    receipts: MemoryChangeReceiptStoreConfig = field(default_factory=MemoryChangeReceiptStoreConfig)
     lifecycle: MemoryWorkflowLifecycleConfig = field(default_factory=MemoryWorkflowLifecycleConfig)
     worker: WorkerConfig = field(default_factory=WorkerConfig)
 
@@ -47,11 +42,6 @@ class WorkflowConfig:
                 MemoryJobConfig,
                 data.get("jobs", {}),
                 "config.workflow.jobs",
-            ),
-            receipts=construct_config(
-                MemoryChangeReceiptStoreConfig,
-                data.get("receipts", {}),
-                "config.workflow.receipts",
             ),
             lifecycle=construct_config(
                 MemoryWorkflowLifecycleConfig,

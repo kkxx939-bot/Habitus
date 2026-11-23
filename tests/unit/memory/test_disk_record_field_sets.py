@@ -2,8 +2,7 @@
 
 W16 为压文件尺寸把这几处手写的字段集合换成了从 dataclass 推导（与原手写集合逐个相等）。推导写法的风险是：
 给值对象加一个字段，读盘接受范围就跟着悄悄放宽、旧文件里多一个键也照收。这里把每份落盘格式的字段名单写死——
-加字段时这条测试变红，逼着同时确认落盘格式要不要跟着变。``MemoryChangeReceipt`` 的解码按 ``fields(cls)[4:]``
-取集合字段，字段顺序也钉住。
+加字段时这条测试变红，逼着同时确认落盘格式要不要跟着变。
 """
 
 from __future__ import annotations
@@ -13,14 +12,7 @@ from dataclasses import fields
 import pytest
 
 from habitus.memory.conversation.messages import ConversationJournalState
-from habitus.memory.editor.transaction_log import MemoryTransactionJournalRecord
 from habitus.memory.workflow.jobs.model import MemoryJob, MemoryJobAbandonment
-from habitus.memory.workflow.receipt.model import (
-    MemoryChangeReceipt,
-    MemoryChangeSource,
-    MemoryNodeChange,
-    MemoryPreparedNodeChange,
-)
 from habitus.pre.conversation.messages.model import ConversationMessage
 from habitus.pre.conversation.summaries.model import (
     ConversationRangeSummary,
@@ -31,21 +23,12 @@ from habitus.pre.conversation.summaries.model import (
 _SUMMARY_TEXT = ("overview", "chronology", "corrections", "ending_state", "open_threads")
 
 FIELD_SETS: dict[type, tuple[str, ...]] = {
-    MemoryTransactionJournalRecord: (
-        "transaction_id",
-        "state",
-        "created_at",
-        "updated_at",
-        "lock_identities",
-        "entries",
-    ),
     MemoryJob: (
         "memory_sequence",
         "conversation_id",
         "started_on",
         "segment_id",
         "source_segment_digest",
-        "transaction_id",
         "status",
         "attempts",
         "claim_id",
@@ -57,6 +40,9 @@ FIELD_SETS: dict[type, tuple[str, ...]] = {
         "created_at",
         "updated_at",
         "model_waits",
+        "cards_written",
+        "changed_uris",
+        "deleted_uris",
     ),
     MemoryJobAbandonment: (
         "memory_sequence",
@@ -64,7 +50,6 @@ FIELD_SETS: dict[type, tuple[str, ...]] = {
         "started_on",
         "segment_id",
         "source_segment_digest",
-        "transaction_id",
         "attempts",
         "last_error",
         "reason",
@@ -73,36 +58,8 @@ FIELD_SETS: dict[type, tuple[str, ...]] = {
     ConversationJournalState: (
         "conversation_id",
         "archived_through_sequence",
-        "released_through_sequence",
         "latest_segment_id",
         "latest_segment_digest",
-    ),
-    MemoryChangeSource: (
-        "memory_sequence",
-        "transaction_id",
-        "conversation_id",
-        "started_on",
-        "segment_id",
-        "source_segment_digest",
-        "editor_segment_id",
-        "editor_segment_digest",
-    ),
-    MemoryPreparedNodeChange: ("action", "uri", "before_digest", "expected_after_digest"),
-    MemoryNodeChange: ("action", "uri", "before_revision", "after_revision", "before_digest", "after_digest"),
-    MemoryChangeReceipt: (
-        "source",
-        "state",
-        "prepared_at",
-        "committed_at",
-        "expected_created_uris",
-        "expected_updated_uris",
-        "expected_deleted_uris",
-        "unchanged_uris",
-        "prepared_node_changes",
-        "identity_changes",
-        "added_relations",
-        "removed_relations",
-        "node_changes",
     ),
     ConversationMessage: (
         "message_id",
@@ -158,14 +115,3 @@ def test_disk_record_fields_are_pinned_in_order(model: type) -> None:
     """字段名与顺序都写死：加字段、删字段、调顺序都要先改这里，确认落盘格式随之变化是有意的。"""
 
     assert tuple(field.name for field in fields(model)) == FIELD_SETS[model]
-
-
-def test_change_receipt_collection_fields_start_after_the_four_scalar_fields() -> None:
-    """``MemoryChangeReceipt.from_dict`` 按 ``fields(cls)[4:]`` 取集合字段：前四个必须正好是来源、状态与两个时间。"""
-
-    assert tuple(field.name for field in fields(MemoryChangeReceipt))[:4] == (
-        "source",
-        "state",
-        "prepared_at",
-        "committed_at",
-    )

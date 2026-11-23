@@ -27,8 +27,6 @@ class MemorySearchServiceConfig:
     time_limit_seconds: float = 12.0
     accounting_reserve_seconds: float = 1.0
     max_rounds: int = 2
-    catalog_retries: int = 3
-    catalog_retry_delay_seconds: float = 0.2
     max_catalog_chars: int = 40_000
     max_reads_per_round: int = 8
     max_unlisted_scan: int = 1_000
@@ -54,7 +52,6 @@ class MemorySearchServiceConfig:
             ("max_limit", self.max_limit, 1, 1_000),
             ("max_query_chars", self.max_query_chars, 1, 1_000_000),
             ("max_rounds", self.max_rounds, 1, 3),
-            ("catalog_retries", self.catalog_retries, 0, 20),
             ("max_catalog_chars", self.max_catalog_chars, 1_024, 2_000_000),
             ("max_reads_per_round", self.max_reads_per_round, 1, 100),
             ("max_unlisted_scan", self.max_unlisted_scan, 0, 100_000),
@@ -79,7 +76,6 @@ class MemorySearchServiceConfig:
         for name, seconds, lower, upper in (
             ("time_limit_seconds", self.time_limit_seconds, 1.0, 600.0),
             ("accounting_reserve_seconds", self.accounting_reserve_seconds, 0.05, 60.0),
-            ("catalog_retry_delay_seconds", self.catalog_retry_delay_seconds, 0.0, 10.0),
         ):
             if not lower <= float(seconds) <= upper:
                 raise ValueError(f"{name} must be between {lower:g} and {upper:g}")

@@ -41,8 +41,6 @@ from habitus.memory.workflow import (
     ConversationLifecycleMaintenanceResult,
     ConversationMemoryFlushResult,
     ConversationMemoryIngestResult,
-    MemoryChangeReceipt,
-    MemoryChangeSource,
     MemoryJob,
     MemoryJobRunResult,
     MemoryJobStatus,
@@ -96,13 +94,10 @@ class RuntimeInitialization:
     """一次成功初始化的可审计结果。"""
 
     memory_root: Path
-    recovered_transaction_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if not self.memory_root.is_absolute():
             raise ValueError("memory_root must be an absolute Path")
-        if any(not identifier for identifier in self.recovered_transaction_ids):
-            raise TypeError("recovered_transaction_ids must contain non-empty strings")
 
 
 @dataclass(frozen=True)
@@ -236,7 +231,6 @@ class Runtime:
         self._initialization: RuntimeInitialization | None = None
         self._consistency = MemoryConsistencyService(
             components.workflow.jobs,
-            components.workflow.receipts,
             observer=components.infrastructure.observer,
         )
         self._conversation_adapters = (
@@ -258,7 +252,7 @@ class Runtime:
         return self._state in {RuntimeState.READY, RuntimeState.RUNNING}
 
     def initialize(self) -> RuntimeInitialization:
-        """初始化树；无任务时恢复孤儿事务，有任务时留给租约持有者恢复。"""
+        """初始化树与各存储；旧盘面（事务日志、回执、旧格式任务文件）在这里就报错。"""
 
         started = time.monotonic()
         if self._state in {RuntimeState.CLOSING, RuntimeState.CLOSED}:
@@ -267,11 +261,7 @@ class Runtime:
             return self._initialization
         try:
             self._ensure_storage_root()
-            memory_root, recovered = self._lifecycle.initialize_stores()
-            initialization = RuntimeInitialization(
-                memory_root=memory_root,
-                recovered_transaction_ids=recovered,
-            )
+            initialization = RuntimeInitialization(memory_root=self._lifecycle.initialize_stores())
             self._initialization = initialization
             self._state = RuntimeState.READY
         except Exception as exc:
@@ -288,7 +278,7 @@ class Runtime:
             "initialization",
             ObservationStatus.SUCCESS,
             started,
-            {"recovered_transactions": len(recovered)},
+            {},
         )
         return initialization
 
@@ -588,32 +578,20 @@ class Runtime:
             poll_interval_seconds=poll_interval_seconds,
         )
 
-    async def memory_change_receipt(self, job: MemoryJob) -> MemoryChangeReceipt | None:
-        """按写入句柄读取可审计的 Memory Change Receipt。"""
-
-        self._require_initialized("memory change receipt read")
-        return await asyncio.to_thread(
-            self.components.workflow.receipts.try_read,
-            MemoryChangeSource.from_job(job),
-        )
-
     async def list_memory_jobs(self, address: ConversationAddress) -> tuple[MemoryJob, ...]:
         """读取一个 Conversation 当前仍保留的后台任务。"""
 
         self._require_initialized("memory job read")
         return await asyncio.to_thread(self.components.workflow.jobs.list_for_conversation, address)
 
-    async def failed_memory_job(self) -> MemoryJob | None:
-        """读取当前阻塞全队列的最早 FAILED Job，供人工检查错误和版本。"""
+    async def failed_memory_jobs(self) -> tuple[MemoryJob, ...]:
+        """读取仍保留的全部 FAILED Job（按序号），供人工检查错误和版本；它们不再挡后面的任务。"""
 
         self._require_initialized("failed memory job inspection")
-        job = await asyncio.to_thread(
-            self.components.workflow.jobs.oldest_uncommitted,
-        )
-        return job if job is not None and job.status is MemoryJobStatus.FAILED else None
+        return await asyncio.to_thread(self.components.workflow.jobs.failed)
 
     async def retry_failed_memory_job(self, failed_job: MemoryJob) -> MemoryJobRetryResult:
-        """以完整失败快照重新开放最早 Job，并恢复被它阻塞的常驻 Worker。"""
+        """以完整失败快照重新开放一条 FAILED Job；原文已释放的不能重试。"""
 
         if failed_job.status is not MemoryJobStatus.FAILED:
             raise ValueError("failed_job must be a FAILED MemoryJob snapshot")
@@ -626,7 +604,7 @@ class Runtime:
         *,
         reason: str,
     ) -> MemoryJobAbandonResult:
-        """显式放弃无法修复的最早 Job；有任何未决或已提交副作用时拒绝执行。"""
+        """显式放弃一条不再重试的 FAILED Job。"""
 
         if failed_job.status is not MemoryJobStatus.FAILED:
             raise ValueError("failed_job must be a FAILED MemoryJob snapshot")

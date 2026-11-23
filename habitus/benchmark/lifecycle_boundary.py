@@ -236,7 +236,6 @@ def _snapshot(runtime: Runtime, address: ConversationAddress) -> dict[str, int]:
         "range_summaries": len(compactor.range_store.list(address, ConversationRangeSummaryStage.RANGE)),
         "archive_summaries": len(compactor.range_store.list(address, ConversationRangeSummaryStage.ARCHIVE)),
         "jobs": len(runtime.components.workflow.jobs.list_for_conversation(address)),
-        "receipts": len(runtime.components.workflow.receipts.list_for_conversation(address)),
     }
 
 
@@ -246,12 +245,10 @@ def _changed(result: ConversationLifecycleMaintenanceResult) -> bool:
         return True
     return any(
         (
-            result.purged_history_segment_ids,
             result.released_history_segment_ids,
             result.deleted_segment_summary_ids,
             result.deleted_range_summary_ids,
             result.deleted_memory_job_sequences,
-            result.deleted_memory_receipt_ids,
         )
     )
 

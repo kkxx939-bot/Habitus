@@ -40,7 +40,6 @@ class MemoryWorkerState(str, Enum):
     RUNNING = "running"
     STOPPING = "stopping"
     STOPPED = "stopped"
-    BLOCKED = "blocked"
     FAILED = "failed"
 
 
@@ -172,23 +171,18 @@ class MemoryWorker:
                     await self._wait(self.config.poll_interval_seconds)
                     continue
                 except MemoryJobExecutionError as exc:
+                    # 判了失败也不停：FAILED 是终态，后面的任务照常往下做（裁定 111）；自动重试的排回队列等退避
                     if exc.job is not None and exc.job.status is MemoryJobStatus.FAILED:
                         self._last_error = exc
-                        self._state = MemoryWorkerState.BLOCKED
-                        return
-                    await self._wait(self.config.poll_interval_seconds)
-                    continue
-                except MemoryJobBlockedError as exc:
-                    oldest = await asyncio.to_thread(self.runner.store.oldest_uncommitted)
-                    if oldest is not None and oldest.status is MemoryJobStatus.FAILED:
                         self._observe(
                             "job_queue",
                             ObservationStatus.DEGRADED,
-                            {"error_type": type(exc).__name__, "memory_sequence": oldest.memory_sequence},
+                            {"error_type": "MemoryJobFailed", "memory_sequence": exc.job.memory_sequence},
                         )
-                        self._last_error = exc
-                        self._state = MemoryWorkerState.BLOCKED
-                        return
+                        continue
+                    await self._wait(self.config.poll_interval_seconds)
+                    continue
+                except MemoryJobBlockedError:
                     await self._wait(self.config.poll_interval_seconds)
                     continue
                 if result.job is None:
@@ -216,7 +210,6 @@ class MemoryWorker:
         started = time.monotonic()
         with bind_observation_context(
             memory_sequence=job.memory_sequence,
-            transaction_id=job.transaction_id,
             worker_id=self.worker_id,
             attempt=job.attempts,
         ):

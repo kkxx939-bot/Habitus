@@ -51,12 +51,7 @@ class ConversationSummaryUseReader(Protocol):
     """压缩规划只读取近期实际使用保护，不依赖状态存储实现。"""
 
     def recently_used_summary(
-        self,
-        address: ConversationAddress,
-        summary: SummarySource,
-        *,
-        now: datetime,
-        protection_days: int,
+        self, address: ConversationAddress, summary: SummarySource, *, now: datetime, protection_days: int
     ) -> bool: ...
 
     def read_many(
@@ -197,7 +192,7 @@ class ConversationSummaryFrontier:
 
 @dataclass(frozen=True)
 class ConversationSummaryCompactionPlan:
-    """一次只覆盖连续来源的纯压缩计划。"""
+    """一次只覆盖有序来源的纯压缩计划；来源之间只隔着永久没有摘要、原文已释放的段。"""
 
     stage: ConversationRangeSummaryStage
     sources: tuple[SummarySource, ...]
@@ -226,8 +221,8 @@ class ConversationSummaryCompactionPlan:
         if len(conversation_ids) != 1:
             raise ValueError("summary compaction sources must belong to one conversation")
         for previous, current in zip(self.sources, self.sources[1:], strict=False):
-            if current.start_sequence != previous.end_sequence + 1:
-                raise ValueError("summary compaction sources must be contiguous and ordered")
+            if current.start_sequence <= previous.end_sequence:
+                raise ValueError("summary compaction sources must be ordered and non-overlapping")
 
     @property
     def source_refs(self) -> tuple[ConversationSummarySourceRef, ...]:
@@ -270,11 +265,7 @@ class ConversationRangeSummaryStore:
                 raise ConversationSummarySchemaError("range summary file must contain an object")
             summary = ConversationRangeSummary.from_dict(payload)
             if (
-                not same_path_identity(
-                    summary.conversation_id,
-                    address.conversation_id,
-                    "conversation_id",
-                )
+                not same_path_identity(summary.conversation_id, address.conversation_id, "conversation_id")
                 or summary.stage is not stage
                 or summary.range_id != range_id
             ):
@@ -397,6 +388,7 @@ class ConversationSummaryCompactionPlanner:
         now: datetime,
         protected_source_ids: frozenset[str] = frozenset(),
         refused: frozenset[str] = frozenset(),
+        blocked: tuple[tuple[int, int], ...] = (),
     ) -> ConversationSummaryCompactionPlan | None:
         current_time = _utc_datetime(now, "summary compaction now")
         stage_config = self.config.stage(stage)
@@ -408,6 +400,7 @@ class ConversationSummaryCompactionPlanner:
             cutoff=cutoff,
             stage_config=stage_config,
             protected_source_ids=protected_source_ids,
+            blocked=blocked,
         )
         chains = tuple(
             chain for chain in chains if refusal_key(stage, _refs(chain)) not in refused
@@ -438,6 +431,7 @@ class ConversationSummaryCompactionPlanner:
         cutoff: datetime,
         stage_config: ConversationSegmentSummaryCompactionConfig | ConversationRangeSummaryCompactionConfig,
         protected_source_ids: frozenset[str],
+        blocked: tuple[tuple[int, int], ...] = (),
     ) -> tuple[tuple[SummarySource, ...], ...]:
         chains: list[tuple[SummarySource, ...]] = []
         chain: list[SummarySource] = []
@@ -457,7 +451,8 @@ class ConversationSummaryCompactionPlanner:
             encoded_chars = len(canonical_json(source.to_dict()))
             if encoded_chars > stage_config.max_source_chars:
                 raise ConversationSummaryCompactionError("one summary source exceeds the compaction input bound")
-            discontinuous = bool(chain) and source.start_sequence != chain[-1].end_sequence + 1
+            gap = (chain[-1].end_sequence + 1, source.start_sequence - 1) if chain else (0, -1)
+            discontinuous = gap[0] <= gap[1] and any(start <= gap[1] and gap[0] <= end for start, end in blocked)
             capacity_reached = bool(chain) and (
                 len(chain) >= stage_config.max_source_count
                 or chain_chars + encoded_chars > stage_config.max_source_chars
@@ -587,14 +582,10 @@ class ConversationSummaryCompactor:
         segment_by_id = {item.segment_id: item for item in segments}
         range_by_id = {item.range_id: item for item in ranges}
         referenced_segments = self._referenced_sources(
-            ranges,
-            expected_kind=ConversationSummarySourceKind.SEGMENT,
-            available=segment_by_id,
+            ranges, expected_kind=ConversationSummarySourceKind.SEGMENT, available=segment_by_id
         )
         referenced_ranges = self._referenced_sources(
-            archives,
-            expected_kind=ConversationSummarySourceKind.RANGE,
-            available=range_by_id,
+            archives, expected_kind=ConversationSummarySourceKind.RANGE, available=range_by_id
         )
         return ConversationSummaryFrontier(
             segments=tuple(item for item in segments if item.segment_id not in referenced_segments),
@@ -615,7 +606,7 @@ class ConversationSummaryCompactor:
             return ConversationSummaryCompactionResult(None, False, "summary compaction is disabled")
         plan = self._plan_under_lock(address, current_time)
         if plan is None:
-            return ConversationSummaryCompactionResult(None, False, "no eligible contiguous summary range")
+            return ConversationSummaryCompactionResult(None, False, "no eligible summary range")
         try:
             generated = await self.generator.generate(plan)
         except Exception as exc:
@@ -651,12 +642,18 @@ class ConversationSummaryCompactor:
         now: datetime,
     ) -> ConversationSummaryCompactionPlan | None:
         frontier, refused = self.frontier(address), self.refusals.keys(address)
+        # 空档里既没有还在的原文、也没有别的前沿摘要：那几段永远不会再有摘要，压缩可以跨过去（裁定 111）
+        blocked = (
+            *self.journal.retained_history_ranges(address),
+            *((i.start_sequence, i.end_sequence) for i in frontier.active),
+        )
         archive_plan = self.planner.plan(
             frontier,
             ConversationRangeSummaryStage.ARCHIVE,
             now=now,
             protected_source_ids=self._protected_source_ids(address, frontier.ranges, now),
             refused=refused,
+            blocked=blocked,
         )
         if archive_plan is not None:
             return archive_plan
@@ -666,6 +663,7 @@ class ConversationSummaryCompactor:
             now=now,
             protected_source_ids=self._protected_source_ids(address, frontier.segments, now),
             refused=refused,
+            blocked=blocked,
         )
 
     def _protected_source_ids(

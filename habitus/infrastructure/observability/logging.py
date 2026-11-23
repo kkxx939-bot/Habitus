@@ -18,7 +18,6 @@ _SAFE_LOG_FIELDS = frozenset(
     {
         "request_id",
         "memory_sequence",
-        "transaction_id",
         "worker_id",
         "attempt",
         "error_code",
@@ -78,7 +77,7 @@ class JSONLogFormatter(logging.Formatter):
         if isinstance(observation, dict):
             payload.update(observation)
         context = current_observation_context()
-        for name in ("request_id", "memory_sequence", "transaction_id", "worker_id", "attempt"):
+        for name in ("request_id", "memory_sequence", "worker_id", "attempt"):
             value = getattr(context, name)
             if value is not None:
                 payload.setdefault(name, value)
@@ -162,7 +161,7 @@ def _safe_attributes(attributes: object) -> dict[str, str | int | float | bool]:
 
 def _context_fields(event: ObservationEvent) -> dict[str, object]:
     result: dict[str, object] = {}
-    for name in ("request_id", "memory_sequence", "transaction_id", "worker_id", "attempt"):
+    for name in ("request_id", "memory_sequence", "worker_id", "attempt"):
         value = getattr(event.context, name)
         if value is not None:
             result[name] = value

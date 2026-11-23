@@ -135,7 +135,6 @@ def test_runtime_memory_rejects_valid_component_bound_to_another_tree(
     ("field", "message"),
     [
         ("jobs", "share one job store"),
-        ("receipts", "share workflow stores"),
         ("enqueuer", "share one job store"),
         ("lifecycle", "share workflow stores"),
         ("runner", "share one job store"),

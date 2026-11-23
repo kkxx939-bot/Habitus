@@ -20,10 +20,8 @@ from habitus.memory.conversation import (
     ConversationSummaryRetirementStore,
     ConversationSummaryStore,
 )
-from habitus.memory.editor import MemoryTransactionJournal
 from habitus.memory.workflow import (
     ConversationLifecycleManager,
-    MemoryChangeReceiptStore,
     MemoryJobStore,
 )
 from habitus.model_client import ChatClient, ChatModelConfig, ProviderCapabilities, ProviderConfig, StructuredChatClient
@@ -35,7 +33,7 @@ from habitus.runtime import (
     LifecycleWorkerState,
 )
 from habitus.runtime.lifecycle_memory import conversation_lease_key
-from tests.helpers import closed_turn, codec
+from tests.helpers import closed_turn
 from tests.lock_store import ProcessLocalLockStore
 from tests.model_helpers import prepare_chat_request
 
@@ -83,7 +81,6 @@ def manager(tmp_path: Path) -> ConversationLifecycleManager:
         ConversationRangeSummaryGenerator(structured()),
     )
     retirements = ConversationSummaryRetirementStore(tmp_path / "workflow")
-    document_codec = codec()
     jobs = MemoryJobStore(
         tmp_path / "workflow",
         path_lock,
@@ -95,8 +92,6 @@ def manager(tmp_path: Path) -> ConversationLifecycleManager:
         segment_store,
         range_store,
         jobs,
-        MemoryChangeReceiptStore(tmp_path / "workflow", document_codec),
-        MemoryTransactionJournal(tmp_path / "workflow" / "transactions", document_codec),
         retirements,
     )
 

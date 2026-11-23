@@ -94,16 +94,14 @@ memory/document/codec.py
 memory/document/link.py
 memory/editor/mutation/reader.py
 memory/editor/relation_reader.py
-memory/editor/transaction_log.py
 memory/recall/state.py
 memory/recall/store.py
 memory/snapshot.py
 memory/tree/store.py
 memory/uri.py
 memory/workflow/conversation_output.py
+memory/workflow/jobs/abandonment.py
 memory/workflow/jobs/store.py
-memory/workflow/receipt/model.py
-memory/workflow/receipt/store.py
 pre/conversation/messages/model.py
 pre/conversation/summaries/model.py
 

@@ -14,7 +14,7 @@ from habitus.memory.semantic.model import (
     MemorySemanticRefreshStatus,
 )
 from habitus.memory.semantic.overview import MemoryOverview, MemoryOverviewCard, MemoryOverviewChild
-from habitus.memory.tree.lock_key import MemoryDocumentLockKeyspace, memory_root_lock_prefix
+from habitus.memory.tree.lock_key import memory_root_lock_prefix
 from habitus.memory.tree.store import MemoryTree
 
 
@@ -38,7 +38,6 @@ class MemorySemanticRefresher:
         self.path_lock = path_lock
         self.config = config or MemorySemanticConfig()
         self._lock_prefix = memory_root_lock_prefix("memory-semantic", self.tree.root)
-        self._transaction_lock_key = MemoryDocumentLockKeyspace(tree.root).transaction_key()
 
     def refresh_for(self, address: MemoryAddress) -> tuple[MemorySemanticRefreshResult, ...]:
         """从发生变化的 L2 父目录开始，依次刷新到记忆根目录。"""
@@ -141,19 +140,13 @@ class MemorySemanticRefresher:
     def _stable_directory(self, directory: MemoryDirectory) -> Iterator[None]:
         wait_timeout = float(min(30, self.config.lock_ttl_seconds))
         with self.path_lock.acquire(
-            self._transaction_lock_key,
+            self._lock_key(directory),
             ttl_seconds=self.config.lock_ttl_seconds,
             wait_timeout_seconds=wait_timeout,
             retry_delay_seconds=0.02,
-        ) as transaction_guard:
-            with self.path_lock.acquire(
-                self._lock_key(directory),
-                ttl_seconds=self.config.lock_ttl_seconds,
-                wait_timeout_seconds=wait_timeout,
-                retry_delay_seconds=0.02,
-            ) as directory_guard:
-                with self.path_lock.fenced((transaction_guard, directory_guard)):
-                    yield
+        ) as directory_guard:
+            with self.path_lock.fenced((directory_guard,)):
+                yield
 
     def _layers_equal(self, directory: MemoryDirectory, abstract: str, overview: str) -> bool:
         if not self.tree.layer_exists(directory, MemoryLevel.ABSTRACT):

@@ -1,29 +1,23 @@
-"""尚未提交的 MemoryJob 执行阶段。"""
+"""MemoryJob 卡片写完之前的执行阶段：摘要、记忆计划、写卡片。"""
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 from habitus.foundation.observability import NullObserver, Observer, observe_operation
 from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
 from habitus.memory.conversation.summary import ConversationSummaryService
+from habitus.memory.editor.commit import MemoryCommitResult
 from habitus.memory.editor.engine import MemoryEditor
 from habitus.memory.editor.extraction import MemoryTurnContext
-from habitus.memory.editor.transaction import MemoryCommitResult
-from habitus.memory.editor.transaction_log import (
-    MemoryTransactionJournalRecord,
-    MemoryTransactionJournalState,
-)
 from habitus.memory.workflow.failure import MemoryJobSkipped, skip_reason
 from habitus.memory.workflow.jobs import (
+    MemoryJob,
     MemoryJobError,
     MemoryJobLease,
     MemoryJobStore,
 )
 from habitus.memory.workflow.planning import MemorySegmentProductBuilder
-from habitus.memory.workflow.receipt import MemoryChangeReceiptStore, MemoryChangeSource
 from habitus.pre.conversation import ConversationSegment
 
 #: 观察事件文本属性的上限（``foundation.observability.ObservationEvent``）：剔除原因拼起来超出时截断。
@@ -31,49 +25,41 @@ _OBSERVED_TEXT_MAX_CHARS = 256
 
 
 @dataclass(frozen=True)
-class MemoryJobCommit:
-    """正常执行阶段已经耐久发布的 L2 事务。"""
+class MemoryJobWrite:
+    """正常执行阶段已经写进记忆树的卡片，以及记下"卡片已写完"之后的任务。"""
 
     commit: MemoryCommitResult
-    journal: MemoryTransactionJournalRecord
+    job: MemoryJob
     summary_generated: bool
 
     def __post_init__(self) -> None:
-        if self.journal.state is not MemoryTransactionJournalState.COMMITTED:
-            raise ValueError("job commit requires a COMMITTED transaction journal")
-        if self.commit.transaction_id != self.journal.transaction_id:
-            raise ValueError("commit result and transaction journal identities differ")
+        if not self.job.cards_written:
+            raise ValueError("job write requires a job whose cards are written")
 
 
 class MemoryJobExecutor:
-    """生成 Summary 与编辑计划，并把准备态回执和 L2 事务耐久发布。"""
+    """生成摘要与编辑计划（摘要生成即落盘），把卡片写进记忆树，再在任务文件里记下"卡片已写完"。"""
 
     def __init__(
         self,
         conversations: ConversationMessageJournal,
         editor: MemoryEditor,
         summary_service: ConversationSummaryService,
-        change_receipts: MemoryChangeReceiptStore,
         jobs: MemoryJobStore,
         *,
-        clock: Callable[[], datetime] | None = None,
         observer: Observer | None = None,
     ) -> None:
         if summary_service.store.layout.root != conversations.layout.root:
             raise ValueError("summary service and conversations must use one conversation root")
-        if change_receipts.codec is not editor.transaction.tree.document_codec:
-            raise ValueError("change receipts and MemoryEditor must share one document codec")
         self.conversations = conversations
         self.editor = editor
         self.summary_service = summary_service
-        self.change_receipts = change_receipts
         self.jobs = jobs
         self.segment_products = MemorySegmentProductBuilder(summary_service, editor)
-        self.clock = clock or (lambda: datetime.now(UTC))
         self.observer = observer or NullObserver()
 
-    async def execute(self, lease: MemoryJobLease) -> MemoryJobCommit:
-        """只接受当前 claim，成功时保证事务日志已经到达 COMMITTED。"""
+    async def execute(self, lease: MemoryJobLease) -> MemoryJobWrite:
+        """只接受当前 claim；成功时卡片已全部写进记忆树，任务文件已记下这一阶段与改动的地址。"""
 
         job = self.jobs.assert_current(lease)
         address = ConversationAddress(job.conversation_id, job.started_on)
@@ -107,30 +93,15 @@ class MemoryJobExecutor:
         products.summary.require_matches_source(segment)
         self.jobs.assert_current(lease)
 
-        source = MemoryChangeSource.from_job(
-            job,
-            editor_segment=editor_segment,
-        )
-        with observe_operation(self.observer, "workflow", "receipt_prepare"):
-            self.change_receipts.prepare(
-                source,
-                products.editor_plan,
-                timestamp=self._timestamp(),
+        with observe_operation(self.observer, "workflow", "l2_write"):
+            commit = self.editor.commit(products.editor_plan)
+        with observe_operation(self.observer, "workflow", "cards_written"):
+            written = self.jobs.record_written(
+                lease,
+                changed_uris=tuple(str(uri) for uri in commit.written_uris),
+                deleted_uris=tuple(str(uri) for uri in commit.deleted_uris),
             )
-        self.jobs.assert_current(lease)
-        with observe_operation(self.observer, "workflow", "l2_commit"):
-            commit = self.editor.commit(
-                products.editor_plan,
-                transaction_id=job.transaction_id,
-                retain_transaction_journal=True,
-            )
-        self.jobs.assert_current(lease)
-        journal = self.editor.transaction.journal.read(job.transaction_id)
-        return MemoryJobCommit(
-            commit=commit,
-            journal=journal,
-            summary_generated=not summary_existed,
-        )
+        return MemoryJobWrite(commit=commit, job=written, summary_generated=not summary_existed)
 
     def _editor_input(
         self,
@@ -159,11 +130,5 @@ class MemoryJobExecutor:
         )
         return segment, context
 
-    def _timestamp(self) -> datetime:
-        value = self.clock()
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("memory workflow clock must return timezone-aware datetime")
-        return value.astimezone(UTC)
 
-
-__all__ = ["MemoryJobCommit", "MemoryJobExecutor"]
+__all__ = ["MemoryJobExecutor", "MemoryJobWrite"]

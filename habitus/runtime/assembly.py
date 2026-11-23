@@ -99,12 +99,11 @@ from habitus.memory.conversation import (
 )
 from habitus.memory.document import MemoryDocumentCodec
 from habitus.memory.editor import (
-    MemoryCommitTransaction,
+    MemoryCommitWriter,
     MemoryEditor,
     MemoryExtractionLoop,
     MemoryIdentityPlanner,
     MemoryRelatedRetriever,
-    MemoryTransactionJournal,
 )
 from habitus.memory.recall import (
     MemoryRecallLifecycle,
@@ -123,7 +122,6 @@ from habitus.memory.tree import MemoryTree
 from habitus.memory.workflow import (
     ConversationLifecycleManager,
     ConversationMemoryEnqueuer,
-    MemoryChangeReceiptStore,
     MemoryConversationConsumer,
     MemoryConversationOutputStore,
     MemoryJobRunner,
@@ -267,22 +265,11 @@ def build_runtime(
         config=memory_config.extraction,
     )
 
-    transaction_journal = MemoryTransactionJournal(
-        config.transaction_root,
-        codec,
-        config=memory_config.transaction_journal,
-    )
-    transaction = MemoryCommitTransaction(
-        tree,
-        snapshot_reader,
-        resolved_lock,
-        transaction_journal,
-        config=memory_config.commit,
-    )
+    writer = MemoryCommitWriter(tree, snapshot_reader, resolved_lock, config=memory_config.commit)
     editor = MemoryEditor(
         extraction_loop=extraction_loop,
         identity_planner=MemoryIdentityPlanner(schema_registry),
-        transaction=transaction,
+        writer=writer,
     )
 
     semantic_refresher = MemorySemanticRefresher(tree, schema_registry, resolved_lock, config=memory_config.semantic)
@@ -351,7 +338,7 @@ def build_runtime(
         config=memory_config.field_compaction,
     )
     recovery_store = MemoryRecoveryStore(tree, config.workflow_root)
-    lifecycle_committer = MemoryLifecycleCommitter(transaction, snapshot_reader)
+    lifecycle_committer = MemoryLifecycleCommitter(writer, snapshot_reader)
 
     async def refresh_lifecycle_derivatives(uris):
         addresses = tuple(uri.to_address() for uri in uris)
@@ -370,15 +357,12 @@ def build_runtime(
         derived_refresh=refresh_lifecycle_derivatives,
     )
     jobs = MemoryJobStore(config.workflow_root, resolved_lock, memory_root=tree.root, config=workflow_config.jobs)
-    receipts = MemoryChangeReceiptStore(config.workflow_root, codec, config=workflow_config.receipts)
     conversation_lifecycle = ConversationLifecycleManager(
         summary_compactor,
         conversations,
         summary_store,
         range_summary_store,
         jobs,
-        receipts,
-        transaction_journal,
         summary_retirements,
         summary_config=conversation_config.lifecycle.summary_compaction,
         workflow_config=workflow_config.lifecycle,
@@ -592,7 +576,6 @@ def build_runtime(
         editor,
         semantic_refresher,
         summaries,
-        receipts,
         recall_lifecycle,
         observer=operation_observer,
     )
@@ -684,7 +667,6 @@ def build_runtime(
         ),
         workflow=RuntimeWorkflow(
             jobs=jobs,
-            receipts=receipts,
             enqueuer=enqueuer,
             conversation_consumer=memory_conversation_consumer,
             lifecycle=conversation_lifecycle,

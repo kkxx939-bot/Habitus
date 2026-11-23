@@ -1,4 +1,4 @@
-"""从完整 ConversationSegment 到 Job/Receipt/双向量 checkpoint 的主链验收测试。"""
+"""从完整 ConversationSegment 到摘要、写卡片、任务文件"卡片已写完"阶段与 Job 终态的主链验收测试。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -16,10 +16,7 @@ from habitus.config import HabitusConfig
 from habitus.foundation.observability import ObservationEvent
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.memory.conversation import ConversationAddress
-from habitus.memory.editor import MemoryTransactionJournalState
 from habitus.memory.workflow import (
-    MemoryChangeReceiptState,
-    MemoryChangeSource,
     MemoryJobExecutionError,
     MemoryJobStatus,
 )
@@ -30,7 +27,7 @@ from habitus.model_client import (
 )
 from habitus.pre.conversation import ConversationBatch
 from habitus.runtime import build_runtime
-from tests.helpers import BASE_TIME, closed_turn, summary_content, tool_turn
+from tests.helpers import closed_turn, summary_content, tool_turn
 from tests.lock_store import ProcessLocalLockStore
 from tests.model_helpers import prepare_chat_request
 
@@ -149,7 +146,7 @@ def dependencies():
     return providers, chat_instances
 
 
-def test_full_job_chain_commits_summary_receipt_and_job_before_cleaning_journal(
+def test_full_job_chain_commits_summary_cards_and_job(
     tmp_path: Path,
 ) -> None:
     config = runtime_config(tmp_path)
@@ -172,12 +169,10 @@ def test_full_job_chain_commits_summary_receipt_and_job_before_cleaning_journal(
 
     assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
     assert result.job.memory_sequence == queued.memory_sequence == 1
-    assert result.change_receipt is not None
-    assert result.change_receipt.state is MemoryChangeReceiptState.COMMITTED
-    assert result.change_receipt.node_changes == ()
+    assert result.job.cards_written and result.job.changed_uris == () and result.job.deleted_uris == ()
     assert result.summary_generated
-    assert result.journal_cleaned
-    assert runtime.components.memory.editor.transaction.journal.try_read(queued.transaction_id) is None
+    assert not (config.workflow_root / "transactions").exists()
+    assert not (config.workflow_root / "receipts").exists()
     summary = runtime.components.conversation.summaries.store.read(
         address,
         runtime.components.conversation.journal.read_segment(address, queued.segment_id),
@@ -241,8 +236,7 @@ def test_empty_tree_final_round_still_insufficient_commits_job_and_audits_limit(
     assert chats[0].retrieval_script == []
     assert chats[0].response_names.count("memory_retrieval_decision") == 3
     assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
-    assert result.change_receipt is not None
-    assert [str(item.uri) for item in result.change_receipt.node_changes] == ["memory://preferences/回答风格.md"]
+    assert result.job.changed_uris == ("memory://preferences/回答风格.md",)
     plans = [event for event in observer.events if (event.category, event.operation) == ("workflow", "memory_plan")]
     assert len(plans) == 1
     assert plans[0].attributes["retrieval_ended_at_limit"] is True
@@ -333,7 +327,7 @@ def test_reading_an_unexposed_uri_still_fails_job_instead_of_ending_at_limit(
 
 
 def _fail_semantic_refresh_once(runtime) -> None:
-    """L2 提交之后的目录 L0/L1 刷新失败一次：L2 不回滚，Job 保持未完成。"""
+    """卡片写完之后的目录 L0/L1 刷新失败一次：卡片不回滚，任务文件里已经记着"卡片已写完"。"""
 
     refresher = runtime.components.workflow.runner.committed_finalizer.semantic_refresher
     refresh = refresher.refresh_for_many
@@ -347,9 +341,11 @@ def _fail_semantic_refresh_once(runtime) -> None:
     refresher.refresh_for_many = fail_once
 
 
-def test_committed_l2_job_resumes_after_semantic_refresh_failure_without_replanning(
+def test_cards_written_job_resumes_after_semantic_refresh_failure_without_replanning(
     tmp_path: Path,
 ) -> None:
+    """卡片写完、任务没标完成时失败：重来只补刷概览和标完成，不再调模型提取。"""
+
     config = runtime_config(tmp_path, max_attempts=1)
     providers, chats = dependencies()
     runtime = build_runtime(
@@ -358,13 +354,14 @@ def test_committed_l2_job_resumes_after_semantic_refresh_failure_without_replann
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     runtime.initialize()
+    chats[0].preferences.append({"page_id": 100, "topic": "回答风格", "content": "- 偏好简洁回答"})
     address = ConversationAddress("conversation-recovery", date(2026, 7, 2))
     runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
         address,
         ConversationBatch("conversation-recovery", closed_turn()),
         after_turn=True,
     )
-    queued = runtime.components.workflow.enqueuer.flush(address).jobs[0]
+    runtime.components.workflow.enqueuer.flush(address)
     _fail_semantic_refresh_once(runtime)
 
     try:
@@ -375,13 +372,11 @@ def test_committed_l2_job_resumes_after_semantic_refresh_failure_without_replann
         raise AssertionError("semantic refresh failure must fail the first attempt")
 
     assert failed is not None and failed.status is MemoryJobStatus.FAILED
-    source = MemoryChangeSource.from_job(failed)
-    receipt = runtime.components.workflow.receipts.read(source)
-    journal = runtime.components.memory.editor.transaction.journal.read(failed.transaction_id)
-    assert receipt.state is MemoryChangeReceiptState.COMMITTED
-    assert journal.state is MemoryTransactionJournalState.COMMITTED
+    assert failed.cards_written
+    assert failed.changed_uris == ("memory://preferences/回答风格.md",)
+    assert (tmp_path / "data" / "memory" / "preferences" / "回答风格.md").exists()
     assert chats[0].response_names.count("memory_candidate_batch") == 1
-    assert asyncio.run(runtime.failed_memory_job()) == failed
+    assert asyncio.run(runtime.failed_memory_jobs()) == (failed,)
 
     retried = asyncio.run(runtime.retry_failed_memory_job(failed))
     assert retried.reopened_job.status is MemoryJobStatus.QUEUED
@@ -389,83 +384,65 @@ def test_committed_l2_job_resumes_after_semantic_refresh_failure_without_replann
 
     assert result.recovered
     assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
-    assert result.change_receipt is not None
-    receipt_source = result.change_receipt.source
-    assert receipt_source.same_trigger(source)
-    trigger = runtime.components.workflow.runner.executor.conversations.read_segment(
-        address,
-        failed.segment_id,
-    )
-    editor_segment = (
-        None
-        if trigger.ends_mid_turn
-        else runtime.components.workflow.runner.executor.conversations.read_editor_turn(address, trigger).whole
-    )
-    assert editor_segment is not None
-    assert receipt_source.editor_segment_id == editor_segment.segment_id
-    assert receipt_source.editor_segment_digest == editor_segment.digest
+    assert result.job.changed_uris == ("memory://preferences/回答风格.md",)
     assert chats[0].response_names.count("memory_candidate_batch") == 1
-    assert runtime.components.memory.editor.transaction.journal.try_read(queued.transaction_id) is None
-    assert asyncio.run(runtime.failed_memory_job()) is None
+    assert asyncio.run(runtime.failed_memory_jobs()) == ()
 
 
-def test_l2_written_but_committed_mark_lost_keeps_receipt_and_retry_finishes_job(
+def test_a_write_that_stops_part_way_keeps_written_files_and_a_retry_finishes_without_duplicates(
     tmp_path: Path,
 ) -> None:
+    """一批写两个文件，第二个写失败：第一个留在盘上、任务失败且没记"卡片已写完"；重试整条重做，能做成，没有重复卡片。"""
+
     config = runtime_config(tmp_path, max_attempts=1)
     providers, chats = dependencies()
-    runtime = build_runtime(
-        config,
-        providers=providers,
-        path_lock=PathLock(ProcessLocalLockStore()),
-    )
+    runtime = build_runtime(config, providers=providers, path_lock=PathLock(ProcessLocalLockStore()))
     runtime.initialize()
-    chats[0].preferences.append({"page_id": 100, "topic": "回答风格", "content": "- 偏好简洁回答"})
-    address = ConversationAddress("conversation-mark", date(2026, 7, 3))
-    runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
-        address,
-        ConversationBatch("conversation-mark", closed_turn()),
-        after_turn=True,
+    chats[0].preferences.extend(
+        [
+            {"page_id": 100, "topic": "回答风格", "content": "- 偏好简洁回答"},
+            {"page_id": 101, "topic": "输出格式", "content": "- 偏好先给结论"},
+        ]
     )
-    queued = runtime.components.workflow.enqueuer.flush(address).jobs[0]
-    journal = runtime.components.memory.editor.transaction.journal
-    mark = journal.mark
-    failures = [OSError("simulated COMMITTED mark loss")]
+    address = ConversationAddress("conversation-partial", date(2026, 7, 3))
+    runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
+        address, ConversationBatch("conversation-partial", closed_turn()), after_turn=True
+    )
+    runtime.components.workflow.enqueuer.flush(address)
+    tree = runtime.components.memory.tree
+    write = tree.write
+    writes: list[object] = []
 
-    def lose_first_commit_mark(transaction_id, state, *, timestamp):
-        if state is MemoryTransactionJournalState.COMMITTED and failures:
-            raise failures.pop()
-        return mark(transaction_id, state, timestamp=timestamp)
+    def fail_second_write(document):
+        writes.append(document)
+        if len(writes) == 2:
+            raise OSError("simulated disk failure on the second file")
+        return write(document)
 
-    journal.mark = lose_first_commit_mark
-    try:
+    tree.write = fail_second_write
+    with pytest.raises(MemoryJobExecutionError) as caught:
         asyncio.run(runtime.run_next())
-    except MemoryJobExecutionError as exc:
-        failed = exc.job
-    else:
-        raise AssertionError("lost COMMITTED mark must fail the first attempt")
+    tree.write = write
+    failed = caught.value.job
 
-    assert failed is not None and failed.status is MemoryJobStatus.FAILED
-    source = MemoryChangeSource.from_job(failed)
-    assert journal.read(failed.transaction_id).state is MemoryTransactionJournalState.PREPARED
-    assert runtime.components.workflow.receipts.read(source).state is MemoryChangeReceiptState.PREPARED
+    preferences = tmp_path / "data" / "memory" / "preferences"
+    assert failed is not None and failed.status is MemoryJobStatus.FAILED and not failed.cards_written
+    assert sorted(path.name for path in preferences.glob("[!.]*.md")) == ["回答风格.md"]
 
     asyncio.run(runtime.retry_failed_memory_job(failed))
     result = asyncio.run(runtime.run_next())
 
-    assert result.recovered
     assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
-    assert result.change_receipt is not None
-    assert result.change_receipt.state is MemoryChangeReceiptState.COMMITTED
-    assert [str(item.uri) for item in result.change_receipt.node_changes] == ["memory://preferences/回答风格.md"]
-    assert result.journal_cleaned
-    assert journal.try_read(queued.transaction_id) is None
-    assert chats[0].response_names.count("memory_candidate_batch") == 1
+    assert not result.recovered
+    assert sorted(path.name for path in preferences.glob("[!.]*.md")) == sorted(["输出格式.md", "回答风格.md"])
+    assert chats[0].response_names.count("memory_candidate_batch") >= 2
 
 
-def test_lifecycle_keeps_history_and_summary_sources_until_terminal_archive_retirement(
+def test_history_is_released_ten_days_after_its_job_ends_and_the_job_later_deleted(
     tmp_path: Path,
 ) -> None:
+    """原文在任务到终态后 10 天（默认）释放，摘要还在；原文释放、过了 30 天的任务删掉。"""
+
     config = runtime_config(tmp_path)
     providers, _chats = dependencies()
     runtime = build_runtime(
@@ -482,49 +459,27 @@ def test_lifecycle_keeps_history_and_summary_sources_until_terminal_archive_reti
     )
     queued = runtime.components.workflow.enqueuer.flush(address).jobs[0]
     completed = asyncio.run(runtime.run_next())
-    assert completed.change_receipt is not None
-    source = completed.change_receipt.source
-    maintenance_time = BASE_TIME + timedelta(days=400)
+    assert completed.job is not None and completed.job.status is MemoryJobStatus.COMMITTED
+    history_path = runtime.components.conversation.journal.layout.history_path(address, queued.segment_id)
 
-    released = asyncio.run(runtime.maintain_conversation(address, now=maintenance_time))
+    early = asyncio.run(runtime.maintain_conversation(address, now=completed.job.updated_at + timedelta(days=9)))
 
-    assert released.released_history_segment_ids == ()
-    assert released.purged_history_segment_ids == ()
-    assert released.deleted_memory_job_sequences == ()
-    assert released.deleted_memory_receipt_ids == ()
-    assert (
-        runtime.components.workflow.jobs.try_read_source(
-            address,
-            queued.segment_id,
-            queued.source_segment_digest,
-        )
-        is not None
-    )
-    assert runtime.components.workflow.receipts.try_read(source) is not None
-    assert (
-        runtime.components.conversation.summaries.store.try_read_by_id(
-            address,
-            queued.segment_id,
-        )
-        is not None
-    )
-    history_path = runtime.components.conversation.journal.layout.history_path(
-        address,
-        queued.segment_id,
-    )
+    assert early.released_history_segment_ids == ()
     assert history_path.exists()
 
-    purged = asyncio.run(runtime.maintain_conversation(address, now=maintenance_time))
+    released = asyncio.run(runtime.maintain_conversation(address, now=completed.job.updated_at + timedelta(days=11)))
 
-    assert purged.purged_history_segment_ids == ()
-    assert purged.released_history_segment_ids == ()
-    assert (
-        runtime.components.conversation.summaries.store.try_read_by_id(
-            address,
-            queued.segment_id,
-        )
-        is not None
+    assert released.released_history_segment_ids == (queued.segment_id,)
+    assert released.deleted_memory_job_sequences == ()
+    assert not history_path.exists()
+    assert runtime.components.conversation.summaries.store.try_read_by_id(address, queued.segment_id) is not None
+
+    later = asyncio.run(
+        runtime.maintain_conversation(address, now=max(datetime.now(UTC), completed.job.updated_at) + timedelta(days=31))
     )
+
+    assert later.deleted_memory_job_sequences == (queued.memory_sequence,)
+    assert runtime.components.workflow.jobs.try_read_source(address, queued.segment_id, queued.source_segment_digest) is None
 
 
 _GOOD_PREFERENCE = {"page_id": 150, "topic": "回答风格", "content": "- 偏好简洁回答"}
@@ -675,11 +630,10 @@ def test_failing_candidate_repaired_by_the_model_is_written_with_the_rest_of_the
     assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
     assert chats[0].response_names.count("memory_candidate_batch") - calls_before == 2
     assert chats[0].candidate_script == []
-    assert result.change_receipt is not None
-    assert sorted(str(item.uri) for item in result.change_receipt.node_changes) == [
+    assert result.job.changed_uris == (
         "memory://entities/软件项目/openviking.md",
         "memory://preferences/回答风格.md",
-    ]
+    )
     assert _plan_events(observer)[-1].attributes["source_rejected_count"] == 0
 
 
@@ -755,60 +709,131 @@ def test_normal_model_variation_in_source_checks_no_longer_fails_the_job(
     assert _plan_events(observer)[-1].attributes["source_rejected_count"] == 1
 
 
-def test_a_running_runtime_refuses_to_retry_or_abandon_while_its_worker_is_not_blocked(tmp_path: Path) -> None:
-    """FAILED Job 的人工处置在 RUNNING 时只许在 MemoryWorker 因它进了 BLOCKED 且空闲之后做（AGENTS 运维入口）；
-    Worker 没被它挡住时两种处置都拒绝，Job 原样留着。"""
+def _failed_job(runtime, conversation_id: str, day: date):
+    runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
+        ConversationAddress(conversation_id, day), ConversationBatch(conversation_id, closed_turn()), after_turn=True
+    )
+    runtime.components.workflow.enqueuer.flush(ConversationAddress(conversation_id, day))
+    with pytest.raises(MemoryJobExecutionError) as caught:
+        asyncio.run(runtime.run_next())
+    failed = caught.value.job
+    assert failed is not None and failed.status is MemoryJobStatus.FAILED
+    return failed
 
-    from habitus.runtime import RuntimeState, RuntimeStateError
+
+def test_a_failed_job_no_longer_blocks_later_jobs_and_can_be_retried_while_running(tmp_path: Path) -> None:
+    """判了失败就放行：后面的任务照常做成；Runtime 在 RUNNING 时也能重试，不要求 Worker 被挡住。"""
+
+    from habitus.runtime import RuntimeState
 
     config = runtime_config(tmp_path, max_attempts=1)
     providers, chats = dependencies()
     runtime = build_runtime(config, providers=providers, path_lock=PathLock(ProcessLocalLockStore()))
     runtime.initialize()
     chats[0].retrieval_script.append(_read_unexposed())
-    address = ConversationAddress("conversation-gate", date(2026, 7, 5))
-    runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
-        address, ConversationBatch("conversation-gate", closed_turn()), after_turn=True
-    )
-    runtime.components.workflow.enqueuer.flush(address)
-    with pytest.raises(MemoryJobExecutionError) as caught:
-        asyncio.run(runtime.run_next())
-    failed = caught.value.job
-    assert failed is not None and failed.status is MemoryJobStatus.FAILED
+    failed = _failed_job(runtime, "conversation-gate", date(2026, 7, 5))
+    _enqueue(runtime, "conversation-after", date(2026, 7, 6), closed_turn())
 
-    runtime._state = RuntimeState.RUNNING  # 只拨状态、不起 Worker：Worker 没进 BLOCKED
+    later = asyncio.run(runtime.run_next())
+
+    assert later.job is not None and later.job.status is MemoryJobStatus.COMMITTED
+    assert later.job.conversation_id == "conversation-after"
+    assert asyncio.run(runtime.failed_memory_jobs()) == (failed,)
+    # 健康面不再报"队列被挡住"，改报失败任务的条数与最早一条（不影响就绪）
+    report = asyncio.run(runtime.health())
+    check = next(item for item in report.checks if item.name == "memory_failed_jobs")
+    assert check.detail.startswith(f"failed=1;oldest={failed.memory_sequence}:") and not check.critical
+    queue = next(item for item in report.checks if item.name == "memory_queue")
+    assert "failed" not in queue.detail
+
+    runtime._state = RuntimeState.RUNNING  # 只拨状态、不起 Worker：重试不再看 Worker 是不是被挡住
     try:
-        with pytest.raises(RuntimeStateError, match="retry a failed job after its memory worker is blocked and idle"):
-            asyncio.run(runtime.retry_failed_memory_job(failed))
-        with pytest.raises(RuntimeStateError, match="abandon a failed job after its memory worker is blocked and idle"):
-            asyncio.run(runtime.abandon_failed_memory_job(failed, reason="人工确认无法修复"))
+        retried = asyncio.run(runtime.retry_failed_memory_job(failed))
     finally:
         runtime._state = RuntimeState.READY
-    assert asyncio.run(runtime.failed_memory_job()) == failed
+    assert retried.reopened_job.status is MemoryJobStatus.QUEUED
+    result = asyncio.run(runtime.run_next())
+    assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
+    assert result.job.conversation_id == "conversation-gate"
 
 
-def test_a_failed_job_whose_change_already_committed_cannot_be_abandoned(tmp_path: Path) -> None:
-    """L2 已提交（回执 COMMITTED）之后才失败的 Job 不许显式放弃：放弃会丢掉已发布的副作用，只能重试补完。"""
+def test_a_failed_job_whose_history_was_released_cannot_be_retried_but_can_be_abandoned(tmp_path: Path) -> None:
+    """原文释放后失败任务没有东西可重做：重试报出看得懂的原因；人工放弃照常。"""
 
     from habitus.runtime import RuntimeStateError
 
     config = runtime_config(tmp_path, max_attempts=1)
-    providers, _chats = dependencies()
+    providers, chats = dependencies()
     runtime = build_runtime(config, providers=providers, path_lock=PathLock(ProcessLocalLockStore()))
     runtime.initialize()
-    address = ConversationAddress("conversation-abandon", date(2026, 7, 2))
-    runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
-        address, ConversationBatch("conversation-abandon", closed_turn()), after_turn=True
-    )
-    runtime.components.workflow.enqueuer.flush(address)
-    _fail_semantic_refresh_once(runtime)
-    with pytest.raises(MemoryJobExecutionError) as caught:
-        asyncio.run(runtime.run_next())
-    failed = caught.value.job
-    assert failed is not None and failed.status is MemoryJobStatus.FAILED
+    chats[0].retrieval_script.append(_read_unexposed())
+    day = date(2026, 7, 5)
+    failed = _failed_job(runtime, "conversation-released", day)
+    address = ConversationAddress("conversation-released", day)
+    released = asyncio.run(runtime.maintain_conversation(address, now=failed.updated_at + timedelta(days=11)))
+    assert released.released_history_segment_ids == (failed.segment_id,)
 
-    with pytest.raises(
-        RuntimeStateError, match="a failed job with a prepared or committed receipt cannot be abandoned"
-    ):
-        asyncio.run(runtime.abandon_failed_memory_job(failed, reason="人工确认无法修复"))
-    assert asyncio.run(runtime.failed_memory_job()) == failed
+    with pytest.raises(RuntimeStateError, match="history has already been released"):
+        asyncio.run(runtime.retry_failed_memory_job(failed))
+    abandoned = asyncio.run(runtime.abandon_failed_memory_job(failed, reason="人工确认不再重试"))
+
+    assert abandoned.abandonment.memory_sequence == failed.memory_sequence
+    assert asyncio.run(runtime.failed_memory_jobs()) == ()
+
+
+def test_a_segment_whose_extraction_failed_still_has_its_summary_on_disk(tmp_path: Path) -> None:
+    """提取失败的段：摘要生成即落盘，不等卡片；后面的摘要压缩与查记忆都用得上。"""
+
+    config = runtime_config(tmp_path, max_attempts=1)
+    providers, chats = dependencies()
+    runtime = build_runtime(config, providers=providers, path_lock=PathLock(ProcessLocalLockStore()))
+    runtime.initialize()
+    chats[0].retrieval_script.append(_read_unexposed())
+    day = date(2026, 7, 7)
+    failed = _failed_job(runtime, "conversation-summary-kept", day)
+    address = ConversationAddress("conversation-summary-kept", day)
+
+    summary = runtime.components.conversation.summaries.store.try_read_by_id(address, failed.segment_id)
+
+    assert summary is not None
+    assert summary.source_message_digest == failed.source_segment_digest
+
+
+def test_a_failed_job_whose_history_was_never_published_can_be_retried_through_runtime(tmp_path: Path) -> None:
+    """封存时 history 发布一直失败、STAGED 阶段就判了 FAILED：原文还在 live 里，Runtime 人工重试照常放行，
+    重开后由 STAGED 恢复补发 history 并做成（Codex 复核第 2 条）。"""
+
+    config = runtime_config(tmp_path, max_attempts=1)
+    providers, chats = dependencies()
+    runtime = build_runtime(config, providers=providers, path_lock=PathLock(ProcessLocalLockStore()))
+    runtime.initialize()
+    chats[0].preferences.append({"page_id": 100, "topic": "回答风格", "content": "- 偏好简洁回答"})
+    address = ConversationAddress("conversation-staged", date(2026, 7, 4))
+    journal = runtime.components.conversation.journal
+    jobs = runtime.components.workflow.jobs
+    publish = journal._publish_seal
+
+    def disk_full(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise OSError(28, "No space left on device")
+
+    journal._publish_seal = disk_full  # type: ignore[method-assign]
+    try:
+        runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
+            address, ConversationBatch("conversation-staged", closed_turn()), after_turn=True
+        )
+        with pytest.raises(OSError, match="No space"):
+            runtime.components.workflow.enqueuer.flush(address)
+        staged = jobs.oldest_unfinished()
+        assert staged is not None
+        failed = jobs.record_staged_failure(staged, OSError(28, "No space left on device"))
+    finally:
+        journal._publish_seal = publish  # type: ignore[method-assign]
+    assert failed.status is MemoryJobStatus.FAILED and failed.claim_generation == 0
+    assert journal.list_history(address) == ()
+
+    retried = asyncio.run(runtime.retry_failed_memory_job(failed))
+    assert retried.reopened_job.status is MemoryJobStatus.STAGED
+    result = asyncio.run(runtime.run_next())
+
+    assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
+    assert result.job.changed_uris == ("memory://preferences/回答风格.md",)

@@ -343,7 +343,6 @@ class JobStatusResult(StrictSchema):
     attempts: NonNegativeSequence
     next_attempt_at: datetime | None
     last_failure: JobFailureResult | None
-    blocking: bool
     manual_action_required: bool
     version: JobVersion
     created_at: datetime
@@ -355,8 +354,9 @@ class JobListResult(StrictSchema):
     next_before_sequence: PositiveSequence | None
 
 
-class BlockedJobResult(StrictSchema):
-    job: JobStatusResult | None
+class FailedJobsResult(StrictSchema):
+    count: NonNegativeSequence
+    jobs: list[JobStatusResult]
 
 
 class RetryJobRequest(StrictSchema):
@@ -433,10 +433,10 @@ __all__ = [
     "ErrorInfo",
     "ErrorResponse",
     "HTTPErrorCode",
-    "BlockedJobResult",
     "AuditListResult",
     "ConversationCursorResult",
     "FlushRequest",
+    "FailedJobsResult",
     "FlushResult",
     "HealthResult",
     "JobListResult",

@@ -40,7 +40,6 @@ from habitus.memory.retrieval.relations import RelationExpander
 from habitus.memory.retrieval.request import MemorySearchRequestNormalizer
 from habitus.memory.retrieval.steps import SearchPlan, SearchSteps, SourceQuery
 from habitus.memory.snapshot import MemorySnapshotReader
-from habitus.memory.tree import MemoryTreeConsistencyError
 from habitus.memory.uri import MemoryURI
 from habitus.model_client import BRIEFS, StructuredChatClient, model_failure
 
@@ -292,29 +291,19 @@ class SearchService:
         found: _Found,
         degrade: Callable[[MemorySearchDegradationStage, BaseException | str], None],
     ) -> MemoryCatalog:
-        """记忆任务提交的窗口内概览整层拒读：短暂重试，仍读不出就按没有卡片清单继续并说明。"""
+        """读各目录的概览拼清单；读不出就按没有卡片清单继续并说明。"""
 
         def recall_failed(error: BaseException) -> None:
             degrade(MemorySearchDegradationStage.RECALL_LIFECYCLE, error)
 
-        for attempt in range(self.config.catalog_retries + 1):
-            try:
-                catalog = await asyncio.to_thread(
-                    self.catalog.read, kinds=kinds, now=now, on_recall_failure=recall_failed
-                )
-            except MemoryTreeConsistencyError as exc:
-                if attempt < self.config.catalog_retries:
-                    await asyncio.sleep(self.config.catalog_retry_delay_seconds)
-                    continue
-                degrade(MemorySearchDegradationStage.CATALOG, exc)
-            except Exception as exc:
-                degrade(MemorySearchDegradationStage.CATALOG, exc)
-            else:
-                found.notes.extend(catalog.notes)
-                return catalog
-            break
-        found.notes.append("记忆卡片清单这次读不出来（记忆正在写入或概览损坏），只查了每一轮的记录和会话摘要。")
-        return MemoryCatalog((), ())
+        try:
+            catalog = await asyncio.to_thread(self.catalog.read, kinds=kinds, now=now, on_recall_failure=recall_failed)
+        except Exception as exc:
+            degrade(MemorySearchDegradationStage.CATALOG, exc)
+            found.notes.append("记忆卡片清单这次读不出来（概览损坏），只查了每一轮的记录和会话摘要。")
+            return MemoryCatalog((), ())
+        found.notes.extend(catalog.notes)
+        return catalog
 
     def _background(self, now: datetime) -> str:
         local = now.astimezone(self.zone)

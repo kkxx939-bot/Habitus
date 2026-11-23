@@ -1,8 +1,7 @@
-"""STAGED 发布恢复与已提交事务续跑的状态组合矩阵。"""
+"""STAGED 发布恢复的状态组合矩阵（多文件事务的恢复已随阶段 3 去掉）。"""
 
 from __future__ import annotations
 
-import json
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,19 +10,13 @@ import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.memory.conversation import ConversationAddress
-from habitus.memory.editor import (
-    MemoryTransactionJournal,
-    MemoryTransactionJournalError,
-    MemoryTransactionJournalState,
-)
 from habitus.memory.workflow import (
     MemoryJobExecutionError,
     MemoryJobNotReadyError,
     MemoryJobStore,
 )
-from habitus.memory.workflow.receipt import MemoryChangeReceiptState, MemoryChangeSource
-from habitus.memory.workflow.recovery import MemoryJobTransactionRecovery, MemoryStagedJobRecovery
-from tests.helpers import BASE_TIME, codec, segment
+from habitus.memory.workflow.recovery import MemoryStagedJobRecovery
+from tests.helpers import BASE_TIME, segment
 from tests.lock_store import ProcessLocalLockStore
 
 
@@ -78,55 +71,10 @@ class FakeConversationJournal:
         return SimpleNamespace(segment=self.sealed)
 
 
-class FakeTransactionJournal:
-    def __init__(self, record=None, *, discard_error: BaseException | None = None) -> None:
-        self.record = record
-        self.discard_error = discard_error
-        self.discarded: list[str] = []
-
-    def try_read(self, _transaction_id):
-        return self.record
-
-    def discard_terminal(self, transaction_id):
-        if self.discard_error is not None:
-            raise self.discard_error
-        self.discarded.append(transaction_id)
-
-
-class FakeTransaction:
-    def __init__(self, record=None, *, discard_error: BaseException | None = None) -> None:
-        self.journal = FakeTransactionJournal(record, discard_error=discard_error)
-        self.recovered: list[bool] = []
-
-    def recover_pending(self, *, discard_terminal):
-        self.recovered.append(discard_terminal)
-        return ("a" * 32,)
-
-
-class FakeReceiptStore:
-    def __init__(self, receipt=None) -> None:
-        self.receipt = receipt
-        self.discarded: list[MemoryChangeSource] = []
-
-    def try_read(self, _source):
-        return self.receipt
-
-    def discard_prepared(self, source):
-        self.discarded.append(source)
-        return True
-
-
 def staged_recovery(source, jobs: FakeJobStore, conversations: FakeConversationJournal):
     current = object.__new__(MemoryStagedJobRecovery)
     current.jobs = jobs
     current.conversations = conversations
-    return current
-
-
-def transaction_recovery(transaction: FakeTransaction, receipts: FakeReceiptStore):
-    current = object.__new__(MemoryJobTransactionRecovery)
-    current.transaction = transaction
-    current.change_receipts = receipts
     return current
 
 
@@ -198,146 +146,3 @@ def test_matching_recovered_segment_activates_staged_job(tmp_path: Path) -> None
     assert staged_recovery(source, jobs, conversations).recover(job) is job
     assert jobs.activated
     assert conversations.seal_calls[0][1] == source.end_sequence
-
-
-def test_transaction_recovery_delegates_without_discarding_terminal_journals() -> None:
-    transaction = FakeTransaction()
-    recovery = transaction_recovery(transaction, FakeReceiptStore())
-
-    assert recovery.recover_pending() == ("a" * 32,)
-    assert transaction.recovered == [False]
-
-
-def test_committed_journal_is_returned_for_finalization(tmp_path: Path) -> None:
-    _store, job, _source = staged_job(tmp_path)
-    record = SimpleNamespace(state=MemoryTransactionJournalState.COMMITTED)
-    recovery = transaction_recovery(FakeTransaction(record), FakeReceiptStore())
-
-    assert recovery.inspect(job) is record
-
-
-def test_rolled_back_journal_discards_prepared_receipt_and_terminal_log(tmp_path: Path) -> None:
-    _store, job, _source = staged_job(tmp_path)
-    record = SimpleNamespace(state=MemoryTransactionJournalState.ROLLED_BACK)
-    transaction = FakeTransaction(record)
-    receipts = FakeReceiptStore()
-    recovery = transaction_recovery(transaction, receipts)
-
-    assert recovery.inspect(job) is None
-    assert receipts.discarded == [MemoryChangeSource.from_job(job)]
-    assert transaction.journal.discarded == [job.transaction_id]
-
-
-def test_missing_journal_with_no_receipt_is_a_clean_restart(tmp_path: Path) -> None:
-    _store, job, _source = staged_job(tmp_path)
-    recovery = transaction_recovery(FakeTransaction(), FakeReceiptStore())
-    assert recovery.inspect(job) is None
-
-
-def test_missing_journal_discards_orphan_prepared_receipt(tmp_path: Path) -> None:
-    _store, job, _source = staged_job(tmp_path)
-    receipt = SimpleNamespace(state=MemoryChangeReceiptState.PREPARED)
-    receipts = FakeReceiptStore(receipt)
-    recovery = transaction_recovery(FakeTransaction(), receipts)
-
-    assert recovery.inspect(job) is None
-    assert receipts.discarded == [MemoryChangeSource.from_job(job)]
-
-
-def test_missing_journal_with_committed_receipt_is_integrity_error(tmp_path: Path) -> None:
-    _store, job, _source = staged_job(tmp_path)
-    receipt = SimpleNamespace(state=MemoryChangeReceiptState.COMMITTED)
-    recovery = transaction_recovery(FakeTransaction(), FakeReceiptStore(receipt))
-
-    with pytest.raises(RuntimeError, match="committed change receipt"):
-        recovery.inspect(job)
-
-
-def test_discard_uncommitted_preserves_committed_transaction_and_receipt(tmp_path: Path) -> None:
-    _store, job, _source = staged_job(tmp_path)
-    source = MemoryChangeSource.from_job(job)
-    record = SimpleNamespace(state=MemoryTransactionJournalState.COMMITTED)
-    receipts = FakeReceiptStore(SimpleNamespace(state=MemoryChangeReceiptState.PREPARED))
-    recovery = transaction_recovery(FakeTransaction(record), receipts)
-
-    recovery.discard_uncommitted(source)
-    assert receipts.discarded == []
-
-
-def test_discard_uncommitted_preserves_receipt_of_indeterminate_prepared_transaction(tmp_path: Path) -> None:
-    _store, job, _source = staged_job(tmp_path)
-    source = MemoryChangeSource.from_job(job)
-    transaction = FakeTransaction(SimpleNamespace(state=MemoryTransactionJournalState.PREPARED))
-    receipts = FakeReceiptStore(SimpleNamespace(state=MemoryChangeReceiptState.PREPARED))
-    recovery = transaction_recovery(transaction, receipts)
-
-    recovery.discard_uncommitted(source)
-    assert receipts.discarded == []
-    assert transaction.journal.discarded == []
-
-
-@pytest.mark.parametrize(
-    "journal_state",
-    [None, MemoryTransactionJournalState.ROLLED_BACK],
-)
-def test_discard_uncommitted_cleans_only_prepared_receipt_and_rolled_back_log(
-    tmp_path: Path,
-    journal_state,
-) -> None:
-    _store, job, _source = staged_job(tmp_path)
-    source = MemoryChangeSource.from_job(job)
-    record = None if journal_state is None else SimpleNamespace(state=journal_state)
-    transaction = FakeTransaction(record)
-    receipts = FakeReceiptStore(SimpleNamespace(state=MemoryChangeReceiptState.PREPARED))
-    recovery = transaction_recovery(transaction, receipts)
-
-    recovery.discard_uncommitted(source)
-    assert receipts.discarded == [source]
-    assert transaction.journal.discarded == (
-        [job.transaction_id] if journal_state is MemoryTransactionJournalState.ROLLED_BACK else []
-    )
-
-
-def test_discard_terminal_reports_success_or_journal_error() -> None:
-    successful = transaction_recovery(FakeTransaction(), FakeReceiptStore())
-    assert successful.discard_terminal("a" * 32) is True
-
-    failed = transaction_recovery(
-        FakeTransaction(discard_error=MemoryTransactionJournalError("busy")),
-        FakeReceiptStore(),
-    )
-    assert failed.discard_terminal("b" * 32) is False
-
-
-@pytest.mark.parametrize(
-    ("field", "bad", "message"),
-    [
-        ("transaction_id", 5, "transaction_id must be 32 lowercase hexadecimal characters"),
-        ("transaction_id", None, "transaction_id must be 32 lowercase hexadecimal characters"),
-        ("lock_identities", ["lock-a", 1], "lock_identities must contain non-empty strings"),
-        ("entries", [{"uri": 1, "before": None, "after": None}], "memory URI must be a string"),
-    ],
-)
-def test_transaction_journal_with_wrongly_typed_fields_is_rejected_when_read_back(
-    tmp_path: Path, field: str, bad: object, message: str
-) -> None:
-    """磁盘读回的事务日志字段类型错时在解码器就被拒（W16：类型检查在边界）。"""
-
-    journal = MemoryTransactionJournal(tmp_path / "workflow" / "transactions", codec())
-    transaction_id = "a" * 32
-    payload: dict[str, object] = {
-        "schema": "memory_commit_transaction_v1",
-        "transaction_id": transaction_id,
-        "state": "prepared",
-        "created_at": "2026-07-01T00:00:00Z",
-        "updated_at": "2026-07-01T00:00:00Z",
-        "lock_identities": ["lock-a"],
-        "entries": [],
-    }
-    payload[field] = bad
-    journal.root.mkdir(parents=True, exist_ok=True)
-    (journal.root / f"{transaction_id}.json").write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(MemoryTransactionJournalError, match="failed to read transaction journal") as raised:
-        journal.read(transaction_id)
-    assert message in str(raised.value.__cause__)

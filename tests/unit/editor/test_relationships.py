@@ -1,6 +1,5 @@
 """最终身份确定后的关系解析、双向落点和结构迁移测试。"""
 
-import pytest
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
 from habitus.memory.document import MemoryLinkType, MemoryStoredLink
@@ -11,7 +10,6 @@ from habitus.memory.editor import (
     MemoryNodeDisposition,
     MemoryRelationAction,
     MemoryRelationCandidate,
-    MemoryRelationIntegrityError,
     MemoryRelationPlanner,
     MemoryRelationReadSet,
     MemoryRelationResolver,
@@ -126,7 +124,9 @@ def test_structural_merge_migrates_old_relations_to_surviving_target() -> None:
     assert plan.update_for(neighbor_uri).backlinks == (migrated,)
 
 
-def test_structural_operation_fails_if_old_link_has_no_matching_backlink() -> None:
+def test_structural_operation_tolerates_an_old_link_without_its_backlink() -> None:
+    """关联规划这条读路径：旧图里只有正向、没有反向的关联不再报错（阶段 3），删节点时照常清掉。"""
+
     source = document(MemoryKind.PREFERENCE)
     target = document(MemoryKind.PROFILE)
     source_uri = MemoryURI.from_address(source.address)
@@ -140,5 +140,7 @@ def test_structural_operation_fails_if_old_link_has_no_matching_backlink() -> No
             MemoryFinalIdentity(2, MemoryNodeDisposition.NOOP, target_uri, target_uri),
         )
     )
-    with pytest.raises(MemoryRelationIntegrityError, match="backlink"):
-        MemoryRelationReadSet.build(snapshots, identities, ())
+    read_set = MemoryRelationReadSet.build(snapshots, identities, ())
+    plan = MemoryRelationPlanner().plan(identities, (), read_set)
+    assert plan.update_for(target_uri) is None
+    assert plan.removed == (relation,)

@@ -1,4 +1,4 @@
-"""Archive 退休清单的三相位幂等续跑：认领并释放 History、删除来源链、完成清单。
+"""Archive 退休清单的三相位幂等续跑：认领并确认 History 已释放、删除来源链、完成清单。
 
 每个相位只在本相位的全部落盘动作完成后推进清单；中途失败或安全门未满足时停在当前相位，
 下一次维护从同一相位重新进入。相位顺序、推进时机与报错文字都不得改变。
@@ -18,7 +18,6 @@ from habitus.memory.conversation import (
     ConversationSummaryStore,
 )
 from habitus.memory.conversation.compaction import ConversationSummaryUseReader
-from habitus.memory.workflow.committed_cleanup import CommittedWorkflowCleanup
 from habitus.memory.workflow.lifecycle_errors import ConversationLifecycleError
 from habitus.pre.conversation import ConversationRangeSummaryStage
 
@@ -26,16 +25,14 @@ ArchiveRetirementOutcome = tuple[
     tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
-    tuple[str, ...],
-    tuple[str, ...],
 ]
-"""依次为：物理清除的 History、释放的 History、删除的 Segment/Range/Archive Summary。"""
+"""依次为：删除的 Segment/Range/Archive Summary。"""
 
-_NOTHING: ArchiveRetirementOutcome = ((), (), (), (), ())
+_NOTHING: ArchiveRetirementOutcome = ((), (), ())
 
 
 class ConversationArchiveRetirementRunner:
-    """严格按认领与 History、子摘要、Archive 的阶段幂等续跑一个已准备的退休清单。"""
+    """严格按认领与确认 History 已释放、子摘要、Archive 的阶段幂等续跑一个已准备的退休清单。"""
 
     def __init__(
         self,
@@ -44,17 +41,12 @@ class ConversationArchiveRetirementRunner:
         segment_store: ConversationSummaryStore,
         range_store: ConversationRangeSummaryStore,
         retirement_store: ConversationSummaryRetirementStore,
-        workflow: CommittedWorkflowCleanup,
-        *,
-        cleanup_batch_size: int,
     ) -> None:
         self.compactor = compactor
         self.journal = journal
         self.segment_store = segment_store
         self.range_store = range_store
         self.retirement_store = retirement_store
-        self.workflow = workflow
-        self.cleanup_batch_size = cleanup_batch_size
 
     async def resume(
         self,
@@ -67,14 +59,12 @@ class ConversationArchiveRetirementRunner:
         use_store = self.compactor.use_store
         if use_store is None:
             raise ConversationLifecycleError("retiring Archive lacks a Summary use store")
-        purged: tuple[str, ...] = ()
-        released: tuple[str, ...] = ()
         if current.phase is ConversationSummaryRetirementPhase.RETIRING:
             if not self._claim(current, use_store, now):
                 return _NOTHING
-            advanced, purged, released = self._release_history(current, now)
+            advanced = self._confirm_history_released(current, now)
             if advanced is None:
-                return purged, released, (), (), ()
+                return _NOTHING
             current = advanced
         segments: tuple[str, ...] = ()
         ranges: tuple[str, ...] = ()
@@ -83,7 +73,7 @@ class ConversationArchiveRetirementRunner:
             current, (segments, ranges, archives) = self._delete_sources(current, use_store, now)
         if current.phase is ConversationSummaryRetirementPhase.SOURCES_DELETED:
             self.retirement_store.complete(current)
-        return purged, released, segments, ranges, archives
+        return segments, ranges, archives
 
     def _claim(
         self,
@@ -112,48 +102,21 @@ class ConversationArchiveRetirementRunner:
         )
         return True
 
-    def _release_history(
+    def _confirm_history_released(
         self,
         current: ConversationSummaryRetirementManifest,
         now: datetime,
-    ) -> tuple[ConversationSummaryRetirementManifest | None, tuple[str, ...], tuple[str, ...]]:
-        """RETIRING（已认领）：按批释放并清除覆盖范围内的 History；全部释放后才推进相位。"""
+    ) -> ConversationSummaryRetirementManifest | None:
+        """RETIRING（已认领）：原文按段到期各自释放（裁定 111），这里只确认覆盖范围内一段都不剩才推进相位。"""
 
-        address = current.address
-        purged: tuple[str, ...] = ()
-        released: tuple[str, ...] = ()
-        journal_state = self.journal.read_state(address)
-        if journal_state.released_through < current.end_sequence:
-            segment_sources = {item.reference.summary_id: item.digest for item in current.segments}
-            active = tuple(
-                segment
-                for segment in self.journal.list_history(address)
-                if current.start_sequence <= segment.start_sequence and segment.end_sequence <= current.end_sequence
-            )[: self.cleanup_batch_size]
-            for segment in active:
-                expected_digest = segment_sources.get(segment.segment_id)
-                summary = self.segment_store.try_read_by_id(address, segment.segment_id)
-                if expected_digest is None or summary is None or summary.digest != expected_digest:
-                    raise ConversationLifecycleError("retiring Archive does not match retained History Segment")
-                summary.require_matches_source(segment)
-                if not self.workflow.is_committed(address, segment):
-                    return None, (), ()
-            if not active:
-                raise ConversationLifecycleError("retiring Archive History source is missing")
-            released = self.journal.release_history_prefix(address, active)
-            purged = self.journal.purge_released_history(
-                address,
-                max_items=self.cleanup_batch_size,
-            )
-            journal_state = self.journal.read_state(address)
-            if journal_state.released_through < current.end_sequence:
-                return None, purged, released
-        advanced = self.retirement_store.advance(
+        retained = self.journal.retained_history_ranges(current.address)
+        if any(start <= current.end_sequence and current.start_sequence <= end for start, end in retained):
+            return None
+        return self.retirement_store.advance(
             current,
             ConversationSummaryRetirementPhase.HISTORY_RELEASED,
             updated_at=now,
         )
-        return advanced, purged, released
 
     def _delete_sources(
         self,

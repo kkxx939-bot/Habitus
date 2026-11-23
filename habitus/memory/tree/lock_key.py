@@ -44,10 +44,5 @@ class MemoryDocumentLockKeyspace:
         uri_digest = hashlib.sha256(str(parsed).encode("utf-8")).hexdigest()
         return f"{self._prefix}:{uri_digest}"
 
-    def transaction_key(self) -> str:
-        """返回同一记忆根全部多文档发布共享的串行化锁键。"""
-
-        return f"{self._prefix}:transaction"
-
 
 __all__ = ["MemoryDocumentLockKeyspace", "memory_root_digest", "memory_root_lock_prefix"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import replace
 from pathlib import Path
 
@@ -347,24 +348,33 @@ def test_read_expands_one_hop_relations_of_newly_read_document(tmp_path: Path) -
     assert {snapshot.identity for snapshot in context.snapshots.snapshots} == {str(source_uri), str(target_uri)}
 
 
-def test_inconsistent_one_hop_relation_aborts_context_construction(tmp_path: Path) -> None:
+def test_inconsistent_one_hop_relation_is_skipped_with_a_log(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """提取补一跳这条读路径：对方没记另一边的关联不再中止，记一条日志跳过（阶段 3，两边分开写）。"""
+
     source, target, _relation = related_documents(consistent=False)
-    with pytest.raises(MemoryExtractionError, match="not bidirectionally consistent"):
-        extraction_context(
+    with caplog.at_level(logging.WARNING):
+        context, _tree, _reader = extraction_context(
             tmp_path,
             documents=(source, target),
             selected=(MemoryURI.from_address(source.address),),
         )
+    assert str(MemoryURI.from_address(source.address)) in context._snapshots
+    assert "skipped" in caplog.text and str(MemoryURI.from_address(target.address)) in caplog.text
 
 
-def test_missing_one_hop_relation_target_aborts_context_construction(tmp_path: Path) -> None:
-    source, _target, _relation = related_documents()
-    with pytest.raises(MemoryExtractionError, match="does not exist"):
-        extraction_context(
+def test_missing_one_hop_relation_target_is_skipped_with_a_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    source, target, _relation = related_documents()
+    with caplog.at_level(logging.WARNING):
+        context, _tree, _reader = extraction_context(
             tmp_path,
             documents=(source,),
             selected=(MemoryURI.from_address(source.address),),
         )
+    missing = context._snapshots.get(str(MemoryURI.from_address(target.address)))
+    assert missing is None or not missing.exists
+    assert "skipped" in caplog.text and str(MemoryURI.from_address(target.address)) in caplog.text
 
 
 def test_relation_expansion_respects_per_seed_limit(tmp_path: Path) -> None:

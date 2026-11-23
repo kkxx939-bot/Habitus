@@ -1,9 +1,9 @@
-"""Archive 退休清单各相位的安全门与放弃分支。"""
+"""Archive 退休清单各相位的安全门与放弃分支：原文按段到期各自释放（阶段 3 裁定），退休只确认覆盖范围里一段原文都不剩。"""
 
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 from habitus.memory.conversation import (
@@ -12,7 +12,6 @@ from habitus.memory.conversation import (
     SQLiteConversationSummaryUseStore,
 )
 from habitus.memory.conversation.summary_reference import summary_reference
-from habitus.memory.workflow import MemoryChangeReceipt, MemoryChangeReceiptState, MemoryChangeSource
 from habitus.pre.conversation import (
     ConversationBatch,
     ConversationRangeSummary,
@@ -20,30 +19,7 @@ from habitus.pre.conversation import (
     ConversationSummarySourceRef,
 )
 from tests.helpers import BASE_TIME, closed_turn, segment_summary, summary_content
-from tests.unit.workflow.test_lifecycle_manager import lifecycle_manager
-
-
-def _commit_workflow(manager, queued) -> None:
-    """把一个 QUEUED Job 推到 COMMITTED，并写入对应的 COMMITTED 变更回执。"""
-
-    job = manager.jobs.complete(manager.jobs.claim(queued, "worker"))
-    manager.receipts._create(
-        MemoryChangeReceipt(
-            source=MemoryChangeSource.from_job(job),
-            state=MemoryChangeReceiptState.COMMITTED,
-            prepared_at=BASE_TIME,
-            committed_at=BASE_TIME,
-            expected_created_uris=(),
-            expected_updated_uris=(),
-            expected_deleted_uris=(),
-            unchanged_uris=(),
-            prepared_node_changes=(),
-            identity_changes=(),
-            added_relations=(),
-            removed_relations=(),
-            node_changes=(),
-        )
-    )
+from tests.unit.workflow.test_lifecycle_manager import commit_job, lifecycle_manager
 
 
 def _prepared_retirement(tmp_path: Path, *, committed: bool = False):
@@ -60,7 +36,7 @@ def _prepared_retirement(tmp_path: Path, *, committed: bool = False):
         manager.segment_store.create(address, source, summary)
         queued = manager.jobs.activate(manager.jobs.stage(address, source))
         if committed:
-            _commit_workflow(manager, queued)
+            commit_job(manager, queued)
         summaries.append(summary)
 
     def parent(stage, sources, minutes):
@@ -99,22 +75,21 @@ def _prepared_retirement(tmp_path: Path, *, committed: bool = False):
     return manager, use_store, address, archive, manifest
 
 
-def test_claimed_retirement_keeps_history_while_its_memory_workflow_is_uncommitted(tmp_path: Path) -> None:
-    """认领后直接进入释放 History；记忆工作流未提交时停在 RETIRING（已认领），History 原样保留。"""
+def test_claimed_retirement_waits_while_history_in_its_range_is_retained(tmp_path: Path) -> None:
+    """认领后确认覆盖范围里的原文都已释放；记忆任务还没到终态、原文还在时停在 RETIRING（已认领），原文原样保留。"""
 
     manager, use_store, address, archive, _manifest = _prepared_retirement(tmp_path)
     history = manager.journal.list_history(address)
 
     result = asyncio.run(manager.maintain_once(address, now=BASE_TIME + timedelta(days=2)))
 
-    assert result.released_history_segment_ids == result.purged_history_segment_ids == ()
+    assert result.released_history_segment_ids == ()
     assert result.deleted_archive_summary_ids == ()
     (pending,) = manager.retirement_store.for_address(address)
     assert pending.phase is ConversationSummaryRetirementPhase.RETIRING
     reference = summary_reference(address, archive)
     assert use_store.read_many((reference,))[0].retiring_at == BASE_TIME + timedelta(days=2)
     assert manager.journal.list_history(address) == history
-    assert manager.journal.read_state(address).released_through < archive.start_sequence
     assert manager.range_store.list(address, ConversationRangeSummaryStage.ARCHIVE) == (archive,)
 
 
@@ -126,28 +101,44 @@ def test_retirement_is_abandoned_when_archive_use_changed_after_prepare(tmp_path
     result = asyncio.run(manager.maintain_once(address, now=BASE_TIME + timedelta(days=2)))
 
     assert result.compaction.reason == "resumed pending Archive retirement before new compaction"
-    assert result.released_history_segment_ids == result.deleted_archive_summary_ids == ()
+    assert result.deleted_archive_summary_ids == ()
     assert manager.retirement_store.for_address(address) == ()
     assert use_store.read_many((reference,))[0].retiring_at is None
     assert manager.range_store.list(address, ConversationRangeSummaryStage.ARCHIVE) == (archive,)
 
 
-def test_finished_retirement_completes_manifest_then_expired_workflow_records_are_cleaned(tmp_path: Path) -> None:
+def test_retirement_finishes_after_history_expired_then_expired_jobs_are_cleaned(tmp_path: Path) -> None:
+    """任务到终态满 10 天：同一次维护先按段释放原文，再推进退休删掉整条摘要链；任务再过保留期删掉。"""
+
     manager, use_store, address, archive, _manifest = _prepared_retirement(tmp_path, committed=True)
     reference = summary_reference(address, archive)
 
-    retired = asyncio.run(manager.maintain_once(address, now=BASE_TIME + timedelta(days=2)))
+    retired = asyncio.run(manager.maintain_once(address, now=BASE_TIME + timedelta(days=11)))
 
-    assert retired.deleted_archive_summary_ids == (archive.range_id,)
     assert len(retired.released_history_segment_ids) == 4
+    assert retired.deleted_archive_summary_ids == (archive.range_id,)
+    assert manager.journal.list_history(address) == ()
     assert manager.retirement_store.for_address(address) == ()
     assert use_store.read_many((reference,)) == ()
     assert retired.deleted_memory_job_sequences == ()
-    assert retired.deleted_memory_receipt_ids == ()
 
-    expired = asyncio.run(manager.maintain_once(address, now=datetime.now(UTC) + timedelta(days=400)))
+    expired = asyncio.run(manager.maintain_once(address, now=BASE_TIME + timedelta(days=31)))
 
     assert expired.deleted_memory_job_sequences == (1, 2, 3, 4)
-    assert len(expired.deleted_memory_receipt_ids) == 4
     assert manager.jobs.list_for_conversation(address) == ()
-    assert manager.receipts.list_for_conversation(address) == ()
+
+
+def test_archive_with_retained_history_is_not_marked_or_claimed(tmp_path: Path) -> None:
+    """覆盖范围里还有没到期的原文：Archive 不进退休候选，免得认领后卡住这个会话的压缩。"""
+
+    manager, use_store, address, archive, manifest = _prepared_retirement(tmp_path)
+    manager.retirement_store.complete(manifest)
+    reference = summary_reference(address, archive)
+    before = use_store.read_many((reference,))[0]
+
+    result = asyncio.run(manager.maintain_once(address, now=BASE_TIME + timedelta(days=4000)))
+
+    assert result.deleted_archive_summary_ids == ()
+    assert manager.retirement_store.for_address(address) == ()
+    after = use_store.read_many((reference,))[0]
+    assert (after.version, after.retiring_at) == (before.version, None)

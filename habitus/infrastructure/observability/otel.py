@@ -229,7 +229,7 @@ def _trace_attributes(event: ObservationEvent) -> dict[str, str | int | float | 
         "habitus.status": event.status.value,
         "habitus.duration_seconds": event.duration_seconds,
     }
-    for name in ("request_id", "memory_sequence", "transaction_id", "worker_id", "attempt"):
+    for name in ("request_id", "memory_sequence", "worker_id", "attempt"):
         value = getattr(event.context, name)
         if value is not None:
             result[f"habitus.{name}"] = value

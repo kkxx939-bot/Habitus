@@ -65,10 +65,10 @@ from habitus.foundation.redaction import redact_sensitive_text
 from habitus.integrations.http_api.schemas import (
     AuditEventResult,
     AuditListResult,
-    BlockedJobResult,
     CapabilitiesResult,
     ConsistencyResult,
     ConversationCursorResult,
+    FailedJobsResult,
     FlushResult,
     HealthCheckResult,
     HealthResult,
@@ -97,7 +97,7 @@ from habitus.memory.conversation import ConversationAddress
 from habitus.memory.model import MemoryKind, MemoryLevel
 from habitus.memory.uri import MemoryURI
 from habitus.memory.workflow import MemoryJob, MemoryJobBlockedError, MemoryJobStatus
-from habitus.runtime import MemoryConsistencySnapshot, Runtime, RuntimeHealthReport
+from habitus.runtime import MemoryConsistencySnapshot, Runtime, RuntimeHealthReport, RuntimeStateError
 
 _PUBLIC_JOB_ERROR_MAX_CHARS = 500
 _SERVICE_API_VERSION = "1.0"
@@ -269,11 +269,7 @@ class RuntimeHTTPHandlers:
             conversation_id=conversation_id,
             started_on=started_on,
         )
-        blocked = await self.runtime.failed_memory_job()
-        return await self._job_status(
-            job,
-            blocking_sequence=None if blocked is None else blocked.memory_sequence,
-        )
+        return await self._job_status(job)
 
     async def list_jobs(
         self,
@@ -300,25 +296,18 @@ class RuntimeHTTPHandlers:
             and (resolved_status is None or job.status is resolved_status)
         ]
         page = filtered[:limit]
-        blocked = await self.runtime.failed_memory_job()
-        blocking_sequence = None if blocked is None else blocked.memory_sequence
         return JobListResult(
-            jobs=[await self._job_status(job, blocking_sequence=blocking_sequence) for job in page],
+            jobs=[await self._job_status(job) for job in page],
             next_before_sequence=(page[-1].memory_sequence if len(filtered) > limit and page else None),
         )
 
-    async def blocked_job(self) -> BlockedJobResult:
-        """返回当前阻塞全局有序队列的最早 FAILED Job，不枚举其他会话。"""
+    async def failed_jobs(self, *, limit: int = 50) -> FailedJobsResult:
+        """返回仍保留的 FAILED Job 条数与最早的若干条；它们不再挡后面的任务，等人决定重试还是放弃。"""
 
-        failed = await self.runtime.failed_memory_job()
-        if failed is None:
-            return BlockedJobResult(job=None)
-        return BlockedJobResult(
-            job=await self._job_status(
-                failed,
-                blocking_sequence=failed.memory_sequence,
-            )
-        )
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be an integer between 1 and 100")
+        failed = await self.runtime.failed_memory_jobs()
+        return FailedJobsResult(count=len(failed), jobs=[await self._job_status(job) for job in failed[:limit]])
 
     async def retry_failed_job(
         self,
@@ -328,7 +317,7 @@ class RuntimeHTTPHandlers:
         started_on: date,
         expected_version: str,
     ) -> RetryJobResult:
-        """仅经 Runtime 重试当前阻塞队列且版本完全匹配的 FAILED Job。"""
+        """仅经 Runtime 重试版本完全匹配的 FAILED Job；原文已释放的拒绝。"""
 
         if re.fullmatch(r"[0-9a-f]{64}", expected_version) is None:
             raise ValueError("expected_version must be lowercase SHA-256 text")
@@ -339,24 +328,15 @@ class RuntimeHTTPHandlers:
         )
         if self._job_version(job) != expected_version:
             raise HTTPMemoryJobConflictError("memory job changed after it was inspected")
-        failed = await self.runtime.failed_memory_job()
-        if failed is None or failed.memory_sequence != job.memory_sequence:
-            raise HTTPMemoryJobConflictError("memory job is not the current blocking failed job")
-        if self._job_version(failed) != expected_version:
-            raise HTTPMemoryJobConflictError("memory job changed after it was inspected")
+        if job.status is not MemoryJobStatus.FAILED:
+            raise HTTPMemoryJobConflictError("memory job is not in a failed state")
 
-        previous = await self._job_status(
-            failed,
-            blocking_sequence=failed.memory_sequence,
-        )
+        previous = await self._job_status(job)
         try:
-            retried = await self.runtime.retry_failed_memory_job(failed)
-        except MemoryJobBlockedError as exc:
+            retried = await self.runtime.retry_failed_memory_job(job)
+        except (MemoryJobBlockedError, RuntimeStateError) as exc:
             raise HTTPMemoryJobConflictError(str(exc)) from exc
-        reopened = await self._job_status(
-            retried.reopened_job,
-            blocking_sequence=None,
-        )
+        reopened = await self._job_status(retried.reopened_job)
         return RetryJobResult(
             previous=previous,
             job=reopened,
@@ -520,15 +500,9 @@ class RuntimeHTTPHandlers:
             )
         return job
 
-    async def _job_status(
-        self,
-        job: MemoryJob,
-        *,
-        blocking_sequence: int | None,
-    ) -> JobStatusResult:
+    async def _job_status(self, job: MemoryJob) -> JobStatusResult:
         snapshot = await self.runtime.memory_consistency(job)
         current = snapshot.current_job or job
-        blocking = blocking_sequence == current.memory_sequence
         last_failure = (
             None if current.last_error is None else JobFailureResult(message=self._sanitize_failure(current.last_error))
         )
@@ -542,8 +516,7 @@ class RuntimeHTTPHandlers:
             attempts=current.attempts,
             next_attempt_at=current.next_attempt_at,
             last_failure=last_failure,
-            blocking=blocking,
-            manual_action_required=blocking and snapshot.state.value == "failed",
+            manual_action_required=snapshot.state.value == "failed",
             version=self._job_version(current),
             created_at=current.created_at,
             updated_at=current.updated_at,
@@ -573,8 +546,8 @@ class RuntimeHTTPHandlers:
             job.started_on.isoformat(),
             job.segment_id,
             job.source_segment_digest,
-            job.transaction_id,
             job.status.value,
+            "1" if job.cards_written else "0",
             str(job.attempts),
             str(job.claim_generation),
             "" if job.next_attempt_at is None else job.next_attempt_at.isoformat(),

@@ -1,4 +1,4 @@
-"""MemoryJob 产品并行构建、STAGED 恢复、Runner 正常/恢复/失败分支测试。"""
+"""MemoryJob 产品并行构建、STAGED 恢复、Runner 正常 / 只补后续步骤 / 失败分支测试。"""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from habitus.memory.editor import MemoryEditor
 from habitus.memory.workflow import (
     MemoryJobClaim,
     MemoryJobExecutionError,
+    MemoryJobLease,
     MemoryJobLeaseLostError,
     MemoryJobRunner,
 )
@@ -23,7 +24,6 @@ from habitus.memory.workflow.planning import MemorySegmentProductBuilder
 from habitus.memory.workflow.recovery import MemoryStagedJobRecovery
 from habitus.pre.conversation import ConversationBatch
 from tests.helpers import closed_turn, segment, segment_summary
-from tests.integration.test_change_receipt_chain import editor_plan
 from tests.lock_store import ProcessLocalLockStore
 
 
@@ -53,7 +53,7 @@ def test_segment_products_run_both_read_only_branches_concurrently_and_wait_for_
     editor_started = asyncio.Event()
     summary_finished = False
     editor_finished = False
-    plan = editor_plan()
+    plan = SimpleNamespace(name="editor-plan")
 
     async def scenario():
         nonlocal summary_finished, editor_finished
@@ -106,7 +106,7 @@ def test_segment_product_failure_waits_for_sibling_but_never_returns_partial_pro
             nonlocal sibling_finished
             await asyncio.sleep(0.001)
             sibling_finished = True
-            return editor_plan()
+            return SimpleNamespace(name="editor-plan")
 
         summary_service.get_or_create = fail_summary
         editor.plan = finish_editor
@@ -170,102 +170,90 @@ def test_staged_recovery_publishes_exact_history_then_activates_job(tmp_path: Pa
     assert journal.read_live(address) is None
 
 
-def runner_with_fakes(store: MemoryJobStore, *, journal: object | None, executor_error: BaseException | None = None):
+def runner_with_fakes(store: MemoryJobStore, *, executor_error: BaseException | None = None):
     runner = object.__new__(MemoryJobRunner)
     runner.store = store
     events: list[str] = []
 
-    class Recovery:
-        def recover_pending(self):
-            events.append("recover_pending")
-            return ()
-
-        def inspect(self, _job):
-            events.append("inspect")
-            return journal
-
-        def discard_uncommitted(self, _source):
-            events.append("discard_uncommitted")
-
     class Executor:
-        async def execute(self, _lease):
+        async def execute(self, lease):
             events.append("execute")
             if executor_error is not None:
                 raise executor_error
-            return SimpleNamespace(commit=None, journal="committed-journal", summary_generated=True)
+            job = store.record_written(lease, changed_uris=("memory://profile.md",), deleted_uris=())
+            return SimpleNamespace(commit="commit", job=job, summary_generated=True)
 
     class Finalizer:
-        async def finalize(self, lease, current_journal, *, summary_generated=None):
-            events.append(f"finalize:{current_journal}:{summary_generated}")
-            committed = store.complete(lease)
-            return SimpleNamespace(
-                job=committed,
-                change_receipt=None,
-                summary_generated=bool(summary_generated),
-                journal_cleaned=True,
-            )
+        async def finalize(self, lease):
+            events.append(f"finalize:{store.assert_current(lease).changed_uris}")
+            return store.complete(lease)
 
-    runner.transaction_recovery = Recovery()
     runner.executor = Executor()
     runner.committed_finalizer = Finalizer()
     return runner, events
 
 
-def test_runner_resumes_committed_journal_without_replanning_or_recommitting(tmp_path: Path) -> None:
+def test_runner_resumes_a_job_whose_cards_are_written_without_replanning_or_rewriting(tmp_path: Path) -> None:
     store, lease = claimed_job(tmp_path)
-    runner, events = runner_with_fakes(store, journal="recovered-journal")
+    written = store.record_written(lease, changed_uris=("memory://profile.md",), deleted_uris=())
+    runner, events = runner_with_fakes(store)
 
-    result = asyncio.run(runner.run_claimed(MemoryJobClaim(lease)))
+    result = asyncio.run(runner.run_claimed(MemoryJobClaim(MemoryJobLease(written))))
 
     assert result.recovered
     assert result.commit is None
     assert result.job.status is MemoryJobStatus.COMMITTED
-    assert events == ["recover_pending", "inspect", "finalize:recovered-journal:None"]
+    assert events == ["finalize:('memory://profile.md',)"]
 
 
 def test_runner_normal_path_executes_once_then_finalizes_with_summary_generation_flag(tmp_path: Path) -> None:
     store, lease = claimed_job(tmp_path)
-    runner, events = runner_with_fakes(store, journal=None)
+    runner, events = runner_with_fakes(store)
 
     result = asyncio.run(runner.run_claimed(MemoryJobClaim(lease)))
 
     assert not result.recovered
     assert result.summary_generated
+    assert result.commit == "commit"
     assert result.job.status is MemoryJobStatus.COMMITTED
-    assert events == [
-        "recover_pending",
-        "inspect",
-        "execute",
-        "finalize:committed-journal:True",
-    ]
+    assert events == ["execute", "finalize:('memory://profile.md',)"]
 
 
-def test_runner_failure_cleans_only_uncommitted_state_and_records_retryable_job(tmp_path: Path) -> None:
+def test_runner_failure_records_a_retryable_job(tmp_path: Path) -> None:
     store, lease = claimed_job(tmp_path)
-    runner, events = runner_with_fakes(store, journal=None, executor_error=TimeoutError("provider slow"))
+    runner, _events = runner_with_fakes(store, executor_error=TimeoutError("provider slow"))
 
     with pytest.raises(MemoryJobExecutionError) as raised:
         asyncio.run(runner.run_claimed(MemoryJobClaim(lease)))
 
     assert raised.value.job is not None
     assert raised.value.job.status is MemoryJobStatus.QUEUED
-    assert "discard_uncommitted" in events
-    assert store.oldest_uncommitted() == raised.value.job
+    assert store.oldest_unfinished() == raised.value.job
+
+
+def test_runner_reclaiming_an_expired_lease_with_exhausted_attempts_fails_unless_cards_are_written(
+    tmp_path: Path,
+) -> None:
+    """租约过期接管时尝试次数已经用完：卡片没写完就判失败，不再重做。"""
+
+    store, lease = claimed_job(tmp_path)
+    runner, events = runner_with_fakes(store)
+
+    with pytest.raises(MemoryJobExecutionError) as raised:
+        asyncio.run(runner.run_claimed(MemoryJobClaim(lease, expired_attempts_exhausted=True)))
+
+    assert raised.value.job is not None and raised.value.job.status is MemoryJobStatus.FAILED
+    assert events == []
 
 
 def test_runner_propagates_lease_loss_without_marking_current_job_failed(tmp_path: Path) -> None:
     store, lease = claimed_job(tmp_path)
-    runner, events = runner_with_fakes(
-        store,
-        journal=None,
-        executor_error=MemoryJobLeaseLostError("lost"),
-    )
+    runner, _events = runner_with_fakes(store, executor_error=MemoryJobLeaseLostError("lost"))
 
     with pytest.raises(MemoryJobLeaseLostError):
         asyncio.run(runner.run_claimed(MemoryJobClaim(lease)))
 
-    assert store.oldest_uncommitted().status is MemoryJobStatus.RUNNING
-    assert "discard_uncommitted" not in events
+    assert store.oldest_unfinished().status is MemoryJobStatus.RUNNING
 
 
 # ── 前台补完 STAGED Job 的两处段身份核对（M9 的防线，U22） ──────────────────────────────────────────────
@@ -302,8 +290,8 @@ def test_the_foreground_does_not_publish_history_for_a_staged_job_that_does_not_
         enqueuer.flush(address)
 
     assert journal.list_history(address) == ()
-    assert jobs.oldest_uncommitted().status is MemoryJobStatus.STAGED
-    assert jobs.oldest_uncommitted().memory_sequence == staged.memory_sequence
+    assert jobs.oldest_unfinished().status is MemoryJobStatus.STAGED
+    assert jobs.oldest_unfinished().memory_sequence == staged.memory_sequence
 
 
 def test_the_foreground_does_not_activate_a_staged_job_whose_published_segment_differs(tmp_path: Path) -> None:
@@ -318,4 +306,4 @@ def test_the_foreground_does_not_activate_a_staged_job_whose_published_segment_d
         enqueuer.flush(address)
 
     assert tuple(item.segment_id for item in journal.list_history(address)) == ("000000000000-000000000001",)
-    assert jobs.oldest_uncommitted().status is MemoryJobStatus.STAGED
+    assert jobs.oldest_unfinished().status is MemoryJobStatus.STAGED

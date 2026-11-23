@@ -34,7 +34,7 @@ from habitus.memory.retrieval import (
 )
 from habitus.memory.semantic import MemorySemanticConfig, MemorySemanticRefresher
 from habitus.memory.snapshot import MemorySnapshotReader
-from habitus.memory.tree import MemoryTree, MemoryTreeConsistencyError
+from habitus.memory.tree import MemoryTree
 from habitus.memory.uri import MemoryURI
 from habitus.model_client import ModelCircuitOpenError, ModelErrorKind
 from habitus.runtime.behavior_records import BehaviorTreeRecords
@@ -455,29 +455,104 @@ class FlakyCatalog:
     def read(self, **kwargs: Any):  # type: ignore[no-untyped-def]
         self.calls += 1
         if self.calls <= self.failures:
-            raise MemoryTreeConsistencyError("memory tree has a prepared multi-document transaction")
+            raise RuntimeError("memory overview cannot be read")
         return self.inner.read(**kwargs)
 
     def match_unlisted(self, *args: Any):  # type: ignore[no-untyped-def]
         return self.inner.match_unlisted(*args)
 
 
-def test_a_commit_window_is_retried_briefly_and_then_the_other_sources_are_still_searched(tmp_path: Path) -> None:
+def test_an_unreadable_catalog_is_not_retried_and_the_other_sources_are_still_searched(tmp_path: Path) -> None:
+    """阶段 3 去掉"提交窗口内拒读"后也去掉了为它加的短暂重试：清单读不出就读一次、照常查另外两处并说明。"""
+
     w = world(tmp_path)
     w.put(MemoryKind.PREFERENCE, PREFERENCE)
-    config = MemorySearchServiceConfig(catalog_retries=2, catalog_retry_delay_seconds=0.0)
-    brief = FlakyCatalog(w.catalog(config), failures=2)
-    client = ScriptedClient([pick(read=["preferences/方案文档表述与结构.md"]), judge(["c1"])])
-    assert len(search(w.service(client, config=config, catalog=brief)).memories) == 1  # type: ignore[arg-type]
-
+    config = MemorySearchServiceConfig()
     stuck = FlakyCatalog(w.catalog(config), failures=99)
     records = FakeRecords((record("核对广告", 9),))
     client = ScriptedClient([pick(records=source(None, None, ["广告"])), judge(["r1"])])
     result = search(w.service(client, config=config, catalog=stuck, records=records))  # type: ignore[arg-type]
+    assert stuck.calls == 1
     assert "（没有卡片）" in client.prompts[0][1]
     assert [item.name for item in result.records] == ["核对广告"]
     assert any("清单这次读不出来" in note for note in result.notes)
     assert any(item.stage is MemorySearchDegradationStage.CATALOG for item in result.degradations)
+
+
+def test_search_answers_normally_while_a_memory_job_is_writing(tmp_path: Path) -> None:
+    """助手查记忆时正好有记忆任务写到一半（锁还拿着）：照常返回，没有拒读。"""
+
+    from threading import Event, Thread
+
+    from habitus.infrastructure.store.contracts import PathLock
+    from habitus.memory.tree import MemoryDocumentLockKeyspace
+
+    w = world(tmp_path)
+    uri = w.put(MemoryKind.PREFERENCE, PREFERENCE)
+    lock = PathLock(ProcessLocalLockStore())
+    held, release = Event(), Event()
+
+    def hold_the_card_lock() -> None:
+        with lock.acquire(MemoryDocumentLockKeyspace(w.tree.root).key(uri), ttl_seconds=30):
+            held.set()
+            release.wait(timeout=5)
+
+    writer = Thread(target=hold_the_card_lock)
+    writer.start()
+    assert held.wait(timeout=5)
+    try:
+        client = ScriptedClient([pick(read=["preferences/方案文档表述与结构.md"]), judge(["c1"])])
+        result = search(w.service(client))
+    finally:
+        release.set()
+        writer.join(timeout=5)
+    assert [memory.uri for memory in result.memories] == [uri]
+    assert not any(item.stage is MemorySearchDegradationStage.CATALOG for item in result.degradations)
+
+
+def test_one_hop_expansion_skips_dangling_and_one_sided_relations_with_a_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """检索补一跳这条读路径：指向不存在文件的、对方没记另一边的关联跳过并记日志，好的那条照常带出。"""
+
+    import logging
+
+    from habitus.memory.document import MemoryLinkType, MemoryStoredLink
+
+    w = world(tmp_path)
+    seed = MemoryURI.parse("memory://preferences/方案文档表述与结构.md")
+    good = MemoryURI.parse("memory://entities/项目/habitus.md")
+    one_sided = MemoryURI.parse("memory://entities/项目/看板.md")
+    ghost = MemoryURI.parse("memory://entities/项目/已删.md")
+    links = tuple(
+        sorted(
+            (MemoryStoredLink(seed, target, MemoryLinkType.BELONGS_TO) for target in (good, one_sided, ghost)),
+            key=lambda item: item.identity,
+        )
+    )
+    meta = MemoryDocumentMetadata(revision=1, created_at=NOW - timedelta(days=1), updated_at=NOW - timedelta(days=1))
+    w.tree.write(codec().build(MemoryKind.PREFERENCE, PREFERENCE, metadata=meta, links=links))
+    w.tree.write(
+        codec().build(
+            MemoryKind.ENTITY,
+            {"category": "项目", "name": "Habitus", "summary": "记忆系统。"},
+            metadata=meta,
+            backlinks=(MemoryStoredLink(seed, good, MemoryLinkType.BELONGS_TO),),
+        )
+    )
+    w.tree.write(
+        codec().build(MemoryKind.ENTITY, {"category": "项目", "name": "看板", "summary": "看板。"}, metadata=meta)
+    )
+    w.refresher.rebuild()
+    client = ScriptedClient([pick(read=["preferences/方案文档表述与结构.md"]), judge(["c1"])])
+
+    with caplog.at_level(logging.WARNING):
+        result = search(w.service(client))
+
+    assert [memory.uri for memory in result.memories][:1] == [seed]
+    related = [item.relation.to_uri for memory in result.memories for item in memory.related]
+    assert good in related and one_sided not in related and ghost not in related
+    assert "missing L2 document" in caplog.text and "one-sided memory relation" in caplog.text
 
 
 def test_with_the_model_breaker_open_only_the_profile_comes_back_with_the_reason(tmp_path: Path) -> None:

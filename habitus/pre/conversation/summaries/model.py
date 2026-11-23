@@ -480,8 +480,8 @@ class ConversationRangeSummary:
         if any(item.kind is not self.stage.source_kind for item in self.source_refs):
             raise ConversationSummarySchemaError("range summary source kind does not match its stage")
         for previous, current in zip(self.source_refs, self.source_refs[1:], strict=False):
-            if current.start_sequence != previous.end_sequence + 1:
-                raise ConversationSummarySchemaError("range summary sources must be contiguous and ordered")
+            if current.start_sequence <= previous.end_sequence:
+                raise ConversationSummarySchemaError("range summary sources must be ordered and non-overlapping")
 
         _require_summary_range(self.start_sequence, self.end_sequence)
         expected_range_id = _summary_range_id(self.start_sequence, self.end_sequence)
@@ -523,7 +523,7 @@ class ConversationRangeSummary:
         self,
         sources: tuple[ConversationSegmentSummary | ConversationRangeSummary, ...],
     ) -> None:
-        """确认父摘要完整绑定传入的同会话、同阶段连续来源。"""
+        """确认父摘要完整绑定传入的同会话、同阶段有序来源。"""
 
         if len(sources) != len(self.source_refs):
             raise ConversationSummarySchemaError("range summary source count does not match")

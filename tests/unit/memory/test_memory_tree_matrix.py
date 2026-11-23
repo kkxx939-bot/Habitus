@@ -600,8 +600,6 @@ def test_lock_keys_derived_from_the_memory_root_keep_their_literal_strings() -> 
     scan = MemoryLifecycleScanStore(tree, path_lock, workflow_root)
 
     assert keyspace.key("memory://preferences/style.md") == f"memory-document:{root_digest}:{uri_digest}"
-    assert keyspace.transaction_key() == f"memory-document:{root_digest}:transaction"
-    assert refresher._transaction_lock_key == f"memory-document:{root_digest}:transaction"
     assert refresher._lock_key(MemoryDirectory.root()) == f"memory-semantic:{root_digest}:/"
     assert refresher._lock_key(MemoryDirectory.preferences()) == f"memory-semantic:{root_digest}:preferences"
     assert operations._lock_prefix == f"memory-lifecycle-operation:{root_digest}"

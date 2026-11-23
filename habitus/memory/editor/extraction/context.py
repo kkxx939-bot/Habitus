@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 
 from habitus.foundation.integrity import canonical_json
@@ -31,6 +32,9 @@ from habitus.model_client import estimate_text_tokens, estimate_utf8_bytes_token
 
 _LISTABLE_ROOTS = ("preferences", "entities", "tools")
 MemorySearcher = Callable[[tuple[str, ...], MemoryDirectory | None, int], tuple[MemorySearchHit, ...]]
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class MemoryExtractionContext:
@@ -235,18 +239,14 @@ class MemoryExtractionContext:
         return tuple(sorted(selected_neighbors))
 
     def _validate_relationship_neighbor(self, identity: str) -> None:
-        expectations = self._relationship_expectations.get(identity, [])
-        if not expectations:
-            return
+        """关联指向不存在的文件、或另一边没有记这条关联：不算错，记一条日志跳过（裁定 111，两边分开写）。"""
+
         snapshot = self._snapshots.get(identity)
-        if snapshot is None or not snapshot.exists or snapshot.value is None:
-            raise MemoryExtractionError(f"one-hop relation target does not exist as a complete L2 memory: {identity}")
-        document = snapshot.value
-        for seed_uri, link, expect_backlink in expectations:
-            counterpart = document.backlinks if expect_backlink else document.links
-            if link not in counterpart:
-                raise MemoryExtractionError(
-                    f"stored memory relation is not bidirectionally consistent between {seed_uri} and {identity}"
+        document = None if snapshot is None else snapshot.value
+        for seed_uri, link, expect_backlink in self._relationship_expectations.get(identity, []):
+            if document is None or link not in (document.backlinks if expect_backlink else document.links):
+                _LOGGER.warning(
+                    "one-hop relation between %s and %s is missing or one-sided, skipped", seed_uri, identity
                 )
 
     def ingest(self, batch: MemorySnapshotBatch) -> tuple[str, ...]:

@@ -54,14 +54,11 @@ def test_lifecycle_cycle_result_validates_outcomes() -> None:
         LifecycleParticipantOutcome("c")
 
 
-def test_runtime_initialization_requires_absolute_root_and_stable_recovery_ids(tmp_path: Path) -> None:
+def test_runtime_initialization_requires_absolute_root(tmp_path: Path) -> None:
     memory_root = (tmp_path / "memory").resolve()
-    result = RuntimeInitialization(memory_root, ("a" * 32,))
-    assert result.memory_root == memory_root
+    assert RuntimeInitialization(memory_root).memory_root == memory_root
     with pytest.raises(ValueError, match="absolute"):
-        RuntimeInitialization(Path("relative"), ())
-    with pytest.raises(TypeError, match="non-empty"):
-        RuntimeInitialization(memory_root, ("",))
+        RuntimeInitialization(Path("relative"))
 
 
 def test_failed_job_retry_result_requires_same_source_and_reset_retry_state(tmp_path: Path) -> None:

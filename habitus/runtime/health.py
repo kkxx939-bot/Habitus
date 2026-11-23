@@ -9,7 +9,6 @@ from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from habitus.foresight import ForesightError
-from habitus.memory.workflow import MemoryJobStatus
 from habitus.runtime.components import RuntimeComponents
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.generation import Generation
@@ -232,8 +231,6 @@ class RuntimeHealthService:
         worker = self.components.workflow.worker
         if worker.state is MemoryWorkerState.FAILED:
             return RuntimeHealthCheck("memory_worker", RuntimeHealthStatus.UNHEALTHY, self._error(worker.last_error))
-        if worker.state is MemoryWorkerState.BLOCKED:
-            return RuntimeHealthCheck("memory_worker", RuntimeHealthStatus.DEGRADED, self._error(worker.last_error))
         return RuntimeHealthCheck("memory_worker", RuntimeHealthStatus.HEALTHY, worker.state.value)
 
     def _lifecycle_check(self) -> RuntimeHealthCheck:
@@ -328,25 +325,22 @@ class RuntimeHealthService:
 
     async def _queue_check(self) -> RuntimeHealthCheck:
         try:
-            job = await asyncio.to_thread(self.components.workflow.jobs.oldest_uncommitted)
+            job = await asyncio.to_thread(self.components.workflow.jobs.oldest_unfinished)
         except Exception as exc:
             return RuntimeHealthCheck("memory_queue", RuntimeHealthStatus.UNHEALTHY, type(exc).__name__)
         if job is None:
-            self.components.infrastructure.observability.set_gauge("memory_queue_blocked", 0)
+            self.components.infrastructure.observability.set_gauge("memory_queue_waiting_for_model", 0)
             return RuntimeHealthCheck("memory_queue", RuntimeHealthStatus.HEALTHY, "empty")
-        if job.status is MemoryJobStatus.FAILED:
-            self.components.infrastructure.observability.set_gauge("memory_queue_blocked", 1)
-            return RuntimeHealthCheck("memory_queue", RuntimeHealthStatus.DEGRADED, f"failed:{job.memory_sequence}")
         if job.waiting_for_model:
             assert job.next_attempt_at is not None  # 模型此刻用不了：等它恢复，原因看 model_* 那几项（裁定 108）
-            self.components.infrastructure.observability.set_gauge("memory_queue_blocked", 1)
+            self.components.infrastructure.observability.set_gauge("memory_queue_waiting_for_model", 1)
             return RuntimeHealthCheck(
                 "memory_queue",
                 RuntimeHealthStatus.DEGRADED,
                 f"waiting_for_model:{job.memory_sequence};waits={job.model_waits};"
                 f"next_attempt_at={job.next_attempt_at.isoformat()}",
             )
-        self.components.infrastructure.observability.set_gauge("memory_queue_blocked", 0)
+        self.components.infrastructure.observability.set_gauge("memory_queue_waiting_for_model", 0)
         return RuntimeHealthCheck(
             "memory_queue", RuntimeHealthStatus.HEALTHY, f"{job.status.value}:{job.memory_sequence}"
         )

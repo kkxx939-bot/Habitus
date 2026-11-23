@@ -443,10 +443,17 @@ def test_range_and_archive_require_stage_specific_source_kind() -> None:
         replace(archive, source_refs=(wrong_archive, archive.source_refs[1]))
 
 
-@pytest.mark.parametrize("indices", [(0, 2), (1, 0), (0, 1, 3)])
-def test_range_summary_rejects_gapped_or_reordered_sources(indices: tuple[int, ...]) -> None:
-    with pytest.raises(ConversationSummarySchemaError, match="contiguous"):
+@pytest.mark.parametrize("indices", [(1, 0), (2, 1, 3)])
+def test_range_summary_rejects_reordered_sources(indices: tuple[int, ...]) -> None:
+    with pytest.raises(ConversationSummarySchemaError, match="ordered and non-overlapping"):
         _range_summary(indices)
+
+
+@pytest.mark.parametrize("indices", [(0, 2), (0, 1, 3)])
+def test_range_summary_accepts_ordered_sources_across_a_gap(indices: tuple[int, ...]) -> None:
+    # 来源之间可以隔着永久没有摘要、原文已释放的段（阶段 3 裁定），父摘要照实记下自己的来源
+    summary, _ = _range_summary(indices)
+    assert len(summary.source_refs) == len(indices)
 
 
 def test_range_summary_identity_and_coverage_must_match_source_edges() -> None:

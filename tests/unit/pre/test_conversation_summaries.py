@@ -101,11 +101,11 @@ def test_range_summary_requires_two_contiguous_same_stage_sources() -> None:
         replace(summary, source_refs=(refs[0],), end_sequence=1, range_id="000000000000-000000000001")
 
 
-def test_range_summary_rejects_gaps_wrong_source_kind_and_wrong_identity() -> None:
+def test_range_summary_rejects_reordering_wrong_source_kind_and_wrong_identity() -> None:
     first = _summary_for_range(0)
     third = _summary_for_range(2)
-    refs = tuple(ConversationSummarySourceRef.from_summary(item) for item in (first, third))
-    with pytest.raises(ConversationSummarySchemaError, match="contiguous"):
+    refs = tuple(ConversationSummarySourceRef.from_summary(item) for item in (third, first))
+    with pytest.raises(ConversationSummarySchemaError, match="ordered and non-overlapping"):
         ConversationRangeSummary(
             conversation_id="conversation-1",
             range_id="000000000000-000000000005",

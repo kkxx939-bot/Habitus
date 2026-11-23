@@ -135,7 +135,7 @@ def test_recently_used_summary_splits_eligible_chain_without_hot_cold_ranking() 
     assert plan is None
 
 
-def test_compaction_frontier_and_plan_reject_overlap_gap_and_cross_conversation() -> None:
+def test_compaction_frontier_and_plan_reject_overlap_disorder_and_cross_conversation() -> None:
     first, second = sources()
     overlapping = segment_summary(
         segment(segment_id="000000000001-000000000002", messages=closed_turn(start_sequence=1))
@@ -146,8 +146,12 @@ def test_compaction_frontier_and_plan_reject_overlap_gap_and_cross_conversation(
     gapped = segment_summary(segment(segment_id="000000000004-000000000005", messages=closed_turn(start_sequence=4)))
     from habitus.memory.conversation import ConversationSummaryCompactionPlan
 
-    with pytest.raises(ValueError, match="contiguous"):
-        ConversationSummaryCompactionPlan(ConversationRangeSummaryStage.RANGE, (first, gapped), "source_count")
+    # 计划只要求来源有序、不重叠；能不能跨过空档由规划器按"空档里原文是否已释放"判（阶段 3 裁定）
+    with pytest.raises(ValueError, match="ordered and non-overlapping"):
+        ConversationSummaryCompactionPlan(ConversationRangeSummaryStage.RANGE, (gapped, first), "source_count")
+    assert ConversationSummaryCompactionPlan(
+        ConversationRangeSummaryStage.RANGE, (first, gapped), "source_count"
+    ).sources == (first, gapped)
     other = segment_summary(
         segment(
             conversation_id="conversation-2",
