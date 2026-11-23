@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
+from typing import cast
 
 from habitus.memory.editor.candidate import MemoryCandidateBatch, MemoryCandidateViolation
 from habitus.memory.editor.mutation import MemoryMutationPlan
@@ -13,6 +14,8 @@ from habitus.memory.snapshot import MemorySnapshotBatch
 from habitus.pre.conversation.messages.model import require_sha256
 
 _MAX_REASON_CHARS = 600
+_MAX_KEYWORDS = 6  # 与助手查记忆一侧"挑"的检索词个数、字数默认值一致
+_MAX_KEYWORD_CHARS = 50
 
 
 class MemoryExtractionError(RuntimeError):
@@ -39,6 +42,7 @@ class MemoryRetrievalAction(str, Enum):
     """受控 ReAct 每轮唯一允许的只读动作。"""
 
     FINISH = "finish"
+    LIST = "memory_list"
     SEARCH = "memory_search"
     READ = "memory_read"
 
@@ -49,9 +53,10 @@ class MemoryRetrievalDecision:
 
     status: MemoryRetrievalStatus
     action: MemoryRetrievalAction
-    query: str | None
-    uri: str | None
+    directory: str | None
+    uris: tuple[str, ...]
     reason: str
+    keywords: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         try:
@@ -60,33 +65,45 @@ class MemoryRetrievalDecision:
         except ValueError as exc:
             raise ValueError("retrieval decision contains an unsupported enum") from exc
         reason = _clean_text(self.reason, "reason", maximum=_MAX_REASON_CHARS)
-        query = _optional_clean_text(self.query, "query")
-        uri = _optional_clean_text(self.uri, "uri")
+        directory = _optional_clean_text(self.directory, "directory")
+        uris = tuple(_clean_text(uri, "uri") for uri in self.uris)
+        if len(set(uris)) != len(uris):
+            raise ValueError("memory_read uris must be unique")
+        keywords = tuple(_clean_text(keyword, "keyword", maximum=_MAX_KEYWORD_CHARS) for keyword in self.keywords)
+        if len(set(keywords)) != len(keywords) or len(keywords) > _MAX_KEYWORDS:
+            raise ValueError(f"memory_search keywords must be unique and at most {_MAX_KEYWORDS}")
+        object.__setattr__(self, "keywords", keywords)
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "action", action)
         object.__setattr__(self, "reason", reason)
-        object.__setattr__(self, "query", query)
-        object.__setattr__(self, "uri", uri)
+        object.__setattr__(self, "directory", directory)
+        object.__setattr__(self, "uris", uris)
         self._require_valid_combination()
 
     def _require_valid_combination(self) -> None:
-        status, action, query, uri = self.status, self.action, self.query, self.uri
+        status, action, directory, uris = self.status, self.action, self.directory, self.uris
         if action is MemoryRetrievalAction.FINISH:
             if status is MemoryRetrievalStatus.INSUFFICIENT:
                 raise ValueError("insufficient retrieval cannot finish")
-            if query is not None or uri is not None:
-                raise ValueError("finish retrieval action cannot carry query or uri")
+            if directory is not None or uris or self.keywords:
+                raise ValueError("finish retrieval action cannot carry a directory, uris or keywords")
             return
         if status is MemoryRetrievalStatus.SUFFICIENT:
             raise ValueError("sufficient retrieval must finish")
         if action is MemoryRetrievalAction.SEARCH:
-            if query is None or uri is not None:
-                raise ValueError("memory_search requires query and forbids uri")
+            if not self.keywords or uris:
+                raise ValueError("memory_search requires keywords and forbids uris")
+            return
+        if self.keywords:
+            raise ValueError("only memory_search carries keywords")
+        if action is MemoryRetrievalAction.LIST:
+            if directory is None or uris:
+                raise ValueError("memory_list requires a directory and forbids uris")
             return
         if status is not MemoryRetrievalStatus.INSUFFICIENT:
             raise ValueError("memory_read is only valid for insufficient context")
-        if uri is None or query is not None:
-            raise ValueError("memory_read requires uri and forbids query")
+        if not uris or directory is not None:
+            raise ValueError("memory_read requires uris and forbids a directory")
 
     @classmethod
     def model_json_schema(cls) -> dict[str, object]:
@@ -95,21 +112,30 @@ class MemoryRetrievalDecision:
         return _decision_schema(
             title="MemoryRetrievalDecision",
             description=(
-                "判断当前完整旧记忆是否足够支撑记忆候选解析。每轮只能 finish、执行一次"
-                " memory_search，或读取一个已经由系统暴露的 memory URI。不得输出多个查询、"
-                "记忆候选、置信度、修改或写入操作。"
+                "判断当前完整旧记忆是否足够支撑记忆候选解析。每轮只能 finish、执行一次 memory_list（列一个目录）、"
+                "执行一次 memory_search（按关键词在卡片字段文字里字面查找，可以限定目录），"
+                "或执行一次 memory_read（读名字清单、目录列表、搜索结果或一跳关系里出现过的若干个 memory URI）。"
+                "不得输出记忆候选、置信度、修改或写入操作。"
             ),
             actions=tuple(MemoryRetrievalAction),
-            query={
+            directory={
                 "type": ["string", "null"],
                 "minLength": 1,
-                "maxLength": 20_000,
-                "description": "memory_search 的单个语义查询；其他动作必须为 null。",
+                "description": (
+                    "memory_list 要列的目录，例如 memory://entities/项目；memory_search 可以用它限定只搜这个目录，"
+                    "也可以为 null 搜全部；其他动作必须为 null。"
+                ),
             },
-            uri={
-                "type": ["string", "null"],
-                "minLength": 1,
-                "description": "memory_read 的一个完整 memory:// L2 URI；其他动作必须为 null。",
+            uris={
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "description": "memory_read 要读的完整 memory:// L2 URI，可以多个；其他动作必须为空数组。",
+            },
+            keywords={
+                "type": "array",
+                "maxItems": _MAX_KEYWORDS,
+                "items": {"type": "string", "minLength": 1, "maxLength": _MAX_KEYWORD_CHARS},
+                "description": "memory_search 的检索词（字面匹配，不分大小写）；其他动作必须为空数组。",
             },
         )
 
@@ -119,17 +145,20 @@ class MemoryRetrievalDecision:
 
         payload = _strict_object(
             value,
-            {"status", "action", "query", "uri", "reason"},
+            {"status", "action", "directory", "uris", "keywords", "reason"},
             "retrieval decision",
         )
         status = MemoryRetrievalStatus(_clean_text(payload["status"], "status"))
         action = MemoryRetrievalAction(_clean_text(payload["action"], "action"))
+        raw_uris = cast(list[object], payload["uris"])  # JSON Schema 已在解码时限定为数组
+        raw_keywords = cast(list[object], payload["keywords"])
         return cls(
             status=status,
             action=action,
-            query=_optional_clean_text(payload["query"], "query"),
-            uri=_optional_clean_text(payload["uri"], "uri"),
+            directory=_optional_clean_text(payload["directory"], "directory"),
+            uris=tuple(_clean_text(uri, "uri") for uri in raw_uris),
             reason=_clean_text(payload["reason"], "reason"),
+            keywords=tuple(_clean_text(keyword, "keyword") for keyword in raw_keywords),
         )
 
 
@@ -144,8 +173,8 @@ class MemoryRetrievalFinalDecision(MemoryRetrievalDecision):
     def _require_valid_combination(self) -> None:
         if self.action is not MemoryRetrievalAction.FINISH:
             raise ValueError("final retrieval round can only finish")
-        if self.query is not None or self.uri is not None:
-            raise ValueError("finish retrieval action cannot carry query or uri")
+        if self.directory is not None or self.uris or self.keywords:
+            raise ValueError("finish retrieval action cannot carry a directory, uris or keywords")
 
     @classmethod
     def model_json_schema(cls) -> dict[str, object]:
@@ -154,14 +183,15 @@ class MemoryRetrievalFinalDecision(MemoryRetrievalDecision):
         return _decision_schema(
             title="MemoryRetrievalFinalDecision",
             description=(
-                "检索轮次预算已经用完，系统不会再执行 memory_search 或 memory_read。只能返回"
-                " finish，按已读到的完整旧记忆和先前检索结果结束检索；status 如实记录这些材料"
-                "是否充分，insufficient 不会导致失败。不得输出查询、URI、记忆候选、置信度、"
+                "检索轮次预算已经用完，系统不会再执行 memory_list、memory_search 或 memory_read。只能返回"
+                " finish，按已读到的完整旧记忆结束检索；status 如实记录这些材料"
+                "是否充分，insufficient 不会导致失败。不得输出目录、URI、记忆候选、置信度、"
                 "修改或写入操作。"
             ),
             actions=(MemoryRetrievalAction.FINISH,),
-            query={"type": "null", "description": "最后一轮不能再搜索，必须为 null。"},
-            uri={"type": "null", "description": "最后一轮不能再读取，必须为 null。"},
+            directory={"type": "null", "description": "最后一轮不能再列目录，必须为 null。"},
+            uris={"type": "array", "maxItems": 0, "description": "最后一轮不能再读取，必须为空数组。"},
+            keywords={"type": "array", "maxItems": 0, "description": "最后一轮不能再搜索，必须为空数组。"},
         )
 
 
@@ -171,7 +201,7 @@ class MemoryRetrievalObservation:
 
     iteration: int
     action: MemoryRetrievalAction
-    input_value: str
+    inputs: tuple[str, ...]
     result_uris: tuple[str, ...]
     added_uris: tuple[str, ...]
     relation_expanded_uris: tuple[str, ...]
@@ -184,7 +214,9 @@ class MemoryRetrievalObservation:
         if action is MemoryRetrievalAction.FINISH:
             raise ValueError("finish does not produce a retrieval observation")
         object.__setattr__(self, "action", action)
-        object.__setattr__(self, "input_value", _clean_text(self.input_value, "input_value"))
+        object.__setattr__(self, "inputs", tuple(_clean_text(item, "input") for item in self.inputs))
+        if not self.inputs:
+            raise ValueError("retrieval observation requires its action inputs")
         for name in ("result_uris", "added_uris", "relation_expanded_uris"):
             values = getattr(self, name)
             if any(not item for item in values):
@@ -198,7 +230,7 @@ class MemoryRetrievalObservation:
         return {
             "iteration": self.iteration,
             "action": self.action.value,
-            "input": self.input_value,
+            "inputs": list(self.inputs),
             "result_uris": list(self.result_uris),
             "added_uris": list(self.added_uris),
             "relation_expanded_uris": list(self.relation_expanded_uris),
@@ -243,8 +275,9 @@ def _decision_schema(
     title: str,
     description: str,
     actions: tuple[MemoryRetrievalAction, ...],
-    query: dict[str, object],
-    uri: dict[str, object],
+    directory: dict[str, object],
+    uris: dict[str, object],
+    keywords: dict[str, object],
 ) -> dict[str, object]:
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -252,7 +285,7 @@ def _decision_schema(
         "description": description,
         "type": "object",
         "additionalProperties": False,
-        "required": ["status", "action", "query", "uri", "reason"],
+        "required": ["status", "action", "directory", "uris", "keywords", "reason"],
         "properties": {
             "status": {
                 "type": "string",
@@ -262,8 +295,9 @@ def _decision_schema(
                 "type": "string",
                 "enum": [action.value for action in actions],
             },
-            "query": query,
-            "uri": uri,
+            "directory": directory,
+            "uris": uris,
+            "keywords": keywords,
             "reason": {
                 "type": "string",
                 "minLength": 1,

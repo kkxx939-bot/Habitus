@@ -19,7 +19,6 @@ from habitus.memory.conversation import (
     ConversationAddress,
     ConversationIngressRequest,
     ConversationMessageJournal,
-    ConversationSemanticBoundaryScorer,
     ConversationWriteConflictError,
 )
 from habitus.memory.workflow.conversation_output import (
@@ -29,7 +28,7 @@ from habitus.memory.workflow.conversation_output import (
 )
 from habitus.memory.workflow.ingest import ConversationMemoryEnqueuer, ConversationMemoryIngestResult
 
-# TODO(conversation-source): Reducer、Chunker、Retention 或边界评分语义变化时，必须同步提升本版本
+# TODO(conversation-source): Reducer、Chunker 或 Retention 语义变化时，必须同步提升本版本
 # 以及 fingerprint 中对应的组件版本；这些版本当前由人工维护。
 MEMORY_CONVERSATION_PROCESSOR_SCHEMA_VERSION = "memory_conversation_processor_v1"
 
@@ -47,7 +46,6 @@ class MemoryConversationConsumer:
         self,
         enqueuer: ConversationMemoryEnqueuer,
         journal: ConversationMessageJournal,
-        boundary_scorer: ConversationSemanticBoundaryScorer,
         output_store: MemoryConversationOutputStore,
         *,
         clock: Callable[[], datetime] | None = None,
@@ -56,7 +54,6 @@ class MemoryConversationConsumer:
             raise ValueError("Memory Conversation Consumer must share the enqueuer journal")
         self.enqueuer = enqueuer
         self.journal = journal
-        self.boundary_scorer = boundary_scorer
         self.output_store = output_store
         self.clock = clock or (lambda: datetime.now(UTC))
         # 显式版本与确定性配置共同形成契约；不依赖 callable repr 或进程地址。
@@ -67,14 +64,9 @@ class MemoryConversationConsumer:
                 "output_schema_version": MEMORY_CONVERSATION_OUTPUT_SCHEMA_VERSION,
                 "tool_result_reducer_version": "conversation_tool_result_reducer_v4",
                 "text_chunker_version": "conversation_message_chunker_v1",
-                "retention_planner_version": "conversation_retention_planner_v2",
+                "retention_planner_version": "conversation_retention_planner_v3",
                 "segmentation_config": asdict(enqueuer.retention_planner.config),
                 "message_chunker_max_tokens": enqueuer.message_chunker.max_message_tokens,
-                "semantic_boundary": {
-                    "version": "conversation_semantic_boundary_scorer_v2",
-                    "embedding_fingerprint": boundary_scorer.embedding_fingerprint,
-                    "max_unit_chars": boundary_scorer.max_unit_chars,
-                },
             }
         )
 
@@ -95,21 +87,11 @@ class MemoryConversationConsumer:
             )
         except ConversationWriteConflictError as exc:
             raise _named_conflict(envelope, exc) from exc
-        boundary_hints = None
-        preview = await asyncio.to_thread(
-            self.enqueuer.preview_retention,
-            address,
-            after_turn=envelope.after_turn,
-        )
-        if preview.should_seal:
-            live = await asyncio.to_thread(self.journal.read_live, address)
-            boundary_hints = await self.boundary_scorer.score(live)
         jobs, retention = await asyncio.to_thread(
             self.enqueuer.enqueue_ready_segments,
             address,
             after_turn=envelope.after_turn,
             flush=False,
-            boundary_hints=boundary_hints,
         )
         ingest = ConversationMemoryIngestResult(appended, jobs, retention)
         output = MemoryConversationOutput.create(

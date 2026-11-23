@@ -28,11 +28,10 @@ from tests.lock_store import ProcessLocalLockStore
 
 
 def runtime(tmp_path: Path):
-    providers, vectors, _chats, _backends = dependencies()
+    providers, _chats = dependencies()
     value = build_runtime(
         runtime_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     value.initialize()
@@ -162,7 +161,7 @@ def test_full_completion_result_is_strict_and_all_durable_steps_are_true(tmp_pat
     assert isinstance(result, MemoryJobCompletion)
     assert result.job.status is MemoryJobStatus.COMMITTED
     assert result.change_receipt.state is MemoryChangeReceiptState.COMMITTED
-    assert result.summary_indexed and result.vector_indexed and result.journal_cleaned
+    assert result.summary_generated and result.journal_cleaned
 
 
 def test_execution_receipt_audits_the_exact_editor_segment(tmp_path: Path) -> None:

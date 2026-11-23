@@ -15,7 +15,6 @@ from fastapi.testclient import TestClient
 
 from habitus.config import HabitusConfig
 from habitus.infrastructure.store.filesystem import restrict_file_to_owner
-from habitus.infrastructure.vector import VectorStoreState
 from habitus.integrations.http_api.app import create_http_app
 from habitus.integrations.local_service import (
     DoctorStatus,
@@ -25,7 +24,6 @@ from habitus.integrations.local_service import (
     run_doctor_from_env,
 )
 from habitus.integrations.local_service import doctor as doctor_module
-from habitus.model_client import EmbeddingVector
 from habitus.runtime import Runtime
 from tests.platform_helpers import grant_everyone_read, grant_group_read, is_private_file
 
@@ -43,14 +41,9 @@ def _config(
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["http"]["port"] = port
     if not credentials:
-        for name in ("chat", "embedding", "rerank"):
-            payload["models"][name]["route"]["credential_ref"] = ""
-        payload["memory"]["vector_store"]["route"]["credential_ref"] = ""
-        payload["conversation"]["summary_vector_store"]["route"]["credential_ref"] = ""
+        payload["models"]["chat"]["route"]["credential_ref"] = ""
     elif filled:
         payload["credentials"]["chat"]["api_key"] = "chat-secret"
-        payload["credentials"]["embedding"]["api_key"] = "embedding-secret"
-        payload["credentials"]["dashscope"]["api_key"] = "dashscope-secret"
     return HabitusConfig.from_mapping(payload)
 
 
@@ -108,8 +101,6 @@ def test_doctor_reports_empty_yaml_credentials_without_a_service_api_key(tmp_pat
 
     assert credentials.status is DoctorStatus.FAIL
     assert "credentials.chat.api_key" in credentials.detail
-    assert "credentials.embedding.api_key" in credentials.detail
-    assert "credentials.dashscope.api_key" in credentials.detail
     assert "HABITUS_HTTP" not in credentials.detail
 
 
@@ -124,15 +115,15 @@ def test_doctor_detects_a_listener_collision_without_starting_runtime(tmp_path: 
     assert report.ok is False
 
 
-def test_doctor_accepts_multiple_filled_named_yaml_credentials(tmp_path: Path) -> None:
+def test_doctor_accepts_filled_named_yaml_credentials(tmp_path: Path) -> None:
     report = run_doctor(_config(tmp_path, credentials=True, filled=True), check_port=False)
     credentials = next(check for check in report.checks if check.name == "credentials")
 
     assert credentials.status is DoctorStatus.PASS
-    assert "3 named YAML credentials" in credentials.detail
+    assert "1 named YAML credentials" in credentials.detail
 
 
-def test_doctor_checks_only_the_base_dependencies_for_the_default_local_vector_store(
+def test_doctor_checks_only_the_base_dependencies_for_the_default_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -143,9 +134,7 @@ def test_doctor_checks_only_the_base_dependencies_for_the_default_local_vector_s
         return doctor_module.DoctorCheck(module, DoctorStatus.PASS, "available")
 
     monkeypatch.setattr(doctor_module, "_python_dependency_check", dependency)
-    config = _config(tmp_path)
-    assert config.memory.vector_store.adapter == "local_sqlite"
-    run_doctor(config, check_port=False)
+    run_doctor(_config(tmp_path), check_port=False)
 
     assert sorted(checked) == ["fastapi", "json_repair", "jsonschema", "uvicorn"]
 
@@ -162,32 +151,6 @@ def test_doctor_reports_unregistered_adapter_without_raising(tmp_path: Path) -> 
     dependencies = next(check for check in report.checks if check.name == "dependencies")
     assert adapter.status is DoctorStatus.FAIL
     assert dependencies.status is DoctorStatus.FAIL
-
-
-@pytest.mark.parametrize(
-    ("store", "change", "expected"),
-    [
-        ("vector_store", {"options": {"busy_timeout_seconds": 0}}, "busy_timeout_seconds"),
-        ("summary_vector_store", {"options": {"legacy_option": True}}, "unknown fields"),
-        ("vector_store", {"route": {"base_url": "https://vector.example.com"}}, "base_url"),
-    ],
-)
-def test_doctor_fails_local_vector_misconfiguration_before_any_probe(
-    tmp_path: Path, store: str, change: dict[str, dict[str, object]], expected: str
-) -> None:
-    payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
-    payload["storage"]["root"] = str(tmp_path / "data")
-    target = payload["memory" if store == "vector_store" else "conversation"][store]
-    for section, values in change.items():
-        target[section] = {**target[section], **values} if section == "route" else values
-    config = HabitusConfig.from_mapping(payload)
-
-    report = run_doctor(config, check_port=False)
-
-    adapter = next(check for check in report.checks if check.name == "adapter_configuration")
-    assert adapter.status is DoctorStatus.FAIL
-    assert expected in adapter.detail
-    assert not (tmp_path / "data" / "vector").exists()
 
 
 def test_doctor_reports_an_out_of_range_override_as_a_config_failure_naming_the_key(tmp_path: Path) -> None:
@@ -234,46 +197,15 @@ def test_deep_doctor_is_opt_in_and_appends_provider_probes(
     def deep_checks(*_args: object, **_kwargs: object) -> list[doctor_module.DoctorCheck]:
         nonlocal called
         called += 1
-        return [doctor_module.DoctorCheck("embedding_probe", DoctorStatus.PASS, "dimension=1024")]
+        return [doctor_module.DoctorCheck("chat_probe", DoctorStatus.PASS, "provider health endpoint responded")]
 
     monkeypatch.setattr(doctor_module, "_deep_checks", deep_checks)
     shallow = run_doctor(_config(tmp_path), check_port=False)
     deep = run_doctor(_config(tmp_path), check_port=False, deep=True, probe_timeout_seconds=1)
 
     assert called == 1
-    assert all(check.name != "embedding_probe" for check in shallow.checks)
-    assert any(check.name == "embedding_probe" for check in deep.checks)
-
-
-def test_deep_doctor_does_not_report_an_unready_vector_publication_as_pass(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    class Chat:
-        def health_check(self) -> dict[str, bool]:
-            return {"ok": True}
-
-    class Embedder:
-        async def embed_query(self, _text: str) -> EmbeddingVector:
-            return EmbeddingVector(tuple(0.0 for _ in range(1024)))
-
-    state = VectorStoreState("schema", "fingerprint", 1024, 0, 1, 0, ready=False)
-    store = SimpleNamespace(state=AsyncMock(return_value=state))
-    runtime = SimpleNamespace(
-        components=SimpleNamespace(
-            models=SimpleNamespace(chat=Chat(), embedder=Embedder(), reranker=None),
-            memory=SimpleNamespace(vector_index=SimpleNamespace(store=store)),
-            conversation=SimpleNamespace(summary_vector_index=SimpleNamespace(store=store)),
-        ),
-        close=AsyncMock(),
-    )
-    monkeypatch.setattr("habitus.runtime.build_runtime", Mock(return_value=runtime))
-
-    checks = doctor_module._deep_checks(_config(tmp_path), timeout_seconds=0.5)
-
-    vector_checks = [check for check in checks if check.name.endswith("vector_probe")]
-    assert len(vector_checks) == 2
-    assert all(check.status is not DoctorStatus.PASS for check in vector_checks)
+    assert all(check.name != "chat_probe" for check in shallow.checks)
+    assert any(check.name == "chat_probe" for check in deep.checks)
 
 
 def test_deep_doctor_chat_timeout_is_a_real_wall_clock_bound(
@@ -289,17 +221,8 @@ def test_deep_doctor_chat_timeout_is_a_real_wall_clock_bound(
             await asyncio.sleep(10.0)
             return {"ok": True}
 
-    class Embedder:
-        async def embed_query(self, _text: str) -> EmbeddingVector:
-            return EmbeddingVector(tuple(0.0 for _ in range(1024)))
-
-    store = SimpleNamespace(state=AsyncMock(return_value=None))
     runtime = SimpleNamespace(
-        components=SimpleNamespace(
-            models=SimpleNamespace(chat=Chat(), embedder=Embedder(), reranker=None),
-            memory=SimpleNamespace(vector_index=SimpleNamespace(store=store)),
-            conversation=SimpleNamespace(summary_vector_index=SimpleNamespace(store=store)),
-        ),
+        components=SimpleNamespace(models=SimpleNamespace(chat=Chat())),
         close=AsyncMock(),
     )
     monkeypatch.setattr("habitus.runtime.build_runtime", Mock(return_value=runtime))
@@ -446,13 +369,12 @@ def test_serve_turns_a_failed_runtime_start_into_one_line_without_a_traceback(
     """预检过了、``runtime.start`` 才失败（凭据非空但填错）：真实 uvicorn 起停，一行原因、非零退出，日志里没有栈。"""
 
     import habitus.infrastructure.observability as observability
-    from habitus.infrastructure.vector import VectorStoreError
     from habitus.integrations.local_service import cli
 
     runtime = _runtime()
     runtime.start = AsyncMock(  # type: ignore[method-assign]
-        side_effect=VectorStoreError(
-            "vector store request failed: 401 InvalidAccessKey:\n  The security token[AKLTleaked0001] included is invalid"
+        side_effect=RuntimeError(
+            "model service request failed: 401 InvalidAccessKey:\n  The security token[AKLTleaked0001] included is invalid"
         )
     )
     monkeypatch.setattr("habitus.runtime.build_runtime", Mock(return_value=runtime))
@@ -469,7 +391,7 @@ def test_serve_turns_a_failed_runtime_start_into_one_line_without_a_traceback(
     message = str(raised.value.code)
     # 回包带出的凭据原文不进这一行，也不进服务日志
     assert message == (
-        "Habitus startup failed: vector store request failed: 401 InvalidAccessKey: "
+        "Habitus startup failed: model service request failed: 401 InvalidAccessKey: "
         "The security token[REDACTED] included is invalid"
     )
     runtime.close.assert_awaited_once()
@@ -633,7 +555,7 @@ def test_repair_source_outputs_dry_run_only_reports_and_never_repairs(
     monkeypatch.setattr(
         adapter_catalog,
         "load_adapter_catalog",
-        Mock(return_value=SimpleNamespace(providers=None, vector_stores=None)),
+        Mock(return_value=SimpleNamespace(providers=None)),
     )
     monkeypatch.setattr("habitus.runtime.build_runtime", Mock(return_value=runtime))
     monkeypatch.setattr(cli, "_report_repair_plan", report)
@@ -718,7 +640,7 @@ def test_readmes_say_what_init_and_the_part_staging_actually_do() -> None:
 
 
 def test_doctor_deep_writes_only_structured_logs_to_stderr(tmp_path: Path) -> None:
-    """--deep 探测失败时运行时记观测日志：CLI 先配好日志，stderr 上只有 JSON 结构化日志，没有裸的 "habitus observation"。"""
+    """--deep 探测失败时：CLI 先配好日志，stderr 上只能是 JSON 结构化日志，并且有一条对话探测失败的 ERROR。"""
 
     import json
     import os
@@ -728,12 +650,9 @@ def test_doctor_deep_writes_only_structured_logs_to_stderr(tmp_path: Path) -> No
     text = (REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8")
     payload = yaml.safe_load(text)
     payload["storage"]["root"] = str(tmp_path / "data")
-    # 模型指向本机关着的端口：探测立刻失败、不出网；向量库是默认的本地文件
-    for name in ("chat", "embedding", "rerank"):
-        payload["models"][name]["route"]["base_url"] = "http://127.0.0.1:9"
+    # 模型指向本机关着的端口：探测立刻失败、不出网
+    payload["models"]["chat"]["route"]["base_url"] = "http://127.0.0.1:9"
     payload["credentials"]["chat"]["api_key"] = "fake"
-    payload["credentials"]["embedding"]["api_key"] = "fake"
-    payload["credentials"]["dashscope"]["api_key"] = "fake"
     config = tmp_path / "config.yaml"
     config.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
     restrict_file_to_owner(config)
@@ -761,11 +680,12 @@ def test_doctor_deep_writes_only_structured_logs_to_stderr(tmp_path: Path) -> No
         env={**os.environ, "HOME": str(tmp_path)},
     )
 
-    assert "[FAIL] embedding_probe" in completed.stdout
+    assert "[FAIL] chat_probe" in completed.stdout
     records = [json.loads(line) for line in completed.stderr.splitlines()]
     for record in records:
         assert {"level", "logger", "message", "timestamp"} <= record.keys()
-    assert any(record["level"] == "ERROR" for record in records)
+    assert "habitus observation" not in completed.stderr
+    assert any(record["level"] == "ERROR" and record["message"] == "doctor chat probe failed" for record in records)
 
 
 @pytest.mark.parametrize(

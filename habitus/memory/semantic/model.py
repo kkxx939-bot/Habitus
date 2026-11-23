@@ -1,4 +1,4 @@
-"""目录 L0/L1 生成使用的受控数据模型。"""
+"""目录 L0/L1 刷新结果。"""
 
 from __future__ import annotations
 
@@ -6,60 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from habitus.foundation.integrity import canonical_digest
 from habitus.memory.model import MemoryDirectory
-
-
-class MemorySemanticEntryKind(str, Enum):
-    MEMORY = "memory"
-    DIRECTORY = "directory"
-
-
-@dataclass(frozen=True)
-class MemorySemanticEntry:
-    """一个目录中的直接 L2 文件或直接子目录摘要。"""
-
-    name: str
-    kind: MemorySemanticEntryKind
-    content: str
-
-    def __post_init__(self) -> None:
-        if not self.name.strip():
-            raise ValueError("memory semantic entry name must be non-empty")
-        if self.name != self.name.strip() or any(ord(character) < 32 for character in self.name):
-            raise ValueError("memory semantic entry name contains unsafe characters")
-        object.__setattr__(self, "kind", MemorySemanticEntryKind(self.kind))
-
-
-@dataclass(frozen=True)
-class MemoryDirectorySnapshot:
-    """生成一次目录概览所需的完整直接子项快照。"""
-
-    directory: MemoryDirectory
-    entries: tuple[MemorySemanticEntry, ...]
-
-    def __post_init__(self) -> None:
-        normalized = tuple(self.entries)
-        identities = [(entry.kind.value, entry.name) for entry in normalized]
-        if len(identities) != len(set(identities)):
-            raise ValueError("snapshot contains duplicate direct entries")
-        object.__setattr__(self, "entries", normalized)
-
-    @property
-    def digest(self) -> str:
-        return canonical_digest(
-            {
-                "directory": list(self.directory.parts),
-                "entries": [
-                    {
-                        "name": entry.name,
-                        "kind": entry.kind.value,
-                        "content": entry.content,
-                    }
-                    for entry in self.entries
-                ],
-            }
-        )
 
 
 class MemorySemanticRefreshStatus(str, Enum):
@@ -75,15 +22,11 @@ class MemorySemanticRefreshResult:
 
     directory: MemoryDirectory
     status: MemorySemanticRefreshStatus
-    source_digest: str = ""
     abstract_path: Path | None = None
     overview_path: Path | None = None
 
 
 __all__ = [
-    "MemoryDirectorySnapshot",
-    "MemorySemanticEntry",
-    "MemorySemanticEntryKind",
     "MemorySemanticRefreshResult",
     "MemorySemanticRefreshStatus",
 ]

@@ -61,11 +61,6 @@ class _Releaser:
         return 1
 
 
-class _NoHints:
-    async def score(self, _live: object) -> None:
-        return None
-
-
 class _Events:
     def __init__(self) -> None:
         self.events: list[ObservationEvent] = []
@@ -88,7 +83,6 @@ class _Chain:
         self.woken = 0
         self.participant = ConversationIdleSealParticipant(
             self.enqueuer,
-            _NoHints(),  # type: ignore[arg-type]
             self.releaser,  # type: ignore[arg-type]
             self.path_lock,
             ConversationLifecycleConfig(idle_commit_seconds=idle_seconds, idle_scan_batch_conversations=batch),

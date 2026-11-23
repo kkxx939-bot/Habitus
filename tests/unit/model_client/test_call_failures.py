@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 from pathlib import Path
 
@@ -15,9 +14,6 @@ from habitus.model_client import (
     RULES,
     CallFailureConfig,
     ChatClient,
-    EmbeddingClient,
-    EmbeddingModelConfig,
-    EmbeddingVector,
     ModelAuthenticationError,
     ModelCircuitOpenError,
     ModelClientError,
@@ -26,8 +22,6 @@ from habitus.model_client import (
     ModelErrorRule,
     ModelQuotaError,
     ModelTransportError,
-    RerankClient,
-    RerankModelConfig,
     model_failure,
     model_failure_rule,
 )
@@ -261,46 +255,3 @@ def test_an_open_chat_breaker_sends_nothing_until_the_probe_and_resumes_by_itsel
     client.breaker._monotonic = lambda: 10.0**9  # 到了试探的时候（人已经把密钥改好）
     assert client.complete("hi") == response()
     assert not client.breaker.is_open()
-
-
-def test_embedding_client_shares_the_same_rules() -> None:
-    class Provider:
-        provider_name, model, is_remote = "scripted", "embed", False
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def embed(self, text: str, *, is_query: bool) -> EmbeddingVector:
-            self.calls += 1
-            raise ModelQuotaError("no credit")
-
-        async def aclose(self) -> None:
-            return None
-
-    route = config().route
-    provider = Provider()
-    client = EmbeddingClient(EmbeddingModelConfig(route, dimension=2), provider, failures=CallFailureConfig())  # type: ignore[arg-type]
-    with pytest.raises(ModelQuotaError):
-        asyncio.run(client.embed_query("q"))
-    with pytest.raises(ModelCircuitOpenError):
-        asyncio.run(client.embed_query("q"))
-    assert provider.calls == 1
-
-
-def test_a_successful_rerank_closes_its_breaker() -> None:
-    """故障注入查出的：重排成功后要记进熔断，否则试探成功了熔断也不关。"""
-
-    class Provider:
-        provider_name, model, is_remote = "scripted", "rerank", False
-
-        async def rerank(self, query: str, documents: tuple[str, ...]) -> tuple[float, ...]:
-            return tuple(0.5 for _ in documents)
-
-        async def aclose(self) -> None:
-            return None
-
-    client = RerankClient(RerankModelConfig(config().route), Provider())  # type: ignore[arg-type]
-    client.breaker.record_failure(ModelTransportError("down"))
-    assert client.breaker.snapshot().consecutive_failures == 1
-    assert asyncio.run(client.rerank("q", ("a",))) == (0.5,)
-    assert client.breaker.snapshot().consecutive_failures == 0

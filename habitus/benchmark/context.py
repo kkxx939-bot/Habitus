@@ -28,7 +28,7 @@ class _ContextBlock:
 
 
 def select_answer_context(result: MemorySearchResult, *, max_content_chars: int) -> BenchmarkAnswerContext:
-    """按直接 Memory、关系一跳、Summary 后备的优先级整块选入上下文。"""
+    """按卡片、关系一跳、每一轮的记录、会话摘要的优先级整块选入上下文。"""
 
     if not isinstance(result, MemorySearchResult):
         raise TypeError("result must be MemorySearchResult")
@@ -71,7 +71,7 @@ def select_answer_context(result: MemorySearchResult, *, max_content_chars: int)
                     ),
                 )
             )
-    for summary in result.summary_fallbacks:
+    for summary in result.summaries:
         identity = summary.reference.identity
         started_at = summary.started_at.isoformat().replace("+00:00", "Z")
         ended_at = summary.ended_at.isoformat().replace("+00:00", "Z")
@@ -86,7 +86,7 @@ def select_answer_context(result: MemorySearchResult, *, max_content_chars: int)
             )
         )
 
-    blocks = (*direct_blocks, *related_blocks, *summary_blocks)
+    blocks = (*direct_blocks, *related_blocks, *_record_blocks(result), *summary_blocks)
     selected: list[_ContextBlock] = []
     skipped: list[str] = []
     used = 0
@@ -105,6 +105,17 @@ def select_answer_context(result: MemorySearchResult, *, max_content_chars: int)
         skipped_ids=tuple(skipped),
         content_chars=used,
     )
+
+
+def _record_blocks(result: MemorySearchResult) -> list[_ContextBlock]:
+    return [
+        _ContextBlock(
+            identity=record.address,
+            kind="record",
+            content=f'<behavior_record address="{record.address}">\n{record.text()}\n</behavior_record>',
+        )
+        for record in result.records
+    ]
 
 
 __all__ = ["BenchmarkAnswerContext", "select_answer_context"]

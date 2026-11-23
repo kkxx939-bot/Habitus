@@ -39,7 +39,6 @@ class BoundaryProfile:
 
     name: BoundaryProfileName
     conversation_scales: tuple[int, ...]
-    vector_capacity_fractions: tuple[float, ...]
     concurrency_levels: tuple[int, ...]
     write_fractions: tuple[float, ...]
     warmup_seconds: float
@@ -58,12 +57,6 @@ class BoundaryProfile:
             if tuple(sorted(set(values))) != values:
                 raise ValueError(f"{name} must be sorted and unique")
             object.__setattr__(self, name, values)
-        fractions = tuple(float(value) for value in self.vector_capacity_fractions)
-        if not fractions or any(not math.isfinite(value) or not 0 < value <= 1 for value in fractions):
-            raise ValueError("vector_capacity_fractions must be between zero and one")
-        if tuple(sorted(set(fractions))) != fractions:
-            raise ValueError("vector_capacity_fractions must be sorted and unique")
-        object.__setattr__(self, "vector_capacity_fractions", fractions)
         writes = tuple(float(value) for value in self.write_fractions)
         if not writes or any(not math.isfinite(value) or not 0 <= value <= 1 for value in writes):
             raise ValueError("write_fractions must be between zero and one")
@@ -96,7 +89,6 @@ class BoundaryProfile:
             BoundaryProfileName.SMOKE: cls(
                 selected,
                 conversation_scales=(1,),
-                vector_capacity_fractions=(0.001,),
                 concurrency_levels=(1, 4),
                 write_fractions=(0.0, 0.2),
                 warmup_seconds=1.0,
@@ -107,7 +99,6 @@ class BoundaryProfile:
             BoundaryProfileName.STANDARD: cls(
                 selected,
                 conversation_scales=(1, 10, 50),
-                vector_capacity_fractions=(0.01, 0.1),
                 concurrency_levels=(1, 2, 4, 8, 16, 32),
                 write_fractions=(0.0, 0.1, 0.3, 0.5),
                 warmup_seconds=5.0,
@@ -118,7 +109,6 @@ class BoundaryProfile:
             BoundaryProfileName.STRESS: cls(
                 selected,
                 conversation_scales=(10, 100, 500),
-                vector_capacity_fractions=(0.1, 0.5, 1.0),
                 concurrency_levels=(1, 4, 8, 16, 32, 64, 128),
                 write_fractions=(0.0, 0.1, 0.3, 0.5, 0.8),
                 warmup_seconds=10.0,
@@ -129,7 +119,6 @@ class BoundaryProfile:
             BoundaryProfileName.SOAK: cls(
                 selected,
                 conversation_scales=(100,),
-                vector_capacity_fractions=(1.0,),
                 concurrency_levels=(16, 32),
                 write_fractions=(0.1, 0.3),
                 warmup_seconds=30.0,
@@ -144,7 +133,6 @@ class BoundaryProfile:
         self,
         *,
         conversation_scales: Sequence[int] | None = None,
-        vector_capacity_fractions: Sequence[float] | None = None,
         concurrency_levels: Sequence[int] | None = None,
         write_fractions: Sequence[float] | None = None,
         warmup_seconds: float | None = None,
@@ -155,11 +143,6 @@ class BoundaryProfile:
             self,
             conversation_scales=(
                 self.conversation_scales if conversation_scales is None else tuple(conversation_scales)
-            ),
-            vector_capacity_fractions=(
-                self.vector_capacity_fractions
-                if vector_capacity_fractions is None
-                else tuple(vector_capacity_fractions)
             ),
             concurrency_levels=(self.concurrency_levels if concurrency_levels is None else tuple(concurrency_levels)),
             write_fractions=(self.write_fractions if write_fractions is None else tuple(write_fractions)),
@@ -172,7 +155,6 @@ class BoundaryProfile:
         return {
             "name": self.name.value,
             "conversation_scales": list(self.conversation_scales),
-            "vector_capacity_fractions": list(self.vector_capacity_fractions),
             "concurrency_levels": list(self.concurrency_levels),
             "write_fractions": list(self.write_fractions),
             "warmup_seconds": self.warmup_seconds,

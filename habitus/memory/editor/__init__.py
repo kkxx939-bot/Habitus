@@ -73,7 +73,6 @@ from habitus.memory.editor.relation_reader import (
 )
 from habitus.memory.editor.relationship import MemoryRelationshipEditor
 from habitus.memory.editor.retrieval import (
-    ConversationSegmentQueryBuilder,
     MemoryRelatedContext,
     MemoryRelatedRetriever,
     MemoryRetrievalConfig,
@@ -104,7 +103,6 @@ from habitus.memory.editor.transaction_log import (
 
 __all__ = [
     "MemoryTurnContext",
-    "ConversationSegmentQueryBuilder",
     "MemoryCandidate",
     "MemoryCandidateBatch",
     "MemoryCandidateError",

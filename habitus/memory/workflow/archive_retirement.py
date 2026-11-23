@@ -1,4 +1,4 @@
-"""Archive 退休清单的四相位幂等续跑：下线索引、释放 History、删除来源链、完成清单。
+"""Archive 退休清单的三相位幂等续跑：认领并释放 History、删除来源链、完成清单。
 
 每个相位只在本相位的全部落盘动作完成后推进清单；中途失败或安全门未满足时停在当前相位，
 下一次维护从同一相位重新进入。相位顺序、推进时机与报错文字都不得改变。
@@ -18,7 +18,6 @@ from habitus.memory.conversation import (
     ConversationSummaryStore,
 )
 from habitus.memory.conversation.compaction import ConversationSummaryUseReader
-from habitus.memory.conversation.indexing import PersistentConversationSummaryVectorIndex
 from habitus.memory.workflow.committed_cleanup import CommittedWorkflowCleanup
 from habitus.memory.workflow.lifecycle_errors import ConversationLifecycleError
 from habitus.pre.conversation import ConversationRangeSummaryStage
@@ -36,7 +35,7 @@ _NOTHING: ArchiveRetirementOutcome = ((), (), (), (), ())
 
 
 class ConversationArchiveRetirementRunner:
-    """严格按下线、History、子摘要、Archive 的阶段幂等续跑一个已准备的退休清单。"""
+    """严格按认领与 History、子摘要、Archive 的阶段幂等续跑一个已准备的退休清单。"""
 
     def __init__(
         self,
@@ -44,7 +43,6 @@ class ConversationArchiveRetirementRunner:
         journal: ConversationMessageJournal,
         segment_store: ConversationSummaryStore,
         range_store: ConversationRangeSummaryStore,
-        summary_vector_index: PersistentConversationSummaryVectorIndex,
         retirement_store: ConversationSummaryRetirementStore,
         workflow: CommittedWorkflowCleanup,
         *,
@@ -54,7 +52,6 @@ class ConversationArchiveRetirementRunner:
         self.journal = journal
         self.segment_store = segment_store
         self.range_store = range_store
-        self.summary_vector_index = summary_vector_index
         self.retirement_store = retirement_store
         self.workflow = workflow
         self.cleanup_batch_size = cleanup_batch_size
@@ -70,14 +67,11 @@ class ConversationArchiveRetirementRunner:
         use_store = self.compactor.use_store
         if use_store is None:
             raise ConversationLifecycleError("retiring Archive lacks a Summary use store")
-        if current.phase is ConversationSummaryRetirementPhase.RETIRING:
-            removed = await self._remove_from_index(current, use_store, now)
-            if removed is None:
-                return _NOTHING
-            current = removed
         purged: tuple[str, ...] = ()
         released: tuple[str, ...] = ()
-        if current.phase is ConversationSummaryRetirementPhase.INDEX_REMOVED:
+        if current.phase is ConversationSummaryRetirementPhase.RETIRING:
+            if not self._claim(current, use_store, now):
+                return _NOTHING
             advanced, purged, released = self._release_history(current, now)
             if advanced is None:
                 return purged, released, (), (), ()
@@ -91,13 +85,13 @@ class ConversationArchiveRetirementRunner:
             self.retirement_store.complete(current)
         return purged, released, segments, ranges, archives
 
-    async def _remove_from_index(
+    def _claim(
         self,
         current: ConversationSummaryRetirementManifest,
         use_store: ConversationSummaryUseReader,
         now: datetime,
-    ) -> ConversationSummaryRetirementManifest | None:
-        """RETIRING：认领使用状态并从 Summary 索引精确删除；使用状态已变化则放弃本清单。"""
+    ) -> bool:
+        """RETIRING：认领使用状态；使用状态已变化则放弃本清单。认领过的（中途被打断）直接继续。"""
 
         states = use_store.read_many((current.archive.reference,))
         use_state = states[0] if states else None
@@ -106,31 +100,24 @@ class ConversationArchiveRetirementRunner:
             and use_state.version == current.expected_use_version + 1
             and use_state.retiring_at is not None
         )
-        if not claimed:
-            if use_state is None or use_state.version != current.expected_use_version:
-                self.retirement_store.complete(current)
-                return None
-            use_store.claim_retirement(
-                current.archive.reference,
-                expected_version=current.expected_use_version,
-                claimed_at=now,
-            )
-        await self.summary_vector_index.synchronize(
-            current.address,
-            removed_references=(current.archive.reference,),
+        if claimed:
+            return True
+        if use_state is None or use_state.version != current.expected_use_version:
+            self.retirement_store.complete(current)
+            return False
+        use_store.claim_retirement(
+            current.archive.reference,
+            expected_version=current.expected_use_version,
+            claimed_at=now,
         )
-        return self.retirement_store.advance(
-            current,
-            ConversationSummaryRetirementPhase.INDEX_REMOVED,
-            updated_at=now,
-        )
+        return True
 
     def _release_history(
         self,
         current: ConversationSummaryRetirementManifest,
         now: datetime,
     ) -> tuple[ConversationSummaryRetirementManifest | None, tuple[str, ...], tuple[str, ...]]:
-        """INDEX_REMOVED：按批释放并清除覆盖范围内的 History；全部释放后才推进相位。"""
+        """RETIRING（已认领）：按批释放并清除覆盖范围内的 History；全部释放后才推进相位。"""
 
         address = current.address
         purged: tuple[str, ...] = ()

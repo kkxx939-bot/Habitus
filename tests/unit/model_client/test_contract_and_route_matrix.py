@@ -13,8 +13,6 @@ from habitus.model_client import (
     ChatMessage,
     ChatModelConfig,
     ChatRequest,
-    EmbeddingModelConfig,
-    EmbeddingVector,
     ModelAuthenticationError,
     ModelClientError,
     ModelConfigurationError,
@@ -33,7 +31,6 @@ from habitus.model_client import (
     ProviderCapabilities,
     ProviderConfig,
     ReasoningOptions,
-    RerankModelConfig,
     ResponseFormat,
     TokenUsage,
     ToolCall,
@@ -537,53 +534,6 @@ def test_model_error_taxonomy_preserves_message_and_retry_hint(
 
 
 @pytest.mark.parametrize(
-    "values",
-    [
-        [1],
-        (1,),
-        [3, 4],
-        (-3, 4),
-        (0.1, 0.2, 0.3),
-        (1, 2, 3, 4),
-        tuple(range(1, 17)),
-        [1e-100, 2e-100],
-        [1e100, -1e100],
-    ],
-)
-def test_embedding_vector_normalizes_valid_numeric_sequences(values: list[float] | tuple[float, ...]) -> None:
-    vector = EmbeddingVector(values)
-    assert vector.dimension == len(values)
-    assert math.sqrt(sum(value * value for value in vector.values)) == pytest.approx(1.0)
-
-
-@pytest.mark.parametrize("invalid", [None, "1,2", 1, 1.5, True, {}, set(), object()])
-def test_embedding_vector_requires_list_or_tuple(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        EmbeddingVector(invalid)
-
-
-@pytest.mark.parametrize("values", [(), [], (0,), (0, 0), [0.0, -0.0]])
-def test_embedding_vector_rejects_empty_or_zero_norm(values: object) -> None:
-    with pytest.raises(ValueError):
-        EmbeddingVector(values)
-
-
-@pytest.mark.parametrize(
-    "invalid",
-    [True, False, None, "1", object(), (), [], {}, set(), complex(1, 2)],
-)
-def test_embedding_vector_rejects_non_numeric_element(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        EmbeddingVector((1, invalid))
-
-
-@pytest.mark.parametrize("invalid", [math.nan, math.inf, -math.inf])
-def test_embedding_vector_rejects_non_finite_element(invalid: float) -> None:
-    with pytest.raises(ValueError):
-        EmbeddingVector((1, invalid))
-
-
-@pytest.mark.parametrize(
     "provider",
     ["a", "A", "Provider", "provider-1", "provider_1", "provider.one", "x" * 128],
 )
@@ -811,133 +761,7 @@ def test_chat_model_config_rejects_invalid_output_limit(invalid: object) -> None
         ChatModelConfig(route(), max_output_tokens=invalid)
 
 
-@pytest.mark.parametrize("dimension", [1, 2, 512, 4096, 65_536])
-def test_embedding_model_config_accepts_dimension_boundaries(dimension: int) -> None:
-    config = EmbeddingModelConfig(route(), dimension=dimension)
-    assert config.capability == "embedding"
-    assert (config.query_prefix, config.document_prefix) == ("", "")
-
-
-def test_embedding_model_config_has_no_input_mode_field() -> None:
-    """``input_mode`` 已在 W7 删掉：不再是字段（YAML 里写了按未知字段拒绝，见 test_config_loading）。"""
-
-    with pytest.raises(TypeError, match="input_mode"):
-        EmbeddingModelConfig(route(), dimension=2, input_mode="text")  # type: ignore[call-arg]
-
-
-def test_embedding_prefixes_shrink_the_text_budget_by_their_own_length() -> None:
-    config = EmbeddingModelConfig(
-        route(), dimension=2, max_input_chars=100, query_prefix="query: ", document_prefix="passage: "
-    )
-    assert config.max_query_text_chars == 93
-    assert config.max_document_text_chars == 91
-
-
-@pytest.mark.parametrize("field", ["query_prefix", "document_prefix"])
-def test_embedding_prefix_must_leave_room_for_text(field: str) -> None:
-    with pytest.raises(ValueError, match=field):
-        EmbeddingModelConfig(route(), dimension=2, max_input_chars=4, **{field: "four"})
-
-
-@pytest.mark.parametrize("dimension", [0, -1, 65_537])
-def test_embedding_model_config_rejects_invalid_dimension(dimension: object) -> None:
-    with pytest.raises(ValueError):
-        EmbeddingModelConfig(route(), dimension=dimension)
-
-
-@pytest.mark.parametrize(
-    ("field", "minimum", "maximum"),
-    [("max_batch_size", 1, 2048), ("max_input_chars", 1, 1_000_000)],
-)
-@pytest.mark.parametrize("edge", ["minimum", "maximum"])
-def test_embedding_model_config_accepts_integer_boundaries(
-    field: str,
-    minimum: int,
-    maximum: int,
-    edge: str,
-) -> None:
-    value = minimum if edge == "minimum" else maximum
-    assert getattr(EmbeddingModelConfig(route(), dimension=2, **{field: value}), field) == value
-
-
-@pytest.mark.parametrize(
-    ("field", "minimum", "maximum"),
-    [("max_batch_size", 1, 2048), ("max_input_chars", 1, 1_000_000)],
-)
-@pytest.mark.parametrize("invalid_kind", ["below", "above"])
-def test_embedding_model_config_rejects_invalid_integer_bounds(
-    field: str,
-    minimum: int,
-    maximum: int,
-    invalid_kind: str,
-) -> None:
-    invalid = {"below": minimum - 1, "above": maximum + 1}[invalid_kind]
-    with pytest.raises(ValueError):
-        EmbeddingModelConfig(route(), dimension=2, **{field: invalid})
-
-
-@pytest.mark.parametrize("field", ["query_parameters", "document_parameters"])
-@pytest.mark.parametrize(
-    "value",
-    [{}, {"instruction": "query"}, {"truncate": True}, {"nested": [1, None]}],
-)
-def test_embedding_model_config_accepts_json_parameter_mappings(
-    field: str,
-    value: dict[str, object],
-) -> None:
-    config = EmbeddingModelConfig(route(), dimension=2, **{field: value})
-    assert getattr(config, field) == value
-
-
-@pytest.mark.parametrize("field", ["query_parameters", "document_parameters"])
-@pytest.mark.parametrize("invalid", [None, [], (), "params", {"": 1}, {1: "x"}, {"x": object()}])
-def test_embedding_model_config_rejects_non_json_parameters(field: str, invalid: object) -> None:
-    with pytest.raises((TypeError, ValueError)):
-        EmbeddingModelConfig(route(), dimension=2, **{field: invalid})
-
-
-@pytest.mark.parametrize(
-    ("field", "minimum", "maximum"),
-    [
-        ("max_documents", 1, 2048),
-        ("max_query_chars", 1, 1_000_000),
-        ("max_document_chars", 1, 1_000_000),
-    ],
-)
-@pytest.mark.parametrize("edge", ["minimum", "maximum"])
-def test_rerank_model_config_accepts_integer_boundaries(
-    field: str,
-    minimum: int,
-    maximum: int,
-    edge: str,
-) -> None:
-    value = minimum if edge == "minimum" else maximum
-    config = RerankModelConfig(route(), **{field: value})
-    assert config.capability == "rerank"
-    assert getattr(config, field) == value
-
-
-@pytest.mark.parametrize(
-    ("field", "minimum", "maximum"),
-    [
-        ("max_documents", 1, 2048),
-        ("max_query_chars", 1, 1_000_000),
-        ("max_document_chars", 1, 1_000_000),
-    ],
-)
-@pytest.mark.parametrize("invalid_kind", ["below", "above"])
-def test_rerank_model_config_rejects_invalid_integer_bounds(
-    field: str,
-    minimum: int,
-    maximum: int,
-    invalid_kind: str,
-) -> None:
-    invalid = {"below": minimum - 1, "above": maximum + 1}[invalid_kind]
-    with pytest.raises(ValueError):
-        RerankModelConfig(route(), **{field: invalid})
-
-
-@pytest.mark.parametrize("model", [ProviderConfig, ChatModelConfig, EmbeddingModelConfig, RerankModelConfig])
+@pytest.mark.parametrize("model", [ProviderConfig, ChatModelConfig])
 def test_model_configuration_objects_are_frozen_dataclasses(model: type[object]) -> None:
     assert model.__dataclass_params__.frozen is True
     assert fields(model)

@@ -1,6 +1,5 @@
 """模型公共契约、供应商路由和显式 Adapter 工厂测试。"""
 
-import asyncio
 from dataclasses import dataclass
 
 import pytest
@@ -9,9 +8,6 @@ from habitus.model_client import (
     ChatMessage,
     ChatModelConfig,
     ChatRequest,
-    EmbeddingClient,
-    EmbeddingModelConfig,
-    EmbeddingVector,
     ModelConfigurationError,
     ModelResponse,
     ProviderBuildContext,
@@ -19,8 +15,6 @@ from habitus.model_client import (
     ProviderConfig,
     ProviderFactory,
     ReasoningOptions,
-    RerankClient,
-    RerankModelConfig,
     ResponseFormat,
     TokenUsage,
     ToolCall,
@@ -28,12 +22,6 @@ from habitus.model_client import (
 )
 from habitus.model_client.adapters import (
     OpenAICompatibleChatProvider,
-    OpenAICompatibleEmbeddingProvider,
-    OpenAICompatibleRerankProvider,
-    build_anthropic_messages_provider,
-    build_openai_compatible_chat_provider,
-    build_openai_compatible_embedding_provider,
-    build_openai_compatible_rerank_provider,
     register_builtin_adapters,
 )
 
@@ -121,143 +109,106 @@ def test_usage_response_and_capabilities_reject_invalid_shapes() -> None:
         ProviderCapabilities(structured_output_mode="boolean")
 
 
-def test_embedding_vector_is_finite_nonzero_and_l2_normalized() -> None:
-    vector = EmbeddingVector((3, 4))
-    assert vector.values == pytest.approx((0.6, 0.8))
-    assert vector.dimension == 2
-    with pytest.raises(ValueError, match="non-zero"):
-        EmbeddingVector((0, 0))
-    with pytest.raises(ValueError, match="finite"):
-        EmbeddingVector((float("nan"), 1))
-
-
 @dataclass
-class FakeEmbeddingProvider:
+class FakeChatProvider:
+    """只满足工厂组件校验的假 Chat Provider，不做任何网络调用。"""
+
     provider_name: str = "test-provider"
     model: str = "test-model"
     is_remote: bool = True
 
-    async def embed(self, text: str, *, is_query: bool) -> EmbeddingVector:
-        return EmbeddingVector((1, 0))
+    def prepare(self, request: object, context: object = None) -> object:
+        raise NotImplementedError
+
+    def complete(self, prepared: object) -> object:
+        raise NotImplementedError
+
+    async def complete_async(self, prepared: object) -> object:
+        raise NotImplementedError
+
+    def stream(self, prepared: object) -> object:
+        raise NotImplementedError
+
+    async def stream_async(self, prepared: object) -> object:
+        raise NotImplementedError
+
+    def health_check(self) -> dict[str, object]:
+        return {}
 
     async def aclose(self) -> None:
         return None
 
 
-@dataclass
-class FakeReranker:
-    provider_name: str = "test-provider"
-    model: str = "test-model"
-    is_remote: bool = True
-
-    async def rerank(self, query: str, documents: tuple[str, ...]) -> tuple[float, ...]:
-        return tuple(1.0 for _ in documents)
-
-    async def aclose(self) -> None:
-        return None
-
-
-def test_factory_resolves_by_capability_and_adapter_and_wraps_embedding_runtime() -> None:
+def test_factory_resolves_by_capability_and_adapter() -> None:
     factory = ProviderFactory()
-    factory.register_adapter("embedding", "test-adapter", lambda context: FakeEmbeddingProvider())
-    config = EmbeddingModelConfig(route(), dimension=2)
-    embedder = factory.create_embedder(config, api_key="secret")
+    factory.register_adapter("chat", "test-adapter", lambda context: FakeChatProvider())
+    provider = factory.create_chat_provider(ChatModelConfig(route()), api_key="secret")
 
-    assert isinstance(embedder, EmbeddingClient)
-    assert asyncio.run(embedder.embed_query("query")).dimension == 2
-    assert factory.registered_adapters("embedding") == ("test-adapter",)
+    assert isinstance(provider, FakeChatProvider)
+    assert factory.registered_adapters("chat") == ("test-adapter",)
 
 
 def test_factory_does_not_guess_adapter_or_silently_fall_back() -> None:
     factory = ProviderFactory()
-    config = EmbeddingModelConfig(route(adapter="unknown"), dimension=2)
+    config = ChatModelConfig(route(adapter="unknown"))
     with pytest.raises(ModelConfigurationError, match="not registered"):
-        factory.create_embedder(config, api_key="secret")
+        factory.create_chat_provider(config, api_key="secret")
 
 
 def test_factory_requires_declared_credential_and_matching_component_identity() -> None:
     factory = ProviderFactory()
-    factory.register_adapter("embedding", "test-adapter", lambda context: FakeEmbeddingProvider(model="wrong"))
-    config = EmbeddingModelConfig(route(), dimension=2)
+    factory.register_adapter("chat", "test-adapter", lambda context: FakeChatProvider(model="wrong"))
+    config = ChatModelConfig(route())
     with pytest.raises(ModelConfigurationError, match="credential"):
-        factory.create_embedder(config, api_key="")
+        factory.create_chat_provider(config, api_key="")
     with pytest.raises(ModelConfigurationError, match="identity"):
-        factory.create_embedder(config, api_key="secret")
+        factory.create_chat_provider(config, api_key="secret")
 
 
-def test_builtin_registry_has_chat_embedding_and_real_rerank_protocols() -> None:
+def test_factory_rejects_a_component_missing_chat_methods() -> None:
+    factory = ProviderFactory()
+
+    @dataclass
+    class Incomplete:
+        provider_name: str = "test-provider"
+        model: str = "test-model"
+
+    factory.register_adapter("chat", "test-adapter", lambda context: Incomplete())
+    with pytest.raises(ModelConfigurationError, match="missing"):
+        factory.create_chat_provider(ChatModelConfig(route()), api_key="secret")
+
+
+def test_factory_accepts_only_the_chat_capability() -> None:
+    factory = ProviderFactory()
+    for capability in ("embedding", "rerank"):
+        with pytest.raises(ValueError, match="chat"):
+            factory.register_adapter(capability, "test-adapter", lambda context: FakeChatProvider())  # type: ignore[arg-type]
+
+
+def test_builtin_registry_has_only_chat_protocols() -> None:
     factory = ProviderFactory()
     register_builtin_adapters(factory)
     assert factory.registered_adapters("chat") == ("anthropic_messages", "openai_compatible_chat")
-    assert factory.registered_adapters("embedding") == ("openai_compatible_embedding",)
-    assert factory.registered_adapters("rerank") == ("openai_compatible_rerank",)
-
-    rerank = RerankModelConfig(route(adapter="future-rerank"))
-    with pytest.raises(ModelConfigurationError, match="not registered"):
-        factory.create_reranker(rerank, api_key="secret")
 
 
 def test_builtin_registry_constructs_real_protocol_adapters_without_network_io() -> None:
     factory = ProviderFactory()
     register_builtin_adapters(factory)
-    chat_config = ChatModelConfig(
-        route(adapter="openai_compatible_chat"),
-    )
-    embedding_config = EmbeddingModelConfig(
-        route(adapter="openai_compatible_embedding"),
-        dimension=2,
-    )
-    rerank_config = RerankModelConfig(
-        route(adapter="openai_compatible_rerank"),
-    )
-
-    chat = factory.create_chat_provider(chat_config, api_key="secret")
-    embedder = factory.create_embedder(embedding_config, api_key="secret")
-    reranker = factory.create_reranker(rerank_config, api_key="secret")
-
+    chat = factory.create_chat_provider(ChatModelConfig(route(adapter="openai_compatible_chat")), api_key="secret")
     assert isinstance(chat, OpenAICompatibleChatProvider)
-    assert isinstance(embedder, EmbeddingClient)
-    assert isinstance(embedder.provider, OpenAICompatibleEmbeddingProvider)
-    assert isinstance(reranker, RerankClient)
-    assert isinstance(reranker.provider, OpenAICompatibleRerankProvider)
-
-
-def test_builtin_adapter_builders_reject_a_capability_config_from_the_wrong_protocol() -> None:
-    rerank = RerankModelConfig(route(adapter="future-rerank"))
-    context = ProviderBuildContext(rerank, api_key="secret")
-    with pytest.raises(ModelConfigurationError, match="EmbeddingModelConfig"):
-        build_openai_compatible_embedding_provider(context)
-    with pytest.raises(ModelConfigurationError, match="ChatModelConfig"):
-        build_openai_compatible_chat_provider(context)
-    with pytest.raises(ModelConfigurationError, match="anthropic_messages adapter requires ChatModelConfig"):
-        build_anthropic_messages_provider(context)
-    chat_context = ProviderBuildContext(
-        ChatModelConfig(route(adapter="openai_compatible_chat")),
-        api_key="secret",
-    )
-    with pytest.raises(ModelConfigurationError, match="RerankModelConfig"):
-        build_openai_compatible_rerank_provider(chat_context)
-
-
-def test_factory_can_accept_a_future_real_rerank_adapter_without_changing_retrieval_contract() -> None:
-    factory = ProviderFactory()
-    factory.register_adapter("rerank", "test-adapter", lambda context: FakeReranker())
-    reranker = factory.create_reranker(RerankModelConfig(route()), api_key="secret")
-    assert asyncio.run(reranker.rerank("query", ("a", "b"))) == (1.0, 1.0)
 
 
 def test_factory_passes_an_adapter_owned_credential_mapping_without_assuming_api_key() -> None:
     factory = ProviderFactory()
     observed: list[ProviderBuildContext] = []
 
-    def build(context: ProviderBuildContext) -> FakeEmbeddingProvider:
+    def build(context: ProviderBuildContext) -> FakeChatProvider:
         observed.append(context)
-        return FakeEmbeddingProvider()
+        return FakeChatProvider()
 
-    factory.register_adapter("embedding", "test-adapter", build)
-    config = EmbeddingModelConfig(route(), dimension=2)
+    factory.register_adapter("chat", "test-adapter", build)
 
-    factory.create_embedder(config, credentials={"token": "secret"})
+    factory.create_chat_provider(ChatModelConfig(route()), credentials={"token": "secret"})
 
     assert dict(observed[0].credentials) == {"token": "secret"}
     assert observed[0].api_key == ""

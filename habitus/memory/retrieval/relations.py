@@ -1,6 +1,8 @@
-"""SearchService 主召回之后的有界 Links/Backlinks 一跳关系扩展。"""
+"""读到一张卡片时按它的 Links/Backlinks 有界补一跳邻居。"""
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 from habitus.memory.document import MemoryDocument, MemoryStoredLink
 from habitus.memory.retrieval.model import (
@@ -28,8 +30,6 @@ class RelationExpander:
     def expand(
         self,
         memories: tuple[MemoryMatchedMemory, ...],
-        *,
-        roots: tuple[MemoryURI, ...],
     ) -> tuple[MemoryMatchedMemory, ...]:
         if not memories or self.config.max_relation_neighbors_total == 0:
             return memories
@@ -37,7 +37,6 @@ class RelationExpander:
         neighbor_documents: dict[MemoryURI, MemoryDocument] = {}
         selected_relations = self._select(
             memories,
-            roots=roots,
             direct_documents=direct_documents,
             neighbor_documents=neighbor_documents,
         )
@@ -52,7 +51,6 @@ class RelationExpander:
         self,
         memories: tuple[MemoryMatchedMemory, ...],
         *,
-        roots: tuple[MemoryURI, ...],
         direct_documents: dict[MemoryURI, MemoryDocument],
         neighbor_documents: dict[MemoryURI, MemoryDocument],
     ) -> dict[MemoryURI, list[MemoryStoredLink]]:
@@ -67,8 +65,6 @@ class RelationExpander:
             for relation in relations:
                 neighbor = relation.to_uri if relation.from_uri == memory.uri else relation.from_uri
                 if relation.identity in assigned_relations:
-                    continue
-                if not any(neighbor.matches_prefix(root) for root in roots):
                     continue
                 document = direct_documents.get(neighbor) or neighbor_documents.get(neighbor)
                 if document is None:
@@ -111,14 +107,7 @@ class RelationExpander:
                 if document is None:
                     document = neighbor_documents[neighbor_uri]
                 related.append(MemoryRelatedMemory(relation=relation, document=document))
-            expanded.append(
-                MemoryMatchedMemory(
-                    hit=memory.hit,
-                    document=memory.document,
-                    matched_queries=memory.matched_queries,
-                    related=tuple(related),
-                )
-            )
+            expanded.append(replace(memory, related=tuple(related)))
         return tuple(expanded)
 
     @staticmethod

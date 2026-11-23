@@ -1,7 +1,8 @@
 """读 ``habitus/config/example.yaml`` 里列出的可调键（含注释掉的示例行），与改动前的那一份比出新增的键。
 
 示例 YAML 的大部分分组是注释掉的（``# behavior:`` 下面一行一个 ``#   key: value  # 说明``），所以不能用 YAML 解析器读，
-按行认：顶格的 ``# <组>:`` / ``<组>:`` 开一组，组下缩进两格的 ``key: value`` 是这一组的一个键。更深的嵌套键不收。
+按行认：顶格的 ``# <组>:`` / ``<组>:`` 开一组，组下缩进两格的 ``key: value`` 是这一组的一个键。更深的嵌套键不收；
+没有值的 ``key:`` 是下一层分组的头（例如 ``summary_reader:``），它本身不是可调键，也不收。
 """
 
 from __future__ import annotations
@@ -29,9 +30,9 @@ def listed_keys(path: Path) -> dict[tuple[str, str], str]:
         indent = len(match["indent"])
         if line.startswith("#"):
             indent -= 1  # "#   key" 是注释掉的两格缩进
-        if indent != 2:
+        if indent != 2 or not match["value"]:
             continue
-        found[(section, match["key"])] = (match["value"] or "").strip()
+        found[(section, match["key"])] = match["value"].strip()
     return found
 
 

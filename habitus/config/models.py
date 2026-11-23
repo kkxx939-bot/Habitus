@@ -10,9 +10,7 @@ from habitus.config.loader import ConfigError, construct_config, group_fields, r
 from habitus.model_client import (
     CallFailureConfig,
     ChatModelConfig,
-    EmbeddingModelConfig,
     ProviderConfig,
-    RerankModelConfig,
 )
 
 _ModelConfigValue = TypeVar("_ModelConfigValue")
@@ -32,28 +30,20 @@ class StructuredOutputConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
-    """Chat、Embedding、可选 Rerank 和结构化输出的统一配置。"""
+    """Chat 与结构化输出的统一配置。"""
 
     chat: ChatModelConfig
-    embedding: EmbeddingModelConfig
-    rerank: RerankModelConfig | None = None
     structured_output: StructuredOutputConfig = field(default_factory=StructuredOutputConfig)
     call_failures: CallFailureConfig = field(default_factory=CallFailureConfig)
 
     @classmethod
     def from_mapping(cls, value: object) -> ModelConfig:
         data = group_fields(cls, value, "config.models")
-        rerank_value = data.get("rerank")
         return cls(
             chat=_chat_config(
                 required_field(data, "chat", path="config.models"),
                 "config.models.chat",
             ),
-            embedding=_embedding_config(
-                required_field(data, "embedding", path="config.models"),
-                "config.models.embedding",
-            ),
-            rerank=(None if rerank_value is None else _rerank_config(rerank_value, "config.models.rerank")),
             structured_output=construct_config(
                 StructuredOutputConfig,
                 data.get("structured_output", {}),
@@ -95,31 +85,6 @@ def _chat_config(value: object, path: str) -> ChatModelConfig:
         f"{path}.route",
     )
     return _construct_model_config(ChatModelConfig, {**data, "route": route}, path)
-
-
-def _embedding_config(value: object, path: str) -> EmbeddingModelConfig:
-    data = group_fields(EmbeddingModelConfig, value, path)
-    for name in ("query_prefix", "document_prefix"):
-        if name in data and not isinstance(data[name], str):  # YAML 里留空是 null，也要拒：不写就是空前缀
-            raise ConfigError(f"'{path}.{name}' must be a string")
-    route = _provider_config(
-        required_field(data, "route", path=path),
-        f"{path}.route",
-    )
-    return _construct_model_config(
-        EmbeddingModelConfig,
-        {**data, "route": route},
-        path,
-    )
-
-
-def _rerank_config(value: object, path: str) -> RerankModelConfig:
-    data = group_fields(RerankModelConfig, value, path)
-    route = _provider_config(
-        required_field(data, "route", path=path),
-        f"{path}.route",
-    )
-    return _construct_model_config(RerankModelConfig, {**data, "route": route}, path)
 
 
 __all__ = ["ModelConfig", "StructuredOutputConfig"]

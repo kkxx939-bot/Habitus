@@ -1,759 +1,125 @@
-"""Memory 主召回、关系补充与 Summary 条件后备测试。"""
+"""助手查记忆：清单 → 挑 → 找 → 判，三处来源、总时间上限、记账退路、模型不可用只给档案。"""
+
+from __future__ import annotations
 
 import asyncio
-import json
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+import time
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from habitus.foundation.observability import ObservationEvent, ObservationStatus
-from habitus.infrastructure.store.contracts import PathLock
-from habitus.memory.compaction import (
-    MemoryContextUseResult,
-)
-from habitus.memory.conversation import (
-    ConversationAddress,
-    ConversationMessageJournal,
-    ConversationRangeSummaryGenerator,
-    ConversationRangeSummaryStore,
-    ConversationSummaryCompactor,
-    ConversationSummaryStore,
-)
-from habitus.memory.conversation.indexing import ConversationSummaryMatch
-from habitus.memory.conversation.indexing.model import summary_reference
-from habitus.memory.model import MemoryDirectory, MemoryKind, MemoryLevel
+from habitus.behavior import BehaviorKind, BehaviorTree
+from habitus.behavior.tree.writer import BehaviorDocumentWriter
+from habitus.foundation.observability import ObservationEvent
+from habitus.memory.conversation import ConversationAddress, ConversationSummaryMatch, summary_reference
+from habitus.memory.document import MemoryDocumentMetadata
+from habitus.memory.model import MemoryAddress, MemoryKind, MemoryLevel
 from habitus.memory.recall import (
     MemoryRecallLifecycle,
     MemoryRecallLifecycleConfig,
-    MemoryRecallLifecycleError,
     MemoryRecallTarget,
     SQLiteMemoryRecallLifecycleStore,
 )
 from habitus.memory.retrieval import (
-    ConversationSearchContextReader,
-    MemoryContextAssembler,
-    MemoryQueryResult,
-    MemoryRetrievalGrader,
-    MemorySearchHit,
-    MemorySearchMode,
-    MemorySearchQueryPlanner,
+    BehaviorRecord,
+    BehaviorRecordBatch,
+    MemoryCatalogReader,
+    MemorySearchDegradationStage,
     MemorySearchServiceConfig,
-    MemorySemanticSearchConfig,
-    MemorySemanticSearchEngine,
-    MemoryTypedQuery,
-    MemoryVectorMatch,
+    NoBehaviorRecords,
     SearchService,
 )
+from habitus.memory.semantic import MemorySemanticConfig, MemorySemanticRefresher
 from habitus.memory.snapshot import MemorySnapshotReader
-from habitus.memory.tree import MemoryTree
+from habitus.memory.tree import MemoryTree, MemoryTreeConsistencyError
 from habitus.memory.uri import MemoryURI
-from habitus.model_client import (
-    ChatClient,
-    ChatModelConfig,
-    EmbeddingVector,
-    ModelResponse,
-    ProviderCapabilities,
-    ProviderConfig,
-    StructuredChatClient,
-)
-from tests.helpers import document, segment, segment_summary
+from habitus.model_client import ModelCircuitOpenError, ModelErrorKind
+from habitus.runtime.behavior_records import BehaviorTreeRecords
+from tests.helpers import codec, registry, segment_summary
 from tests.lock_store import ProcessLocalLockStore
-from tests.model_helpers import prepare_chat_request
+from tests.unit.behavior.tree_payloads import DAY, gap_payload, local, occurrence_payload
+
+CST = timezone(timedelta(hours=8))
+NOW = datetime(2026, 8, 20, 4, 0, tzinfo=UTC)
+PROFILE_URI = MemoryURI.from_address(MemoryAddress.profile())
 
 
 @dataclass
-class QueueChatProvider:
-    responses: list[dict[str, object]]
-    provider_name: str = "test"
-    model: str = "test"
-    is_remote: bool = False
-    capabilities: ProviderCapabilities = ProviderCapabilities()
-
-    prepare = staticmethod(prepare_chat_request)
-
-    def complete(self, request):
-        return ModelResponse(json.dumps(self.responses.pop(0), ensure_ascii=False), self.model, self.provider_name)
-
-    async def complete_async(self, request):
-        return self.complete(request)
-
-    def stream(self, request):
-        return iter(())
-
-    async def stream_async(self, request):
-        if False:
-            yield None
-
-    def health_check(self):
-        return {"ok": True}
+class _Response:
+    value: object
 
 
-class SemanticSearch:
-    def __init__(self, hits=()):
-        self.hits = hits
-        self.calls = []
+@dataclass
+class ScriptedClient:
+    """按顺序回答"挑"与"判"；每次记下提示词。``delay`` 让某一步慢下来，``error`` 让它失败。"""
 
-    async def search(self, query, **kwargs):
-        self.calls.append((query, kwargs))
-        return self.hits
+    answers: list[object]
+    prompts: list[tuple[str, str]] = field(default_factory=list)
+    delays: dict[int, float] = field(default_factory=dict)
+    error: BaseException | None = None
 
-
-class StaticAdmissionEmbedder:
-    async def embed_query(self, query: str) -> EmbeddingVector:
-        return EmbeddingVector((1.0, 0.0))
-
-
-class StaticAdmissionIndex:
-    def __init__(self, matches: tuple[MemoryVectorMatch, ...]) -> None:
-        self.matches = matches
-
-    async def search(self, query_vector, **kwargs):
-        return self.matches
-
-    async def search_children(self, query_vector, **kwargs):
-        return ()
+    async def complete_json_async(self, request, *, schema, name, validator, context):  # type: ignore[no-untyped-def]
+        index = len(self.prompts)
+        self.prompts.append((name, request.messages[-1].content))
+        if self.error is not None:
+            raise self.error
+        if index in self.delays:
+            await asyncio.sleep(self.delays[index])
+        return _Response(validator(self.answers[index]))
 
 
-class StaticAdmissionReranker:
-    def __init__(self, scores: tuple[float, ...]) -> None:
-        self.scores = scores
-
-    async def rerank(self, query: str, documents: Sequence[str]) -> tuple[float, ...]:
-        return self.scores
+def pick(read=(), card_keywords=(), records=None, summaries=None) -> dict[str, object]:  # type: ignore[no-untyped-def]
+    return {"read": list(read), "card_keywords": list(card_keywords), "records": records, "summaries": summaries}
 
 
-class SummarySearch:
-    def __init__(self, matches=()):
-        self.matches = matches
-        self.calls = []
+def judge(use, *, enough: bool = True, last: bool = False, following=None) -> dict[str, object]:  # type: ignore[no-untyped-def]
+    value: dict[str, object] = {"enough": enough, "use": list(use)}
+    if not last:
+        value["next"] = following
+    return value
 
-    async def search(self, query, *, limit):
-        self.calls.append((query, limit))
+
+def source(date_from: str | None = None, date_to: str | None = None, keywords=()) -> dict[str, object]:  # type: ignore[no-untyped-def]
+    return {"date_from": date_from, "date_to": date_to, "keywords": list(keywords)}
+
+
+@dataclass
+class FakeRecords:
+    records: tuple[BehaviorRecord, ...]
+    failing: tuple[date, ...] = ()
+
+    def days(self) -> tuple[date, ...]:
+        return tuple(sorted({record.day for record in self.records}))
+
+    def read_days(self, days: tuple[date, ...]) -> BehaviorRecordBatch:
+        wanted = set(days) - set(self.failing)
+        return BehaviorRecordBatch(
+            tuple(record for record in self.records if record.day in wanted),
+            tuple(sorted(set(days) & set(self.failing))),
+        )
+
+
+@dataclass
+class FakeSummaries:
+    matches: tuple[ConversationSummaryMatch, ...] = ()
+    config: Any = field(default_factory=lambda: type("C", (), {"max_record_chars": 16_000})())
+
+    def walk(self) -> tuple[ConversationSummaryMatch, ...]:
         return self.matches
 
 
-def structured(responses: list[dict[str, object]]) -> StructuredChatClient:
-    route = ProviderConfig(
-        provider="test",
-        adapter="test",
-        model="test",
-        base_url="https://example.com",
-        max_retries=0,
-    )
-    return StructuredChatClient(ChatClient(ChatModelConfig(route), QueueChatProvider(responses)))
+@dataclass
+class FakeContextReader:
+    config: MemorySearchServiceConfig
 
+    def read(self, _address):  # type: ignore[no-untyped-def]
+        raise AssertionError("these tests search without a Conversation")
 
-def conversation_context_reader(
-    tmp_path: Path,
-    config: MemorySearchServiceConfig,
-) -> ConversationSearchContextReader:
-    journal = ConversationMessageJournal(
-        tmp_path / "conversation",
-        PathLock(ProcessLocalLockStore()),
-    )
-    segment_store = ConversationSummaryStore(journal.layout)
-    range_store = ConversationRangeSummaryStore(journal.layout)
-    compactor = ConversationSummaryCompactor(
-        journal,
-        segment_store,
-        range_store,
-        ConversationRangeSummaryGenerator(structured([])),
-    )
-    return ConversationSearchContextReader(journal, compactor, config=config)
 
-
-def service(
-    tmp_path: Path,
-    *,
-    semantic: SemanticSearch,
-    summaries: SummarySearch,
-    responses: list[dict[str, object]] | None = None,
-    config: MemorySearchServiceConfig | None = None,
-    lifecycle_config: MemoryRecallLifecycleConfig | None = None,
-    recall_lifecycle: MemoryRecallLifecycle | None = None,
-    clock: Callable[[], datetime] | None = None,
-) -> SearchService:
-    config = config or MemorySearchServiceConfig()
-    lifecycle_config = lifecycle_config or MemoryRecallLifecycleConfig()
-    tree = MemoryTree(tmp_path / "memory")
-    reader = MemorySnapshotReader(tree)
-    client = structured([] if responses is None else responses)
-    planner = MemorySearchQueryPlanner(client, config=config)
-    grader = MemoryRetrievalGrader(client, config=config)
-    context_reader = conversation_context_reader(tmp_path, config)
-    lifecycle = recall_lifecycle or MemoryRecallLifecycle(
-        SQLiteMemoryRecallLifecycleStore(
-            tmp_path / "workflow" / "memory_recall_lifecycle.sqlite3",
-            config=lifecycle_config,
-        ),
-        config=lifecycle_config,
-    )
-    return SearchService(
-        tree=tree,
-        snapshot_reader=reader,
-        semantic_search=semantic,
-        summary_search=summaries,
-        query_planner=planner,
-        retrieval_grader=grader,
-        recall_lifecycle=lifecycle,
-        conversation_context=context_reader,
-        assembler=MemoryContextAssembler(config=config),
-        config=config,
-        clock=clock,
-    )
-
-
-def summary_match() -> ConversationSummaryMatch:
-    source = segment(segment_id="000000000000-000000000001")
-    summary = segment_summary(source)
-    address = ConversationAddress("conversation-1", date(2026, 7, 1))
-    return ConversationSummaryMatch(
-        summary_reference(address, summary),
-        summary,
-        "历史过程：用户先提出简洁回答，助手随后确认。",
-        0.8,
-        0.8,
-    )
-
-
-def test_find_never_uses_summary_fallback_even_when_memory_has_no_hits(tmp_path: Path) -> None:
-    semantic = SemanticSearch()
-    summaries = SummarySearch((summary_match(),))
-    result = asyncio.run(service(tmp_path, semantic=semantic, summaries=summaries).find("历史偏好"))
-    assert result.memories == ()
-    assert result.retrieval_assessment is None
-    assert not result.summary_fallback_attempted
-    assert summaries.calls == []
-
-
-def test_search_uses_summary_only_after_memory_is_assessed_insufficient(tmp_path: Path) -> None:
-    semantic = SemanticSearch()
-    summaries = SummarySearch((summary_match(),))
-    result = asyncio.run(service(tmp_path, semantic=semantic, summaries=summaries).search("之前怎么决定的"))
-    assert result.memories == ()
-    assert result.retrieval_assessment.decision.value == "insufficient"
-    assert result.summary_fallback_attempted
-    assert result.summary_fallbacks == (summary_match(),)
-    assert "Conversation Summary" in result.context
-    assert len(summaries.calls) == 1
-
-
-def test_sufficient_memory_is_primary_and_prevents_summary_search(tmp_path: Path) -> None:
-    preference = document(MemoryKind.PREFERENCE)
-    uri = MemoryURI.from_address(preference.address)
-    semantic = SemanticSearch((MemorySearchHit(uri, 0.9),))
-    summaries = SummarySearch((summary_match(),))
-    instance = service(
-        tmp_path,
-        semantic=semantic,
-        summaries=summaries,
-        responses=[
-            {
-                "decision": "sufficient",
-                "reason": "长期偏好足够回答。",
-                "missing_information": [],
-                "summary_query": None,
-            }
-        ],
-    )
-    instance.tree.write(preference)
-    result = asyncio.run(instance.search("用户喜欢什么回答风格"))
-    assert tuple(item.document for item in result.memories) == (preference,)
-    assert result.summary_fallbacks == ()
-    assert summaries.calls == []
-    assert result.context.index("长期记忆") < result.context.index("偏好")
-
-
-def test_find_records_only_the_final_model_visible_memory_as_success(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
-    preference = document(MemoryKind.PREFERENCE, timestamp=now)
-    uri = MemoryURI.from_address(preference.address)
-    instance = service(
-        tmp_path,
-        semantic=SemanticSearch((MemorySearchHit(uri, 0.9),)),
-        summaries=SummarySearch(),
-        clock=lambda: now,
-    )
-    instance.tree.write(preference)
-
-    result = asyncio.run(instance.find("回答偏好"))
-    assert result.memories[0].hit.lifecycle_semantic_score == 0.9
-    assert result.memories[0].hit.lifecycle_hotness == pytest.approx(0.5)
-    assert result.memories[0].hit.lifecycle_temperature.value == "warm"
-    assert "temperature" not in result.context
-    assert instance.recall_lifecycle.store.read_many((uri,))[0].useful_recall_count == 1
-
-
-def test_sufficient_grader_result_records_only_retained_direct_memory_and_keeps_l2(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
-    first = document(
-        MemoryKind.PREFERENCE,
-        fields={"topic": "回答风格-a", "content": "- 偏好简洁回答"},
-        timestamp=now,
-    )
-    second = document(
-        MemoryKind.PREFERENCE,
-        fields={"topic": "回答风格-b", "content": "- 偏好分点回答"},
-        timestamp=now,
-    )
-    first_uri = MemoryURI.from_address(first.address)
-    second_uri = MemoryURI.from_address(second.address)
-    instance = service(
-        tmp_path,
-        semantic=SemanticSearch((MemorySearchHit(first_uri, 0.9), MemorySearchHit(second_uri, 0.8))),
-        summaries=SummarySearch(),
-        responses=[
-            {
-                "decision": "sufficient",
-                "reason": "第一条长期偏好足够支持回答。",
-                "missing_information": [],
-                "summary_query": None,
-            }
-        ],
-        clock=lambda: now,
-    )
-    instance.tree.write(first)
-    instance.tree.write(second)
-
-    result = asyncio.run(instance.search("回答偏好", limit=1))
-    assert tuple(memory.uri for memory in result.memories) == (first_uri,)
-    assert result.memories[0].hit.lifecycle_temperature.value == "warm"
-    states = instance.recall_lifecycle.store.read_many((first_uri, second_uri))
-    assert tuple((state.uri, state.useful_recall_count) for state in states) == ((first_uri, 1),)
-    assert instance.tree.read(first.address) == first
-
-    recalled = asyncio.run(instance.find("回答偏好", limit=1))
-    assert recalled.memories[0].hit.lifecycle_temperature.value == "hot"
-    assert instance.recall_lifecycle.store.read_many((first_uri,))[0].useful_recall_count == 2
-
-
-def test_final_context_exposure_heats_each_retained_direct_memory(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
-    first = document(
-        MemoryKind.PREFERENCE,
-        fields={"topic": "回答长度", "content": "- 偏好简洁回答"},
-        timestamp=now,
-    )
-    second = document(
-        MemoryKind.PREFERENCE,
-        fields={"topic": "回答结构", "content": "- 偏好分点回答"},
-        timestamp=now,
-    )
-    first_uri = MemoryURI.from_address(first.address)
-    second_uri = MemoryURI.from_address(second.address)
-    instance = service(
-        tmp_path,
-        semantic=SemanticSearch((MemorySearchHit(first_uri, 0.9), MemorySearchHit(second_uri, 0.8))),
-        summaries=SummarySearch(),
-        responses=[
-            {
-                "decision": "sufficient",
-                "reason": "最终召回的长期偏好集合足够支持回答。",
-                "missing_information": [],
-                "summary_query": None,
-            }
-        ],
-        clock=lambda: now,
-    )
-    instance.tree.write(first)
-    instance.tree.write(second)
-
-    result = asyncio.run(instance.search("回答应该多长并如何组织", limit=2))
-    assert len(result.memories) == 2
-    states = instance.recall_lifecycle.store.read_many((first_uri, second_uri))
-    assert tuple((state.uri, state.useful_recall_count) for state in states) == (
-        (first_uri, 1),
-        (second_uri, 1),
-    )
-
-
-def test_hot_low_relevance_memory_cannot_bypass_rerank_admission_or_enter_agent_context(
-    tmp_path: Path,
-) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
-    relevant = document(
-        MemoryKind.PREFERENCE,
-        fields={"topic": "回答长度", "content": "- 偏好简洁回答"},
-        timestamp=now,
-    )
-    hitchhiker = document(
-        MemoryKind.PREFERENCE,
-        fields={"topic": "界面主题", "content": "- 偏好深色主题"},
-        timestamp=now,
-    )
-    relevant_uri = MemoryURI.from_address(relevant.address)
-    hitchhiker_uri = MemoryURI.from_address(hitchhiker.address)
-    semantic = MemorySemanticSearchEngine(
-        embedder=StaticAdmissionEmbedder(),
-        index=StaticAdmissionIndex(
-            (
-                MemoryVectorMatch(
-                    hitchhiker_uri,
-                    MemoryLevel.DETAIL,
-                    MemoryDirectory.for_address(hitchhiker.address),
-                    hitchhiker.markdown_body,
-                    0.95,
-                ),
-                MemoryVectorMatch(
-                    relevant_uri,
-                    MemoryLevel.DETAIL,
-                    MemoryDirectory.for_address(relevant.address),
-                    relevant.markdown_body,
-                    0.8,
-                ),
-            )
-        ),
-        reranker=StaticAdmissionReranker((0.19, 0.91)),
-        config=MemorySemanticSearchConfig(mode=MemorySearchMode.VECTOR),
-    )
-    instance = service(
-        tmp_path,
-        semantic=semantic,  # type: ignore[arg-type]
-        summaries=SummarySearch(),
-        responses=[
-            {
-                "decision": "sufficient",
-                "reason": "回答长度偏好足够支持回答。",
-                "missing_information": [],
-                "summary_query": None,
-            }
-        ],
-        clock=lambda: now,
-    )
-    instance.tree.write(relevant)
-    instance.tree.write(hitchhiker)
-    hitchhiker_target = MemoryRecallTarget(
-        hitchhiker_uri,
-        hitchhiker.metadata.revision,
-        hitchhiker.metadata.created_at,
-    )
-    for index in range(3):
-        instance.recall_lifecycle.record_use(
-            (hitchhiker_target,),
-            used_at=now + timedelta(seconds=index),
-        )
-
-    result = asyncio.run(instance.search("回答应该多长", limit=2))
-
-    assert tuple(memory.uri for memory in result.memories) == (relevant_uri,)
-    assert "偏好深色主题" not in result.context
-    states = instance.recall_lifecycle.store.read_many((relevant_uri, hitchhiker_uri))
-    assert tuple((state.uri, state.useful_recall_count) for state in states) == (
-        (relevant_uri, 1),
-        (hitchhiker_uri, 3),
-    )
-
-
-def test_insufficient_memory_with_summary_still_records_final_direct_context_use(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
-    preference = document(MemoryKind.PREFERENCE, timestamp=now)
-    uri = MemoryURI.from_address(preference.address)
-    instance = service(
-        tmp_path,
-        semantic=SemanticSearch((MemorySearchHit(uri, 0.9),)),
-        summaries=SummarySearch((summary_match(),)),
-        responses=[
-            {
-                "decision": "insufficient",
-                "reason": "长期记忆缺少决定过程。",
-                "missing_information": ["决定过程"],
-                "summary_query": "决定过程",
-            }
-        ],
-        clock=lambda: now,
-    )
-    instance.tree.write(preference)
-
-    result = asyncio.run(instance.search("之前怎么决定的"))
-    assert result.summary_fallbacks == (summary_match(),)
-    assert instance.recall_lifecycle.store.read_many((uri,))[0].useful_recall_count == 1
-
-
-def test_rejected_final_context_is_regraded_and_can_trigger_summary_fallback(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
-    preference = document(MemoryKind.PREFERENCE, timestamp=now)
-    uri = MemoryURI.from_address(preference.address)
-    summaries = SummarySearch((summary_match(),))
-    instance = service(
-        tmp_path,
-        semantic=SemanticSearch((MemorySearchHit(uri, 0.9),)),
-        summaries=summaries,
-        responses=[
-            {
-                "decision": "sufficient",
-                "reason": "候选记忆看起来足够。",
-                "missing_information": [],
-                "summary_query": None,
-            },
-            {
-                "decision": "insufficient",
-                "reason": "最终记忆因 revision fence 被拒绝。",
-                "missing_information": ["决定过程"],
-                "summary_query": "决定过程",
-            },
-        ],
-        clock=lambda: now,
-    )
-    instance.tree.write(preference)
-
-    class RejectingContextUse:
-        @staticmethod
-        def expand_for_probe(value):
-            return value
-
-        @staticmethod
-        async def record_context_use(targets, *, used_at):
-            return MemoryContextUseResult((), tuple(target.uri for target in targets))
-
-    instance.cold_probe_expander = RejectingContextUse()
-    result = asyncio.run(instance.search("之前怎么决定的"))
-
-    assert result.memories == ()
-    assert result.retrieval_assessment is not None
-    assert result.retrieval_assessment.decision.value == "insufficient"
-    assert result.summary_fallback_attempted
-    assert result.summary_fallbacks == (summary_match(),)
-    assert summaries.calls == [("之前怎么决定的", instance.config.summary_fallback_limit)]
-    assert tuple(item.stage.value for item in result.degradations) == ("recall_lifecycle",)
-
-
-def test_first_grader_failure_degrades_without_assessment_or_summary(tmp_path: Path) -> None:
-    """首次评估失败：记 retrieval_grader 降级、assessment 为空、不补查 Summary。"""
-
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
-    preference = document(MemoryKind.PREFERENCE, timestamp=now)
-    summaries = SummarySearch((summary_match(),))
-    instance = service(
-        tmp_path,
-        semantic=SemanticSearch((MemorySearchHit(MemoryURI.from_address(preference.address), 0.9),)),
-        summaries=summaries,
-        responses=[],
-        clock=lambda: now,
-    )
-    instance.tree.write(preference)
-
-    result = asyncio.run(instance.search("之前怎么决定的"))
-
-    assert len(result.memories) == 1
-    assert result.retrieval_assessment is None
-    assert not result.summary_fallback_attempted
-    assert summaries.calls == []
-    assert tuple(item.stage.value for item in result.degradations) == ("retrieval_grader",)
-
-
-class PartiallyRejectingContextUse:
-    """使用确认只接受 ``accepted`` 中的 URI 并返回其文档，其余目标视为失去生命周期 fence。"""
-
-    def __init__(self, accepted: dict[MemoryURI, object]) -> None:
-        self.accepted = accepted
-
-    @staticmethod
-    def expand_for_probe(value):
-        return value
-
-    async def record_context_use(self, targets, *, used_at):
-        return MemoryContextUseResult(
-            tuple(self.accepted[target.uri] for target in targets if target.uri in self.accepted),
-            tuple(target.uri for target in targets if target.uri not in self.accepted),
-        )
-
-
-def test_regrade_failure_after_final_context_rejection_clears_the_first_assessment(tmp_path: Path) -> None:
-    """使用确认剔除部分记忆后的再评估失败：先前的 sufficient 评估作废为空，不补查 Summary。"""
-
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
-    first = document(MemoryKind.PREFERENCE, fields={"topic": "回答长度", "content": "- 偏好简洁回答"}, timestamp=now)
-    second = document(MemoryKind.PREFERENCE, fields={"topic": "回答结构", "content": "- 偏好分点回答"}, timestamp=now)
-    first_uri = MemoryURI.from_address(first.address)
-    second_uri = MemoryURI.from_address(second.address)
-    summaries = SummarySearch((summary_match(),))
-    instance = service(
-        tmp_path,
-        semantic=SemanticSearch((MemorySearchHit(first_uri, 0.9), MemorySearchHit(second_uri, 0.8))),
-        summaries=summaries,
-        responses=[
-            {
-                "decision": "sufficient",
-                "reason": "候选记忆看起来足够。",
-                "missing_information": [],
-                "summary_query": None,
-            },
-        ],
-        clock=lambda: now,
-    )
-    instance.tree.write(first)
-    instance.tree.write(second)
-    instance.cold_probe_expander = PartiallyRejectingContextUse({first_uri: first})
-
-    result = asyncio.run(instance.search("之前怎么决定的"))
-
-    assert tuple(memory.uri for memory in result.memories) == (first_uri,)
-    assert result.retrieval_assessment is None
-    assert not result.summary_fallback_attempted
-    assert summaries.calls == []
-    assert tuple(item.stage.value for item in result.degradations) == ("recall_lifecycle", "retrieval_grader")
-
-
-def test_regrade_summary_failure_after_final_context_rejection_is_degraded(tmp_path: Path) -> None:
-    """使用确认剔除记忆后再评估为不足、补查 Summary 失败：记 summary_fallback 降级，保留不足评估。"""
-
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
-    preference = document(MemoryKind.PREFERENCE, timestamp=now)
-    uri = MemoryURI.from_address(preference.address)
-
-    class FailingSummarySearch:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, int]] = []
-
-        async def search(self, query, *, limit):
-            self.calls.append((query, limit))
-            raise TimeoutError("summary timeout")
-
-    summaries = FailingSummarySearch()
-    instance = service(
-        tmp_path,
-        semantic=SemanticSearch((MemorySearchHit(uri, 0.9),)),
-        summaries=summaries,
-        responses=[
-            {
-                "decision": "sufficient",
-                "reason": "候选记忆看起来足够。",
-                "missing_information": [],
-                "summary_query": None,
-            },
-        ],
-        clock=lambda: now,
-    )
-    instance.tree.write(preference)
-    instance.cold_probe_expander = PartiallyRejectingContextUse({})
-
-    result = asyncio.run(instance.search("之前怎么决定的"))
-
-    assert result.memories == ()
-    assert result.retrieval_assessment is not None
-    assert result.retrieval_assessment.decision.value == "insufficient"
-    assert result.summary_fallback_attempted
-    assert result.summary_fallbacks == ()
-    assert summaries.calls == [("之前怎么决定的", instance.config.summary_fallback_limit)]
-    assert tuple(item.stage.value for item in result.degradations) == ("recall_lifecycle", "summary_fallback")
-
-
-class FailingRecallStateStore:
-    def __init__(self, *, fail_read: bool = False, fail_write: bool = False) -> None:
-        self.fail_read = fail_read
-        self.fail_write = fail_write
-
-    def initialize(self) -> None:
-        return None
-
-    def read_many(self, uris):
-        if self.fail_read:
-            raise MemoryRecallLifecycleError("read failed")
-        return ()
-
-    def record_use(self, targets, *, used_at):
-        if self.fail_write:
-            raise MemoryRecallLifecycleError("write failed")
-        return ()
-
-    def record_probe(self, targets, *, probed_at):
-        if self.fail_write:
-            raise MemoryRecallLifecycleError("write failed")
-        return ()
-
-    def mark_compacted(
-        self,
-        target,
-        *,
-        lifecycle_activity_at,
-        compacted_at,
-        expected_version,
-    ):
-        if self.fail_write:
-            raise MemoryRecallLifecycleError("write failed")
-        raise AssertionError("not used by SearchService")
-
-    def mark_retire_candidate(self, target, *, marked_at, expected_version):
-        if self.fail_write:
-            raise MemoryRecallLifecycleError("write failed")
-        raise AssertionError("not used by SearchService")
-
-    def mark_retired(self, target, *, retired_at, expected_version):
-        if self.fail_write:
-            raise MemoryRecallLifecycleError("write failed")
-        raise AssertionError("not used by SearchService")
-
-    def delete_many(self, uris):
-        return 0
-
-
-def test_lifecycle_read_failure_keeps_semantic_order_and_marks_degradation(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
-    preference = document(MemoryKind.PREFERENCE, timestamp=now)
-    uri = MemoryURI.from_address(preference.address)
-    lifecycle = MemoryRecallLifecycle(FailingRecallStateStore(fail_read=True))
-    instance = service(
-        tmp_path,
-        semantic=SemanticSearch((MemorySearchHit(uri, 0.9),)),
-        summaries=SummarySearch(),
-        recall_lifecycle=lifecycle,
-        clock=lambda: now,
-    )
-    instance.tree.write(preference)
-
-    result = asyncio.run(instance.find("回答偏好"))
-    assert result.memories[0].hit.score == 0.9
-    assert result.memories[0].hit.lifecycle_temperature is None
-    assert tuple(item.stage.value for item in result.degradations) == ("recall_lifecycle",)
-
-
-def test_actual_use_write_failure_keeps_detailed_memory_and_marks_degradation(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
-    preference = document(MemoryKind.PREFERENCE, timestamp=now)
-    uri = MemoryURI.from_address(preference.address)
-    lifecycle = MemoryRecallLifecycle(FailingRecallStateStore(fail_write=True))
-    instance = service(
-        tmp_path,
-        semantic=SemanticSearch((MemorySearchHit(uri, 0.9),)),
-        summaries=SummarySearch(),
-        responses=[
-            {
-                "decision": "sufficient",
-                "reason": "长期偏好足够支持回答。",
-                "missing_information": [],
-                "summary_query": None,
-            }
-        ],
-        recall_lifecycle=lifecycle,
-        clock=lambda: now,
-    )
-    instance.tree.write(preference)
-
-    result = asyncio.run(instance.search("回答偏好"))
-    assert result.retrieval_assessment.decision.value == "sufficient"
-    assert result.memories[0].hit.lifecycle_temperature.value == "warm"
-    assert tuple(item.stage.value for item in result.degradations) == ("recall_lifecycle",)
-
-
-def test_aggregate_deduplicates_same_uri_and_records_each_matching_query_once() -> None:
-    uri = MemoryURI.from_address(document(MemoryKind.PROFILE).address)
-    first_query = MemoryTypedQuery("用户是谁", "身份", 1)
-    second_query = MemoryTypedQuery("用户背景", "背景", 2)
-    hit = MemorySearchHit(uri, 0.8)
-    hits, queries = SearchService._aggregate(
-        (
-            MemoryQueryResult(first_query, (hit,)),
-            MemoryQueryResult(second_query, (MemorySearchHit(uri, 0.9),)),
-        )
-    )
-    assert hits[0].score == 0.9
-    assert queries[uri] == ("用户是谁", "用户背景")
-
-
-class RecordingObserver:
+class Recorder:
     def __init__(self) -> None:
         self.events: list[ObservationEvent] = []
 
@@ -761,48 +127,584 @@ class RecordingObserver:
         self.events.append(event)
 
 
-def test_search_observation_counts_results_degradations_and_lifecycle_temperatures(tmp_path: Path) -> None:
-    """一次检索完成后的观察事件：数量、降级与各生命周期温度的计数都来自最终结果。"""
-
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
-    preference = document(MemoryKind.PREFERENCE, timestamp=now)
-    uri = MemoryURI.from_address(preference.address)
-    observer = RecordingObserver()
-    instance = service(
-        tmp_path,
-        semantic=SemanticSearch((MemorySearchHit(uri, 0.9),)),
-        summaries=SummarySearch((summary_match(),)),
-        responses=[],
-        clock=lambda: now,
+def record(name: str, hour: int, *, day: date = date(2026, 3, 31), summary: str = "", goal: str = "") -> BehaviorRecord:
+    started = datetime(day.year, day.month, day.day, hour, 0, tzinfo=CST)
+    return BehaviorRecord(
+        address=f"session:behavior://occurrences/{day:%Y/%m/%d}/{name}",
+        lane="session",
+        day=day,
+        started_at=started,
+        name=name,
+        goal=goal or None,
+        summary=summary or name,
+        steps=(f"{name}的步骤",),
     )
-    instance.observer = observer
-    instance.tree.write(preference)
 
-    result = asyncio.run(instance.search("之前怎么决定的"))
 
-    temperature = result.memories[0].hit.lifecycle_temperature
-    assert temperature is not None
-    searches = [event for event in observer.events if event.operation == "search"]
-    assert len(searches) == 1
-    event = searches[0]
-    assert event.category == "retrieval"
-    assert event.status is ObservationStatus.DEGRADED
-    assert event.duration_seconds >= 0.0
-    assert event.attributes == {
-        "queries": 1,
-        "memories": 1,
-        "summaries": 0,
-        "degradations": 1,
-        "result_count": 1,
-        "degradation_count": 1,
-        "hot_memories": int(temperature.value == "hot"),
-        "warm_memories": int(temperature.value == "warm"),
-        "cold1_memories": int(temperature.value == "cold_1"),
-        "cold2_memories": int(temperature.value == "cold_2"),
-    }
+@dataclass
+class World:
+    tree: MemoryTree
+    refresher: MemorySemanticRefresher
+    lifecycle: MemoryRecallLifecycle
 
-    instance.observer = observer = RecordingObserver()
-    found = asyncio.run(instance.find("用户偏好"))
+    def put(
+        self, kind: MemoryKind, fields: dict[str, object], *, updated: datetime = NOW - timedelta(days=1)
+    ) -> MemoryURI:
+        document = codec().build(
+            kind, fields, metadata=MemoryDocumentMetadata(revision=1, created_at=updated, updated_at=updated)
+        )
+        self.tree.write(document)
+        self.refresher.refresh_for(document.address)
+        return MemoryURI.from_address(document.address)
 
-    assert found.degradations == ()
-    assert [event.status for event in observer.events if event.operation == "search"] == [ObservationStatus.SUCCESS]
+    def service(
+        self,
+        client: ScriptedClient,
+        *,
+        records=None,  # type: ignore[no-untyped-def]
+        summaries=None,  # type: ignore[no-untyped-def]
+        config: MemorySearchServiceConfig | None = None,
+        expander=None,  # type: ignore[no-untyped-def]
+        observer: Recorder | None = None,
+        catalog: MemoryCatalogReader | None = None,
+    ) -> SearchService:
+        resolved = config or MemorySearchServiceConfig()
+        return SearchService(
+            catalog=catalog or self.catalog(resolved),
+            snapshot_reader=MemorySnapshotReader(self.tree),
+            client=client,  # type: ignore[arg-type]
+            recall_lifecycle=self.lifecycle,
+            conversation_context=FakeContextReader(resolved),  # type: ignore[arg-type]
+            summaries=summaries or FakeSummaries(),  # type: ignore[arg-type]
+            records=records or NoBehaviorRecords(),
+            zone=CST,
+            config=resolved,
+            cold_probe_expander=expander,
+            clock=lambda: NOW,
+            observer=observer,
+        )
+
+    def catalog(self, config: MemorySearchServiceConfig) -> MemoryCatalogReader:
+        return MemoryCatalogReader(
+            self.tree,
+            registry(),
+            self.lifecycle,
+            max_catalog_chars=config.max_catalog_chars,
+            overview_max_bytes=1_000_000,
+            max_unlisted_scan=config.max_unlisted_scan,
+        )
+
+
+def world(tmp_path: Path, *, semantic: MemorySemanticConfig | None = None) -> World:
+    from habitus.infrastructure.store.contracts import PathLock
+
+    tree = MemoryTree(tmp_path / "memory", document_codec=codec())
+    tree.initialize()
+    refresher = MemorySemanticRefresher(tree, registry(), PathLock(ProcessLocalLockStore()), config=semantic)
+    config = MemoryRecallLifecycleConfig()
+    lifecycle = MemoryRecallLifecycle(
+        SQLiteMemoryRecallLifecycleStore(tmp_path / "recall.sqlite3", config=config), config=config
+    )
+    return World(tree, refresher, lifecycle)
+
+
+def search(service: SearchService, query: str = "问题", **kwargs: Any):  # type: ignore[no-untyped-def]
+    return asyncio.run(service.search(query, **kwargs))
+
+
+PREFERENCE = {"topic": "方案文档表述与结构", "content": "- 方案措辞偏正式，便于评审\n- 先写核心结论"}
+
+
+# ── 卡片 ─────────────────────────────────────────────────────────────────────
+
+
+def test_a_card_in_the_list_is_picked_read_handed_over_and_counted_once(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    uri = w.put(MemoryKind.PREFERENCE, PREFERENCE)
+    client = ScriptedClient([pick(read=["preferences/方案文档表述与结构.md"]), judge(["c1"])])
+
+    result = search(w.service(client))
+
+    assert [str(memory.uri) for memory in result.memories] == [str(uri)]
+    assert "方案措辞偏正式" in result.context
+    pick_prompt = client.prompts[0][1]
+    assert "preferences/方案文档表述与结构.md — 方案措辞偏正式，便于评审 先写核心结论" in pick_prompt
+    assert "revision" not in pick_prompt and "r1\t" not in pick_prompt  # 冷热用的版本、时间不给模型看
+    (state,) = w.lifecycle.store.read_many((uri,))
+    assert state.useful_recall_count == 1
+    assert result.rounds == 1 and len(client.prompts) == 2
+
+
+def test_reading_a_path_that_is_not_in_the_list_is_refused(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    w.put(MemoryKind.PREFERENCE, PREFERENCE)
+    client = ScriptedClient([pick(read=["preferences/不存在.md", "entities/x/y.md"]), judge([])])
+
+    result = search(w.service(client))
+
+    assert result.memories == ()
+    assert any("清单里没有 preferences/不存在.md" in note for note in result.notes)
+
+
+def test_kinds_limit_the_list_and_limit_caps_the_cards_handed_over(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    w.put(MemoryKind.PREFERENCE, PREFERENCE)
+    w.put(MemoryKind.PREFERENCE, {"topic": "通知措辞", "content": "- 通知要客气"})
+    w.put(MemoryKind.ENTITY, {"category": "项目", "name": "五一拉新方案", "summary": "方案放在 plans/campaign.md。"})
+    client = ScriptedClient(
+        [pick(read=["preferences/方案文档表述与结构.md", "preferences/通知措辞.md"]), judge(["c1", "c2"])]
+    )
+
+    result = search(w.service(client), kinds=(MemoryKind.PREFERENCE,), limit=1)
+
+    assert "五一拉新方案" not in client.prompts[0][1]
+    assert len(result.memories) == 1
+
+
+# ── 每一轮的记录 ───────────────────────────────────────────────────────────────
+
+
+def test_an_answer_only_in_the_turn_records_is_found_by_date_and_keyword_in_its_own_section(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    records = FakeRecords(
+        (
+            record("核对昨日广告花费与转化", 9, summary="花费 13670 元，转化 396 个"),
+            record("记录体重", 7, day=date(2026, 4, 8), summary="60.8 公斤"),
+        )
+    )
+    client = ScriptedClient([pick(records=source("2026-03-31", "2026-03-31", ["广告", "花费"])), judge(["r1"])])
+
+    result = search(w.service(client, records=records))
+
+    assert [item.name for item in result.records] == ["核对昨日广告花费与转化"]
+    assert "【每一轮的记录】" in result.context and "13670" in result.context
+    assert "60.8" not in result.context
+    judge_prompt = client.prompts[1][1]
+    assert "[r1] 记录 2026-03-31 09:00 核对昨日广告花费与转化" in judge_prompt
+
+
+def test_with_the_behaviour_side_off_the_search_still_answers_from_the_other_sources(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    w.put(MemoryKind.PREFERENCE, PREFERENCE)
+    client = ScriptedClient(
+        [pick(read=["preferences/方案文档表述与结构.md"], records=source(None, None, ["方案"])), judge(["c1"])]
+    )
+
+    result = search(w.service(client, records=NoBehaviorRecords()))
+
+    assert result.records == () and len(result.memories) == 1
+    assert result.degradations == ()
+
+
+def test_a_day_that_fails_to_read_is_skipped_and_the_rest_is_returned(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    bad = date(2026, 3, 30)
+    records = FakeRecords((record("周一例会", 9, day=bad), record("核对广告", 9)), failing=(bad,))
+    client = ScriptedClient([pick(records=source("2026-03-30", "2026-03-31", ["广告", "例会"])), judge(["r1"])])
+
+    result = search(w.service(client, records=records))
+
+    assert [item.name for item in result.records] == ["核对广告"]
+    assert any("2026-03-30" in note and "没读出来" in note for note in result.notes)
+
+
+def test_unwatched_gaps_are_not_records_and_continuations_are_searchable(tmp_path: Path) -> None:
+    """「未观测」「没读懂」是空白（gap），不进列出和搜索；名字照常的 occurrence（含续话这类）都读得到。"""
+
+    tree = BehaviorTree(tmp_path / "behavior-tree")
+    writer = BehaviorDocumentWriter(tree, ProcessLocalLockStore(), clock=lambda: local(23, 0))
+    writer.publish(BehaviorKind.OCCURRENCE, occurrence_payload())
+    writer.publish(BehaviorKind.GAP, gap_payload(gap_kind="未观测", started_at=local(21, 0), ended_at=local(21, 30)))
+    source_records = BehaviorTreeRecords((("session", tree),))
+
+    batch = source_records.read_days(source_records.days())
+
+    assert [item.name for item in batch.records] == ["洗了手"]
+    assert batch.records[0].day == DAY and batch.records[0].address.startswith("session:behavior://")
+    w = world(tmp_path)
+    client = ScriptedClient([pick(records=source(DAY.isoformat(), DAY.isoformat(), ["未观测"])), judge([])])
+    result = search(w.service(client, records=source_records))
+    assert result.records == ()
+    assert "未观测" not in client.prompts[1][1].split("到目前为止找到的材料")[1].split("请判断")[0]
+
+
+# ── 会话摘要 ──────────────────────────────────────────────────────────────────
+
+
+def summary_match() -> ConversationSummaryMatch:
+    summary = segment_summary()
+    address = ConversationAddress(summary.conversation_id, summary.started_at.date())
+    return ConversationSummaryMatch(
+        summary_reference(address, summary), summary, "overview: 转写出的文字稿叫 meeting_transcript.txt"
+    )
+
+
+def test_an_answer_only_in_a_summary_is_found_in_the_first_round(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    match = summary_match()
+    client = ScriptedClient([pick(summaries=source(None, None, ["转写"])), judge(["s1"])])
+
+    result = search(w.service(client, summaries=FakeSummaries((match,))))
+
+    assert [item.reference.identity for item in result.summaries] == [match.reference.identity]
+    assert result.rounds == 1 and len(client.prompts) == 2
+    assert "【会话摘要】" in result.context and "meeting_transcript.txt" in result.context
+
+
+def test_the_judge_is_told_the_later_material_wins_and_every_material_carries_its_time(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    w.put(MemoryKind.PREFERENCE, PREFERENCE)
+    client = ScriptedClient(
+        [
+            pick(read=["preferences/方案文档表述与结构.md"], summaries=source(None, None, ["转写"])),
+            judge(["c1", "s1"]),
+        ]
+    )
+
+    search(w.service(client, summaries=FakeSummaries((summary_match(),))))
+
+    judge_prompt = client.prompts[1][1]
+    assert "以时间更晚的为准" in judge_prompt
+    assert "（更新于 2026-08-19 12:00）" in judge_prompt
+    assert "会话摘要（2026-07-01 16:00 到" in judge_prompt
+
+
+def test_a_second_round_follows_the_judge_and_the_last_judge_cannot_ask_again(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    records = FakeRecords((record("核对广告", 9),))
+    client = ScriptedClient(
+        [
+            pick(),
+            judge([], enough=False, following=pick(records=source(None, None, ["广告"]))),
+            judge(["r1"], last=True),
+        ]
+    )
+
+    result = search(w.service(client, records=records))
+
+    assert result.rounds == 2 and len(client.prompts) == 3
+    assert "最后一次可以再找" in client.prompts[1][1] and "已经不能再找了" in client.prompts[2][1]
+    assert [item.name for item in result.records] == ["核对广告"]
+
+
+# ── 时间上限与记账 ────────────────────────────────────────────────────────────
+
+
+def test_at_the_time_limit_what_was_found_is_handed_over_within_the_limit(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    w.put(MemoryKind.PREFERENCE, PREFERENCE)
+    config = MemorySearchServiceConfig(time_limit_seconds=1.0, accounting_reserve_seconds=0.2)
+    client = ScriptedClient([pick(read=["preferences/方案文档表述与结构.md"]), judge(["c1"])], delays={1: 5.0})
+
+    started = time.monotonic()
+    result = search(w.service(client, config=config))
+    elapsed = time.monotonic() - started
+
+    assert elapsed <= 1.0 + 0.15
+    assert result.timed_out
+    assert len(result.memories) == 1 and result.context
+    assert any(item.stage is MemorySearchDegradationStage.TIME_LIMIT for item in result.degradations)
+
+
+class SlowExpander:
+    """记账一直拿不到锁：等过给它的时间。"""
+
+    def __init__(self, *, hang: bool) -> None:
+        self.hang = hang
+
+    def expand_for_probe(self, document):  # type: ignore[no-untyped-def]
+        return document
+
+    async def record_context_use(self, targets, *, used_at=None, lock_wait_seconds=5.0):  # type: ignore[no-untyped-def]
+        if self.hang:
+            await asyncio.sleep(60)
+        return type(
+            "Receipt", (), {"documents": (), "rejected_uris": (), "skipped_uris": tuple(t.uri for t in targets)}
+        )()
+
+
+@pytest.mark.parametrize("hang", [True, False])
+def test_accounting_that_cannot_get_the_lock_is_skipped_observed_and_the_cards_still_come_back(
+    tmp_path: Path, hang: bool
+) -> None:
+    w = world(tmp_path)
+    w.put(MemoryKind.PREFERENCE, PREFERENCE)
+    observer = Recorder()
+    config = MemorySearchServiceConfig(time_limit_seconds=1.0, accounting_reserve_seconds=0.3)
+    client = ScriptedClient([pick(read=["preferences/方案文档表述与结构.md"]), judge(["c1"])])
+
+    started = time.monotonic()
+    result = search(w.service(client, config=config, expander=SlowExpander(hang=hang), observer=observer))
+
+    assert time.monotonic() - started <= 1.0 + 0.15
+    assert len(result.memories) == 1
+    assert any(item.stage is MemorySearchDegradationStage.RECALL_LIFECYCLE for item in result.degradations)
+    assert any(event.operation == "use_accounting" and event.attributes["skipped"] == 1 for event in observer.events)
+
+
+# ── 清单读不出、模型不可用 ────────────────────────────────────────────────────
+
+
+class FlakyCatalog:
+    def __init__(self, inner: MemoryCatalogReader, failures: int) -> None:
+        self.inner = inner
+        self.tree = inner.tree
+        self.failures = failures
+        self.calls = 0
+
+    def read(self, **kwargs: Any):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise MemoryTreeConsistencyError("memory tree has a prepared multi-document transaction")
+        return self.inner.read(**kwargs)
+
+    def match_unlisted(self, *args: Any):  # type: ignore[no-untyped-def]
+        return self.inner.match_unlisted(*args)
+
+
+def test_a_commit_window_is_retried_briefly_and_then_the_other_sources_are_still_searched(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    w.put(MemoryKind.PREFERENCE, PREFERENCE)
+    config = MemorySearchServiceConfig(catalog_retries=2, catalog_retry_delay_seconds=0.0)
+    brief = FlakyCatalog(w.catalog(config), failures=2)
+    client = ScriptedClient([pick(read=["preferences/方案文档表述与结构.md"]), judge(["c1"])])
+    assert len(search(w.service(client, config=config, catalog=brief)).memories) == 1  # type: ignore[arg-type]
+
+    stuck = FlakyCatalog(w.catalog(config), failures=99)
+    records = FakeRecords((record("核对广告", 9),))
+    client = ScriptedClient([pick(records=source(None, None, ["广告"])), judge(["r1"])])
+    result = search(w.service(client, config=config, catalog=stuck, records=records))  # type: ignore[arg-type]
+    assert "（没有卡片）" in client.prompts[0][1]
+    assert [item.name for item in result.records] == ["核对广告"]
+    assert any("清单这次读不出来" in note for note in result.notes)
+    assert any(item.stage is MemorySearchDegradationStage.CATALOG for item in result.degradations)
+
+
+def test_with_the_model_breaker_open_only_the_profile_comes_back_with_the_reason(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    w.put(MemoryKind.PROFILE, {"content": "- 用户是产品经理"})
+    w.put(MemoryKind.PREFERENCE, PREFERENCE)
+    error = ModelCircuitOpenError("open", opened_by=ModelErrorKind.QUOTA, retry_after_seconds=60.0)
+    client = ScriptedClient([], error=error)
+
+    result = search(w.service(client, records=FakeRecords((record("核对广告", 9),))))
+
+    assert [memory.uri for memory in result.memories] == [PROFILE_URI]
+    assert result.records == () and result.summaries == ()
+    assert "额度或余额用完了" in result.notes[0] and "只交出了档案" in result.notes[0]
+    assert "额度或余额用完了" in result.context
+    assert any(item.stage is MemorySearchDegradationStage.PICK for item in result.degradations)
+
+
+# ── 冷热 ─────────────────────────────────────────────────────────────────────
+
+
+def test_the_coldest_cards_are_listed_apart_by_name_one_per_search_and_warm_up_once_used(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    old = NOW - timedelta(days=400)
+    w.put(MemoryKind.ENTITY, {"category": "人", "name": "老王", "summary": "老王是前同事。"}, updated=old)
+    w.put(MemoryKind.ENTITY, {"category": "人", "name": "老李", "summary": "老李是房东。"}, updated=old)
+    client = ScriptedClient([pick(read=["entities/人/老王.md", "entities/人/老李.md"]), judge(["c1", "c2"])])
+
+    result = search(w.service(client))
+
+    pick_prompt = client.prompts[0][1]
+    cold_section = pick_prompt.split("## 很久没用到的卡片")[1]
+    assert "- entities/人/老王.md\n" in cold_section + "\n" and "老王是前同事" not in pick_prompt
+    assert len(result.memories) == 1  # 最冷那一组每次最多一张
+    picked = result.memories[0].uri
+    client = ScriptedClient([pick(), judge([])])
+    search(w.service(client))
+    normal = client.prompts[0][1].split("## 很久没用到的卡片")[0]
+    assert str(picked).removeprefix("memory://") in normal  # 用过一次回暖，回到普通清单
+
+
+# ── 目录超出清单上限 ──────────────────────────────────────────────────────────
+
+
+def test_a_directory_over_the_list_bound_says_how_many_are_missing_and_keywords_find_them(tmp_path: Path) -> None:
+    w = world(tmp_path, semantic=MemorySemanticConfig(max_direct_entries=2))
+    w.put(
+        MemoryKind.PREFERENCE, {"topic": "最早的主题", "content": "- 早早定下的习惯"}, updated=NOW - timedelta(days=3)
+    )
+    w.put(MemoryKind.PREFERENCE, {"topic": "中间的主题", "content": "- 中间"}, updated=NOW - timedelta(days=2))
+    w.put(MemoryKind.PREFERENCE, {"topic": "最新的主题", "content": "- 最新"}, updated=NOW - timedelta(days=1))
+    overview = w.tree.read_layer(MemoryURI.parse("memory://preferences").to_directory(), MemoryLevel.OVERVIEW)
+    assert "（还有 1 张卡片没有列出）" in overview and "最早的主题" not in overview
+
+    client = ScriptedClient([pick(card_keywords=["习惯"]), judge(["c1"])])
+    result = search(w.service(client))
+
+    assert "还有 1 张卡片没有列出" in client.prompts[0][1]
+    assert [str(memory.uri) for memory in result.memories] == ["memory://preferences/最早的主题.md"]
+
+
+def test_a_card_written_without_refreshing_its_overview_appears_after_the_maintenance_rebuild(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    w.put(MemoryKind.PREFERENCE, PREFERENCE)
+    later = codec().build(
+        MemoryKind.PREFERENCE,
+        {"topic": "通知措辞", "content": "- 通知要客气"},
+        metadata=MemoryDocumentMetadata(revision=1, created_at=NOW, updated_at=NOW),
+    )
+    w.tree.write(later)  # 写完卡片、刷概览之前进程没了
+
+    client = ScriptedClient([pick(), judge([])])
+    search(w.service(client))
+    assert "通知措辞" not in client.prompts[0][1]
+
+    w.refresher.rebuild()
+    client = ScriptedClient([pick(), judge([])])
+    search(w.service(client))
+    assert "preferences/通知措辞.md — 通知要客气" in client.prompts[0][1]
+
+
+def test_search_config_keeps_the_accounting_reserve_inside_the_time_limit() -> None:
+    with pytest.raises(ValueError, match="accounting reserve"):
+        MemorySearchServiceConfig(time_limit_seconds=1.0, accounting_reserve_seconds=1.0)
+    assert MemorySearchServiceConfig().time_limit_seconds < 15.0  # 插件单个请求 15 秒就断
+
+
+# ── codex 复核后补的几条 ──────────────────────────────────────────────────────
+
+
+class FailingSecondCall(ScriptedClient):
+    """ "挑"照常答，"判"那一步模型不可用。"""
+
+    async def complete_json_async(self, request, *, schema, name, validator, context):  # type: ignore[no-untyped-def]
+        if self.prompts:
+            self.prompts.append((name, request.messages[-1].content))
+            raise ModelCircuitOpenError("open", opened_by=ModelErrorKind.SERVICE, retry_after_seconds=30.0)
+        return await super().complete_json_async(
+            request, schema=schema, name=name, validator=validator, context=context
+        )
+
+
+def test_a_model_failure_at_the_judge_step_also_hands_over_only_the_profile(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    w.put(MemoryKind.PROFILE, {"content": "- 用户是产品经理"})
+    w.put(MemoryKind.PREFERENCE, PREFERENCE)
+    client = FailingSecondCall([pick(read=["preferences/方案文档表述与结构.md"], records=source(None, None, ["广告"]))])
+
+    result = search(w.service(client, records=FakeRecords((record("核对广告", 9),))))
+
+    assert [memory.uri for memory in result.memories] == [PROFILE_URI]
+    assert result.records == ()
+    assert "只交出了档案" in result.notes[-1]
+    assert any(item.stage is MemorySearchDegradationStage.JUDGE for item in result.degradations)
+
+
+def test_reading_the_profile_after_the_model_failed_stays_within_the_time_limit(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    w.put(MemoryKind.PROFILE, {"content": "- 用户是产品经理"})
+    config = MemorySearchServiceConfig(time_limit_seconds=1.0, accounting_reserve_seconds=0.2)
+    service = w.service(ScriptedClient([], error=RuntimeError("down")), config=config)
+    slow = service.snapshot_reader.read
+
+    def stuck(uri):  # type: ignore[no-untyped-def]
+        time.sleep(3)
+        return slow(uri)
+
+    service.snapshot_reader.read = stuck  # type: ignore[method-assign]
+
+    async def timed():  # type: ignore[no-untyped-def]
+        # 在协程里量：asyncio.run 收尾时还会等那个仍在睡的线程，那不是查询本身的耗时
+        started = time.monotonic()
+        result = await service.search("问题")
+        return result, time.monotonic() - started
+
+    result, elapsed = asyncio.run(timed())
+    assert elapsed <= 1.0 + 0.15
+    assert result.memories == ()
+
+
+def test_keyword_matches_among_unlisted_cards_skip_retired_ones_and_count_cold_ones_once(tmp_path: Path) -> None:
+    w = world(tmp_path, semantic=MemorySemanticConfig(max_direct_entries=1))
+    old = NOW - timedelta(days=500)
+    w.put(MemoryKind.PREFERENCE, {"topic": "习惯甲", "content": "- 早年的习惯甲"}, updated=old)
+    w.put(MemoryKind.PREFERENCE, {"topic": "习惯乙", "content": "- 早年的习惯乙"}, updated=old - timedelta(days=1))
+    retired = w.put(
+        MemoryKind.PREFERENCE, {"topic": "习惯丙", "content": "- 早年的习惯丙"}, updated=old - timedelta(days=2)
+    )
+    w.put(MemoryKind.PREFERENCE, {"topic": "最新", "content": "- 最新"}, updated=NOW - timedelta(days=1))
+    target = MemoryRecallTarget(retired, 1, old - timedelta(days=2))
+    w.lifecycle.store.mark_retire_candidate(target, marked_at=NOW - timedelta(days=40), expected_version=0)
+    w.lifecycle.store.mark_retired(target, retired_at=NOW - timedelta(days=1), expected_version=1)
+    client = ScriptedClient([pick(card_keywords=["习惯"]), judge(["c1", "c2"])])
+
+    result = search(w.service(client))
+
+    assert len(result.memories) == 1  # 三张都命中关键词：退休的不读，两张最冷的只读一张
+    assert result.memories[0].uri != retired
+
+
+def test_a_request_without_dates_or_keywords_lists_the_latest_records_and_summaries(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    records = FakeRecords(
+        tuple(record(f"事{index}", 9, day=date(2026, 3, 1) + timedelta(days=index)) for index in range(100))
+    )
+    config = MemorySearchServiceConfig(max_record_list=5)
+    client = ScriptedClient([pick(records=source(), summaries=source()), judge([], last=False)])
+
+    search(w.service(client, records=records, summaries=FakeSummaries((summary_match(),)), config=config))
+
+    materials = client.prompts[1][1].split("到目前为止找到的材料")[1]
+    assert "事99" in materials and "事95" in materials and "事94" not in materials
+    assert "会话摘要（" in materials
+
+
+def test_the_coldest_group_stays_within_the_list_character_bound(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    old = NOW - timedelta(days=500)
+    for index in range(80):
+        w.put(
+            MemoryKind.ENTITY,
+            {"category": "人", "name": f"很久以前认识的人{index:02d}", "summary": "前同事。"},
+            updated=old,
+        )
+    config = MemorySearchServiceConfig(max_catalog_chars=1_024)
+    catalog = w.catalog(config).read(kinds=(), now=NOW, on_recall_failure=lambda _error: None)
+
+    assert len(catalog.render()) <= config.max_catalog_chars
+    assert catalog.cold and catalog.unlisted_count == 80 - len(catalog.cold)
+
+
+def test_keyword_ties_in_turn_records_put_the_newer_first_and_keep_the_newer_under_the_limit() -> None:
+    """用户 2026-11-23 定：命中词数相同时近的在前，超过条数上限留下的是近的；命中词更多的仍排最前。"""
+
+    from habitus.memory.retrieval.records import search_records
+
+    records = tuple(record(f"周报{index}", 9, day=date(2026, 3, 1) + timedelta(days=index)) for index in range(6))
+    best = record("周报总结", 9, day=date(2026, 3, 1), summary="周报 总结")
+
+    hits, total = search_records((*records, best), ("周报", "总结"), limit=3)
+
+    assert total == 7
+    assert [item.name for item in hits] == ["周报总结", "周报5", "周报4"]
+
+
+def test_keyword_ties_in_summaries_put_the_newer_first(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    w = world(tmp_path)
+    base = summary_match()
+    matches = []
+    for index, day in enumerate((5, 20, 12)):
+        shift = timedelta(days=day)
+        summary = replace(
+            base.summary,
+            segment_id=f"segment-{index}",
+            started_at=base.summary.started_at + shift,
+            ended_at=base.summary.ended_at + shift,
+            generated_at=base.summary.generated_at + shift,
+        )
+        address = ConversationAddress(summary.conversation_id, summary.started_at.date())
+        matches.append(ConversationSummaryMatch(summary_reference(address, summary), summary, base.content))
+    config = MemorySearchServiceConfig(max_summary_hits=2)
+    client = ScriptedClient([pick(summaries=source(None, None, ["转写"])), judge([], last=False)])
+
+    search(w.service(client, summaries=FakeSummaries(tuple(matches)), config=config))
+
+    materials = client.prompts[1][1].split("到目前为止找到的材料")[1]
+    days = [f"{(base.summary.started_at + timedelta(days=day)).astimezone(CST):%Y-%m-%d}" for day in (20, 12, 5)]
+    assert materials.index(days[0]) < materials.index(days[1]) and days[2] not in materials

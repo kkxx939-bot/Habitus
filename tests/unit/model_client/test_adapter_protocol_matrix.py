@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 
 import httpx
 import pytest
@@ -15,29 +14,19 @@ from habitus.model_client import (
     ChatMessage,
     ChatModelConfig,
     ChatRequest,
-    EmbeddingModelConfig,
-    ModelAuthenticationError,
     ModelConfigurationError,
     ModelContentSafetyError,
-    ModelErrorRule,
-    ModelInvalidRequestError,
-    ModelNotFoundError,
-    ModelQuotaError,
     ModelRateLimitError,
     ModelResponseError,
-    ModelServiceError,
     ModelUnknownError,
     ProviderConfig,
     ReasoningOptions,
-    RerankModelConfig,
     ResponseFormat,
     StructuredChatClient,
     ToolCall,
     ToolDefinition,
 )
 from habitus.model_client.adapters.openai_compatible_chat import OpenAICompatibleChatProvider
-from habitus.model_client.adapters.openai_compatible_embedding import OpenAICompatibleEmbeddingProvider
-from habitus.model_client.adapters.openai_compatible_rerank import OpenAICompatibleRerankProvider
 from habitus.model_client.failures import classify_failure
 
 
@@ -56,41 +45,6 @@ def chat_config(**overrides: object) -> ChatModelConfig:
         else:
             route_values[key] = value
     return ChatModelConfig(ProviderConfig(**route_values), **model_values)
-
-
-def embedding_config(**overrides: object) -> EmbeddingModelConfig:
-    route_values: dict[str, object] = {
-        "provider": "test-provider",
-        "adapter": "openai_compatible_embedding",
-        "model": "embedding-model",
-        "base_url": "https://example.com/v1",
-        "max_retries": 0,
-    }
-    model_values: dict[str, object] = {"dimension": 2}
-    for key, value in overrides.items():
-        if key in {
-            "dimension",
-            "max_batch_size",
-            "max_input_chars",
-            "query_parameters",
-            "document_parameters",
-        }:
-            model_values[key] = value
-        else:
-            route_values[key] = value
-    return EmbeddingModelConfig(ProviderConfig(**route_values), **model_values)
-
-
-def rerank_config(**overrides: object) -> RerankModelConfig:
-    route_values: dict[str, object] = {
-        "provider": "test-provider",
-        "adapter": "openai_compatible_rerank",
-        "model": "rerank-model",
-        "base_url": "https://example.com/v1",
-        "max_retries": 0,
-    }
-    route_values.update(overrides)
-    return RerankModelConfig(ProviderConfig(**route_values))
 
 
 def request(**overrides: object) -> ChatRequest:
@@ -831,296 +785,6 @@ def test_openai_async_complete_and_stream_use_same_protocol_semantics() -> None:
         assert [event.kind for event in streamed] == ["content_delta", "done"]
     finally:
         provider._sync_client.close()
-
-
-def test_rerank_adapter_rejects_duplicate_json_keys_in_success_response() -> None:
-    provider = OpenAICompatibleRerankProvider(rerank_config(), api_key="secret")
-    body = b'{"results":[{"index":0,"relevance_score":0.1,"relevance_score":0.9}]}'
-
-    async def invoke():
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body))
-        ) as client:
-            provider._client = lambda: client
-            return await provider.rerank("query", ("document",))
-
-    with pytest.raises(ModelResponseError, match="malformed JSON"):
-        asyncio.run(invoke())
-
-
-def _rerank_call(provider: OpenAICompatibleRerankProvider, handler):
-    async def invoke():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            provider._client = lambda: client
-            return await provider.rerank("query", ("document",))
-
-    return asyncio.run(invoke())
-
-
-@pytest.mark.parametrize(
-    ("status", "body", "retry_after", "message", "expected_retry_after"),
-    [
-        (400, {"error": {"message": "bad input"}}, None, "bad input", None),
-        (404, {"message": "no such model"}, None, "no such model", None),
-        (429, {"error": {"message": "slow down"}}, "3", "slow down", 3.0),
-        (500, ["bad"], "invalid", "rerank provider request failed with HTTP 500", None),
-        (503, "plain", "-1", "rerank provider request failed with HTTP 503", 0.0),
-    ],
-)
-def test_rerank_adapter_keeps_its_http_error_message_and_retry_after(
-    status: int,
-    body: object,
-    retry_after: str | None,
-    message: str,
-    expected_retry_after: float | None,
-) -> None:
-    """W7 把 HTTP 小函数抽进公共模块后，rerank 的报错文字、状态码与 Retry-After 一点不变。"""
-
-    provider = OpenAICompatibleRerankProvider(rerank_config(), api_key="secret")
-    headers = {} if retry_after is None else {"Retry-After": retry_after}
-    with pytest.raises(RuntimeError) as caught:
-        _rerank_call(provider, lambda _request: httpx.Response(status, json=body, headers=headers))
-    assert str(caught.value) == message
-    assert caught.value.status_code == status
-    assert caught.value.retry_after == expected_retry_after
-
-
-def test_rerank_adapter_keeps_its_response_byte_bound() -> None:
-    provider = OpenAICompatibleRerankProvider(rerank_config(max_response_bytes=1024), api_key="secret")
-    with pytest.raises(ModelResponseError, match="^rerank response exceeds the configured byte bound$"):
-        _rerank_call(provider, lambda _request: httpx.Response(200, content=b"x" * 1025))
-
-
-@pytest.mark.parametrize(
-    ("base_url", "remote"),
-    [("http://127.0.0.1:8000/v1", False), ("http://localhost:8000/v1", False), ("https://rerank.vendor.test/v1", True)],
-)
-def test_rerank_adapter_keeps_loopback_endpoints_local(base_url: str, remote: bool) -> None:
-    assert OpenAICompatibleRerankProvider(rerank_config(base_url=base_url), api_key="secret").is_remote is remote
-
-
-@pytest.mark.parametrize("overrides", [{"adapter": "other"}, {"base_url": ""}])
-def test_embedding_adapter_rejects_incompatible_route(overrides: dict[str, object]) -> None:
-    with pytest.raises(ModelConfigurationError):
-        OpenAICompatibleEmbeddingProvider(embedding_config(**overrides), api_key="secret")
-
-
-@pytest.mark.parametrize("field", ["extra_body", "query_parameters", "document_parameters"])
-@pytest.mark.parametrize(
-    "reserved",
-    ["api_key", "base_url", "encoding_format", "extra_body", "extra_headers", "input", "model", "timeout"],
-)
-def test_embedding_adapter_rejects_reserved_request_field_in_every_parameter_layer(
-    field: str,
-    reserved: str,
-) -> None:
-    """``model``、``input`` 等请求字段不能被用户参数覆盖：构造时就拒绝，不等到发请求。"""
-
-    with pytest.raises((ValueError, ModelConfigurationError), match="cannot override"):
-        OpenAICompatibleEmbeddingProvider(
-            embedding_config(**{field: {reserved: "override"}}),
-            api_key="secret",
-        )
-
-
-def _embedding_call(provider: OpenAICompatibleEmbeddingProvider, handler, text: str = "text", *, is_query: bool = True):
-    async def invoke():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            provider._client = lambda: client
-            return await provider.embed(text, is_query=is_query)
-
-    return asyncio.run(invoke())
-
-
-@pytest.mark.parametrize("is_query", [True, False])
-def test_embedding_adapter_sends_openai_request_shape_with_mode_specific_parameters(is_query: bool) -> None:
-    captured: dict[str, object] = {}
-    provider = OpenAICompatibleEmbeddingProvider(
-        embedding_config(
-            extra_body={"dimensions": 2},
-            query_parameters={"instruction": "query"},
-            document_parameters={"instruction": "document"},
-        ),
-        api_key=" secret ",
-    )
-
-    def handler(http_request: httpx.Request) -> httpx.Response:
-        captured["payload"] = json.loads(http_request.content)
-        captured["authorization"] = http_request.headers.get("Authorization")
-        captured["url"] = str(http_request.url)
-        captured["method"] = http_request.method
-        return httpx.Response(
-            200, json={"object": "list", "data": [{"object": "embedding", "index": 0, "embedding": [3, 4]}]}
-        )
-
-    vector = _embedding_call(provider, handler, " text ", is_query=is_query)
-    assert vector.values == pytest.approx((0.6, 0.8))
-    assert captured["payload"] == {
-        "dimensions": 2,
-        "instruction": "query" if is_query else "document",
-        "model": "embedding-model",
-        "input": " text ",
-        "encoding_format": "float",
-    }
-    assert captured["authorization"] == "Bearer secret"
-    assert captured["method"] == "POST"
-    assert captured["url"] == "https://example.com/v1/embeddings"
-
-
-def test_embedding_adapter_omits_authorization_without_a_key() -> None:
-    """自部署服务（Ollama、TEI）常不要密钥：没配凭据就不发 Authorization，而不是发一个空的 Bearer。"""
-
-    captured: dict[str, object] = {}
-
-    def handler(http_request: httpx.Request) -> httpx.Response:
-        captured["headers"] = dict(http_request.headers)
-        return httpx.Response(200, json={"data": [{"embedding": [1, 0]}]})
-
-    _embedding_call(OpenAICompatibleEmbeddingProvider(embedding_config(), api_key=""), handler)
-    assert "authorization" not in captured["headers"]
-
-
-def test_embedding_adapter_rejects_dimension_mismatch_instead_of_truncating() -> None:
-    provider = OpenAICompatibleEmbeddingProvider(embedding_config(dimension=1024), api_key="secret")
-    with pytest.raises(ModelResponseError) as caught:
-        provider._vector({"data": [{"embedding": [0.5] * 1536}]})
-    message = str(caught.value)
-    assert "1024" in message and "1536" in message and "dimensions" in message
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {},
-        {"data": []},
-        {"data": [{"embedding": [1, 2]}, {"embedding": [3, 4]}]},
-        {"data": None},
-        {"data": {"embedding": [1, 2]}},
-        {"data": ["1,2"]},
-        {"data": [{"embedding": None}]},
-        {"data": [{"embedding": "AACAPwAAAEA="}]},
-        {"data": [{"embedding": [1]}]},
-        {"data": [{"embedding": [1, 2, 3]}]},
-        {"data": [{"embedding": [0, 0]}]},
-        {"data": [{"embedding": [1, math.nan]}]},
-        {"data": [{"embedding": [1, True]}]},
-        {"data": [{"embedding": [1, "2"]}]},
-    ],
-)
-def test_embedding_adapter_rejects_malformed_count_shape_dimension_or_numeric_vector(
-    payload: dict[str, object],
-) -> None:
-    provider = OpenAICompatibleEmbeddingProvider(embedding_config(), api_key="secret")
-    with pytest.raises(ModelResponseError):
-        provider._vector(payload)
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        b"not-json",
-        b"[]",
-        b"null",
-        b"\xff",
-        b'{"data":[{"embedding":[1,0]}],"data":[{"embedding":[0,1]}]}',
-    ],
-)
-def test_embedding_adapter_rejects_malformed_or_non_object_http_response(body: bytes) -> None:
-    provider = OpenAICompatibleEmbeddingProvider(embedding_config(), api_key="secret")
-    with pytest.raises(ModelResponseError):
-        _embedding_call(provider, lambda _request: httpx.Response(200, content=body))
-
-
-@pytest.mark.parametrize(
-    ("status", "body", "retry_after", "message", "error_type", "rule"),
-    [
-        (400, {"error": {"message": "bad input"}}, None, "bad input", ModelInvalidRequestError, ModelErrorRule.INPUT),
-        (401, {"error": {"message": "bad key"}}, None, "bad key", ModelAuthenticationError, ModelErrorRule.OPERATOR),
-        (404, {"message": "model not found"}, None, "model not found", ModelNotFoundError, ModelErrorRule.OPERATOR),
-        (429, {"error": {"message": "slow down"}}, "3", "slow down", ModelRateLimitError, ModelErrorRule.WAIT),
-        (500, ["bad"], "invalid", "HTTP 500", ModelServiceError, ModelErrorRule.WAIT),
-        (503, "plain", "-1", "HTTP 503", ModelServiceError, ModelErrorRule.WAIT),
-        # 协议的错误代码优先于状态码（429 + insufficient_quota 是额度用完，不是限流）
-        (429, {"error": {"code": "insufficient_quota", "message": "quota"}}, None, "quota", ModelQuotaError,
-         ModelErrorRule.OPERATOR),
-    ],
-)
-def test_embedding_adapter_http_errors_are_classified_by_the_retry_layer(
-    status: int,
-    body: object,
-    retry_after: str | None,
-    message: str,
-    error_type: type[Exception],
-    rule: ModelErrorRule,
-) -> None:
-    provider = OpenAICompatibleEmbeddingProvider(embedding_config(), api_key="secret")
-    headers = {} if retry_after is None else {"Retry-After": retry_after}
-    with pytest.raises(RuntimeError) as caught:
-        _embedding_call(provider, lambda _request: httpx.Response(status, json=body, headers=headers))
-    assert caught.value.status_code == status
-    assert message in str(caught.value)
-    normalized = classify_failure(caught.value)
-    assert type(normalized) is error_type
-    assert normalized.rule is rule
-    if retry_after == "3":
-        assert normalized.retry_after_seconds == 3.0
-    elif retry_after == "-1":
-        assert caught.value.retry_after == 0.0
-    else:
-        assert caught.value.retry_after is None
-
-
-def test_embedding_adapter_rejects_response_over_byte_bound() -> None:
-    provider = OpenAICompatibleEmbeddingProvider(embedding_config(max_response_bytes=1024), api_key="secret")
-    with pytest.raises(ModelResponseError, match="byte bound"):
-        _embedding_call(provider, lambda _request: httpx.Response(200, content=b"x" * 1025))
-
-
-@pytest.mark.parametrize(
-    ("base_url", "remote"),
-    [
-        ("http://127.0.0.1:11434/v1", False),
-        ("http://localhost:8080/v1", False),
-        ("http://[::1]:8000/v1", False),
-        ("https://api.openai.com/v1", True),
-        ("https://embedding.internal.example/v1", True),
-    ],
-)
-def test_embedding_adapter_treats_only_loopback_endpoints_as_local(base_url: str, remote: bool) -> None:
-    provider = OpenAICompatibleEmbeddingProvider(embedding_config(base_url=base_url), api_key="")
-    assert provider.is_remote is remote
-
-
-def test_embedding_adapter_reuses_one_async_client_per_event_loop_and_closes_idempotently() -> None:
-    provider = OpenAICompatibleEmbeddingProvider(embedding_config(), api_key="secret")
-
-    async def invoke() -> bool:
-        first = provider._client()
-        second = provider._client()
-        await provider.aclose()
-        await provider.aclose()
-        return first is second and first.is_closed
-
-    assert asyncio.run(invoke()) is True
-    with pytest.raises(ModelConfigurationError, match="closed"):
-        asyncio.run(provider.embed("text", is_query=True))
-
-
-@pytest.mark.parametrize(
-    ("item", "message"),
-    [
-        ({"index": True, "relevance_score": 0.5}, r"result\[0\] index must be an integer"),
-        ({"index": 0.0, "relevance_score": 0.5}, r"result\[0\] index must be an integer"),
-        ({"index": 0, "relevance_score": True}, r"result\[0\] relevance_score must be numeric"),
-        ({"index": 0, "relevance_score": "0.5"}, r"result\[0\] relevance_score must be numeric"),
-    ],
-)
-def test_rerank_adapter_rejects_wrong_types_in_provider_response(item: dict[str, object], message: str) -> None:
-    """外部 rerank 响应里 bool 冒充整数或分数、字符串冒充数都在解析处被拒（W16：边界判定收进公共函数后行为不变）。"""
-
-    provider = OpenAICompatibleRerankProvider(rerank_config(), api_key="secret")
-    with pytest.raises(ModelResponseError, match=message):
-        _rerank_call(provider, lambda _request: httpx.Response(200, json={"results": [item]}))
 
 
 @pytest.mark.parametrize(

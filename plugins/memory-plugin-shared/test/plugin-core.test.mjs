@@ -417,7 +417,7 @@ test("real Codex hook process negotiates, recalls, and persists its injection re
       : request.url === "/ready"
         ? { ready: true, recall_ready: true, status: "healthy" }
         : request.url === "/api/v1/memory/recall"
-          ? { context: "remembered context", query: "prompt", queries: ["prompt"], memories: [], summaries: [], degradations: [], budget_exhausted: false }
+          ? { context: "remembered context", query: "prompt", memories: [], records: [], summaries: [], notes: [], degradations: [], budget_exhausted: false, timed_out: false }
           : {};
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ status: "ok", result }));

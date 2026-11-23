@@ -1,4 +1,4 @@
-"""长期记忆实际使用、动态冷热、COLD_2 探测和退休状态。"""
+"""长期记忆实际使用、动态冷热和退休状态。"""
 
 from __future__ import annotations
 
@@ -27,7 +27,6 @@ class MemoryTemperature(str, Enum):
 @dataclass(frozen=True)
 class MemoryRecallLifecycleConfig:
     enabled: bool = True
-    ranking_alpha: float = 0.2
     cold2_threshold: float = 0.08
     cold1_threshold: float = 0.2
     hot_threshold: float = 0.6
@@ -40,16 +39,12 @@ class MemoryRecallLifecycleConfig:
     entity_retire_days: float = 270.0
     tool_retire_days: float = 180.0
     retire_candidate_grace_days: float = 30.0
-    cold2_probe_interval_days: float = 30.0
-    cold2_probe_limit: int = 2
-    max_cold2_probes_per_search: int = 1
     sqlite_timeout_seconds: float = 5.0
     max_batch_size: int = 1_000
     max_useful_recall_count: int = 1_000_000_000
 
     def __post_init__(self) -> None:
         numeric = (
-            "ranking_alpha",
             "cold2_threshold",
             "cold1_threshold",
             "hot_threshold",
@@ -62,7 +57,6 @@ class MemoryRecallLifecycleConfig:
             "entity_retire_days",
             "tool_retire_days",
             "retire_candidate_grace_days",
-            "cold2_probe_interval_days",
             "sqlite_timeout_seconds",
         )
         for name in numeric:
@@ -71,10 +65,6 @@ class MemoryRecallLifecycleConfig:
             if not math.isfinite(number):
                 raise ValueError(f"memory recall lifecycle {name} must be finite")
             object.__setattr__(self, name, number)
-        if not 0.0 <= self.ranking_alpha <= 0.95:
-            raise ValueError("memory recall lifecycle ranking_alpha must be between zero and 0.95")
-        if self.enabled and self.ranking_alpha == 0.0:
-            raise ValueError("enabled memory recall lifecycle requires a positive ranking_alpha")
         if not 0.0 < self.cold2_threshold < self.cold1_threshold <= 0.5:
             raise ValueError("memory recall lifecycle cold thresholds are invalid")
         if not 0.5 <= self.hot_threshold < 2.0 / 3.0:
@@ -93,9 +83,8 @@ class MemoryRecallLifecycleConfig:
         ):
             if not 0.001 <= getattr(self, name) <= 36_500.0:
                 raise ValueError(f"memory recall lifecycle {name} must be between 0.001 and 36500")
-        for name in ("retire_candidate_grace_days", "cold2_probe_interval_days"):
-            if not 0.001 <= getattr(self, name) <= 36_500.0:
-                raise ValueError(f"memory recall lifecycle {name} is outside its supported range")
+        if not 0.001 <= self.retire_candidate_grace_days <= 36_500.0:
+            raise ValueError("memory recall lifecycle retire_candidate_grace_days is outside its supported range")
         if not 0.001 <= self.sqlite_timeout_seconds <= 60.0:
             raise ValueError("memory recall lifecycle sqlite_timeout_seconds must be between 0.001 and 60")
         for name, minimum, maximum in (
@@ -105,10 +94,6 @@ class MemoryRecallLifecycleConfig:
             value = getattr(self, name)
             if not minimum <= value <= maximum:
                 raise ValueError(f"memory recall lifecycle {name} is outside its supported range")
-        if not 1 <= self.cold2_probe_limit <= self.max_useful_recall_count:
-            raise ValueError("memory recall lifecycle probe observation cap is invalid")
-        if self.max_cold2_probes_per_search != 1:
-            raise ValueError("memory recall lifecycle permits at most one COLD_2 probe per search")
 
     def half_life_days(self, kind: MemoryKind) -> float:
         normalized = MemoryKind(kind)
@@ -137,8 +122,6 @@ class MemoryRecallState:
     useful_recall_count: int
     last_useful_recall_at: datetime | None
     lifecycle_activity_at: datetime | None
-    cold2_probe_count: int
-    last_cold2_probe_at: datetime | None
     compacted_at: datetime | None
     retire_candidate_at: datetime | None
     retired_at: datetime | None
@@ -146,7 +129,7 @@ class MemoryRecallState:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "uri", _document_uri(self.uri))
-        for name in ("document_revision", "useful_recall_count", "cold2_probe_count", "version"):
+        for name in ("document_revision", "useful_recall_count", "version"):
             value = getattr(self, name)
             if value < 0:
                 raise ValueError(f"memory recall state {name} must be non-negative")
@@ -160,7 +143,6 @@ class MemoryRecallState:
         for name in (
             "last_useful_recall_at",
             "lifecycle_activity_at",
-            "last_cold2_probe_at",
             "compacted_at",
             "retire_candidate_at",
             "retired_at",
@@ -170,8 +152,6 @@ class MemoryRecallState:
                 object.__setattr__(self, name, _utc_timestamp(value, name))
         if (self.useful_recall_count == 0) != (self.last_useful_recall_at is None):
             raise ValueError("memory recall state useful count and timestamp must describe the same lifecycle")
-        if (self.cold2_probe_count == 0) != (self.last_cold2_probe_at is None):
-            raise ValueError("memory recall state probe count and timestamp must describe the same lifecycle")
         if self.retired_at is not None and self.retire_candidate_at is None:
             raise ValueError("memory recall state cannot retire before its grace candidate phase")
         if self.version == 0 and any(
@@ -179,7 +159,6 @@ class MemoryRecallState:
             for value in (
                 self.last_useful_recall_at,
                 self.lifecycle_activity_at,
-                self.last_cold2_probe_at,
                 self.compacted_at,
                 self.retire_candidate_at,
                 self.retired_at,
@@ -200,8 +179,6 @@ class MemoryRecallState:
             document_created_at,
             0,
             None,
-            None,
-            0,
             None,
             None,
             None,
@@ -232,7 +209,6 @@ class MemoryRecallCandidate:
     target: MemoryRecallTarget
     kind: MemoryKind
     updated_at: datetime
-    semantic_score: float
 
     def __post_init__(self) -> None:
         kind = MemoryKind(self.kind)
@@ -242,7 +218,6 @@ class MemoryRecallCandidate:
         object.__setattr__(self, "updated_at", _utc_timestamp(self.updated_at, "updated_at"))
         if self.updated_at < self.target.document_created_at:
             raise ValueError("memory recall candidate updated_at cannot precede document creation")
-        object.__setattr__(self, "semantic_score", _finite_score(self.semantic_score, "semantic_score"))
 
     @property
     def uri(self) -> MemoryURI:
@@ -255,7 +230,6 @@ class MemoryRecallRanking:
     state: MemoryRecallState
     hotness: float | None
     temperature: MemoryTemperature | None
-    final_score: float
 
     def __post_init__(self) -> None:
         if self.candidate.uri != self.state.uri:
@@ -268,7 +242,6 @@ class MemoryRecallRanking:
                 raise ValueError("memory recall ranking hotness must be between zero and one")
             object.__setattr__(self, "hotness", hotness)
             object.__setattr__(self, "temperature", MemoryTemperature(self.temperature))
-        object.__setattr__(self, "final_score", _finite_score(self.final_score, "final_score"))
 
 
 class MemoryRecallStateStore(Protocol):
@@ -281,13 +254,6 @@ class MemoryRecallStateStore(Protocol):
         targets: tuple[MemoryRecallTarget, ...],
         *,
         used_at: datetime,
-    ) -> tuple[MemoryRecallState, ...]: ...
-
-    def record_probe(
-        self,
-        targets: tuple[MemoryRecallTarget, ...],
-        *,
-        probed_at: datetime,
     ) -> tuple[MemoryRecallState, ...]: ...
 
     def mark_compacted(
@@ -370,23 +336,6 @@ def memory_temperature(
     return MemoryTemperature.WARM
 
 
-def lifecycle_adjusted_score(
-    semantic_score: float,
-    hotness: float,
-    *,
-    alpha: float,
-) -> float:
-    semantic = _finite_score(semantic_score, "semantic_score")
-    heat = _finite_score(hotness, "hotness")
-    weight = _finite_score(alpha, "alpha")
-    if not 0.0 <= heat <= 1.0:
-        raise ValueError("memory lifecycle hotness must be between zero and one")
-    if not 0.0 <= weight < 1.0:
-        raise ValueError("memory lifecycle alpha must be between zero and one")
-    factor = 1.0 - weight * (1.0 - heat)
-    return semantic * factor if semantic >= 0.0 else semantic / factor
-
-
 class MemoryRecallLifecycle:
     def __init__(
         self,
@@ -407,6 +356,8 @@ class MemoryRecallLifecycle:
         *,
         now: datetime,
     ) -> tuple[MemoryRecallRanking, ...]:
+        """按热度从高到低排；关掉时没有冷热，按地址排。"""
+
         values = self._candidates(candidates)
         current = _utc_timestamp(now, "now")
         if not values:
@@ -422,9 +373,8 @@ class MemoryRecallLifecycle:
                     ),
                     None,
                     None,
-                    candidate.semantic_score,
                 )
-                for candidate in values
+                for candidate in sorted(values, key=lambda item: str(item.uri))
             )
         states = {state.uri: state for state in self.store.read_many(tuple(candidate.uri for candidate in values))}
         rankings: list[MemoryRecallRanking] = []
@@ -445,8 +395,6 @@ class MemoryRecallLifecycle:
                     state.useful_recall_count,
                     state.last_useful_recall_at,
                     candidate.updated_at,
-                    0,
-                    None,
                     None,
                     None,
                     None,
@@ -469,51 +417,9 @@ class MemoryRecallLifecycle:
                         cold1_threshold=self.config.cold1_threshold,
                         hot_threshold=self.config.hot_threshold,
                     ),
-                    final_score=lifecycle_adjusted_score(
-                        candidate.semantic_score,
-                        hotness,
-                        alpha=self.config.ranking_alpha,
-                    ),
                 )
             )
-        return tuple(sorted(rankings, key=lambda item: (-item.final_score, str(item.candidate.uri))))
-
-    def select(
-        self,
-        candidates: tuple[MemoryRecallCandidate, ...],
-        *,
-        limit: int,
-        now: datetime,
-    ) -> tuple[MemoryRecallRanking, ...]:
-        if limit <= 0:
-            raise ValueError("memory recall lifecycle selection limit must be positive")
-        current = _utc_timestamp(now, "now")
-        ranked = self.rank(candidates, now=current)
-        if not self.config.enabled:
-            return ranked[:limit]
-        semantic_top = tuple(
-            sorted(
-                (item for item in ranked if item.state.retired_at is None),
-                key=lambda item: (-item.candidate.semantic_score, str(item.candidate.uri)),
-            )
-        )[:limit]
-        probe_candidates = tuple(
-            item
-            for item in semantic_top
-            if item.temperature is MemoryTemperature.COLD_2 and self._probe_eligible(item.state, current)
-        )[: self.config.max_cold2_probes_per_search]
-        selected_probe_uris = {item.candidate.uri for item in probe_candidates}
-        normal = tuple(
-            item
-            for item in ranked
-            if item.state.retired_at is None and item.temperature is not MemoryTemperature.COLD_2
-        )[: max(0, limit - len(probe_candidates))]
-        return tuple(
-            sorted(
-                (*normal, *(item for item in probe_candidates if item.candidate.uri in selected_probe_uris)),
-                key=lambda item: (-item.final_score, str(item.candidate.uri)),
-            )
-        )
+        return tuple(sorted(rankings, key=lambda item: (-(item.hotness or 0.0), str(item.candidate.uri))))
 
     def record_use(
         self,
@@ -600,11 +506,6 @@ class MemoryRecallLifecycle:
             return 0
         return self.store.delete_many(values)
 
-    def _probe_eligible(self, state: MemoryRecallState, now: datetime) -> bool:
-        if state.last_cold2_probe_at is None:
-            return True
-        return now - state.last_cold2_probe_at >= timedelta(days=self.config.cold2_probe_interval_days)
-
     def _candidates(
         self,
         values: tuple[MemoryRecallCandidate, ...],
@@ -673,7 +574,6 @@ __all__ = [
     "MemoryRecallStateStore",
     "MemoryRecallTarget",
     "MemoryTemperature",
-    "lifecycle_adjusted_score",
     "memory_activity_at",
     "memory_hotness",
     "memory_temperature",

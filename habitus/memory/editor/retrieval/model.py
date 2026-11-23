@@ -1,53 +1,54 @@
-"""相关旧记忆检索使用的严格配置和结果模型。"""
+"""提取记忆时查旧卡片用的严格配置和结果模型。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from habitus.memory.retrieval.model import MemorySearchHit
 from habitus.memory.snapshot import MemorySnapshotBatch
-from habitus.memory.uri import MemoryURI, MemoryURINodeType
+from habitus.memory.uri import MemoryURI
 
 
 class MemoryRetrievalError(RuntimeError):
-    """相关旧记忆检索失败，不能安全地继续生成编辑操作。"""
+    """旧记忆读取失败，不能安全地继续生成编辑操作。"""
 
 
 @dataclass(frozen=True)
 class MemoryRetrievalConfig:
-    """限制会话查询、语义命中和确定性工具 URI 的资源使用。"""
+    """限制按真实工具名直读的工具卡片数，以及名字清单的大小。"""
 
-    max_query_chars: int = 5_000
-    max_prompt_chars: int = 1_000
-    max_completion_chars: int = 500
-    max_tool_message_chars: int = 500
-    search_limit: int = 5
     max_tool_uris: int = 32
+    max_listing_entries: int = 2_000
 
     def __post_init__(self) -> None:
         for name, value in {
-            "max_query_chars": self.max_query_chars,
-            "max_prompt_chars": self.max_prompt_chars,
-            "max_completion_chars": self.max_completion_chars,
-            "max_tool_message_chars": self.max_tool_message_chars,
-            "search_limit": self.search_limit,
             "max_tool_uris": self.max_tool_uris,
+            "max_listing_entries": self.max_listing_entries,
         }.items():
             if value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
 
 
 @dataclass(frozen=True)
+class MemoryNameEntry:
+    """名字清单里的一张旧卡片：地址与模板概览里的一小段说明（读不到概览时为空）。"""
+
+    uri: MemoryURI
+    description: str = ""
+
+    def line(self) -> str:
+        return f"- {self.uri}" + (f" — {self.description}" if self.description else "")
+
+
+@dataclass(frozen=True)
 class MemoryRelatedContext:
-    """绑定一个 ConversationSegment 的相关旧记忆完整读取结果。"""
+    """绑定一个 ConversationSegment 的固定旧卡片快照，以及偏好主题与实体名字清单。"""
 
     conversation_id: str
     segment_id: str
     source_segment_digest: str
-    query: str
-    search_roots: tuple[MemoryURI, ...]
-    search_hits: tuple[MemorySearchHit, ...]
+    listing: tuple[MemoryNameEntry, ...]
     snapshots: MemorySnapshotBatch
+    omitted_listing_entries: int = 0
 
     def __post_init__(self) -> None:
         for name, value in {
@@ -58,26 +59,11 @@ class MemoryRelatedContext:
                 raise ValueError(f"{name} must be a non-empty string without surrounding whitespace")
         if not _is_sha256(self.source_segment_digest):
             raise ValueError("source_segment_digest must be a lowercase SHA-256 digest")
-        if not self.query.strip():
-            raise ValueError("related memory query must be non-empty")
-
-        roots = tuple(MemoryURI.parse(uri) for uri in self.search_roots)
-        if any(uri.node_type is not MemoryURINodeType.DIRECTORY for uri in roots):
-            raise ValueError("related memory search roots must identify directories")
-        if roots != tuple(sorted(roots, key=str)) or len(roots) != len(set(roots)):
-            raise ValueError("related memory search roots must be unique and sorted")
-        object.__setattr__(self, "search_roots", roots)
-
-        hits = tuple(self.search_hits)
-        expected_hits = tuple(sorted(hits, key=lambda hit: (-hit.score, str(hit.uri))))
-        if hits != expected_hits or len({hit.uri for hit in hits}) != len(hits):
-            raise ValueError("related memory search hits must be unique and relevance-sorted")
-        for hit in hits:
-            if not any(hit.uri.matches_prefix(root) for root in roots):
-                raise ValueError("related memory search hit is outside its allowed roots")
-            if self.snapshots.get(str(hit.uri)) is None:
-                raise ValueError("related memory search hit has no corresponding read snapshot")
-        object.__setattr__(self, "search_hits", hits)
+        uris = tuple(entry.uri for entry in self.listing)
+        if len(set(uris)) != len(uris):
+            raise ValueError("memory name listing must be unique")
+        if self.omitted_listing_entries < 0:
+            raise ValueError("omitted listing entries must be non-negative")
 
     @property
     def selected_uris(self) -> tuple[MemoryURI, ...]:
@@ -91,6 +77,7 @@ def _is_sha256(value: str) -> bool:
 
 
 __all__ = [
+    "MemoryNameEntry",
     "MemoryRelatedContext",
     "MemoryRetrievalConfig",
     "MemoryRetrievalError",

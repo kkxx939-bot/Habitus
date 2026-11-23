@@ -6,6 +6,7 @@ import asyncio
 import errno
 import importlib.util
 import json
+import logging
 import os
 import shutil
 import socket
@@ -25,7 +26,6 @@ from habitus.integrations.local_service.windows_shell import powershell_policy_c
 
 if TYPE_CHECKING:
     from habitus.integrations.local_service.adapter_catalog import AdapterCatalog
-    from habitus.model_client import Reranker
 
 _MINIMUM_FREE_BYTES = 1024**3
 # Habitus 还没发布到 PyPI：缺依赖的安装提示与 README 一样从源码仓库装
@@ -37,6 +37,8 @@ _EXTRA_BY_MODULE = {
     "json_repair": "model",
     "jsonschema": "model",
 }
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class DoctorStatus(str, Enum):
@@ -217,12 +219,12 @@ def _adapter_configuration_check(
     return DoctorCheck(
         "adapter_configuration",
         DoctorStatus.PASS,
-        "registered model and vector adapters accept the configured limits",
+        "registered model adapters accept the configured limits",
     )
 
 
 def _setup_placeholder_check(config: HabitusConfig, catalog: AdapterCatalog) -> DoctorCheck:
-    """非交互 init 写出的 Embedding 模板还没填：在这里直接点名，免得等到发请求才报 DNS / 连接错误。"""
+    """非交互 init 写出的模型模板还没填：在这里直接点名，免得等到发请求才报 DNS / 连接错误。"""
 
     from habitus.integrations.local_service.setup_placeholders import unfilled_settings
 
@@ -301,11 +303,7 @@ def _deep_checks(
             from habitus.integrations.local_service.adapter_catalog import load_adapter_catalog
 
             catalog = load_adapter_catalog()
-        runtime = build_runtime(
-            config,
-            providers=catalog.providers,
-            vector_stores=catalog.vector_stores,
-        )
+        runtime = build_runtime(config, providers=catalog.providers)
     except Exception as exc:
         return [DoctorCheck("component_construction", DoctorStatus.FAIL, type(exc).__name__)]
 
@@ -313,7 +311,7 @@ def _deep_checks(
         DoctorCheck(
             "component_construction",
             DoctorStatus.PASS,
-            "chat, embedding, optional rerank, and both vector stores constructed",
+            "chat model and runtime components constructed",
         )
     ]
 
@@ -325,66 +323,10 @@ def _deep_checks(
                     runtime.components.models.chat.health_check_async(),
                     timeout=timeout_seconds,
                 )
-                chat_ok = chat_result.get("ok") is True
-                results.append(
-                    DoctorCheck(
-                        "chat_probe",
-                        DoctorStatus.PASS if chat_ok else DoctorStatus.FAIL,
-                        "provider health endpoint responded"
-                        if chat_ok
-                        else _probe_failure(str(chat_result.get("error_code", "health check failed")), config),
-                    )
-                )
+                results.append(_chat_check(chat_result, config))
             except Exception as exc:
+                _LOGGER.error("doctor chat probe failed", extra={"error_type": type(exc).__name__})
                 results.append(DoctorCheck("chat_probe", DoctorStatus.FAIL, type(exc).__name__))
-            try:
-                vector = await asyncio.wait_for(
-                    runtime.components.models.embedder.embed_query("Habitus doctor probe"),
-                    timeout=timeout_seconds,
-                )
-                results.append(
-                    DoctorCheck(
-                        "embedding_probe",
-                        DoctorStatus.PASS,
-                        f"dimension={len(vector.values)}; expected={config.models.embedding.dimension}",
-                    )
-                )
-            except Exception as exc:
-                results.append(DoctorCheck("embedding_probe", DoctorStatus.FAIL, _probe_exception(exc, config)))
-            for name, store in (
-                ("memory_vector_probe", runtime.components.memory.vector_index.store),
-                ("summary_vector_probe", runtime.components.conversation.summary_vector_index.store),
-            ):
-                try:
-                    state = await asyncio.wait_for(store.state(), timeout=timeout_seconds)
-                    if state is None:
-                        results.append(
-                            DoctorCheck(
-                                name,
-                                DoctorStatus.WARN,
-                                "vector store is reachable; collection has no Habitus publication yet",
-                            )
-                        )
-                    elif not state.ready:
-                        results.append(
-                            DoctorCheck(
-                                name,
-                                DoctorStatus.WARN,
-                                "publication exists but is not ready",
-                            )
-                        )
-                    else:
-                        results.append(
-                            DoctorCheck(
-                                name,
-                                DoctorStatus.PASS,
-                                f"publication is readable; ready={state.ready}",
-                            )
-                        )
-                except Exception as exc:
-                    results.append(DoctorCheck(name, DoctorStatus.FAIL, type(exc).__name__))
-            if runtime.components.models.reranker is not None:
-                results.append(await _rerank_probe(runtime.components.models.reranker, config, timeout_seconds))
         finally:
             try:
                 await asyncio.wait_for(runtime.close(), timeout=timeout_seconds)
@@ -399,17 +341,14 @@ def _deep_checks(
     return checks
 
 
-async def _rerank_probe(reranker: Reranker, config: HabitusConfig, timeout_seconds: float) -> DoctorCheck:
-    """rerank 没有免费的健康端点，就真发一次最小请求（一个查询、一个文档）：多一次计费调用，换来证书 / 代理问题当场可见。"""
+def _chat_check(chat_result: Mapping[str, object], config: HabitusConfig) -> DoctorCheck:
+    """对话模型健康探测的结论；没通过时写一条结构化 ERROR 日志（CLI 已把日志配成 stderr 上的 JSON）。"""
 
-    try:
-        scores = await asyncio.wait_for(
-            reranker.rerank("Habitus doctor probe", ("Habitus doctor probe",)),
-            timeout=timeout_seconds,
-        )
-    except Exception as exc:
-        return DoctorCheck("rerank_probe", DoctorStatus.FAIL, _probe_exception(exc, config))
-    return DoctorCheck("rerank_probe", DoctorStatus.PASS, f"scored {len(scores)} document")
+    if chat_result.get("ok") is True:
+        return DoctorCheck("chat_probe", DoctorStatus.PASS, "provider health endpoint responded")
+    code = str(chat_result.get("error_code", "health check failed"))
+    _LOGGER.error("doctor chat probe failed", extra={"error_code": code})
+    return DoctorCheck("chat_probe", DoctorStatus.FAIL, _probe_failure(code, config))
 
 
 def _network_check(config: HabitusConfig) -> DoctorCheck:
@@ -463,13 +402,6 @@ def _probe_failure(code: str, config: HabitusConfig) -> str:
     if code == "MODEL_PROXY_AUTH":
         return f"MODEL_PROXY_AUTH: {PROXY_AUTH_HINT}"
     return code
-
-
-def _probe_exception(error: BaseException, config: HabitusConfig) -> str:
-    code = getattr(error, "code", None)
-    if code in {"MODEL_TLS", "MODEL_PROXY_AUTH"}:
-        return _probe_failure(str(code), config)
-    return type(error).__name__
 
 
 def _credential_check(config: HabitusConfig, catalog: AdapterCatalog) -> DoctorCheck:

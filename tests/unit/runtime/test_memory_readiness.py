@@ -16,21 +16,20 @@ from tests.integration.test_runtime_assembly import runtime_config, runtime_depe
 from tests.lock_store import ProcessLocalLockStore
 
 
-def _service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, vector: RuntimeHealthStatus):
-    providers, vectors = runtime_dependencies()
+def _service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, recall_side: RuntimeHealthStatus):
+    providers = runtime_dependencies()
     runtime = build_runtime(
         runtime_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     runtime.initialize()
 
-    async def vector_check(name: str, _store: object) -> RuntimeHealthCheck:
-        return RuntimeHealthCheck(name, vector, "stub")
+    def lifecycle_storage_check(_self: object, _runtime_state: str) -> RuntimeHealthCheck:
+        return RuntimeHealthCheck("lifecycle_storage", recall_side, "stub")
 
-    # 向量库的就绪要起服务才发布；这里只看就绪怎么由各项合成
-    monkeypatch.setattr(RuntimeHealthService, "_vector_check", staticmethod(vector_check))
+    # 召回侧用生命周期存储这一项做替身；这里只看就绪怎么由各项合成
+    monkeypatch.setattr(RuntimeHealthService, "_lifecycle_storage_check", lifecycle_storage_check)
     return runtime, RuntimeHealthService(runtime.components)
 
 
@@ -45,7 +44,7 @@ def _job(runtime):
 def test_a_job_waiting_for_the_model_blocks_writes_but_not_recall(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runtime, service = _service(tmp_path, monkeypatch, vector=RuntimeHealthStatus.HEALTHY)
+    runtime, service = _service(tmp_path, monkeypatch, recall_side=RuntimeHealthStatus.HEALTHY)
     jobs, job = _job(runtime)
     jobs.fail(jobs.claim(job, "worker"), RuntimeError("Insufficient Balance"), waits_for_model=True)
 
@@ -59,7 +58,7 @@ def test_a_job_waiting_for_the_model_blocks_writes_but_not_recall(
 def test_a_failed_job_reads_as_failed_and_still_leaves_recall_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runtime, service = _service(tmp_path, monkeypatch, vector=RuntimeHealthStatus.HEALTHY)
+    runtime, service = _service(tmp_path, monkeypatch, recall_side=RuntimeHealthStatus.HEALTHY)
     jobs, job = _job(runtime)
     jobs.fail(jobs.claim(job, "worker"), ValueError("bad data"), retryable=False)
 
@@ -70,7 +69,7 @@ def test_a_failed_job_reads_as_failed_and_still_leaves_recall_ready(
 
 
 def test_a_recall_side_problem_makes_recall_not_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _runtime, service = _service(tmp_path, monkeypatch, vector=RuntimeHealthStatus.UNHEALTHY)
+    _runtime, service = _service(tmp_path, monkeypatch, recall_side=RuntimeHealthStatus.UNHEALTHY)
 
     report = asyncio.run(service.report("running"))
     assert report.ready is False and report.recall_ready is False

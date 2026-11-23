@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 from collections.abc import Mapping, Sequence
@@ -68,19 +67,15 @@ class LifecycleBenchmark:
             raise BenchmarkRunError("lifecycle benchmark output directory is not empty")
         self.output_directory.mkdir(parents=True, exist_ok=True)
         require_empty_directory(self.work_directory, label="lifecycle benchmark work directory")
-        scope = hashlib.sha256(str(self.output_directory).encode("utf-8")).hexdigest()
         runtime = build_runtime(
             isolated_config(
                 self.config,
                 storage_root=self.work_directory,
-                collection_scope=f"lifecycle:{scope}",
             )
         )
         runtime.initialize()
         events: list[dict[str, object]] = []
         try:
-            await runtime.components.memory.vector_index.rebuild(checkpoint=0)
-            await runtime.components.conversation.summary_vector_index.rebuild(checkpoint=0)
             address = ConversationAddress(
                 conversation_id=f"lifecycle-{self.sample.sample_id}",
                 started_on=self.sample.sessions[0].started_at.date(),

@@ -19,11 +19,10 @@ from tests.lock_store import ProcessLocalLockStore
 
 
 def _lifecycle_check(tmp_path: Path, cycle: LifecycleMaintenanceCycleResult | None):
-    providers, vectors = runtime_dependencies()
+    providers = runtime_dependencies()
     runtime = build_runtime(
         runtime_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     worker = runtime.components.workflow.lifecycle_worker
@@ -73,11 +72,10 @@ def test_participant_signals_show_up_on_the_health_surface(tmp_path: Path) -> No
 
 
 def _capacity_check(tmp_path: Path, *readings: CapacityReading):
-    providers, vectors = runtime_dependencies()
+    providers = runtime_dependencies()
     runtime = build_runtime(
         runtime_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     store = runtime.components.workflow.lifecycle_worker.capacity

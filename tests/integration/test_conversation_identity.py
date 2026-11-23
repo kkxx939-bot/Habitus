@@ -29,7 +29,7 @@ from habitus.foundation.integrity import canonical_digest
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.integrations.http_api import create_http_app
 from habitus.memory.conversation import ConversationAddress, ConversationWriteConflictError
-from habitus.memory.conversation.indexing.model import ConversationSummaryReference, ConversationSummaryStage
+from habitus.memory.conversation.summary_reference import ConversationSummaryReference, ConversationSummaryStage
 from habitus.memory.workflow.jobs.store import MemoryJobStore
 from habitus.memory.workflow.receipt.model import MemoryChangeSource
 from habitus.pre.conversation import ConversationBatch
@@ -182,11 +182,10 @@ def test_recovery_orders_both_spellings_as_one_conversation() -> None:
 
 
 def _runtime(tmp_path: Path):
-    providers, vectors = runtime_dependencies()
+    providers = runtime_dependencies()
     runtime = build_runtime(
         runtime_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     runtime.initialize()

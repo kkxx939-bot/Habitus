@@ -22,15 +22,6 @@ from habitus.memory.conversation.expansion import (
     ConversationSummaryExpander,
     ConversationSummaryExpansionError,
 )
-from habitus.memory.conversation.indexing import (
-    ConversationSummaryIndexError,
-    ConversationSummaryMatch,
-    ConversationSummaryReference,
-    ConversationSummaryStage,
-    ConversationSummaryVectorIndexConfig,
-    PersistentConversationSummaryVectorIndex,
-    conversation_summary_embedding_fingerprint,
-)
 from habitus.memory.conversation.ingress import (
     ConversationIngressError,
     ConversationIngressReceipt,
@@ -73,10 +64,7 @@ from habitus.memory.conversation.retirement import (
 )
 from habitus.memory.conversation.segmentation import (
     SEMANTIC_CHUNKER_VERSION,
-    ConversationBoundaryHints,
     ConversationMessageChunker,
-    ConversationSemanticBoundary,
-    ConversationSemanticBoundaryScorer,
 )
 from habitus.memory.conversation.summary import (
     ConversationSummaryConfig,
@@ -85,13 +73,22 @@ from habitus.memory.conversation.summary import (
     ConversationSummaryService,
     ConversationSummaryStore,
 )
+from habitus.memory.conversation.summary_reader import (
+    ConversationSummaryReader,
+    ConversationSummaryReaderConfig,
+)
+from habitus.memory.conversation.summary_reference import (
+    ConversationSummaryMatch,
+    ConversationSummaryReference,
+    ConversationSummaryStage,
+    summary_reference,
+)
 from habitus.memory.conversation.tool_result_reduction import ConversationToolResultReducer
 
 __all__ = [
     "ConversationAddress",
     "ConversationAppendResult",
     "ConversationAppendStatus",
-    "ConversationBoundaryHints",
     "ConversationIngressError",
     "ConversationIngressReceipt",
     "ConversationIngressReceiptStore",
@@ -113,8 +110,6 @@ __all__ = [
     "ConversationRetentionError",
     "ConversationRetentionPlan",
     "ConversationRetentionPlanner",
-    "ConversationSemanticBoundary",
-    "ConversationSemanticBoundaryScorer",
     "ConversationSealResult",
     "ConversationSealStatus",
     "ConversationSummaryConfig",
@@ -126,13 +121,14 @@ __all__ = [
     "ConversationSummaryCompactor",
     "ConversationSummaryError",
     "ConversationSummaryGenerator",
-    "ConversationSummaryIndexError",
     "ConversationSummaryMatch",
     "ConversationSummaryReference",
+    "ConversationSummaryReader",
+    "ConversationSummaryReaderConfig",
     "ConversationSummaryService",
+    "summary_reference",
     "ConversationSummaryStage",
     "ConversationSummaryStore",
-    "ConversationSummaryVectorIndexConfig",
     "ConversationSummaryUseError",
     "ConversationSummaryUseState",
     "ConversationSummaryRetirementError",
@@ -148,8 +144,6 @@ __all__ = [
     "ConversationToolResultReducer",
     "ConversationTurn",
     "ConversationWriteConflictError",
-    "PersistentConversationSummaryVectorIndex",
     "SEMANTIC_CHUNKER_VERSION",
-    "conversation_summary_embedding_fingerprint",
     "estimate_conversation_message_tokens",
 ]

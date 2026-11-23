@@ -1,4 +1,4 @@
-"""本地产品外壳使用的声明式 Provider、模型与向量配置注册表。"""
+"""本地产品外壳使用的声明式 Provider 与模型配置注册表。"""
 
 from __future__ import annotations
 
@@ -9,13 +9,10 @@ from types import MappingProxyType
 from typing import Literal
 
 from habitus.config import HabitusConfig
-from habitus.infrastructure.vector import VectorStoreConfig
-from habitus.infrastructure.vector.adapters import LocalSQLiteVectorStoreConfig
 from habitus.model_client import CapabilityConfig
 
-SetupCapability = Literal["chat", "embedding", "rerank", "vector"]
+SetupCapability = Literal["chat"]
 SetupInputKind = Literal["text", "required_text", "positive_int", "choice"]
-SetupTargetState = Literal["configured", "disabled"]
 
 
 @dataclass(frozen=True)
@@ -67,7 +64,7 @@ class SetupField:
 
 @dataclass(frozen=True)
 class SetupProfile:
-    """一个可注册的模型或向量产品配置模板。"""
+    """一个可注册的模型产品配置模板。"""
 
     profile_id: str
     capability: SetupCapability
@@ -77,19 +74,14 @@ class SetupProfile:
     fields: tuple[SetupField, ...] = ()
     replace_paths: tuple[str, ...] = ()
     selectable: bool = True
-    target_state: SetupTargetState = "configured"
 
     def __post_init__(self) -> None:
         if not self.profile_id:
             raise ValueError("setup profile id must be non-empty")
-        if self.capability not in {"chat", "embedding", "rerank", "vector"}:
+        if self.capability != "chat":
             raise ValueError("setup profile capability is invalid")
         if not self.display_name.strip():
             raise ValueError("setup profile display_name must be non-empty")
-        if self.target_state not in {"configured", "disabled"}:
-            raise ValueError("setup profile target_state is invalid")
-        if self.target_state == "disabled" and self.capability != "rerank":
-            raise ValueError("only an optional rerank profile may be disabled")
         if any(not path for path in self.replace_paths):
             raise ValueError("setup profile replace_paths must be non-empty paths")
         field_keys = [item.key for item in self.fields]
@@ -152,7 +144,7 @@ class AdapterProductRegistration:
     validate: ConfigurationValidator | None = None
 
     def __post_init__(self) -> None:
-        if self.capability not in {"chat", "embedding", "rerank", "vector"}:
+        if self.capability != "chat":
             raise ValueError("adapter product capability is invalid")
         if not self.adapter:
             raise ValueError("adapter product name must be non-empty")
@@ -298,25 +290,7 @@ def build_builtin_setup_registry() -> SetupRegistry:
     from habitus.integrations.local_service.setup_chat_profiles import chat_adapter_registrations
 
     registry = SetupRegistry()
-    for registration in (
-        *chat_adapter_registrations(),
-        AdapterProductRegistration(
-            "embedding",
-            "openai_compatible_embedding",
-            _api_key_fields,
-        ),
-        AdapterProductRegistration(
-            "rerank",
-            "openai_compatible_rerank",
-            _api_key_fields,
-        ),
-        AdapterProductRegistration(
-            "vector",
-            "local_sqlite",
-            _no_credential_fields,
-            validate=_validate_local_sqlite,
-        ),
-    ):
+    for registration in chat_adapter_registrations():
         registry.register_adapter(registration)
     for profile in _builtin_profiles():
         registry.register_profile(profile)
@@ -327,180 +301,17 @@ def _builtin_profiles() -> tuple[SetupProfile, ...]:
     # chat 的 Profile 在单独模块里；它要用本模块的字段构造函数，所以在这里（本模块加载完之后）再导入
     from habitus.integrations.local_service.setup_chat_profiles import chat_profiles
 
-    qwen_instruction = "Given a web search query, retrieve relevant passages that answer the query."
-    return (
-        *chat_profiles(),
-        SetupProfile(
-            "embedding.openai_compatible.custom",
-            "embedding",
-            "OpenAI-compatible embedding endpoint (cloud or self-hosted)",
-            patch={
-                "route": {
-                    "provider": "custom",
-                    "adapter": "openai_compatible_embedding",
-                    "model": "example.embedding-model",
-                    "base_url": "https://embedding.example.com/v1",
-                    "credential_ref": "embedding",
-                    "extra_body": {},
-                },
-                "dimension": 1024,
-                "query_parameters": {},
-                "document_parameters": {},
-                "query_prefix": "",
-                "document_prefix": "",
-            },
-            match={"route.adapter": "openai_compatible_embedding"},
-            fields=(
-                _text("provider", "Embedding provider identifier", "route.provider", "custom"),
-                _required(
-                    "model", "Embedding model", "route.model", "", placeholder_values=("example.embedding-model",)
-                ),
-                _required(
-                    "base_url",
-                    "Embedding API base URL",
-                    "route.base_url",
-                    "",
-                    placeholder_values=("https://embedding.example.com/v1",),
-                ),
-                _text("credential_ref", "Embedding credential reference", "route.credential_ref", "embedding"),
-                _positive("dimension", "Embedding dimension (must match the model output)", "dimension", 1024),
-            ),
-            replace_paths=(
-                "route.extra_body",
-                "query_parameters",
-                "document_parameters",
-                "query_prefix",
-                "document_prefix",
-            ),
-        ),
-        SetupProfile(
-            "rerank.disabled",
-            "rerank",
-            "Disabled (vector relevance fallback)",
-            patch={"enabled": False},
-            match={"enabled": False},
-            target_state="disabled",
-        ),
-        SetupProfile(
-            "rerank.aliyun.qwen3",
-            "rerank",
-            "Alibaba Cloud Qwen3 Rerank",
-            patch={
-                "route": {
-                    "provider": "aliyun",
-                    "adapter": "openai_compatible_rerank",
-                    "model": "qwen3-rerank",
-                    "base_url": "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-api/v1",
-                    "credential_ref": "dashscope",
-                    "extra_body": {"instruct": qwen_instruction},
-                },
-                "max_documents": 100,
-                "max_query_chars": 8_000,
-                "max_document_chars": 16_000,
-            },
-            match={
-                "route.provider": "aliyun",
-                "route.adapter": "openai_compatible_rerank",
-                "route.model": "qwen3-rerank",
-            },
-            fields=(
-                # 没有 example 模板原值，占位只由 is_setup_placeholder 的 {var} 规则拦（README 里的 {WorkspaceId}）
-                _required("base_url", "Alibaba Workspace API base URL", "route.base_url", ""),
-            ),
-            replace_paths=("route.extra_body",),
-        ),
-        SetupProfile(
-            "rerank.openai_compatible.custom",
-            "rerank",
-            "Custom OpenAI-compatible rerank endpoint",
-            patch={
-                "route": {
-                    "provider": "custom",
-                    "adapter": "openai_compatible_rerank",
-                    "model": "rerank-model",
-                    "base_url": "https://rerank.example.com/v1",
-                    "credential_ref": "custom_rerank",
-                    "extra_body": {},
-                },
-                "max_documents": 100,
-                "max_query_chars": 8_000,
-                "max_document_chars": 16_000,
-            },
-            match={"route.adapter": "openai_compatible_rerank"},
-            fields=(
-                _text("provider", "Rerank provider identifier", "route.provider", "custom"),
-                _text("model", "Rerank model", "route.model", "rerank-model"),
-                _required("base_url", "Rerank API base URL", "route.base_url", ""),
-                _text("credential_ref", "Rerank credential reference", "route.credential_ref", "custom_rerank"),
-            ),
-            replace_paths=("route.extra_body",),
-        ),
-        _local_sqlite_profile(),
-    )
-
-
-def _local_sqlite_profile() -> SetupProfile:
-    """进程内本地向量库：存储根下每个 Collection 一个 SQLite 文件，不要账号、不走网络。"""
-
-    route = {
-        "provider": "local",
-        "adapter": "local_sqlite",
-        "base_url": "",
-        "credential_ref": "",
-        "extra_headers": {},
-    }
-    options = {"busy_timeout_seconds": 5.0}
-    return SetupProfile(
-        "vector.local_sqlite",
-        "vector",
-        "Local (embedded SQLite + numpy, no account)",
-        patch={
-            "memory": {"route": route, "collection": "memory", "options": options},
-            "summary": {
-                "route": deepcopy(route),
-                "collection": "conversation_summaries",
-                "options": deepcopy(options),
-            },
-        },
-        match={"memory.route.adapter": "local_sqlite"},
-        replace_paths=(
-            "memory.options",
-            "summary.options",
-            "memory.route.extra_headers",
-            "summary.route.extra_headers",
-        ),
-    )
+    return chat_profiles()
 
 
 def _api_key_fields(_document: Mapping[str, object]) -> tuple[str, ...]:
     return ("api_key",)
 
 
-def _no_credential_fields(_document: Mapping[str, object]) -> tuple[str, ...]:
-    return ()
-
-
-def _validate_local_sqlite(config: HabitusConfig) -> None:
-    for vector in (config.memory.vector_store, config.conversation.summary_vector_store):
-        LocalSQLiteVectorStoreConfig.from_mapping(vector.options).validate_store(vector)
-
-
 def _active_adapter_documents(
     config: HabitusConfig,
 ) -> tuple[tuple[SetupCapability, Mapping[str, object]], ...]:
-    documents: list[tuple[SetupCapability, Mapping[str, object]]] = [
-        ("chat", model_document(config.models.chat)),
-        ("embedding", model_document(config.models.embedding)),
-    ]
-    if config.models.rerank is not None:
-        documents.append(("rerank", model_document(config.models.rerank)))
-    documents.extend(
-        (
-            ("vector", _vector_document(config.memory.vector_store)),
-            ("vector", _vector_document(config.conversation.summary_vector_store)),
-        )
-    )
-    return tuple(documents)
+    return (("chat", model_document(config.models.chat)),)
 
 
 def model_document(model: CapabilityConfig) -> Mapping[str, object]:
@@ -513,19 +324,6 @@ def model_document(model: CapabilityConfig) -> Mapping[str, object]:
             "base_url": route.base_url,
             "credential_ref": route.credential_ref,
         }
-    }
-
-
-def _vector_document(vector: VectorStoreConfig) -> Mapping[str, object]:
-    route = vector.route
-    return {
-        "route": {
-            "provider": route.provider,
-            "adapter": route.adapter,
-            "base_url": route.base_url,
-            "credential_ref": route.credential_ref,
-        },
-        "options": dict(vector.options),
     }
 
 

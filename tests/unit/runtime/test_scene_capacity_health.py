@@ -44,11 +44,10 @@ class _Health:
     """一份真实 Runtime 的容量快照存储 + 真实健康面判断。"""
 
     def __init__(self, tmp_path: Path, share: float) -> None:
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         runtime = build_runtime(
             runtime_config(tmp_path / "runtime"),
             providers=providers,
-            vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
         )
         store = runtime.components.workflow.lifecycle_worker.capacity

@@ -25,12 +25,11 @@ from tests.lock_store import ProcessLocalLockStore
 def runtime_pair(tmp_path: Path):
     values = []
     for name in ("first", "second"):
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         values.append(
             build_runtime(
                 runtime_config(tmp_path / name),
                 providers=providers,
-                vector_stores=vectors,
                 path_lock=PathLock(ProcessLocalLockStore()),
             )
         )
@@ -93,7 +92,7 @@ def test_runtime_models_structured_client_must_wrap_same_chat_instance(runtime_p
     [
         ("summaries", "share one root"),
         ("summary_compactor", "shared journal"),
-        ("summary_vector_index", "share one Summary compactor"),
+        ("summary_reader", "share one Summary compactor"),
     ],
 )
 def test_runtime_conversation_rejects_valid_component_from_another_runtime(
@@ -115,7 +114,8 @@ def test_runtime_conversation_rejects_valid_component_from_another_runtime(
         ("search", "shared memory tree"),
         ("editor", "shared memory tree"),
         ("semantic_refresher", "shared memory tree"),
-        ("vector_index", "shared memory tree"),
+        ("browser", "shared memory tree"),
+        ("lifecycle", "shared memory tree"),
     ],
 )
 def test_runtime_memory_rejects_valid_component_bound_to_another_tree(
@@ -129,14 +129,6 @@ def test_runtime_memory_rejects_valid_component_bound_to_another_tree(
             first.components.memory,
             **{field: getattr(second.components.memory, field)},
         )
-
-
-def test_runtime_memory_search_and_persistent_index_must_share_one_index(runtime_pair) -> None:
-    first, second = runtime_pair
-    search = first.components.memory.search
-    search.semantic_search = second.components.memory.search.semantic_search
-    with pytest.raises(ValueError, match="shared persistent vector index"):
-        replace(first.components.memory, search=search)
 
 
 @pytest.mark.parametrize(

@@ -7,8 +7,8 @@
 **加**内容（``MemorySearchServiceConfig.max_context_chars=120000`` 字符上限）；``Stop``/``SessionEnd`` 只抄走
 transcript；``PreCompact`` 只是先 ``flush`` 封段，压缩仍由宿主自己做；``SessionStart`` 不注入任何东西。
 ``ConversationRetentionPlanner``（保留 3 轮 / 12000 token）与段摘要 → Range → Archive 压的都是 Habitus
-自己的 ``live.jsonl`` 副本，不是 Agent 的 prompt；压缩产物只在 ``SearchService.search()`` 判定长期记忆
-不足时当 Summary 兜底用。HTTP 的记忆出口只有 remember / recall / flush / cursor，没有"按预算给出会话上下文"
+自己的 ``live.jsonl`` 副本，不是 Agent 的 prompt；压缩产物只作为 ``SearchService.search()`` 能查的三处来源之一
+（会话摘要）。HTTP 的记忆出口只有 remember / recall / flush / cursor，没有"按预算给出会话上下文"
 的能力。
 
 **参考（OpenViking ``volcengine/OpenViking`` main，2026-09-23 核对）**：存储这一半 Habitus 已有自己的实现，只借鉴了
@@ -31,7 +31,7 @@ OpenViking 的设计（retention 默认值取同一组数、归档摘要、L0/L1
 **Habitus 已有的数据**：``ConversationSummaryCompactor.frontier(address).active``（按序号不重叠的 Segment /
 Range / Archive 摘要，字段 overview / chronology / corrections / ending_state / open_threads）、
 ``ConversationMessageJournal.read_live``（未封段消息）、``history/*.jsonl``（原文，直到 Archive 退役释放）、
-``PersistentConversationSummaryVectorIndex``（摘要检索）。
+``ConversationSummaryReader``（检索按日期与关键词查摘要）。
 
 **候选方案（未裁定）**：
 
@@ -80,6 +80,7 @@ from habitus.integrations.http_api.schemas import (
     MemoryReadResult,
     RecallDegradationResult,
     RecallMemoryResult,
+    RecallRecordResult,
     RecallResult,
     RecallSummaryResult,
     RememberJobResult,
@@ -239,25 +240,17 @@ class RuntimeHTTPHandlers:
         )
         return RecallResult(
             query=result.query,
-            queries=[item.query for item in result.plan.queries],
             context=result.context,
-            memories=[
-                RecallMemoryResult(
-                    uri=str(memory.uri),
-                    score=memory.hit.score,
-                    matched_queries=list(memory.matched_queries),
-                )
-                for memory in result.memories
-            ],
-            summaries=[
-                RecallSummaryResult(reference=match.reference.identity, score=match.score)
-                for match in result.summary_fallbacks
-            ],
+            memories=[RecallMemoryResult(uri=str(memory.uri)) for memory in result.memories],
+            records=[RecallRecordResult(address=record.address) for record in result.records],
+            summaries=[RecallSummaryResult(reference=match.reference.identity) for match in result.summaries],
+            notes=list(result.notes),
             degradations=[
                 RecallDegradationResult(stage=item.stage.value, error_type=item.error_type)
                 for item in result.degradations
             ],
             budget_exhausted=result.budget_exhausted,
+            timed_out=result.timed_out,
         )
 
     async def job_status(

@@ -23,6 +23,7 @@ from habitus.infrastructure.store.contracts import LockStore
 from habitus.infrastructure.store.filesystem import atomic_replace_bytes, read_regular_bytes
 from habitus.memory.compaction import MemoryLifecycleMaintenanceResult, MemoryLifecycleManager
 from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
+from habitus.memory.semantic import MemorySemanticRefresher
 from habitus.memory.workflow import ConversationLifecycleManager
 from habitus.runtime.lifecycle import LifecycleWorkerStateError
 
@@ -193,12 +194,13 @@ class ConversationChainParticipant:
 
 
 class MemoryL2Participant:
-    """L2 记忆的冷热、压缩与退休维护。"""
+    """L2 记忆的冷热、压缩与退休维护；最后按模板把全树目录概览重建一遍，补"写完卡片、刷概览之前崩了"的情况。"""
 
     name = "memory-l2"
 
-    def __init__(self, manager: MemoryLifecycleManager) -> None:
+    def __init__(self, manager: MemoryLifecycleManager, semantic_refresher: MemorySemanticRefresher) -> None:
         self.manager = manager
+        self.semantic_refresher = semantic_refresher
         self.last_result: MemoryLifecycleMaintenanceResult | None = None
 
     async def maintain(self, ctx: LifecycleContext) -> ParticipantReport:
@@ -206,10 +208,12 @@ class MemoryL2Participant:
         result = await self.manager.maintain()
         await asyncio.to_thread(ctx.assert_owned)
         self.last_result = result
-        return ParticipantReport(
-            released=len(result.compacted) + len(result.retired),
-            signals=tuple(f"{item.uri}: {item.error_type}" for item in result.failures),
-        )
+        signals = [f"{item.uri}: {item.error_type}" for item in result.failures]
+        try:
+            await asyncio.to_thread(self.semantic_refresher.rebuild)
+        except Exception as exc:
+            signals.append(f"memory overview rebuild: {type(exc).__name__}")
+        return ParticipantReport(released=len(result.compacted) + len(result.retired), signals=tuple(signals))
 
 
 def _failure(address: ConversationAddress, error: Exception) -> LifecycleMaintenanceFailure:

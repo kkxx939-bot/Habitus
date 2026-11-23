@@ -302,13 +302,14 @@ class ConversationCursorResult(StrictSchema):
 
 class RecallMemoryResult(StrictSchema):
     uri: str
-    score: float
-    matched_queries: list[str]
+
+
+class RecallRecordResult(StrictSchema):
+    address: str
 
 
 class RecallSummaryResult(StrictSchema):
     reference: str
-    score: float
 
 
 class RecallDegradationResult(StrictSchema):
@@ -318,12 +319,14 @@ class RecallDegradationResult(StrictSchema):
 
 class RecallResult(StrictSchema):
     query: str
-    queries: list[str]
     context: str
     memories: list[RecallMemoryResult]
+    records: list[RecallRecordResult]
     summaries: list[RecallSummaryResult]
+    notes: list[str]
     degradations: list[RecallDegradationResult]
     budget_exhausted: bool
+    timed_out: bool
 
 
 class JobFailureResult(StrictSchema):

@@ -244,8 +244,10 @@ async function recall(args, { stdout, env }) {
   });
   if (json) { writeJson(stdout, found); return 0; }
   const result = found || {};
-  if (!result.memories?.length && !result.context) { stdout.write("没有相关记忆。\n"); return 0; }
-  for (const item of result.memories || []) stdout.write(`${Number(item.score).toFixed(2)}  ${item.uri}\n`);
+  if (!result.context) { stdout.write("没有相关记忆。\n"); return 0; }
+  for (const item of result.memories || []) stdout.write(`卡片  ${item.uri}\n`);
+  for (const item of result.records || []) stdout.write(`记录  ${item.address}\n`);
+  for (const item of result.summaries || []) stdout.write(`摘要  ${item.reference}\n`);
   if (result.context) stdout.write(`\n${result.context}\n`);
   return 0;
 }

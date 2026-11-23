@@ -15,12 +15,12 @@ from pathlib import Path
 from habitus.foundation.timestamps import format_utc_z, require_aware_utc
 from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import ensure_owner_directory, restrict_file_to_owner
-from habitus.memory.conversation.indexing.model import (
+from habitus.memory.conversation.layout import ConversationAddress, ConversationLayout, ConversationLayoutError
+from habitus.memory.conversation.summary_reference import (
     ConversationSummaryReference,
     ConversationSummaryStage,
     summary_reference,
 )
-from habitus.memory.conversation.layout import ConversationAddress, ConversationLayout, ConversationLayoutError
 from habitus.pre.conversation import ConversationRangeSummary, ConversationSegmentSummary
 
 

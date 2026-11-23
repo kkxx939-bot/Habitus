@@ -1,6 +1,6 @@
 """健康检查里模型调用失败那几项（裁定 108）：给人看的一句话直接写在 ``detail`` 里。
 
-- ``model_chat`` / ``model_embedding`` / ``model_rerank``：这种能力的熔断此刻的样子。开着时写打开它的那类错误的那句话、
+- ``model_chat``：对话能力（唯一的模型能力）的熔断此刻的样子。开着时写打开它的那类错误的那句话、
   多久之后再试一次；"要人处理"的改好配置或额度恢复后，下一次试探成功自己消掉。都是 non-critical：读写各条链自己会等。
 - ``memory_skipped``：长期记忆里输入有问题、跳过了的段（仍在保留期里的）：条数、各类几段、最近一段的那句话。
 """
@@ -17,13 +17,7 @@ from habitus.runtime.health_model import RuntimeHealthCheck, RuntimeHealthStatus
 
 
 def model_checks(components: RuntimeComponents) -> list[RuntimeHealthCheck]:
-    models = components.models
-    breakers: tuple[tuple[str, CircuitBreaker | None], ...] = (
-        ("model_chat", models.chat.breaker),
-        ("model_embedding", getattr(models.embedder, "breaker", None)),
-        ("model_rerank", getattr(models.reranker, "breaker", None)),
-    )
-    checks = [breaker_check(name, breaker) for name, breaker in breakers if breaker is not None]
+    checks = [breaker_check("model_chat", components.models.chat.breaker)]
     try:
         skipped = components.workflow.jobs.skipped()
     except Exception as exc:  # noqa: BLE001 - 健康检查只报不抛

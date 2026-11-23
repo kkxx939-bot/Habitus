@@ -29,7 +29,6 @@ from habitus.infrastructure.store.contracts import PathLock
 from habitus.memory.conversation import (
     ConversationAddress,
     ConversationMessageJournal,
-    ConversationSemanticBoundaryScorer,
 )
 from habitus.memory.conversation.interruption import interruption_messages
 from habitus.memory.workflow import ConversationMemoryEnqueuer
@@ -42,7 +41,6 @@ class ConversationIdleSealParticipant:
     def __init__(
         self,
         enqueuer: ConversationMemoryEnqueuer,
-        boundary_scorer: ConversationSemanticBoundaryScorer,
         releaser: ConversationSourceReleaser,
         path_lock: PathLock,
         config: ConversationLifecycleConfig,
@@ -52,7 +50,6 @@ class ConversationIdleSealParticipant:
     ) -> None:
         self.enqueuer = enqueuer
         self.journal = enqueuer.conversations
-        self.boundary_scorer = boundary_scorer
         self.releaser = releaser
         self.path_lock = path_lock
         self.config = config
@@ -87,7 +84,6 @@ class ConversationIdleSealParticipant:
         live = await asyncio.to_thread(self.journal.read_live, address)
         if live is None or live.messages[-1].occurred_at > idle_since:
             return 0
-        hints = await self.boundary_scorer.score(live)
         key = conversation_order_lock_key(
             address.conversation_id, address.started_on, ConversationSourceConsumer.MEMORY
         )
@@ -105,9 +101,7 @@ class ConversationIdleSealParticipant:
                 closing = interruption_messages(current, at=ctx.now)
                 if closing:
                     self.enqueuer.append(address, ConversationBatch(address.conversation_id, closing))
-                jobs, _plan = self.enqueuer.enqueue_ready_segments(
-                    address, after_turn=False, flush=True, boundary_hints=hints
-                )
+                jobs, _plan = self.enqueuer.enqueue_ready_segments(address, after_turn=False, flush=True)
             if jobs:
                 ctx.assert_owned()
                 self.releaser.release_address(SourceAddress(address.conversation_id, address.started_on).digest, ctx)

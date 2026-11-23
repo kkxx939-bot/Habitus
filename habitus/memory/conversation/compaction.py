@@ -44,7 +44,7 @@ SummarySource = ConversationSegmentSummary | ConversationRangeSummary
 
 if TYPE_CHECKING:
     from habitus.memory.conversation.access import ConversationSummaryUseState
-    from habitus.memory.conversation.indexing.model import ConversationSummaryReference
+    from habitus.memory.conversation.summary_reference import ConversationSummaryReference
 
 
 class ConversationSummaryUseReader(Protocol):

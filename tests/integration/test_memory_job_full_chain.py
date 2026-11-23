@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -16,8 +15,6 @@ import yaml
 from habitus.config import HabitusConfig
 from habitus.foundation.observability import ObservationEvent
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.vector import VectorStoreBusyError, VectorStoreFactory, VectorStoreMatch, VectorStoreState
-from habitus.infrastructure.vector.adapters import register_builtin_vector_adapters
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.editor import MemoryTransactionJournalState
 from habitus.memory.workflow import (
@@ -27,9 +24,7 @@ from habitus.memory.workflow import (
     MemoryJobStatus,
 )
 from habitus.model_client import (
-    EmbeddingVector,
     ModelResponse,
-    ModelTransportError,
     ProviderCapabilities,
     ProviderFactory,
 )
@@ -42,7 +37,7 @@ from tests.model_helpers import prepare_chat_request
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
-def runtime_config(tmp_path: Path, *, max_attempts: int = 3, local_vectors: bool = False) -> HabitusConfig:
+def runtime_config(tmp_path: Path, *, max_attempts: int = 3) -> HabitusConfig:
     payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     # 单测不往 127.0.0.1:4318 真导出：没关掉的 Runtime 会留下每 10 秒导出一次的线程，串进后面设了代理环境变量的测试
@@ -52,20 +47,6 @@ def runtime_config(tmp_path: Path, *, max_attempts: int = 3, local_vectors: bool
         adapter="fake_chat",
         credential_ref="",
     )
-    payload["models"]["embedding"]["route"].update(
-        provider="fake",
-        adapter="fake_embedding",
-        credential_ref="",
-    )
-    payload["models"]["rerank"]["route"].update(
-        provider="fake",
-        adapter="fake_rerank",
-        credential_ref="",
-    )
-    if not local_vectors:
-        for store in (payload["memory"]["vector_store"], payload["conversation"]["summary_vector_store"]):
-            store["route"].update(provider="fake", adapter="fake_vector", credential_ref="")
-            store["options"] = {}
     payload["workflow"]["jobs"]["max_attempts"] = max_attempts
     return HabitusConfig.from_mapping(payload)
 
@@ -109,8 +90,9 @@ class DispatchingChatProvider:
             "memory_retrieval_decision": {
                 "status": "irrelevant",
                 "action": "finish",
-                "query": None,
-                "uri": None,
+                "directory": None,
+                "uris": [],
+                "keywords": [],
                 "reason": "当前没有相关旧记忆。",
             },
             "memory_candidate_batch": {
@@ -122,15 +104,6 @@ class DispatchingChatProvider:
                 "relations": [],
             },
         }
-        if response_name == "memory_directory_overview":
-            snapshot = json.loads(str(request.messages[-1].content).split("目录快照：", 1)[1])
-            payloads[response_name] = {
-                "directory_summary": "目录保存有来源支持的长期记忆。",
-                "entries": [
-                    {"name": item["name"], "kind": item["kind"], "summary": f"{item['name']} 的稳定摘要。"}
-                    for item in snapshot["entries"]
-                ],
-            }
         if response_name == "memory_retrieval_decision" and self.retrieval_script:
             payloads[response_name] = self.retrieval_script.pop(0)
         if response_name == "memory_candidate_batch":
@@ -163,100 +136,9 @@ class DispatchingChatProvider:
         return None
 
 
-class EmbeddingProvider:
-    is_remote = False
-
-    def __init__(self, provider_name: str, model: str, dimension: int) -> None:
-        self.provider_name = provider_name
-        self.model = model
-        self.dimension = dimension
-
-    async def embed(self, _text: str, *, is_query: bool) -> EmbeddingVector:
-        return EmbeddingVector((1.0,) + (0.0,) * (self.dimension - 1))
-
-    async def aclose(self):
-        return None
-
-
-class RerankProvider:
-    is_remote = False
-
-    def __init__(self, provider_name: str, model: str) -> None:
-        self.provider_name = provider_name
-        self.model = model
-
-    async def rerank(self, _query: str, documents) -> tuple[float, ...]:
-        return tuple(1.0 for _ in documents)
-
-    async def aclose(self):
-        return None
-
-
-class DurableVectorBackend:
-    adapter_name = "fake_vector"
-    max_records = 100_000
-    max_search_hits = 10_000
-
-    def __init__(self, provider_name: str, collection: str) -> None:
-        self.provider_name = provider_name
-        self.collection = collection
-        self.metadata = {}
-        self.records = {}
-        self.fail_incremental_visibility_once = False
-        self.fail_search_when: Callable[[], bool] = lambda: False
-
-    async def initialize(self):
-        return None
-
-    async def read_metadata(self, names):
-        return {name: self.metadata[name] for name in names if name in self.metadata}
-
-    async def write_metadata(self, values, *, dimension):
-        self.metadata.update({name: dict(value) for name, value in values.items()})
-
-    async def ensure_schema(self, _dimension, *, published_dimension):
-        return None
-
-    async def read(self, identities):
-        return tuple(self.records[identity] for identity in identities if identity in self.records)
-
-    async def delete_all(self):
-        self.records.clear()
-
-    async def upsert(self, records):
-        self.records.update({record.identity: record for record in records})
-
-    async def delete(self, identities):
-        for identity in identities:
-            self.records.pop(identity, None)
-
-    async def validate_records(self, _records, *, replacing):
-        return None
-
-    async def wait_visible(self, _upserts, _deletes, *, complete):
-        if self.fail_incremental_visibility_once and not complete:
-            self.fail_incremental_visibility_once = False
-            raise TimeoutError("vector visibility did not converge")
-        return None
-
-    async def search(self, _query_vector, *, filters, limit):
-        if self.fail_search_when():
-            raise ConnectionError("vector service unavailable")
-        return tuple(
-            VectorStoreMatch(record, 1.0) for record in self.records.values() if filters.matches(record.attributes)
-        )[:limit]
-
-    async def scan(self, *, filters, limit):
-        return tuple(record for record in self.records.values() if filters.matches(record.attributes))[:limit]
-
-    async def close(self):
-        return None
-
-
 def dependencies():
     providers = ProviderFactory()
     chat_instances: list[DispatchingChatProvider] = []
-    vector_instances: list[DurableVectorBackend] = []
 
     def chat_builder(context):
         provider = DispatchingChatProvider(context.route.provider, context.route.model)
@@ -264,43 +146,17 @@ def dependencies():
         return provider
 
     providers.register_adapter("chat", "fake_chat", chat_builder)
-    providers.register_adapter(
-        "embedding",
-        "fake_embedding",
-        lambda context: EmbeddingProvider(
-            context.route.provider,
-            context.route.model,
-            context.config.dimension,
-        ),
-    )
-    providers.register_adapter(
-        "rerank",
-        "fake_rerank",
-        lambda context: RerankProvider(context.route.provider, context.route.model),
-    )
-    vectors = VectorStoreFactory()
-
-    def vector_builder(context):
-        backend = DurableVectorBackend(context.config.provider, context.config.collection)
-        vector_instances.append(backend)
-        return backend
-
-    vectors.register_adapter(
-        "fake_vector",
-        vector_builder,
-    )
-    return providers, vectors, chat_instances, vector_instances
+    return providers, chat_instances
 
 
-def test_full_job_chain_commits_summary_receipt_indexes_and_job_before_cleaning_journal(
+def test_full_job_chain_commits_summary_receipt_and_job_before_cleaning_journal(
     tmp_path: Path,
 ) -> None:
     config = runtime_config(tmp_path)
-    providers, vectors, chats, _vector_backends = dependencies()
+    providers, chats = dependencies()
     runtime = build_runtime(
         config,
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     runtime.initialize()
@@ -319,7 +175,7 @@ def test_full_job_chain_commits_summary_receipt_indexes_and_job_before_cleaning_
     assert result.change_receipt is not None
     assert result.change_receipt.state is MemoryChangeReceiptState.COMMITTED
     assert result.change_receipt.node_changes == ()
-    assert result.summary_generated and result.summary_indexed and result.vector_indexed
+    assert result.summary_generated
     assert result.journal_cleaned
     assert runtime.components.memory.editor.transaction.journal.try_read(queued.transaction_id) is None
     summary = runtime.components.conversation.summaries.store.read(
@@ -327,59 +183,11 @@ def test_full_job_chain_commits_summary_receipt_indexes_and_job_before_cleaning_
         runtime.components.conversation.journal.read_segment(address, queued.segment_id),
     )
     assert summary.source_message_digest == queued.source_segment_digest
-    memory_state = asyncio.run(runtime.components.memory.vector_index.store.state())
-    summary_state = asyncio.run(runtime.components.conversation.summary_vector_index.store.state())
-    assert isinstance(memory_state, VectorStoreState) and memory_state.checkpoint == 1
-    assert isinstance(summary_state, VectorStoreState) and summary_state.checkpoint == 1
     assert set(chats[0].response_names) == {
         "conversation_segment_summary_field_operations",
         "memory_retrieval_decision",
         "memory_candidate_batch",
     }
-
-
-def test_full_job_chain_publishes_into_default_local_sqlite_vector_files(tmp_path: Path) -> None:
-    """默认配置的本地向量后端接在真实 Runtime 上：两份索引都落到存储根下的 SQLite 文件，重启后读回同一状态。"""
-
-    config = runtime_config(tmp_path, local_vectors=True)
-    assert config.memory.vector_store.adapter == "local_sqlite"
-    providers, vectors, _chats, fake_vectors = dependencies()
-    register_builtin_vector_adapters(vectors)
-    runtime = build_runtime(
-        config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
-    )
-    runtime.initialize()
-    address = ConversationAddress("conversation-1", date(2026, 7, 1))
-    runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
-        address,
-        ConversationBatch("conversation-1", closed_turn()),
-        after_turn=True,
-    )
-    runtime.components.workflow.enqueuer.flush(address)
-
-    result = asyncio.run(runtime.run_next())
-
-    assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
-    assert result.summary_indexed and result.vector_indexed
-    assert fake_vectors == []
-    vector_root = tmp_path / "data" / "vector"
-    assert sorted(path.name for path in vector_root.glob("*.sqlite3")) == [
-        "conversation_summaries.sqlite3",
-        "memory.sqlite3",
-    ]
-    memory_state = asyncio.run(runtime.components.memory.vector_index.store.state())
-    summary_state = asyncio.run(runtime.components.conversation.summary_vector_index.store.state())
-    assert memory_state is not None and memory_state.checkpoint == 1 and memory_state.ready
-    assert summary_state is not None and summary_state.checkpoint == 1 and summary_state.record_count >= 1
-    asyncio.run(runtime.close())
-
-    restarted = build_runtime(
-        config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
-    )
-    restarted.initialize()
-    assert asyncio.run(restarted.components.memory.vector_index.store.state()) == memory_state
-    assert asyncio.run(restarted.components.conversation.summary_vector_index.store.state()) == summary_state
-    asyncio.run(restarted.close())
 
 
 class RecordingObserver:
@@ -393,36 +201,29 @@ class RecordingObserver:
 def test_empty_tree_final_round_still_insufficient_commits_job_and_audits_limit(
     tmp_path: Path,
 ) -> None:
-    """主链端到端实测（Job #1 首次）：空树上两轮搜索都为空，终轮如实答不足，Job 仍要写完。"""
+    """主链端到端实测（Job #1 首次）：空树上两轮列目录都为空，终轮如实答不足，Job 仍要写完。"""
 
     config = runtime_config(tmp_path, max_attempts=1)
-    providers, vectors, chats, _vector_backends = dependencies()
+    providers, chats = dependencies()
     observer = RecordingObserver()
     runtime = build_runtime(
         config,
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
         observer=observer,
     )
     runtime.initialize()
-    search = {
-        "status": "insufficient",
-        "action": "memory_search",
-        "query": "磁盘清理偏好",
-        "uri": None,
-        "reason": "旧 L2 快照为空，需要检索。",
-    }
     chats[0].retrieval_script.extend(
         [
-            search,
-            search,
+            _list("memory://preferences"),
+            _list("memory://entities"),
             {
                 "status": "insufficient",
                 "action": "finish",
-                "query": None,
-                "uri": None,
-                "reason": "完整旧 L2 快照均缺失，语义检索两次均无结果。",
+                "directory": None,
+                "uris": [],
+                "keywords": [],
+                "reason": "完整旧 L2 快照均缺失，两个目录都没有条目。",
             },
         ]
     )
@@ -448,6 +249,43 @@ def test_empty_tree_final_round_still_insufficient_commits_job_and_audits_limit(
     assert plans[0].context.memory_sequence == result.job.memory_sequence
 
 
+def _list(directory: str) -> dict[str, object]:
+    return {
+        "status": "insufficient",
+        "action": "memory_list",
+        "directory": directory,
+        "uris": [],
+        "keywords": [],
+        "reason": "旧 L2 快照为空，需要列目录。",
+    }
+
+
+def _read_unexposed() -> dict[str, object]:
+    """读一个名字清单、目录列表与一跳关系里都没出现过的地址。"""
+
+    return {
+        "status": "insufficient",
+        "action": "memory_read",
+        "directory": None,
+        "uris": ["memory://preferences/磁盘清理.md"],
+        "keywords": [],
+        "reason": "猜一个可能存在的旧记忆。",
+    }
+
+
+def _read_seeded_entity() -> dict[str, object]:
+    """名字清单里有第一场会话种下的实体，模型先把它读进来。"""
+
+    return {
+        "status": "insufficient",
+        "action": "memory_read",
+        "directory": None,
+        "uris": ["memory://entities/软件项目/habitus.md"],
+        "keywords": [],
+        "reason": "名字清单里有相关实体，读完整旧记忆。",
+    }
+
+
 def _empty_candidates() -> dict[str, list[object]]:
     return {
         name: []
@@ -462,28 +300,18 @@ def _empty_candidates() -> dict[str, list[object]]:
     }
 
 
-def test_retrieval_search_failure_still_fails_job_instead_of_ending_at_limit(
+def test_reading_an_unexposed_uri_still_fails_job_instead_of_ending_at_limit(
     tmp_path: Path,
 ) -> None:
     config = runtime_config(tmp_path, max_attempts=1)
-    providers, vectors, chats, vector_backends = dependencies()
+    providers, chats = dependencies()
     runtime = build_runtime(
         config,
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     runtime.initialize()
-    search = {
-        "status": "insufficient",
-        "action": "memory_search",
-        "query": "磁盘清理偏好",
-        "uri": None,
-        "reason": "旧 L2 快照为空，需要检索。",
-    }
-    chats[0].retrieval_script.extend([search, search])
-    memory_collection = runtime.components.memory.vector_index.store.collection
-    memory_backend = next(backend for backend in vector_backends if backend.collection == memory_collection)
+    chats[0].retrieval_script.append(_read_unexposed())
     address = ConversationAddress("conversation-search-down", date(2026, 7, 5))
     runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
         address,
@@ -491,30 +319,42 @@ def test_retrieval_search_failure_still_fails_job_instead_of_ending_at_limit(
         after_turn=True,
     )
     runtime.components.workflow.enqueuer.flush(address)
-    # 首次检索照常；受控 ReAct 第一轮要求追加搜索之后，向量服务不可用。
-    memory_backend.fail_search_when = lambda: "memory_retrieval_decision" in chats[0].response_names
 
     try:
         asyncio.run(runtime.run_next())
     except MemoryJobExecutionError as exc:
         failed = exc.job
     else:
-        raise AssertionError("an unavailable vector search must fail the job")
+        raise AssertionError("reading an unexposed URI must fail the job")
 
     assert failed is not None and failed.status is MemoryJobStatus.FAILED
-    assert failed.last_error is not None and "additional memory semantic search failed" in failed.last_error
+    assert failed.last_error is not None and "memory_read URI was not exposed" in failed.last_error
     assert "memory_candidate_batch" not in chats[0].response_names
 
 
-def test_committed_l2_job_resumes_after_vector_timeout_without_replanning(
+def _fail_semantic_refresh_once(runtime) -> None:
+    """L2 提交之后的目录 L0/L1 刷新失败一次：L2 不回滚，Job 保持未完成。"""
+
+    refresher = runtime.components.workflow.runner.committed_finalizer.semantic_refresher
+    refresh = refresher.refresh_for_many
+    failures = [OSError("simulated L0/L1 refresh failure")]
+
+    def fail_once(addresses):
+        if failures:
+            raise failures.pop()
+        return refresh(addresses)
+
+    refresher.refresh_for_many = fail_once
+
+
+def test_committed_l2_job_resumes_after_semantic_refresh_failure_without_replanning(
     tmp_path: Path,
 ) -> None:
     config = runtime_config(tmp_path, max_attempts=1)
-    providers, vectors, chats, vector_backends = dependencies()
+    providers, chats = dependencies()
     runtime = build_runtime(
         config,
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     runtime.initialize()
@@ -525,16 +365,14 @@ def test_committed_l2_job_resumes_after_vector_timeout_without_replanning(
         after_turn=True,
     )
     queued = runtime.components.workflow.enqueuer.flush(address).jobs[0]
-    memory_collection = runtime.components.memory.vector_index.store.collection
-    memory_backend = next(backend for backend in vector_backends if backend.collection == memory_collection)
-    memory_backend.fail_incremental_visibility_once = True
+    _fail_semantic_refresh_once(runtime)
 
     try:
         asyncio.run(runtime.run_next())
     except MemoryJobExecutionError as exc:
         failed = exc.job
     else:
-        raise AssertionError("vector visibility timeout must fail the first attempt")
+        raise AssertionError("semantic refresh failure must fail the first attempt")
 
     assert failed is not None and failed.status is MemoryJobStatus.FAILED
     source = MemoryChangeSource.from_job(failed)
@@ -575,11 +413,10 @@ def test_l2_written_but_committed_mark_lost_keeps_receipt_and_retry_finishes_job
     tmp_path: Path,
 ) -> None:
     config = runtime_config(tmp_path, max_attempts=1)
-    providers, vectors, chats, _vector_backends = dependencies()
+    providers, chats = dependencies()
     runtime = build_runtime(
         config,
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     runtime.initialize()
@@ -621,7 +458,7 @@ def test_l2_written_but_committed_mark_lost_keeps_receipt_and_retry_finishes_job
     assert result.change_receipt is not None
     assert result.change_receipt.state is MemoryChangeReceiptState.COMMITTED
     assert [str(item.uri) for item in result.change_receipt.node_changes] == ["memory://preferences/回答风格.md"]
-    assert result.vector_indexed and result.journal_cleaned
+    assert result.journal_cleaned
     assert journal.try_read(queued.transaction_id) is None
     assert chats[0].response_names.count("memory_candidate_batch") == 1
 
@@ -630,11 +467,10 @@ def test_lifecycle_keeps_history_and_summary_sources_until_terminal_archive_reti
     tmp_path: Path,
 ) -> None:
     config = runtime_config(tmp_path)
-    providers, vectors, _chats, _vector_backends = dependencies()
+    providers, _chats = dependencies()
     runtime = build_runtime(
         config,
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     runtime.initialize()
@@ -724,12 +560,11 @@ def _with_good_preference(**extra: Callable[[dict[str, object]], list[object]]):
 
 def _seeded_runtime(tmp_path: Path, *, max_attempts: int = 1):
     config = runtime_config(tmp_path, max_attempts=max_attempts)
-    providers, vectors, chats, vector_backends = dependencies()
+    providers, chats = dependencies()
     observer = RecordingObserver()
     runtime = build_runtime(
         config,
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
         observer=observer,
     )
@@ -738,7 +573,7 @@ def _seeded_runtime(tmp_path: Path, *, max_attempts: int = 1):
     _enqueue(runtime, "conversation-seed", date(2026, 7, 1), tool_turn())
     seeded = asyncio.run(runtime.run_next())
     assert seeded.job is not None and seeded.job.status is MemoryJobStatus.COMMITTED
-    return runtime, chats, vector_backends, observer
+    return runtime, chats, observer
 
 
 def _enqueue(runtime, conversation_id: str, day: date, messages) -> None:
@@ -761,13 +596,14 @@ def test_failing_candidate_after_repair_is_dropped_and_the_rest_of_the_batch_and
     """裁定 82：合格偏好 + 一条用新编号沿用已有实体地址的候选，修补后仍不合格 → 只丢那一条，Job 照常提交，
     回执记剔除 1 条及原因，另一场会话的下一个 Job 随后提交。"""
 
-    runtime, chats, _backends, observer = _seeded_runtime(tmp_path)
+    runtime, chats, observer = _seeded_runtime(tmp_path)
     same_entity_new_page = _with_good_preference(
         entities=lambda _visible: [
             {"page_id": 160, "category": "软件项目", "name": "Habitus", "summary": "Habitus 补充对比结论。"}
         ]
     )
     chats[0].candidate_script.append(same_entity_new_page)
+    chats[0].retrieval_script.append(_read_seeded_entity())
     _enqueue(runtime, "conversation-x", date(2026, 7, 1), closed_turn())
     _enqueue(runtime, "conversation-y", date(2026, 7, 2), closed_turn(prompt="另一场会话：我喜欢中文回答"))
     calls_before = chats[0].response_names.count("memory_candidate_batch")
@@ -792,10 +628,35 @@ def test_failing_candidate_after_repair_is_dropped_and_the_rest_of_the_batch_and
     assert third.job.conversation_id == "conversation-y"
 
 
+def test_a_candidate_on_an_unread_old_card_never_fails_the_job_and_later_jobs_commit(tmp_path: Path) -> None:
+    """用户 2026-11-23 定：模型没读已有实体就用新编号写它的地址。系统补读那张旧卡片、交回修补轮；修补后仍不合格只剔
+    这一条，Job 照常提交，后面的序号照常推进（原来这里字段规划永久失败、堵住队列）。"""
+
+    runtime, chats, observer = _seeded_runtime(tmp_path)
+    unread_entity = _with_good_preference(
+        entities=lambda _visible: [
+            {"page_id": 160, "category": "软件项目", "name": "Habitus", "summary": "Habitus 补充对比结论。"}
+        ]
+    )
+    chats[0].candidate_script.extend([unread_entity, unread_entity])
+    _enqueue(runtime, "conversation-x", date(2026, 7, 1), closed_turn())
+    _enqueue(runtime, "conversation-y", date(2026, 7, 2), closed_turn(prompt="另一场会话：我喜欢中文回答"))
+
+    second = asyncio.run(runtime.run_next())
+
+    assert second.job is not None and second.job.status is MemoryJobStatus.COMMITTED
+    assert (tmp_path / "data" / "memory" / "preferences" / "回答风格.md").exists()
+    plan = _plan_events(observer)[-1]
+    assert plan.attributes["source_rejected_count"] == 1
+    third = asyncio.run(runtime.run_next())
+    assert third.job is not None and third.job.status is MemoryJobStatus.COMMITTED
+    assert third.job.conversation_id == "conversation-y"
+
+
 def test_failing_candidate_repaired_by_the_model_is_written_with_the_rest_of_the_batch(tmp_path: Path) -> None:
     """裁定 82 第 1 条：修补轮改对了，两条都写进，模型被问了两次。"""
 
-    runtime, chats, _backends, observer = _seeded_runtime(tmp_path)
+    runtime, chats, observer = _seeded_runtime(tmp_path)
     renamed = _with_good_preference(
         entities=lambda _visible: [{"page_id": 160, "category": "软件项目", "name": "Habitus", "summary": "补充。"}]
     )
@@ -805,6 +666,7 @@ def test_failing_candidate_repaired_by_the_model_is_written_with_the_rest_of_the
         ]
     )
     chats[0].candidate_script.extend([renamed, repaired])
+    chats[0].retrieval_script.append(_read_seeded_entity())
     _enqueue(runtime, "conversation-x", date(2026, 7, 1), closed_turn())
     calls_before = chats[0].response_names.count("memory_candidate_batch")
 
@@ -881,8 +743,9 @@ def test_normal_model_variation_in_source_checks_no_longer_fails_the_job(
 ) -> None:
     """测试工程师 B 列的模型正常波动：修补后仍不过只丢那一条，Job 不再 FAILED。"""
 
-    runtime, chats, _backends, observer = _seeded_runtime(tmp_path)
+    runtime, chats, observer = _seeded_runtime(tmp_path)
     chats[0].candidate_script.append(_with_good_preference(**bad))
+    chats[0].retrieval_script.append(_read_seeded_entity())
     _enqueue(runtime, "conversation-x", date(2026, 7, 1), messages(start_sequence=0))
 
     result = asyncio.run(runtime.run_next())
@@ -892,90 +755,6 @@ def test_normal_model_variation_in_source_checks_no_longer_fails_the_job(
     assert _plan_events(observer)[-1].attributes["source_rejected_count"] == 1
 
 
-class _ShiftingClock:
-    """Job 队列的时钟：每次失败后拨到下一次可认领的时刻，不真的等退避。"""
-
-    def __init__(self) -> None:
-        self.now = datetime.now(UTC)
-
-    def __call__(self) -> datetime:
-        return self.now
-
-
-def _run_through_outage(runtime, *, outages: int, clock: _ShiftingClock, restore: Callable[[], None]):
-    jobs = runtime.components.workflow.jobs
-    for _ in range(outages):
-        try:
-            asyncio.run(runtime.run_next())
-        except MemoryJobExecutionError as exc:
-            assert exc.job is not None and exc.job.status is MemoryJobStatus.QUEUED
-            assert exc.job.next_attempt_at is not None
-            clock.now = exc.job.next_attempt_at + timedelta(seconds=1)
-        else:
-            raise AssertionError("an unavailable dependency must not let the job commit")
-    waiting = jobs.oldest_uncommitted()
-    restore()
-    return waiting, asyncio.run(runtime.run_next())
-
-
-@pytest.mark.parametrize("dependency", ["vector", "embedding"])
-def test_vector_store_or_embedding_outage_longer_than_max_attempts_waits_and_commits_after_recovery(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    dependency: str,
-) -> None:
-    """裁定 82 第 3 条：向量库忙 / 嵌入服务连不上按根因归"等依赖恢复"，不计次数、不 FAILED，恢复后提交。"""
-
-    max_attempts = 2
-    config = runtime_config(tmp_path, max_attempts=max_attempts)
-    providers, vectors, chats, vector_backends = dependencies()
-    runtime = build_runtime(
-        config,
-        providers=providers,
-        vector_stores=vectors,
-        path_lock=PathLock(ProcessLocalLockStore()),
-    )
-    runtime.initialize()
-    clock = _ShiftingClock()
-    runtime.components.workflow.jobs.clock = clock
-    chats[0].preferences.append(dict(_GOOD_PREFERENCE))
-    down = [True]
-    if dependency == "vector":
-        memory_collection = runtime.components.memory.vector_index.store.collection
-        backend = next(item for item in vector_backends if item.collection == memory_collection)
-        search = backend.search
-
-        async def busy_search(query_vector, *, filters, limit):
-            if down[0]:
-                raise VectorStoreBusyError("vector store is temporarily busy")
-            return await search(query_vector, filters=filters, limit=limit)
-
-        backend.search = busy_search
-    else:
-        embed = EmbeddingProvider.embed
-
-        async def unreachable_embed(self, text: str, *, is_query: bool) -> EmbeddingVector:
-            if down[0]:
-                raise ModelTransportError("embedding service unreachable")
-            return await embed(self, text, is_query=is_query)
-
-        monkeypatch.setattr(EmbeddingProvider, "embed", unreachable_embed)
-    _enqueue(runtime, "conversation-outage", date(2026, 7, 1), closed_turn())
-
-    breaker = runtime.components.models.embedder.breaker  # type: ignore[attr-defined]
-
-    def restore() -> None:
-        down[0] = False
-        breaker._monotonic = lambda: time.monotonic() + 86_400.0  # 到了熔断试探的时候（裁定 108）
-
-    waiting, result = _run_through_outage(runtime, outages=max_attempts + 2, clock=clock, restore=restore)
-
-    assert waiting is not None and waiting.status is MemoryJobStatus.QUEUED
-    assert waiting.attempts == 0 and waiting.model_waits == max_attempts + 2
-    assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
-    assert (tmp_path / "data" / "memory" / "preferences" / "回答风格.md").exists()
-
-
 def test_a_running_runtime_refuses_to_retry_or_abandon_while_its_worker_is_not_blocked(tmp_path: Path) -> None:
     """FAILED Job 的人工处置在 RUNNING 时只许在 MemoryWorker 因它进了 BLOCKED 且空闲之后做（AGENTS 运维入口）；
     Worker 没被它挡住时两种处置都拒绝，Job 原样留着。"""
@@ -983,27 +762,15 @@ def test_a_running_runtime_refuses_to_retry_or_abandon_while_its_worker_is_not_b
     from habitus.runtime import RuntimeState, RuntimeStateError
 
     config = runtime_config(tmp_path, max_attempts=1)
-    providers, vectors, chats, vector_backends = dependencies()
-    runtime = build_runtime(
-        config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
-    )
+    providers, chats = dependencies()
+    runtime = build_runtime(config, providers=providers, path_lock=PathLock(ProcessLocalLockStore()))
     runtime.initialize()
-    search = {
-        "status": "insufficient",
-        "action": "memory_search",
-        "query": "磁盘清理偏好",
-        "uri": None,
-        "reason": "旧 L2 快照为空，需要检索。",
-    }
-    chats[0].retrieval_script.extend([search, search])
-    memory_collection = runtime.components.memory.vector_index.store.collection
-    memory_backend = next(backend for backend in vector_backends if backend.collection == memory_collection)
+    chats[0].retrieval_script.append(_read_unexposed())
     address = ConversationAddress("conversation-gate", date(2026, 7, 5))
     runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
         address, ConversationBatch("conversation-gate", closed_turn()), after_turn=True
     )
     runtime.components.workflow.enqueuer.flush(address)
-    memory_backend.fail_search_when = lambda: "memory_retrieval_decision" in chats[0].response_names
     with pytest.raises(MemoryJobExecutionError) as caught:
         asyncio.run(runtime.run_next())
     failed = caught.value.job
@@ -1026,19 +793,15 @@ def test_a_failed_job_whose_change_already_committed_cannot_be_abandoned(tmp_pat
     from habitus.runtime import RuntimeStateError
 
     config = runtime_config(tmp_path, max_attempts=1)
-    providers, vectors, _chats, vector_backends = dependencies()
-    runtime = build_runtime(
-        config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
-    )
+    providers, _chats = dependencies()
+    runtime = build_runtime(config, providers=providers, path_lock=PathLock(ProcessLocalLockStore()))
     runtime.initialize()
     address = ConversationAddress("conversation-abandon", date(2026, 7, 2))
     runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
         address, ConversationBatch("conversation-abandon", closed_turn()), after_turn=True
     )
     runtime.components.workflow.enqueuer.flush(address)
-    memory_collection = runtime.components.memory.vector_index.store.collection
-    memory_backend = next(backend for backend in vector_backends if backend.collection == memory_collection)
-    memory_backend.fail_incremental_visibility_once = True
+    _fail_semantic_refresh_once(runtime)
     with pytest.raises(MemoryJobExecutionError) as caught:
         asyncio.run(runtime.run_next())
     failed = caught.value.job

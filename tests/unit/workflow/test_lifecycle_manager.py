@@ -16,10 +16,9 @@ from habitus.memory.conversation import (
     ConversationSummaryCompactor,
     ConversationSummaryRetirementStore,
     ConversationSummaryStore,
-    PersistentConversationSummaryVectorIndex,
     SQLiteConversationSummaryUseStore,
 )
-from habitus.memory.conversation.indexing import summary_reference
+from habitus.memory.conversation.summary_reference import summary_reference
 from habitus.memory.editor import MemoryTransactionJournal
 from habitus.memory.retrieval import ConversationSearchContextReader
 from habitus.memory.workflow import (
@@ -36,8 +35,7 @@ from habitus.pre.conversation import (
 )
 from tests.helpers import BASE_TIME, closed_turn, codec, segment_summary, summary_content
 from tests.lock_store import ProcessLocalLockStore
-from tests.unit.conversation.test_summary_indexing import Embedder, VectorStore
-from tests.unit.retrieval.test_search_service import structured
+from tests.unit.conversation.test_summary_generation import RecordingProvider, structured
 
 
 def lifecycle_manager(
@@ -57,34 +55,13 @@ def lifecycle_manager(
         segment_store,
         range_store,
         ConversationRangeSummaryGenerator(
-            structured([]),
+            structured(RecordingProvider([])),
             compaction_config=compaction_config,
         ),
         use_store=use_store,
         config=compaction_config,
     )
     retirements = ConversationSummaryRetirementStore(tmp_path / "workflow")
-    summary_index = PersistentConversationSummaryVectorIndex(
-        journal,
-        compactor,
-        Embedder(),
-        VectorStore(),
-        dimension=2,
-        embedding_fingerprint="lifecycle-test-v1",
-        retirement_store=retirements,
-    )
-    calls = []
-
-    async def synchronize(address, *, checkpoint=None, removed_references=()):
-        calls.append(
-            (
-                address,
-                checkpoint,
-                tuple(reference.identity for reference in removed_references),
-            )
-        )
-
-    summary_index.synchronize = synchronize
     document_codec = codec()
     jobs = MemoryJobStore(
         tmp_path / "workflow",
@@ -97,32 +74,29 @@ def lifecycle_manager(
         journal,
         segment_store,
         range_store,
-        summary_index,
         jobs,
         receipts,
         MemoryTransactionJournal(tmp_path / "workflow" / "transactions", document_codec),
         retirements,
         summary_config=compaction_config,
     )
-    return manager, calls
+    return manager
 
 
-def test_empty_lifecycle_cycle_is_idempotent_and_still_reconciles_summary_index(tmp_path: Path) -> None:
-    manager, calls = lifecycle_manager(tmp_path, compaction_enabled=False)
+def test_empty_lifecycle_cycle_is_idempotent(tmp_path: Path) -> None:
+    manager = lifecycle_manager(tmp_path, compaction_enabled=False)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
 
     result = asyncio.run(manager.maintain_once(address, now=BASE_TIME))
 
     assert result.compaction.summary is None
-    assert result.summary_indexed
-    assert calls == [(address, None, ())]
     assert result.purged_history_segment_ids == ()
     assert result.deleted_memory_job_sequences == ()
     assert result.deleted_memory_receipt_ids == ()
 
 
 def test_retained_history_without_bound_summary_is_kept_without_ordinary_cleanup(tmp_path: Path) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=True)
+    manager = lifecycle_manager(tmp_path, compaction_enabled=True)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     manager.journal.append(address, ConversationBatch("conversation-1", closed_turn()))
     segment = manager.journal.seal(address, through_sequence=1).segment
@@ -151,7 +125,7 @@ def test_archive_retirement_waits_for_actual_use_window_and_grace_then_deletes_c
         archive_retire_days=1,
         archive_retire_grace_days=1,
     )
-    manager, calls = lifecycle_manager(
+    manager = lifecycle_manager(
         tmp_path,
         compaction_enabled=False,
         compaction_config=config,
@@ -241,7 +215,6 @@ def test_archive_retirement_waits_for_actual_use_window_and_grace_then_deletes_c
     retiring_state = use_store.read_many((archive_reference,))[0]
     assert retiring_state.retiring_at == BASE_TIME + timedelta(days=14)
     assert manager.retirement_store.for_address(address)
-    assert manager.summary_vector_index.sources.active(address) == ()
 
     monkeypatch.setattr(manager.range_store, "delete", delete)
     compact_once = manager.compactor.compact_once
@@ -265,10 +238,3 @@ def test_archive_retirement_waits_for_actual_use_window_and_grace_then_deletes_c
     assert manager.range_store.list(address, ConversationRangeSummaryStage.RANGE) == ()
     assert manager.range_store.list(address, ConversationRangeSummaryStage.ARCHIVE) == ()
     assert use_store.read_many((archive_reference,)) == ()
-    assert calls == [
-        (address, None, ()),
-        (address, None, ()),
-        (address, None, (archive_reference.identity,)),
-        (address, None, ()),
-        (address, None, ()),
-    ]

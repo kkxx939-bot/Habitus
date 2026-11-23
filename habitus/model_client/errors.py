@@ -113,6 +113,12 @@ class ModelClientError(RuntimeError):
         kind = self.kind
         return None if kind is None else kind.rule
 
+    @property
+    def cause_kind(self) -> ModelErrorKind | None:
+        """这次失败归到哪一类；熔断开着时是打开熔断的那次失败的类别。给人看的原因（``BRIEFS``）按它取。"""
+
+        return self.kind
+
 
 class ModelServiceError(ModelClientError):
     kind = ModelErrorKind.SERVICE
@@ -231,6 +237,10 @@ class ModelCircuitOpenError(ModelClientError):
     @property
     def rule(self) -> ModelErrorRule:
         return self.opened_by.rule
+
+    @property
+    def cause_kind(self) -> ModelErrorKind:
+        return self.opened_by
 
 
 class ModelStructuredOutputError(ModelClientError):

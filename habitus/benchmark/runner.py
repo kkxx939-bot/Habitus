@@ -83,9 +83,6 @@ class BenchmarkRunner:
         self.answers_path = self.output_directory / "answers.jsonl"
         self.ingest_path = self.output_directory / "ingest.jsonl"
         self.manifest_path = self.output_directory / "run.json"
-        self._collection_scope = hashlib.sha256(f"{dataset.name.value}\0{self.output_directory}".encode()).hexdigest()[
-            :16
-        ]
 
     async def run(self) -> tuple[BenchmarkAnswerRecord, ...]:
         """执行全部选定样本，逐条耐久写出答案以支持中断续跑。"""
@@ -150,8 +147,6 @@ class BenchmarkRunner:
 
     def _run_identity(self) -> Mapping[str, object]:
         chat = self.base_config.models.chat.route
-        embedding = self.base_config.models.embedding
-        rerank = self.base_config.models.rerank
         revision = _source_revision()
         return {
             "dataset": self.dataset.name.value,
@@ -173,25 +168,6 @@ class BenchmarkRunner:
                 "adapter": chat.adapter,
                 "model": chat.model,
             },
-            "embedding": {
-                "provider": embedding.route.provider,
-                "adapter": embedding.route.adapter,
-                "model": embedding.route.model,
-                "dimension": embedding.dimension,
-            },
-            "rerank": (
-                None
-                if rerank is None
-                else {
-                    "provider": rerank.route.provider,
-                    "adapter": rerank.route.adapter,
-                    "model": rerank.route.model,
-                }
-            ),
-            "vector_store": {
-                "provider": self.base_config.memory.vector_store.provider,
-                "adapter": self.base_config.memory.vector_store.adapter,
-            },
             "code_revision": revision,
             "source_tree_sha256": _source_tree_sha256(),
         }
@@ -202,18 +178,10 @@ class BenchmarkRunner:
         existing: Mapping[tuple[str, str], BenchmarkAnswerRecord],
     ) -> tuple[BenchmarkAnswerRecord, ...]:
         sample_root = self.work_directory / self.dataset.name.value / sample.sample_id
-        sample_config = isolated_config(
-            self.base_config,
-            storage_root=sample_root,
-            collection_scope=self._collection_scope,
-        )
+        sample_config = isolated_config(self.base_config, storage_root=sample_root)
         runtime = build_runtime(sample_config)
         try:
             runtime.initialize()
-            # 两个 run-scoped Collection 在样本之间复用；每个样本先从自己的真相源完整重建，
-            # 避免为 LongMemEval 的每个问题创建远程 Collection，也避免跨样本污染。
-            await runtime.components.memory.vector_index.rebuild(checkpoint=0)
-            await runtime.components.conversation.summary_vector_index.rebuild(checkpoint=0)
             await self._ingest_sample(runtime, sample, sample_root)
             pending = [
                 question for question in sample.questions if (sample.sample_id, question.question_id) not in existing
@@ -342,9 +310,10 @@ class BenchmarkRunner:
                     }
                 )
             )
-            summary_ids = tuple(item.reference.identity for item in search.summary_fallbacks)
-            assessment = search.retrieval_assessment
-            sufficient = None if assessment is None else assessment.decision.value == "sufficient"
+            summary_ids = tuple(item.reference.identity for item in search.summaries)
+            # 检索不再有单独的"够不够"评估与 Summary 后备：会话摘要第一轮就能查，交出了就算用到了
+            summaries_used = bool(search.summaries)
+            sufficient = None
         except Exception as exc:
             return _answer_error(
                 self.dataset.name.value,
@@ -399,7 +368,7 @@ class BenchmarkRunner:
                 answer_summary_ids=answer_context.summary_ids,
                 skipped_context_ids=answer_context.skipped_ids,
                 answer_context_limit_chars=self.max_answer_context_chars,
-                summary_fallback_attempted=search.summary_fallback_attempted,
+                summary_fallback_attempted=summaries_used,
                 retrieval_sufficient=sufficient,
                 expected_summary_fallback=expected_summary,
                 expected_related_memory=expected_related,
@@ -425,15 +394,13 @@ class BenchmarkRunner:
             answer_summary_ids=answer_context.summary_ids,
             skipped_context_ids=answer_context.skipped_ids,
             answer_context_limit_chars=self.max_answer_context_chars,
-            summary_fallback_attempted=search.summary_fallback_attempted,
+            summary_fallback_attempted=summaries_used,
             retrieval_sufficient=sufficient,
             evidence_count=len(question.evidence_texts),
             evidence_recall=prompt_evidence_recall,
             expected_summary_fallback=expected_summary,
             expected_related_memory=expected_related,
-            summary_fallback_route_correct=(
-                None if expected_summary is None else search.summary_fallback_attempted is expected_summary
-            ),
+            summary_fallback_route_correct=(None if expected_summary is None else summaries_used is expected_summary),
             related_memory_route_correct=(None if expected_related is None else bool(related_uris) is expected_related),
             context_chars=len(context),
             context_tokens_approx=max(0, len(context) // 4),

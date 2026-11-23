@@ -56,12 +56,9 @@ def _noninteractive_init(tmp_path: Path) -> Path:
     return destination
 
 
-def _with_real_embedding(destination: Path, **chat_route: str) -> HabitusConfig:
+def _with_chat_route(destination: Path, **chat_route: str) -> HabitusConfig:
     payload = yaml.safe_load(destination.read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(destination.parent / "data")
-    payload["models"]["embedding"]["route"].update(
-        {"model": "text-embedding-3-small", "base_url": "https://api.openai.com/v1"}
-    )
     payload["models"]["chat"]["route"].update(chat_route)
     return HabitusConfig.from_mapping(payload)
 
@@ -99,13 +96,12 @@ def test_noninteractive_init_lists_every_chat_item_to_fill(
 
 
 def test_doctor_and_preflight_name_the_chat_placeholder_instead_of_a_connection_error(tmp_path: Path) -> None:
-    config = _with_real_embedding(_noninteractive_init(tmp_path))
+    config = _with_chat_route(_noninteractive_init(tmp_path))
 
     check = _placeholder_check(config)
     assert check.status is DoctorStatus.FAIL
     assert "models.chat.route.model" in check.detail
     assert "models.chat.route.base_url" in check.detail
-    assert "models.embedding" not in check.detail
     with pytest.raises(StartupPreflightError, match=r"setup_placeholders: models\.chat still holds"):
         run_startup_preflight(config)
 
@@ -120,14 +116,14 @@ def test_doctor_and_preflight_name_the_chat_placeholder_instead_of_a_connection_
 def test_one_remaining_chat_placeholder_is_still_reported(
     tmp_path: Path, route: dict[str, str], remaining: str
 ) -> None:
-    check = _placeholder_check(_with_real_embedding(_noninteractive_init(tmp_path), **route))
+    check = _placeholder_check(_with_chat_route(_noninteractive_init(tmp_path), **route))
 
     assert check.status is DoctorStatus.FAIL
     assert remaining in check.detail.split(";")[0]
 
 
 def test_real_chat_values_clear_the_placeholder_check(tmp_path: Path) -> None:
-    config = _with_real_embedding(
+    config = _with_chat_route(
         _noninteractive_init(tmp_path), model="chat-model-1", base_url="https://api.openai.com/v1"
     )
 
@@ -154,11 +150,7 @@ def test_anthropic_messages_selection_builds_the_runtime_provider_without_networ
     )
     payload = apply_cloud_selection(load_initialization_mapping(), selection)
     payload["storage"]["root"] = str(tmp_path / "data")  # type: ignore[index]
-    payload["models"]["embedding"]["route"].update(  # type: ignore[index]
-        {"model": "text-embedding-3-small", "base_url": "https://api.openai.com/v1"}
-    )
     payload["credentials"]["chat"]["api_key"] = "chat-secret"  # type: ignore[index]
-    payload["credentials"]["embedding"]["api_key"] = "embedding-secret"  # type: ignore[index]
     config = HabitusConfig.from_mapping(payload)
 
     report = run_doctor(config, check_port=False)
@@ -171,7 +163,7 @@ def test_anthropic_messages_selection_builds_the_runtime_provider_without_networ
 
 
 def test_empty_chat_credential_fails_startup_preflight(tmp_path: Path) -> None:
-    config = _with_real_embedding(
+    config = _with_chat_route(
         _noninteractive_init(tmp_path), model="chat-model-1", base_url="https://api.openai.com/v1"
     )
 
@@ -226,11 +218,7 @@ def test_doctor_and_preflight_reject_an_anthropic_route_the_protocol_cannot_hono
     )
     payload = apply_cloud_selection(load_initialization_mapping(), selection)
     payload["storage"]["root"] = str(tmp_path / "data")  # type: ignore[index]
-    payload["models"]["embedding"]["route"].update(  # type: ignore[index]
-        {"model": "text-embedding-3-small", "base_url": "https://api.openai.com/v1"}
-    )
     payload["credentials"]["chat"]["api_key"] = "chat-secret"  # type: ignore[index]
-    payload["credentials"]["embedding"]["api_key"] = "embedding-secret"  # type: ignore[index]
     chat = payload["models"]["chat"]  # type: ignore[index]
     for key, value in chat_overrides.items():
         if key == "route":

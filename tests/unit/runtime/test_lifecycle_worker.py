@@ -19,7 +19,6 @@ from habitus.memory.conversation import (
     ConversationSummaryCompactor,
     ConversationSummaryRetirementStore,
     ConversationSummaryStore,
-    PersistentConversationSummaryVectorIndex,
 )
 from habitus.memory.editor import MemoryTransactionJournal
 from habitus.memory.workflow import (
@@ -27,6 +26,7 @@ from habitus.memory.workflow import (
     MemoryChangeReceiptStore,
     MemoryJobStore,
 )
+from habitus.model_client import ChatClient, ChatModelConfig, ProviderCapabilities, ProviderConfig, StructuredChatClient
 from habitus.pre.conversation import ConversationBatch
 from habitus.runtime import (
     ConversationChainParticipant,
@@ -37,8 +37,38 @@ from habitus.runtime import (
 from habitus.runtime.lifecycle_memory import conversation_lease_key
 from tests.helpers import closed_turn, codec
 from tests.lock_store import ProcessLocalLockStore
-from tests.unit.conversation.test_summary_indexing import Embedder, VectorStore
-from tests.unit.retrieval.test_search_service import structured
+from tests.model_helpers import prepare_chat_request
+
+
+class _UnusedChatProvider:
+    """这些用例不生成 Range Summary；真被调用就说明测试前提变了。"""
+
+    provider_name = "test"
+    model = "test"
+    is_remote = False
+    capabilities = ProviderCapabilities()
+    prepare = staticmethod(prepare_chat_request)
+
+    def complete(self, request):
+        raise AssertionError("range summary model must not be called")
+
+    async def complete_async(self, request):
+        return self.complete(request)
+
+    def stream(self, request):
+        return iter(())
+
+    async def stream_async(self, request):
+        if False:
+            yield None
+
+    def health_check(self):
+        return {"ok": True}
+
+
+def structured() -> StructuredChatClient:
+    route = ProviderConfig(provider="test", adapter="test", model="test", base_url="https://example.com", max_retries=0)
+    return StructuredChatClient(ChatClient(ChatModelConfig(route), _UnusedChatProvider()))
 
 
 def manager(tmp_path: Path) -> ConversationLifecycleManager:
@@ -50,23 +80,9 @@ def manager(tmp_path: Path) -> ConversationLifecycleManager:
         journal,
         segment_store,
         range_store,
-        ConversationRangeSummaryGenerator(structured([])),
+        ConversationRangeSummaryGenerator(structured()),
     )
     retirements = ConversationSummaryRetirementStore(tmp_path / "workflow")
-    summary_index = PersistentConversationSummaryVectorIndex(
-        journal,
-        compactor,
-        Embedder(),
-        VectorStore(),
-        dimension=2,
-        embedding_fingerprint="lifecycle-worker-test-v1",
-        retirement_store=retirements,
-    )
-
-    async def synchronize(_address, *, checkpoint=None):
-        return checkpoint
-
-    summary_index.synchronize = synchronize
     document_codec = codec()
     jobs = MemoryJobStore(
         tmp_path / "workflow",
@@ -78,7 +94,6 @@ def manager(tmp_path: Path) -> ConversationLifecycleManager:
         journal,
         segment_store,
         range_store,
-        summary_index,
         jobs,
         MemoryChangeReceiptStore(tmp_path / "workflow", document_codec),
         MemoryTransactionJournal(tmp_path / "workflow" / "transactions", document_codec),

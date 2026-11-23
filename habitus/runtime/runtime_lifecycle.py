@@ -37,6 +37,21 @@ def refuse_single_branch_layout(config: HabitusConfig) -> None:
         )
 
 
+class VectorLayoutError(RuntimeError):
+    """盘上还有已删的向量库目录（向量检索已移除，不迁移、不读）。"""
+
+
+def refuse_vector_layout(config: HabitusConfig) -> None:
+    """存储根下还有旧的 ``vector/`` 向量库目录：明确报错、点出目录。"""
+
+    vector_root = config.storage_root / "vector"
+    if vector_root.exists():
+        raise VectorLayoutError(
+            "vector search has been removed from Habitus and old vector stores are not migrated; "
+            f"remove {vector_root} (it only held derived indexes, memory files are untouched) and restart"
+        )
+
+
 class RuntimeLifecycle:
     """``observe`` 是 Runtime 的观测出口；本类不持有也不改变 Runtime 状态。"""
 
@@ -49,6 +64,7 @@ class RuntimeLifecycle:
         """初始化树与各存储；无任务时恢复孤儿事务，有任务时留给租约持有者恢复。返回（记忆根, 恢复的事务）。"""
 
         self.components.infrastructure.initialize()
+        refuse_vector_layout(self.config)
         memory_root = self.components.memory.tree.initialize()
         self.components.workflow.jobs.initialize()
         self.components.memory.lifecycle.initialize()
@@ -76,10 +92,8 @@ class RuntimeLifecycle:
         return memory_root, recovered
 
     async def start(self, started: float) -> None:
-        """确认两套向量索引 ready，恢复交付，依次启动 Job Worker、生命周期维护 Worker 与可选的后台循环。"""
+        """恢复交付，依次启动 Job Worker、生命周期维护 Worker 与可选的后台循环。"""
 
-        await self.components.memory.vector_index.ensure_ready()
-        await self.components.conversation.summary_vector_index.ensure_ready()
         # 恢复失败不阻断启动（裁定 60 第 6 条），只降级出事的那个地址：有序的 Memory 对同地址后面的源报"等前序"或
         # "前序已坏"，别的地址照常；可重试的由周期恢复按退避再试，放弃了的等人工修复。失败都计入 gauge。
         # 整轮恢复本身出错（读不了账）同样不挡启动：记一条失败事件，交给周期恢复再来。
@@ -213,17 +227,11 @@ class RuntimeLifecycle:
 
     async def close_resources(self) -> None:
         try:
-            await self.components.conversation.summary_vector_index.close()
+            await self.components.models.aclose()
         finally:
-            try:
-                await self.components.memory.vector_index.close()
-            finally:
-                try:
-                    await self.components.models.aclose()
-                finally:
-                    manager = self.components.infrastructure.managed_observability
-                    if manager is not None:
-                        manager.close()
+            manager = self.components.infrastructure.managed_observability
+            if manager is not None:
+                manager.close()
 
     def _observe_degraded_source_addresses(
         self,

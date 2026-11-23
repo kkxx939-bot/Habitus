@@ -37,7 +37,7 @@ def _refusing(chat, refused: set[str], error: type[Exception] = ModelContentSafe
 
 
 def test_a_refused_segment_is_skipped_with_its_reason_and_the_next_sequence_commits(tmp_path: Path) -> None:
-    runtime, chats, _backends, _observer = _seeded_runtime(tmp_path)
+    runtime, chats, _observer = _seeded_runtime(tmp_path)
     _refusing(chats[0], {_CANDIDATES})
     _enqueue(runtime, "conversation-refused", date(2026, 7, 2), closed_turn())
     _enqueue(runtime, "conversation-after", date(2026, 7, 3), closed_turn())
@@ -62,7 +62,7 @@ def test_a_refused_segment_is_skipped_with_its_reason_and_the_next_sequence_comm
 
 
 def test_when_the_summary_is_refused_too_the_segment_keeps_its_history_and_has_no_summary(tmp_path: Path) -> None:
-    runtime, chats, _backends, _observer = _seeded_runtime(tmp_path)
+    runtime, chats, _observer = _seeded_runtime(tmp_path)
     armed = _refusing(chats[0], {_SUMMARY, _CANDIDATES})
     _enqueue(runtime, "conversation-refused", date(2026, 7, 2), closed_turn())
     skipped = asyncio.run(runtime.run_next())
@@ -77,7 +77,7 @@ def test_when_the_summary_is_refused_too_the_segment_keeps_its_history_and_has_n
 
 
 def test_a_service_outage_still_blocks_the_later_sequences_until_recovery(tmp_path: Path) -> None:
-    runtime, chats, _backends, _observer = _seeded_runtime(tmp_path)
+    runtime, chats, _observer = _seeded_runtime(tmp_path)
     armed = _refusing(chats[0], {_CANDIDATES}, ModelTransportError)
     _enqueue(runtime, "conversation-outage", date(2026, 7, 2), closed_turn())
     _enqueue(runtime, "conversation-after", date(2026, 7, 3), closed_turn())

@@ -67,7 +67,7 @@ jobs:
           if [ "$RUNNER_OS" != "Windows" ]; then
             python -c 'import os, stat, sys; mode = stat.S_IMODE(os.stat(sys.argv[1]).st_mode); sys.exit(0 if mode == 0o600 else f"{sys.argv[1]}: mode {mode:#o}, expected 0o600")' "$init_root/config.yaml"
           fi
-          HABITUS_CI_CONFIG_PATH="$init_root/config.yaml" python -c 'import os; from habitus.config import HabitusConfig; c=HabitusConfig.from_file(os.environ["HABITUS_CI_CONFIG_PATH"]); assert c.models.chat.route.credential_ref == "chat"; assert c.models.chat.route.adapter == "openai_compatible_chat"; assert c.models.embedding.route.credential_ref == "embedding"; assert c.models.rerank.route.credential_ref == "dashscope"; assert c.memory.vector_store.adapter == c.conversation.summary_vector_store.adapter == "local_sqlite"; assert c.memory.vector_store.route.credential_ref == c.conversation.summary_vector_store.route.credential_ref == ""'
+          HABITUS_CI_CONFIG_PATH="$init_root/config.yaml" python -c 'import os; from habitus.config import HabitusConfig; c=HabitusConfig.from_file(os.environ["HABITUS_CI_CONFIG_PATH"]); assert c.models.chat.route.credential_ref == "chat"; assert c.models.chat.route.adapter == "openai_compatible_chat"; assert not hasattr(c.models, "embedding") and not hasattr(c.models, "rerank") and not hasattr(c.memory, "vector_store")'
       - name: Build wheel and verify its contents against pyproject
         if: ${{ !cancelled() }}
         run: |

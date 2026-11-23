@@ -3,17 +3,13 @@
 import pytest
 
 from habitus.memory.editor import (
-    ConversationSegmentQueryBuilder,
     MemoryExtractionConfig,
     MemoryRetrievalAction,
-    MemoryRetrievalConfig,
     MemoryRetrievalDecision,
     MemoryRetrievalFinalDecision,
     MemoryRetrievalObservation,
     MemoryRetrievalStatus,
 )
-from habitus.pre.conversation import ConversationMessageRole, ConversationSegment
-from tests.helpers import message, tool_turn
 
 
 def test_retrieval_decision_allows_exactly_one_action_shape() -> None:
@@ -21,45 +17,88 @@ def test_retrieval_decision_allows_exactly_one_action_shape() -> None:
         {
             "status": "sufficient",
             "action": "finish",
-            "query": None,
-            "uri": None,
+            "directory": None,
+            "uris": [],
+            "keywords": [],
             "reason": "旧记忆已经足够。",
         }
     )
-    search = MemoryRetrievalDecision.model_validate(
+    listing = MemoryRetrievalDecision.model_validate(
         {
             "status": "insufficient",
-            "action": "memory_search",
-            "query": "用户的回答风格",
-            "uri": None,
-            "reason": "需要补充偏好。",
+            "action": "memory_list",
+            "directory": "memory://entities/项目",
+            "uris": [],
+            "keywords": [],
+            "reason": "需要看看这个目录。",
         }
     )
     read = MemoryRetrievalDecision.model_validate(
         {
             "status": "insufficient",
             "action": "memory_read",
-            "query": None,
-            "uri": "memory://profile",
+            "directory": None,
+            "uris": ["memory://profile.md", "memory://preferences/回答风格.md"],
+            "keywords": [],
             "reason": "需要阅读全文。",
         }
     )
-    assert (finish.action, search.action, read.action) == tuple(MemoryRetrievalAction)
+    search = MemoryRetrievalDecision.model_validate(
+        {
+            "status": "insufficient",
+            "action": "memory_search",
+            "directory": "memory://entities",
+            "uris": [],
+            "keywords": ["拉新方案"],
+            "reason": "名字看不出，按内容找。",
+        }
+    )
+    assert (finish.action, listing.action, search.action, read.action) == tuple(MemoryRetrievalAction)
+    assert read.uris == ("memory://profile.md", "memory://preferences/回答风格.md")
+    assert search.keywords == ("拉新方案",)
 
-    with pytest.raises(ValueError, match="requires query"):
+    with pytest.raises(ValueError, match="requires keywords"):
+        MemoryRetrievalDecision(MemoryRetrievalStatus.INSUFFICIENT, MemoryRetrievalAction.SEARCH, None, (), "缺词")
+    with pytest.raises(ValueError, match="only memory_search carries keywords"):
         MemoryRetrievalDecision(
             MemoryRetrievalStatus.INSUFFICIENT,
-            MemoryRetrievalAction.SEARCH,
+            MemoryRetrievalAction.READ,
             None,
+            ("memory://profile.md",),
+            "读时带词",
+            keywords=("词",),
+        )
+
+    with pytest.raises(ValueError, match="requires a directory"):
+        MemoryRetrievalDecision(
+            MemoryRetrievalStatus.INSUFFICIENT,
+            MemoryRetrievalAction.LIST,
             None,
-            "缺少查询",
+            (),
+            "缺少目录",
+        )
+    with pytest.raises(ValueError, match="requires uris"):
+        MemoryRetrievalDecision(
+            MemoryRetrievalStatus.INSUFFICIENT,
+            MemoryRetrievalAction.READ,
+            None,
+            (),
+            "缺少地址",
+        )
+    with pytest.raises(ValueError, match="unique"):
+        MemoryRetrievalDecision(
+            MemoryRetrievalStatus.INSUFFICIENT,
+            MemoryRetrievalAction.READ,
+            None,
+            ("memory://profile.md", "memory://profile.md"),
+            "重复地址",
         )
     with pytest.raises(ValueError, match="must finish"):
         MemoryRetrievalDecision(
             MemoryRetrievalStatus.SUFFICIENT,
             MemoryRetrievalAction.READ,
             None,
-            "memory://profile",
+            ("memory://profile.md",),
             "错误组合",
         )
     with pytest.raises(ValueError, match="unknown fields"):
@@ -67,8 +106,9 @@ def test_retrieval_decision_allows_exactly_one_action_shape() -> None:
             {
                 "status": "sufficient",
                 "action": "finish",
-                "query": None,
-                "uri": None,
+                "directory": None,
+                "uris": [],
+                "keywords": [],
                 "reason": "完成",
                 "confidence": 1,
             }
@@ -80,16 +120,17 @@ def test_final_retrieval_round_schema_and_decision_only_allow_finish() -> None:
     properties = schema["properties"]
     assert isinstance(properties, dict)
     assert properties["action"]["enum"] == ["finish"]
-    assert properties["query"]["type"] == "null"
-    assert properties["uri"]["type"] == "null"
+    assert properties["directory"]["type"] == "null"
+    assert properties["uris"]["maxItems"] == 0
 
     ended = MemoryRetrievalFinalDecision.model_validate(
         {
             "status": "insufficient",
             "action": "finish",
-            "query": None,
-            "uri": None,
-            "reason": "检索没有找到旧记忆。",
+            "directory": None,
+            "uris": [],
+            "keywords": [],
+            "reason": "列目录没有找到旧记忆。",
         }
     )
     assert ended.status is MemoryRetrievalStatus.INSUFFICIENT
@@ -97,17 +138,17 @@ def test_final_retrieval_round_schema_and_decision_only_allow_finish() -> None:
     with pytest.raises(ValueError, match="can only finish"):
         MemoryRetrievalFinalDecision(
             MemoryRetrievalStatus.INSUFFICIENT,
-            MemoryRetrievalAction.SEARCH,
-            "继续搜索",
-            None,
+            MemoryRetrievalAction.LIST,
+            "memory://preferences",
+            (),
             "上下文不足",
         )
     with pytest.raises(ValueError, match="cannot carry"):
         MemoryRetrievalFinalDecision(
             MemoryRetrievalStatus.SUFFICIENT,
             MemoryRetrievalAction.FINISH,
-            "多余查询",
-            None,
+            "memory://preferences",
+            (),
             "完成",
         )
     with pytest.raises(ValueError, match="insufficient retrieval cannot finish"):
@@ -115,7 +156,7 @@ def test_final_retrieval_round_schema_and_decision_only_allow_finish() -> None:
             MemoryRetrievalStatus.INSUFFICIENT,
             MemoryRetrievalAction.FINISH,
             None,
-            None,
+            (),
             "动作轮的不足仍须继续检索",
         )
 
@@ -123,16 +164,16 @@ def test_final_retrieval_round_schema_and_decision_only_allow_finish() -> None:
 def test_observation_is_a_bounded_audit_reference_not_a_document_copy() -> None:
     observation = MemoryRetrievalObservation(
         1,
-        MemoryRetrievalAction.SEARCH,
-        "偏好",
-        ("memory://preferences/回答风格",),
-        ("memory://preferences/回答风格",),
+        MemoryRetrievalAction.LIST,
+        ("memory://preferences",),
+        ("memory://preferences/回答风格.md",),
+        (),
         (),
     )
     assert set(observation.to_dict()) == {
         "iteration",
         "action",
-        "input",
+        "inputs",
         "result_uris",
         "added_uris",
         "relation_expanded_uris",
@@ -142,60 +183,13 @@ def test_observation_is_a_bounded_audit_reference_not_a_document_copy() -> None:
         MemoryRetrievalObservation(
             1,
             MemoryRetrievalAction.READ,
-            "memory://profile",
-            ("memory://profile", "memory://profile"),
+            ("memory://profile.md",),
+            ("memory://profile.md", "memory://profile.md"),
             (),
             (),
         )
-
-
-def test_query_builder_preserves_roles_tool_identity_status_and_prompt_priority() -> None:
-    source = ConversationSegment("conversation-1", "segment-1", tool_turn())
-    query = ConversationSegmentQueryBuilder().build(source)
-    assert query.index("[0][prompt]") < query.index("[1][tool_call]")
-    assert "[tool=workspace.inspect]" in query
-    assert "[call=call-1]" in query
-    assert "[status=completed]" in query
-
-
-def test_query_builder_truncates_each_role_and_total_query_without_losing_role_headers() -> None:
-    source = ConversationSegment("conversation-1", "segment-1", tool_turn())
-    builder = ConversationSegmentQueryBuilder(
-        MemoryRetrievalConfig(
-            max_query_chars=80,
-            max_prompt_chars=10,
-            max_completion_chars=10,
-            max_tool_message_chars=10,
-            search_limit=5,
-            max_tool_uris=5,
-        )
-    )
-    query = builder.build(source)
-    assert len(query) <= 80
-    assert query.startswith("[0][prompt]")
-
-
-def test_query_builder_keeps_latest_user_correction_under_total_budget() -> None:
-    source = ConversationSegment(
-        "conversation-1",
-        "segment-1",
-        (
-            message(0, ConversationMessageRole.PROMPT, "最初要求剪成六十秒" * 20),
-            message(1, ConversationMessageRole.COMPLETION, "已按六十秒处理" * 20),
-            message(2, ConversationMessageRole.PROMPT, "最终纠正：必须剪成三十秒"),
-            message(3, ConversationMessageRole.COMPLETION, "已确认最终要求"),
-        ),
-    )
-    query = ConversationSegmentQueryBuilder(
-        MemoryRetrievalConfig(
-            max_query_chars=90,
-            max_prompt_chars=80,
-            max_completion_chars=40,
-            max_tool_message_chars=40,
-        )
-    ).build(source)
-    assert "最终纠正：必须剪成三十秒" in query
-    assert "最初要求剪成六十秒" not in query
+    with pytest.raises(ValueError, match="requires its action inputs"):
+        MemoryRetrievalObservation(1, MemoryRetrievalAction.READ, (), (), (), ())
 
 
 @pytest.mark.parametrize(
@@ -204,6 +198,8 @@ def test_query_builder_keeps_latest_user_correction_under_total_budget() -> None
         ("max_retrieval_iterations", 0),
         ("max_retrieval_iterations", 9),
         ("max_old_memory_items", 100),
+        ("max_reads_per_action", 0),
+        ("max_listing_tokens", 0),
     ],
 )
 def test_extraction_config_enforces_cost_and_page_id_bounds(field: str, value: int) -> None:
@@ -211,7 +207,10 @@ def test_extraction_config_enforces_cost_and_page_id_bounds(field: str, value: i
         MemoryExtractionConfig(**{field: value})
 
 
-@pytest.mark.parametrize("field", ["max_candidate_regenerations", "reviewer_max_output_tokens"])
-def test_extraction_config_does_not_keep_removed_review_controls(field: str) -> None:
+@pytest.mark.parametrize(
+    "field",
+    ["max_candidate_regenerations", "reviewer_max_output_tokens", "additional_search_limit", "max_query_chars"],
+)
+def test_extraction_config_does_not_keep_removed_review_or_search_controls(field: str) -> None:
     with pytest.raises(TypeError, match="unexpected keyword"):
         MemoryExtractionConfig(**{field: 1})

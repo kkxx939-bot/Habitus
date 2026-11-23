@@ -16,7 +16,6 @@ from habitus.memory.editor import (
     MemoryRetrievalFinalDecision,
 )
 from habitus.memory.model import MemoryKind
-from habitus.memory.retrieval import MemorySearchHit
 from habitus.memory.schema import MemorySchemaRegistry
 from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.tree import MemoryTree
@@ -66,41 +65,13 @@ class QueueProvider:
         return {"ok": True}
 
 
-class EmptySemanticSearch:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def search(self, _query, **_kwargs):
-        self.calls += 1
-        return ()
-
-
-class FailingAdditionalSearch(EmptySemanticSearch):
-    """首次检索正常返回空，受控 ReAct 的追加搜索遇到向量服务不可用。"""
-
-    async def search(self, query, **kwargs):
-        if self.calls >= 1:
-            self.calls += 1
-            raise ConnectionError("vector service unavailable")
-        return await super().search(query, **kwargs)
-
-
-class OutOfScopeAdditionalSearch(EmptySemanticSearch):
-    """追加搜索返回搜索范围之外的 URI。"""
-
-    async def search(self, query, **kwargs):
-        if self.calls >= 1:
-            self.calls += 1
-            return (MemorySearchHit(MemoryURI.parse("memory://profile.md"), 0.9),)
-        return await super().search(query, **kwargs)
-
-
 def finish() -> dict[str, object]:
     return {
         "status": "sufficient",
         "action": "finish",
-        "query": None,
-        "uri": None,
+        "directory": None,
+        "uris": [],
+        "keywords": [],
         "reason": "当前旧记忆已经足够。",
     }
 
@@ -133,25 +104,38 @@ def all_kind_candidates() -> dict[str, object]:
     return result
 
 
-def search_more(query: str = "继续搜索偏好") -> dict[str, object]:
+def list_more(directory: str = "memory://preferences") -> dict[str, object]:
     return {
         "status": "insufficient",
-        "action": "memory_search",
-        "query": query,
-        "uri": None,
+        "action": "memory_list",
+        "directory": directory,
+        "uris": [],
+        "keywords": [],
         "reason": "旧记忆不足。",
     }
 
 
+def read_more(*uris: str) -> dict[str, object]:
+    return {
+        "status": "insufficient",
+        "action": "memory_read",
+        "directory": None,
+        "uris": list(uris),
+        "keywords": [],
+        "reason": "需要读取完整旧记忆。",
+    }
+
+
 def ended_insufficient() -> dict[str, object]:
-    """主链端到端实测 005 的终轮答复形状：树空、两次搜索无结果、如实说不足并结束。"""
+    """终轮答复形状：树空、两次列目录都是空的、如实说不足并结束。"""
 
     return {
         "status": "insufficient",
         "action": "finish",
-        "query": None,
-        "uri": None,
-        "reason": "完整旧 L2 快照均缺失，语义检索两次均无结果。",
+        "directory": None,
+        "uris": [],
+        "keywords": [],
+        "reason": "完整旧 L2 快照均缺失，列目录两次均为空。",
     }
 
 
@@ -160,7 +144,6 @@ def extraction_loop(
     responses: list[dict[str, object]],
     *,
     config: MemoryExtractionConfig | None = None,
-    semantic_search: EmptySemanticSearch | None = None,
     provider: QueueProvider | None = None,
 ) -> MemoryExtractionLoop:
     route = ProviderConfig(
@@ -178,7 +161,6 @@ def extraction_loop(
     retriever = MemoryRelatedRetriever(
         schema_registry=MemorySchemaRegistry.load_default(),
         snapshot_reader=MemorySnapshotReader(tree),
-        semantic_search=semantic_search or EmptySemanticSearch(),
     )
     return MemoryExtractionLoop(client=client, retriever=retriever, zone=UTC, config=config)
 
@@ -195,13 +177,11 @@ def test_loop_returns_model_candidates_without_second_semantic_review(tmp_path: 
 
 
 def test_final_round_insufficient_on_empty_tree_ends_retrieval_and_still_extracts(tmp_path: Path) -> None:
-    provider = QueueProvider([search_more(), search_more("再换一个查询"), ended_insufficient(), all_kind_candidates()])
-    search = EmptySemanticSearch()
+    provider = QueueProvider([list_more(), list_more("memory://entities"), ended_insufficient(), all_kind_candidates()])
     loop = extraction_loop(
         tmp_path,
         [],
         config=MemoryExtractionConfig(max_retrieval_iterations=3),
-        semantic_search=search,
         provider=provider,
     )
 
@@ -216,7 +196,6 @@ def test_final_round_insufficient_on_empty_tree_ends_retrieval_and_still_extract
     )
     assert isinstance(result.retrieval_decisions[-1], MemoryRetrievalFinalDecision)
     assert len(result.retrieval_observations) == 2
-    assert search.calls == 3
     assert all(mutation.action.value == "create" for mutation in result.mutations.mutations)
     assert len(result.mutations.mutations) == len(MemoryKind)
 
@@ -227,17 +206,15 @@ def test_final_round_insufficient_on_empty_tree_ends_retrieval_and_still_extract
     assert "预算已经用完" in final_system
     assert "明确失败" not in final_system
     action_schema = provider.requests[0].response_format.schema
-    assert action_schema["properties"]["action"]["enum"] == ["finish", "memory_search", "memory_read"]
+    assert action_schema["properties"]["action"]["enum"] == ["finish", "memory_list", "memory_search", "memory_read"]
 
 
 def test_final_round_that_still_requests_a_tool_ends_at_limit_without_running_it(tmp_path: Path) -> None:
-    search = EmptySemanticSearch()
-    responses = [search_more(), empty_candidates()]
+    responses = [list_more(), empty_candidates()]
     loop = extraction_loop(
         tmp_path,
         responses,
         config=MemoryExtractionConfig(max_retrieval_iterations=1),
-        semantic_search=search,
     )
 
     result = asyncio.run(loop.extract(segment()))
@@ -246,7 +223,6 @@ def test_final_round_that_still_requests_a_tool_ends_at_limit_without_running_it
     assert result.retrieval_ended_at_limit is True
     assert result.retrieval_decisions == ()
     assert result.retrieval_observations == ()
-    assert search.calls == 1
     assert result.candidates.iter_candidates() == ()
 
 
@@ -254,7 +230,7 @@ def test_final_round_sufficient_finish_is_not_recorded_as_limit(tmp_path: Path) 
     result = asyncio.run(
         extraction_loop(
             tmp_path,
-            [search_more(), finish(), empty_candidates()],
+            [list_more(), finish(), empty_candidates()],
             config=MemoryExtractionConfig(max_retrieval_iterations=2),
         ).extract(segment())
     )
@@ -270,53 +246,58 @@ def test_finish_before_the_final_round_is_not_recorded_as_limit(tmp_path: Path) 
     assert not isinstance(result.retrieval_decisions[0], MemoryRetrievalFinalDecision)
 
 
-@pytest.mark.parametrize(
-    ("semantic_search", "message"),
-    [
-        (FailingAdditionalSearch(), "additional memory semantic search failed"),
-        (OutOfScopeAdditionalSearch(), "out-of-scope URI"),
-    ],
-)
-def test_search_failure_still_fails_instead_of_ending_at_limit(
-    tmp_path: Path,
-    semantic_search: EmptySemanticSearch,
-    message: str,
-) -> None:
-    responses = [search_more(), ended_insufficient(), empty_candidates()]
+def test_read_outside_the_listing_still_fails_instead_of_ending_at_limit(tmp_path: Path) -> None:
+    """读名字清单、列目录结果和一跳关系之外的地址明确失败，不当作在上限处结束。"""
+
+    MemoryTree(tmp_path / "memory").write(document(MemoryKind.PROFILE))
+    responses = [read_more("memory://preferences/未列出.md"), ended_insufficient(), empty_candidates()]
     loop = extraction_loop(
         tmp_path,
         responses,
         config=MemoryExtractionConfig(max_retrieval_iterations=2),
-        semantic_search=semantic_search,
     )
 
-    with pytest.raises(MemoryExtractionError, match=message):
+    with pytest.raises(MemoryExtractionError, match="not exposed"):
         asyncio.run(loop.extract(segment()))
     assert responses == [ended_insufficient(), empty_candidates()]
 
 
-def test_loop_executes_one_search_then_finishes_with_auditable_observation(tmp_path: Path) -> None:
-    search = {
-        "status": "insufficient",
-        "action": "memory_search",
-        "query": "回答风格",
-        "uri": None,
-        "reason": "需要确认相关旧偏好。",
-    }
+def test_loop_executes_one_list_then_finishes_with_auditable_observation(tmp_path: Path) -> None:
     result = asyncio.run(
         extraction_loop(
             tmp_path,
-            [search, finish(), empty_candidates()],
+            [list_more(), finish(), empty_candidates()],
             config=MemoryExtractionConfig(max_retrieval_iterations=2),
         ).extract(segment())
     )
 
     assert tuple(item.action.value for item in result.retrieval_decisions) == (
-        "memory_search",
+        "memory_list",
         "finish",
     )
     assert len(result.retrieval_observations) == 1
-    assert result.retrieval_observations[0].input_value == "回答风格"
+    assert result.retrieval_observations[0].inputs == ("memory://preferences",)
+
+
+def test_name_listing_goes_into_the_first_round_and_listed_cards_can_be_read(tmp_path: Path) -> None:
+    """偏好主题与实体名字清单放进第一轮输入；清单里的地址可以一次读进来，读到的成为旧记忆快照。"""
+
+    preference = document(MemoryKind.PREFERENCE)
+    entity = document(MemoryKind.ENTITY)
+    tree = MemoryTree(tmp_path / "memory")
+    tree.write(preference)
+    tree.write(entity)
+    uris = sorted(str(MemoryURI.from_address(item.address)) for item in (preference, entity))
+    provider = QueueProvider([read_more(*uris), finish(), empty_candidates()])
+
+    result = asyncio.run(extraction_loop(tmp_path, [], provider=provider).extract(segment()))
+
+    first = json.loads(str(provider.requests[0].messages[-1].content).split("\n", 1)[1])
+    for uri in uris:
+        assert uri in first["name_listing"]
+    assert result.retrieval_observations[0].inputs == tuple(uris)
+    assert {snapshot.identity for snapshot in result.old_memories.snapshots if snapshot.exists} == set(uris)
+    assert result.page_ids.page_ids() == frozenset({1, 2})
 
 
 def _provider(responses: list[dict[str, object]]) -> QueueProvider:
@@ -396,20 +377,52 @@ def test_unusable_repair_answer_falls_back_to_the_first_batch_minus_failing_item
     assert len(result.source_rejections) == 1
 
 
-def test_preliminary_mutation_failure_does_not_trigger_semantic_regeneration(
-    tmp_path: Path,
-) -> None:
-    # 树里已有这条偏好但本轮没有读到：新编号指向它只能在初步字段规划里明确失败
-    MemoryTree(tmp_path / "memory").write(document(MemoryKind.PREFERENCE))
+def test_a_candidate_written_to_an_unread_old_card_is_sent_back_with_that_card_and_updates_it(tmp_path: Path) -> None:
+    """用户 2026-11-23 定：候选写到已有旧卡片的地址、这次又没读过，系统把旧卡片读出来，连同说明交回修补轮改一次；
+    改成复用旧 page_id 就照常更新这张卡片，任务不失败。"""
+
+    old = document(MemoryKind.PREFERENCE)
+    MemoryTree(tmp_path / "memory").write(old)
+    uri = str(MemoryURI.from_address(old.address))
     unread_target = empty_candidates()
     unread_target["preferences"] = [candidate_item(MemoryKind.PREFERENCE, 100)]
-    unused_retry = empty_candidates()
-    responses = [finish(), unread_target, unused_retry]
-    loop = extraction_loop(tmp_path, responses)
+    rewritten = empty_candidates()
+    rewritten["preferences"] = [candidate_item(MemoryKind.PREFERENCE, 1, content="- 偏好简洁直接的回答\n- 列表用短句")]
+    provider = _provider([finish(), unread_target, rewritten])
 
-    with pytest.raises(MemoryExtractionError, match="preliminary mutation planning"):
-        asyncio.run(loop.extract(segment()))
-    assert responses == [unused_retry]
+    result = asyncio.run(extraction_loop(tmp_path, [], provider=provider).extract(segment()))
+
+    assert provider.responses == []
+    assert result.source_rejections == ()
+    assert [mutation.match.status.value for mutation in result.mutations.mutations] == ["existing"]
+    repair = provider.requests[-1]
+    payload = json.loads(str(repair.messages[-3].content).split("\n", 1)[1])  # 修补请求带上了补读进来的旧卡片
+    assert uri in {item["uri"] for item in payload["old_memory_snapshots"]}
+    assert f"page_id=100 写到 {uri}，这个地址已有旧卡片" in str(repair.messages[-1].content)
+
+
+@pytest.mark.parametrize("repair_answer", ["still-new", "unusable"])
+def test_a_candidate_still_written_to_an_old_card_after_repair_is_dropped_alone(
+    tmp_path: Path, repair_answer: str
+) -> None:
+    """修补后仍把新 page_id 写到旧卡片的地址（或修补答复不能用）：只剔掉这一条和引用它的关系，同批其余照常。"""
+
+    MemoryTree(tmp_path / "memory").write(document(MemoryKind.PREFERENCE))
+    first = empty_candidates()
+    first["preferences"] = [candidate_item(MemoryKind.PREFERENCE, 100)]
+    first["entities"] = [candidate_item(MemoryKind.ENTITY, 101)]
+    first["relations"] = [{"action": "add", "from_page_id": 100, "to_page_id": 101, "link_type": "related_to"}]
+    second: object = first if repair_answer == "still-new" else {"not": "a batch"}
+    provider = _provider([finish(), first, *([second] * 3)])
+
+    result = asyncio.run(extraction_loop(tmp_path, [], provider=provider).extract(segment()))
+
+    assert [candidate.page_id for candidate in result.candidates.iter_candidates()] == [101]
+    assert result.candidates.relations == ()
+    reasons = [violation.reason for violation in result.source_rejections]
+    # 旧卡片补读进来后，来源校验本身就认出"写到已有记忆却没复用它的 page_id"
+    assert "candidate for an existing memory URI must reuse its existing page_id" in reasons
+    assert "relation references a dropped memory candidate" in reasons
 
 
 def test_successful_loop_plans_all_four_memory_kinds_without_writing_tree(tmp_path: Path) -> None:
@@ -460,7 +473,7 @@ def _summaries(source, count: int):
 
 
 def test_the_turn_budget_reserves_the_old_memory_budget_and_counts_the_context_char_bound(tmp_path: Path) -> None:
-    """整轮放不放得下：不带旧记忆的两种请求都要放进 max_input_tokens − max_old_memory_tokens；超过 max_context_chars
+    """整轮放不放得下：不带旧记忆与名字清单的两种请求都要放进 max_input_tokens − max_old_memory_tokens − max_listing_tokens；超过 max_context_chars
     的整轮直接算放不下（按段抽取），不再永久失败。"""
 
     from habitus.memory.editor import MemoryCandidateBatch
@@ -475,14 +488,18 @@ def test_the_turn_budget_reserves_the_old_memory_budget_and_counts_the_context_c
         tmp_path / "fits",
         [],
         provider=SizedQueueProvider([]),
-        config=MemoryExtractionConfig(max_input_tokens=candidate + 5_000, max_old_memory_tokens=5_000),
+        config=MemoryExtractionConfig(
+            max_input_tokens=candidate + 6_000, max_old_memory_tokens=5_000, max_listing_tokens=1_000
+        ),
     )
     assert fits.turn_fits_whole(material)
     tight = extraction_loop(
         tmp_path / "tight",
         [],
         provider=SizedQueueProvider([]),
-        config=MemoryExtractionConfig(max_input_tokens=candidate + 5_000, max_old_memory_tokens=5_001),
+        config=MemoryExtractionConfig(
+            max_input_tokens=candidate + 6_000, max_old_memory_tokens=5_001, max_listing_tokens=1_000
+        ),
     )
     assert not tight.turn_fits_whole(material)
     huge = extraction_loop(tmp_path / "huge", [], config=MemoryExtractionConfig(max_context_chars=100))
@@ -521,7 +538,9 @@ def test_a_turn_part_keeps_the_nearest_earlier_summaries_that_fit(tmp_path: Path
         tmp_path / "loop",
         [],
         provider=provider,
-        config=MemoryExtractionConfig(max_input_tokens=tokens(two) + 2_000, max_old_memory_tokens=2_000),
+        config=MemoryExtractionConfig(
+            max_input_tokens=tokens(two) + 3_000, max_old_memory_tokens=2_000, max_listing_tokens=1_000
+        ),
     )
     assert tokens(full) > tokens(two)
     asyncio.run(loop.extract(part, turn_context=full))
@@ -550,3 +569,92 @@ def test_extraction_material_carries_local_times_with_offset(tmp_path: Path) -> 
     sent = json.loads(str(provider.requests[-1].messages[-1].content).split("\n", 1)[1])
     times = [item["occurred_at"] for item in sent["conversation_segment"]["messages"]]
     assert times == ["2026-07-01T16:00:00.000000+08:00", "2026-07-01T16:00:01.000000+08:00"]
+
+
+def search_more(*keywords: str, directory: str | None = None) -> dict[str, object]:
+    return {
+        "status": "insufficient",
+        "action": "memory_search",
+        "directory": directory,
+        "uris": [],
+        "keywords": list(keywords),
+        "reason": "名字看不出，按内容找。",
+    }
+
+
+def test_a_content_search_returns_matching_cards_with_snippets_and_makes_them_readable(tmp_path: Path) -> None:
+    """用户 2026-11-23 定：提取时可以按词搜卡片内容（字面匹配）。工具卡片不在名字清单里，搜到才能读；
+    返回地址、名字和命中片段，不超过条数上限；没搜到的地址照旧拒读。"""
+
+    tree = MemoryTree(tmp_path / "memory")
+    for name in ("disk.clean", "disk.scan", "disk.mount"):
+        tree.write(
+            document(
+                MemoryKind.TOOL, fields={"tool_name": name, "verification": f"{name} 跑完后看剩余空间，再看日志。"}
+            )
+        )
+    tree.write(document(MemoryKind.TOOL, fields={"tool_name": "net.ping", "verification": "看丢包率。"}))
+    provider = QueueProvider([search_more("剩余空间", directory="memory://tools"), finish(), empty_candidates()])
+    config = MemoryExtractionConfig(max_search_results=2)
+
+    result = asyncio.run(extraction_loop(tmp_path, [], provider=provider, config=config).extract(segment()))
+
+    observation = result.retrieval_observations[0]
+    assert observation.inputs == ("memory://tools", "剩余空间")
+    assert len(observation.result_uris) == 2
+    assert all(uri.startswith("memory://tools/disk.") for uri in observation.result_uris)
+    second = json.loads(str(provider.requests[1].messages[-1].content).split("\n", 1)[1])
+    lines = second["searched"]["memory://tools 剩余空间"]
+    assert len(lines) == 2 and all("剩余空间" in line and "（disk." in line for line in lines)
+
+    found = observation.result_uris[0]
+    responses = [search_more("剩余空间"), read_more(found), finish(), empty_candidates()]
+    read = asyncio.run(
+        extraction_loop(tmp_path, responses, config=MemoryExtractionConfig(max_retrieval_iterations=4)).extract(
+            segment()
+        )
+    )
+    assert found in {snapshot.identity for snapshot in read.old_memories.snapshots if snapshot.exists}
+
+    refused = [
+        search_more("剩余空间"),
+        read_more("memory://tools/net.ping.md"),
+        ended_insufficient(),
+        empty_candidates(),
+    ]
+    with pytest.raises(MemoryExtractionError, match="not exposed"):
+        asyncio.run(
+            extraction_loop(tmp_path, refused, config=MemoryExtractionConfig(max_retrieval_iterations=3)).extract(
+                segment()
+            )
+        )
+
+
+def test_a_content_search_skips_retired_cards(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta
+
+    from habitus.memory.editor.retrieval import memory_content_search
+    from habitus.memory.recall import (
+        MemoryRecallLifecycle,
+        MemoryRecallLifecycleConfig,
+        MemoryRecallTarget,
+        SQLiteMemoryRecallLifecycleStore,
+    )
+
+    tree = MemoryTree(tmp_path / "memory")
+    kept = document(MemoryKind.TOOL, fields={"tool_name": "disk.clean", "verification": "看剩余空间。"})
+    gone = document(MemoryKind.TOOL, fields={"tool_name": "disk.old", "verification": "看剩余空间。"})
+    tree.write(kept)
+    tree.write(gone)
+    config = MemoryRecallLifecycleConfig()
+    lifecycle = MemoryRecallLifecycle(
+        SQLiteMemoryRecallLifecycleStore(tmp_path / "recall.sqlite3", config=config), config=config
+    )
+    target = MemoryRecallTarget(MemoryURI.from_address(gone.address), 1, gone.metadata.created_at)
+    now = datetime.now(UTC)
+    lifecycle.store.mark_retire_candidate(target, marked_at=now - timedelta(days=40), expected_version=0)
+    lifecycle.store.mark_retired(target, retired_at=now - timedelta(days=1), expected_version=1)
+
+    hits = memory_content_search(tree, lifecycle, keywords=("剩余空间",), directory=None, limit=8)
+
+    assert [str(hit.uri) for hit in hits] == [str(MemoryURI.from_address(kept.address))]

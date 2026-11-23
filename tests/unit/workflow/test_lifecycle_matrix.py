@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from habitus.memory.conversation import ConversationAddress, ConversationSummaryRetirementStore
+from habitus.memory.conversation import ConversationAddress
 from habitus.memory.editor import MemoryTransactionJournalState
 from habitus.memory.workflow import (
     ConversationLifecycleError,
@@ -25,14 +25,13 @@ from tests.unit.workflow.test_lifecycle_manager import lifecycle_manager
 
 
 def test_constructor_rejects_summary_config_different_from_compactor(tmp_path: Path) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
+    manager = lifecycle_manager(tmp_path, compaction_enabled=False)
     with pytest.raises(ValueError, match="share one lifecycle config"):
         ConversationLifecycleManager(
             manager.compactor,
             manager.journal,
             manager.segment_store,
             manager.range_store,
-            manager.summary_vector_index,
             manager.jobs,
             manager.receipts,
             manager.transaction_journal,
@@ -41,36 +40,20 @@ def test_constructor_rejects_summary_config_different_from_compactor(tmp_path: P
         )
 
 
-def test_constructor_rejects_retirement_store_not_shared_with_summary_index(tmp_path: Path) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
-    with pytest.raises(ValueError, match="share one retirement store"):
-        ConversationLifecycleManager(
-            manager.compactor,
-            manager.journal,
-            manager.segment_store,
-            manager.range_store,
-            manager.summary_vector_index,
-            manager.jobs,
-            manager.receipts,
-            manager.transaction_journal,
-            ConversationSummaryRetirementStore(tmp_path / "other-workflow"),
-        )
-
-
 @pytest.mark.parametrize("now", [BASE_TIME.replace(tzinfo=None)])
 def test_maintain_once_rejects_invalid_explicit_time(tmp_path: Path, now: datetime) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
+    manager = lifecycle_manager(tmp_path, compaction_enabled=False)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     with pytest.raises(ValueError, match="lifecycle now"):
         asyncio.run(manager.maintain_once(address, now=now))
 
 
 def test_maintain_once_normalizes_offset_time_to_utc(tmp_path: Path) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
+    manager = lifecycle_manager(tmp_path, compaction_enabled=False)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     offset = BASE_TIME.astimezone(timezone(timedelta(hours=8)))
     result = asyncio.run(manager.maintain_once(address, now=offset))
-    assert result.summary_indexed
+    assert result.compaction.summary is None
 
 
 @pytest.mark.parametrize(
@@ -87,7 +70,7 @@ def test_maintenance_result_rejects_invalid_fields(
     value: object,
     message: str,
 ) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
+    manager = lifecycle_manager(tmp_path, compaction_enabled=False)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     valid = asyncio.run(manager.maintain_once(address, now=BASE_TIME))
     arguments = {name: getattr(valid, name) for name in valid.__dataclass_fields__}
@@ -143,14 +126,14 @@ def _committed_workflow(manager: ConversationLifecycleManager, address: Conversa
 
 
 def test_workflow_commit_gate_accepts_committed_job_and_receipt_without_recovery_log(tmp_path: Path) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
+    manager = lifecycle_manager(tmp_path, compaction_enabled=False)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     source_segment, _job, _receipt = _committed_workflow(manager, address)
     assert manager.committed_cleanup.is_committed(address, source_segment)
 
 
 def test_workflow_commit_gate_rejects_missing_job(tmp_path: Path) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
+    manager = lifecycle_manager(tmp_path, compaction_enabled=False)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     source_segment = segment(segment_id="000000000000-000000000001")
     with pytest.raises(ConversationLifecycleError, match="no durable MemoryJob"):
@@ -158,7 +141,7 @@ def test_workflow_commit_gate_rejects_missing_job(tmp_path: Path) -> None:
 
 
 def test_workflow_commit_gate_returns_false_for_uncommitted_job(tmp_path: Path) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
+    manager = lifecycle_manager(tmp_path, compaction_enabled=False)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     source_segment = segment(segment_id="000000000000-000000000001")
     manager.jobs.activate(manager.jobs.stage(address, source_segment))
@@ -166,7 +149,7 @@ def test_workflow_commit_gate_returns_false_for_uncommitted_job(tmp_path: Path) 
 
 
 def test_workflow_commit_gate_rejects_missing_receipt(tmp_path: Path) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
+    manager = lifecycle_manager(tmp_path, compaction_enabled=False)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     source_segment = segment(segment_id="000000000000-000000000001")
     queued = manager.jobs.activate(manager.jobs.stage(address, source_segment))
@@ -189,7 +172,7 @@ def test_workflow_commit_gate_interprets_transaction_terminal_state(
     expected: bool | None,
     error: str | None,
 ) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
+    manager = lifecycle_manager(tmp_path, compaction_enabled=False)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     source_segment, job, _receipt = _committed_workflow(manager, address)
     record = manager.transaction_journal._parse(
@@ -225,7 +208,7 @@ def test_discard_terminal_journal_rejects_non_committed_states(
     state: MemoryTransactionJournalState,
     error: str,
 ) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
+    manager = lifecycle_manager(tmp_path, compaction_enabled=False)
     transaction_id = "a" * 32
     record = manager.transaction_journal._parse(
         {
@@ -246,7 +229,7 @@ def test_discard_terminal_journal_rejects_non_committed_states(
 
 
 def test_discard_terminal_journal_is_noop_when_absent_and_deletes_committed(tmp_path: Path) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
+    manager = lifecycle_manager(tmp_path, compaction_enabled=False)
     manager.committed_cleanup.discard_terminal_journal("b" * 32)
     transaction_id = "a" * 32
     record = manager.transaction_journal._parse(

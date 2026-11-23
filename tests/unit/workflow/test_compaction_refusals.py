@@ -24,7 +24,7 @@ def _manager(tmp_path: Path):  # type: ignore[no-untyped-def]
         enabled=True,
         segment_to_range=ConversationSegmentSummaryCompactionConfig(min_age_days=1, min_source_count=2),
     )
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=True, compaction_config=config)
+    manager = lifecycle_manager(tmp_path, compaction_enabled=True, compaction_config=config)
     return manager
 
 

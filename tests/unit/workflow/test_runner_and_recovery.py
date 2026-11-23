@@ -202,8 +202,6 @@ def runner_with_fakes(store: MemoryJobStore, *, journal: object | None, executor
                 job=committed,
                 change_receipt=None,
                 summary_generated=bool(summary_generated),
-                summary_indexed=True,
-                vector_indexed=True,
                 journal_cleaned=True,
             )
 

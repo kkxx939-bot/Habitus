@@ -348,35 +348,43 @@ class MemoryCandidateBatch:
             violations = batch.context_violations(segment, old_memories, page_ids)
             if not violations:
                 return batch, tuple(dropped)
-            removed: dict[object, MemoryCandidateViolation] = {}
-            for violation in violations:
-                removed.setdefault(_violation_key(violation.item), violation)
-            dropped_page_ids = {
-                violation.item.page_id for violation in removed.values() if isinstance(violation.item, MemoryCandidate)
-            }
-            for relation in batch.relations:
-                if dropped_page_ids & {relation.from_page_id, relation.to_page_id}:
-                    removed.setdefault(
-                        relation, MemoryCandidateViolation(relation, "relation references a dropped memory candidate")
-                    )
-            for proposal in batch.identity_proposals:
-                if proposal.target_page_id in dropped_page_ids:
-                    removed.setdefault(
-                        proposal,
-                        MemoryCandidateViolation(proposal, "identity proposal targets a dropped memory candidate"),
-                    )
-            dropped.extend(removed.values())
+            batch, removed = batch.without(violations)
+            dropped.extend(removed)
 
-            def keep(item: object, removed: dict[object, MemoryCandidateViolation] = removed) -> bool:
-                return _violation_key(item) not in removed
+    def without(
+        self, violations: tuple[MemoryCandidateViolation, ...]
+    ) -> tuple[MemoryCandidateBatch, tuple[MemoryCandidateViolation, ...]]:
+        """剔除这些条目，连同引用被剔候选的关系与身份提议；返回剩下的批次与剔掉的每一条及原因。"""
 
-            batch = replace(
-                batch,
-                **{
-                    field_name: tuple(item for item in getattr(batch, field_name) if keep(item))
-                    for field_name in self._FIELD_NAMES
-                },
-            )
+        removed: dict[object, MemoryCandidateViolation] = {}
+        for violation in violations:
+            removed.setdefault(_violation_key(violation.item), violation)
+        dropped_page_ids = {
+            violation.item.page_id for violation in removed.values() if isinstance(violation.item, MemoryCandidate)
+        }
+        for relation in self.relations:
+            if dropped_page_ids & {relation.from_page_id, relation.to_page_id}:
+                removed.setdefault(
+                    relation, MemoryCandidateViolation(relation, "relation references a dropped memory candidate")
+                )
+        for proposal in self.identity_proposals:
+            if proposal.target_page_id in dropped_page_ids:
+                removed.setdefault(
+                    proposal,
+                    MemoryCandidateViolation(proposal, "identity proposal targets a dropped memory candidate"),
+                )
+
+        def keep(item: object) -> bool:
+            return _violation_key(item) not in removed
+
+        batch = replace(
+            self,
+            **{
+                field_name: tuple(item for item in getattr(self, field_name) if keep(item))
+                for field_name in self._FIELD_NAMES
+            },
+        )
+        return batch, tuple(removed.values())
 
     def to_dict(self) -> dict[str, object]:
         """输出与模型 JSON Schema 完全一致的候选批次。"""

@@ -15,15 +15,11 @@ from habitus.behavior.fusion.lanes.physical import PhysicalDeliveryError, Physic
 from habitus.behavior.fusion.lanes.session import SessionLane
 from habitus.behavior.model import BehaviorKind
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.vector import VectorStoreFactory
 from habitus.model_client import ModelResponse, ProviderCapabilities, ProviderFactory
 from habitus.runtime import build_runtime
 from habitus.runtime.runtime import RuntimeStateError
 from tests.integration.test_runtime_assembly import (
     REPOSITORY_ROOT,
-    FakeEmbeddingProvider,
-    FakeRerankProvider,
-    FakeVectorBackend,
     prepare_chat_request,
     runtime_config,
     runtime_dependencies,
@@ -42,12 +38,6 @@ def behavior_enabled_config(tmp_path: Path, **behavior: object):
     # 单测不往 127.0.0.1:4318 真导出：没关掉的 Runtime 会留下每 10 秒导出一次的线程，串进后面设了代理环境变量的测试
     raw["observability"]["tracing"]["enabled"] = False
     raw["models"]["chat"]["route"].update(provider="fake", adapter="fake_chat", credential_ref="")
-    raw["models"]["embedding"]["route"].update(provider="fake", adapter="fake_embedding", credential_ref="")
-    raw["models"]["rerank"]["route"].update(provider="fake", adapter="fake_rerank", credential_ref="")
-    raw["memory"]["vector_store"]["route"].update(provider="fake", adapter="fake_vector", credential_ref="")
-    raw["conversation"]["summary_vector_store"]["route"].update(
-        provider="fake", adapter="fake_vector", credential_ref=""
-    )
     raw["behavior"] = {"primary_subject": SUBJECT, **behavior}
     from habitus.config import HabitusConfig
 
@@ -100,22 +90,7 @@ def scripted_dependencies(bodies: list[dict]):
         "fake_chat",
         lambda context: ScriptedChatProvider(context.route.provider, context.route.model, bodies),
     )
-    providers.register_adapter(
-        "embedding",
-        "fake_embedding",
-        lambda context: FakeEmbeddingProvider(context.route.provider, context.route.model, context.config.dimension),
-    )
-    providers.register_adapter(
-        "rerank",
-        "fake_rerank",
-        lambda context: FakeRerankProvider(context.route.provider, context.route.model),
-    )
-    vectors = VectorStoreFactory()
-    vectors.register_adapter(
-        "fake_vector",
-        lambda context: FakeVectorBackend(context.config.provider, context.config.collection),
-    )
-    return providers, vectors
+    return providers
 
 
 def physical_delivery() -> dict:
@@ -144,11 +119,10 @@ PICK_BODY = {"pick": "missing", "new": None}
 
 
 def test_behavior_stays_dark_until_a_subject_is_configured(tmp_path: Path) -> None:
-    providers, vectors = runtime_dependencies()
+    providers = runtime_dependencies()
     runtime = build_runtime(
         runtime_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     assert runtime.components.behavior is None
@@ -160,11 +134,10 @@ def test_behavior_stays_dark_until_a_subject_is_configured(tmp_path: Path) -> No
 def test_each_lane_gets_its_own_whole_pipeline_and_they_share_only_the_chat_client(tmp_path: Path) -> None:
     """两条 lane 各是一整套（存储、融合、归约、行为树、词表），互不共用；模型客户端与 memory 共用同一个实例。"""
 
-    providers, vectors = runtime_dependencies()
+    providers = runtime_dependencies()
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     branches = runtime.components.behavior
@@ -227,7 +200,7 @@ def test_each_lane_gets_its_own_whole_pipeline_and_they_share_only_the_chat_clie
 def test_every_behaviour_override_reaches_the_component_that_uses_it(tmp_path: Path) -> None:
     """E18：配置里写的保护上限真的交到用它的组件上（物理 lane、会话 lane、行为树文档、文档写锁、语义概览），两支都接。"""
 
-    providers, vectors = runtime_dependencies()
+    providers = runtime_dependencies()
     runtime = build_runtime(
         behavior_enabled_config(
             tmp_path,
@@ -238,7 +211,6 @@ def test_every_behaviour_override_reaches_the_component_that_uses_it(tmp_path: P
             semantic_max_prompt_chars=5000,
         ),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     branches = runtime.components.behavior
@@ -262,11 +234,10 @@ def test_a_physical_delivery_reaches_the_tree_end_to_end_through_the_runtime(tmp
 
     # 唯一的模型调用是物理 lane 在归约里的选词：这一条答"表里没有"，落成「表外」。
     # 之后的语义层调用也会拿到它——对语义层是垃圾，按设计降级成信号。
-    providers, vectors = scripted_dependencies([PICK_BODY])
+    providers = scripted_dependencies([PICK_BODY])
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     runtime.initialize()
@@ -313,11 +284,10 @@ def test_a_physical_delivery_reaches_the_tree_end_to_end_through_the_runtime(tmp
 
 
 def test_runtime_start_and_stop_manage_behavior_workers(tmp_path: Path) -> None:
-    providers, vectors = scripted_dependencies([PICK_BODY])
+    providers = scripted_dependencies([PICK_BODY])
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
 
@@ -337,11 +307,10 @@ def test_a_behavior_branch_that_cannot_start_does_not_block_the_runtime_or_the_o
 
     from habitus.runtime import RuntimeState
 
-    providers, vectors = scripted_dependencies([PICK_BODY])
+    providers = scripted_dependencies([PICK_BODY])
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     branches = runtime.components.behavior
@@ -364,11 +333,10 @@ def test_a_behavior_branch_that_cannot_start_does_not_block_the_runtime_or_the_o
 def test_storage_layout_follows_each_stores_root_contract(tmp_path: Path) -> None:
     """全部存储传同一个行为根：传子目录会目录二次嵌套（评审实测的口吃布局）。"""
 
-    providers, vectors = scripted_dependencies([PICK_BODY])
+    providers = scripted_dependencies([PICK_BODY])
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     runtime.initialize()
@@ -391,11 +359,10 @@ def test_close_stops_behavior_workers_like_stop_does(tmp_path: Path) -> None:
     """``async with`` 的退出走 close 不走 stop——close 漏停行为循环会让它带着已关闭的
     模型客户端继续空转（评审实测泄漏）。"""
 
-    providers, vectors = scripted_dependencies([PICK_BODY])
+    providers = scripted_dependencies([PICK_BODY])
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
 
@@ -417,11 +384,10 @@ def test_component_group_rejects_foreign_instances(tmp_path: Path) -> None:
 
     from habitus.behavior.fusion.store import BehaviorJudgementStore
 
-    providers, vectors = scripted_dependencies([PICK_BODY])
+    providers = scripted_dependencies([PICK_BODY])
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     branches = runtime.components.behavior
@@ -472,8 +438,7 @@ def test_the_behavior_participant_expires_physical_units_and_reports_words_in_us
 
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
-        providers=runtime_dependencies()[0],
-        vector_stores=runtime_dependencies()[1],
+        providers=runtime_dependencies(),
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     branches = runtime.components.behavior
@@ -544,11 +509,10 @@ def test_the_overview_refresh_gives_up_at_once_on_input_too_large_and_content_sa
 
     import habitus.model_client as model_client
 
-    providers, vectors = runtime_dependencies()
+    providers = runtime_dependencies()
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     assert runtime.components.behavior is not None

@@ -1,6 +1,6 @@
 """找出模型路由里还留着向导占位值的配置项（W7；W10a 起 Chat 同样适用）。
 
-非交互 ``init`` 写出的 Chat 与 Embedding 段是不预置厂商的模板：地址与模型名带 ``example.``。占位片段由 Profile 字段的
+非交互 ``init`` 写出的 Chat 段是不预置厂商的模板：地址与模型名带 ``example.``。占位片段由 Profile 字段的
 ``placeholder_values`` 声明，这里只按注册表判，不认任何厂商或模型名。doctor、服务启动前检查与 ``init`` 的终端提示
 都用它，好在发请求之前就说清"还是占位值、要填哪几项"，而不是等到报 DNS 或连接错误。
 """
@@ -19,7 +19,7 @@ from habitus.integrations.local_service.setup_registry import (
     model_document,
 )
 
-_MODEL_CAPABILITIES: tuple[SetupCapability, ...] = ("chat", "embedding", "rerank")
+_MODEL_CAPABILITIES: tuple[SetupCapability, ...] = ("chat",)
 
 
 @dataclass(frozen=True)
@@ -41,7 +41,7 @@ class UnfilledSetup:
 
 
 def unfilled_settings(registry: SetupRegistry, config: HabitusConfig) -> tuple[UnfilledSetup, ...]:
-    """按已注册 Profile 的占位片段检查 chat、embedding、rerank 路由；没有对应 Profile 的第三方适配器不查。"""
+    """按已注册 Profile 的占位片段检查 chat 路由；没有对应 Profile 的第三方适配器不查。"""
 
     result: list[UnfilledSetup] = []
     for capability in _MODEL_CAPABILITIES:

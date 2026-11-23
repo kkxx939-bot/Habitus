@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 
 from habitus.config.loader import ConfigError, construct_config, group_fields
 from habitus.foundation.validation import is_int
-from habitus.infrastructure.vector import VectorStoreConfig
 from habitus.memory.conversation import (
     ConversationJournalConfig,
     ConversationRangeSummaryCompactionConfig,
@@ -14,7 +13,7 @@ from habitus.memory.conversation import (
     ConversationSegmentSummaryCompactionConfig,
     ConversationSummaryCompactionConfig,
     ConversationSummaryConfig,
-    ConversationSummaryVectorIndexConfig,
+    ConversationSummaryReaderConfig,
 )
 
 
@@ -136,12 +135,7 @@ class ConversationConfig:
     source: ConversationSourceConfig = field(default_factory=ConversationSourceConfig)
     segmentation: ConversationSegmentationConfig = field(default_factory=ConversationSegmentationConfig)
     summary: ConversationSummaryConfig = field(default_factory=ConversationSummaryConfig)
-    summary_vector_store: VectorStoreConfig = field(
-        default_factory=lambda: VectorStoreConfig(collection="conversation_summaries")
-    )
-    summary_vector_index: ConversationSummaryVectorIndexConfig = field(
-        default_factory=ConversationSummaryVectorIndexConfig
-    )
+    summary_reader: ConversationSummaryReaderConfig = field(default_factory=ConversationSummaryReaderConfig)
     lifecycle: ConversationLifecycleConfig = field(default_factory=ConversationLifecycleConfig)
 
     def __post_init__(self) -> None:
@@ -183,11 +177,10 @@ class ConversationConfig:
                 data.get("summary", {}),
                 "config.conversation.summary",
             ),
-            summary_vector_store=_summary_vector_store_config(data.get("summary_vector_store", {})),
-            summary_vector_index=construct_config(
-                ConversationSummaryVectorIndexConfig,
-                data.get("summary_vector_index", {}),
-                "config.conversation.summary_vector_index",
+            summary_reader=construct_config(
+                ConversationSummaryReaderConfig,
+                data.get("summary_reader", {}),
+                "config.conversation.summary_reader",
             ),
             lifecycle=ConversationLifecycleConfig.from_mapping(data.get("lifecycle", {})),
         )
@@ -251,15 +244,6 @@ def _boolean_value(value: object, path: str) -> bool:
     return value
 
 
-def _summary_vector_store_config(value: object) -> VectorStoreConfig:
-    try:
-        if value == {}:
-            return VectorStoreConfig(collection="conversation_summaries")
-        return VectorStoreConfig.from_mapping(value)
-    except (TypeError, ValueError) as exc:
-        raise ConfigError(f"invalid 'config.conversation.summary_vector_store': {exc}") from exc
-
-
 __all__ = [
     "ConversationConfig",
     "ConversationLifecycleConfig",
@@ -267,5 +251,4 @@ __all__ = [
     "ConversationSegmentSummaryCompactionConfig",
     "ConversationSourceConfig",
     "ConversationSummaryCompactionConfig",
-    "ConversationSummaryVectorIndexConfig",
 ]

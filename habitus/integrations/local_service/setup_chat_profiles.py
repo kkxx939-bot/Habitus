@@ -1,7 +1,7 @@
 """chat 能力的向导 Profile：两种协议各一个不绑厂商的模板，外加一个 DeepSeek 预置。
 
 默认（``cloud_setup.default_cloud_selection``）用 OpenAI 兼容模板；模板里的 ``example.`` 模型名与地址是占位值，
-由 doctor 与启动前检查（``setup_placeholders``）报"还是占位值"，交互式向导逼用户填真实值，与 Embedding 同一范式。
+由 doctor 与启动前检查（``setup_placeholders``）报"还是占位值"，交互式向导逼用户填真实值。
 """
 
 from __future__ import annotations

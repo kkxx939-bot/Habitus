@@ -31,7 +31,6 @@ from habitus.config.locale import LocaleConfig
 from habitus.config.scene import SceneConfig
 from habitus.infrastructure.editor.snapshot import SnapshotReadConfig
 from habitus.infrastructure.store.sqlite import SQLiteLockStoreConfig
-from habitus.infrastructure.vector import VectorStoreConfig, VectorStoreRouteConfig
 from habitus.memory.conversation import (
     ConversationJournalConfig,
     ConversationRangeSummaryCompactionConfig,
@@ -39,7 +38,7 @@ from habitus.memory.conversation import (
     ConversationSegmentSummaryCompactionConfig,
     ConversationSummaryCompactionConfig,
     ConversationSummaryConfig,
-    ConversationSummaryVectorIndexConfig,
+    ConversationSummaryReaderConfig,
 )
 from habitus.memory.document import MemoryDocumentConfig
 from habitus.memory.editor import (
@@ -48,7 +47,6 @@ from habitus.memory.editor import (
     MemoryRetrievalConfig,
     MemoryTransactionJournalConfig,
 )
-from habitus.memory.indexing import MemoryVectorIndexConfig
 from habitus.memory.semantic import MemorySemanticConfig
 from habitus.memory.tree import MemoryTreeConfig
 from habitus.memory.workflow import (
@@ -76,13 +74,12 @@ CONFIG_INSTANCES = (
     ConversationRangeSummaryCompactionConfig(),
     ConversationSummaryCompactionConfig(),
     ConversationSegmentationConfig(),
-    ConversationSummaryVectorIndexConfig(),
+    ConversationSummaryReaderConfig(),
     MemoryDocumentConfig(),
     MemoryExtractionConfig(),
     MemoryCommitConfig(),
     MemoryTransactionJournalConfig(),
     MemoryRetrievalConfig(),
-    MemoryVectorIndexConfig(),
     MemoryRecallLifecycleConfig(),
     MemorySearchServiceConfig(),
     MemorySemanticConfig(),
@@ -92,8 +89,6 @@ CONFIG_INSTANCES = (
     MemoryChangeReceiptStoreConfig(),
     SnapshotReadConfig(),
     SQLiteLockStoreConfig(),
-    VectorStoreRouteConfig(),
-    VectorStoreConfig(),
 )
 
 

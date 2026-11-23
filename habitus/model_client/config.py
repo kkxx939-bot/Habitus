@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 from habitus.foundation.network import is_loopback_host
 
-ModelCapability = Literal["chat", "embedding", "rerank"]
+ModelCapability = Literal["chat"]
 ChatStructuredOutputMode = Literal["none", "json_object", "json_schema"]
 
 _PROVIDER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
@@ -130,88 +130,12 @@ class ChatModelConfig:
         return "chat"
 
 
-@dataclass(frozen=True)
-class EmbeddingModelConfig:
-    """稠密向量能力配置；不包含任何具体平台或模型枚举。
-
-    ``query_prefix`` / ``document_prefix`` 由 ``EmbeddingClient`` 在调用适配器前拼到文本前面：E5 一类模型靠
-    ``"query: "`` / ``"passage: "``、BGE 与 Qwen3-Embedding 靠一句指令区分查询和文档，光靠请求参数做不到。
-    """
-
-    route: ProviderConfig
-    dimension: int
-    max_batch_size: int = 32
-    max_input_chars: int = 16_000
-    query_parameters: Mapping[str, object] = field(default_factory=dict)
-    document_parameters: Mapping[str, object] = field(default_factory=dict)
-    query_prefix: str = ""
-    document_prefix: str = ""
-
-    def __post_init__(self) -> None:
-        _bounded_int(self.dimension, "embedding dimension", minimum=1, maximum=65_536)
-        _bounded_int(self.max_batch_size, "embedding max_batch_size", minimum=1, maximum=2048)
-        _bounded_int(self.max_input_chars, "embedding max_input_chars", minimum=1, maximum=1_000_000)
-        object.__setattr__(
-            self,
-            "query_parameters",
-            _json_mapping(self.query_parameters, "embedding query_parameters"),
-        )
-        object.__setattr__(
-            self,
-            "document_parameters",
-            _json_mapping(self.document_parameters, "embedding document_parameters"),
-        )
-        for label, prefix in (("query_prefix", self.query_prefix), ("document_prefix", self.document_prefix)):
-            if len(prefix) >= self.max_input_chars:
-                raise ValueError(f"embedding {label} must be shorter than max_input_chars")
-
-    @property
-    def capability(self) -> Literal["embedding"]:
-        return "embedding"
-
-    @property
-    def max_document_text_chars(self) -> int:
-        """文档正文能用的字符数：``max_input_chars`` 按拼好前缀之后算，要先让出前缀。"""
-
-        return self.max_input_chars - len(self.document_prefix)
-
-    @property
-    def max_query_text_chars(self) -> int:
-        """查询正文能用的字符数，同上。"""
-
-        return self.max_input_chars - len(self.query_prefix)
-
-
-@dataclass(frozen=True)
-class RerankModelConfig:
-    """文本重排能力配置；具体评分协议由注册的 provider 实现。"""
-
-    route: ProviderConfig
-    max_documents: int = 100
-    max_query_chars: int = 8_000
-    max_document_chars: int = 16_000
-
-    def __post_init__(self) -> None:
-        _bounded_int(self.max_documents, "rerank max_documents", minimum=1, maximum=2048)
-        _bounded_int(self.max_query_chars, "rerank max_query_chars", minimum=1, maximum=1_000_000)
-        _bounded_int(
-            self.max_document_chars,
-            "rerank max_document_chars",
-            minimum=1,
-            maximum=1_000_000,
-        )
-
-    @property
-    def capability(self) -> Literal["rerank"]:
-        return "rerank"
-
-
-CapabilityConfig: TypeAlias = ChatModelConfig | EmbeddingModelConfig | RerankModelConfig
+CapabilityConfig: TypeAlias = ChatModelConfig
 
 
 @dataclass(frozen=True)
 class CallFailureConfig:
-    """模型调用失败的处理数（裁定 108）：限流的重试间隔与熔断。三种能力（对话、向量、重排）各一个熔断，共用这组数。
+    """模型调用失败的处理数（裁定 108）：限流的重试间隔与熔断。对话能力带一个熔断，用这组数。
 
     - 限流的重试间隔照 OpenViking（5 秒起、120 秒封顶）；其余"等一等可能好"的重试次数与间隔用各路由的
       ``max_retries`` / ``retry_*_delay_seconds``。
@@ -313,8 +237,6 @@ __all__ = [
     "CapabilityConfig",
     "ChatModelConfig",
     "ChatStructuredOutputMode",
-    "EmbeddingModelConfig",
     "ModelCapability",
     "ProviderConfig",
-    "RerankModelConfig",
 ]

@@ -101,9 +101,9 @@ test("status says how to start the service when it is not reachable", async (t) 
 test("recall posts the query and prints the hits", async (t) => {
   const service = await serve(t, {
     "/api/v1/memory/recall": {
-      query: "回答风格", queries: ["回答风格"], context: "用户偏好简洁回答。",
-      memories: [{ uri: "memory://preferences/response_style.md", score: 0.91, matched_queries: ["回答风格"] }],
-      summaries: [], degradations: [], budget_exhausted: false,
+      query: "回答风格", context: "用户偏好简洁回答。",
+      memories: [{ uri: "memory://preferences/response_style.md" }],
+      records: [], summaries: [], notes: [], degradations: [], budget_exhausted: false, timed_out: false,
     },
   });
   if (!service) return;
@@ -111,7 +111,7 @@ test("recall posts the query and prints the hits", async (t) => {
   const out = sink();
   assert.equal(await main(["recall", "回答", "风格", "--limit", "3"], { stdout: out, stderr: sink(), env }), 0);
   assert.deepEqual(service.calls.at(-1).body, { query: "回答 风格", limit: 3 });
-  assert.match(out.text(), /0\.91  memory:\/\/preferences\/response_style\.md/);
+  assert.match(out.text(), /卡片  memory:\/\/preferences\/response_style\.md/);
   assert.match(out.text(), /用户偏好简洁回答/);
   const err = sink();
   assert.equal(await main(["recall"], { stdout: sink(), stderr: err, env }), 1);

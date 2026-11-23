@@ -5,6 +5,9 @@ description: >-
   只针对当前这一次任务提出的具体要求不是偏好。不同主题分开，重叠或同义主题应合并；
   不保存职业身份、客观能力、稳定事实状态、事件、计划或支持证据。
 path_template: preferences/{topic}.md
+overview_line:
+  fields: [content]
+  max_chars: 160
 markdown_template: |
   # {topic}
 

@@ -55,7 +55,7 @@ class HttpxClientOptions:
 
 @dataclass(frozen=True)
 class OutboundSettings:
-    """调模型服务（chat、embedding、rerank）时的出站设置；不可变、可哈希，SSL context 按设置缓存。
+    """调模型服务（chat）时的出站设置；不可变、可哈希，SSL context 按设置缓存。
 
     - ``trust_store``：见 ``TRUST_STORES``。
     - ``ca_bundle``：在证书库之上**额外**信任的 PEM 文件（公司代理做 TLS 解密时的根证书）。

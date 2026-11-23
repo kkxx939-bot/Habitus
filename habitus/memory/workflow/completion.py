@@ -15,13 +15,11 @@ from habitus.foundation.observability import (
     observe_operation,
 )
 from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
-from habitus.memory.conversation.indexing import PersistentConversationSummaryVectorIndex
 from habitus.memory.conversation.summary import ConversationSummaryService
 from habitus.memory.editor.transaction_log import (
     MemoryTransactionJournalRecord,
     MemoryTransactionJournalState,
 )
-from habitus.memory.indexing import PersistentMemoryVectorIndex
 from habitus.memory.semantic import MemorySemanticRefresher, MemorySemanticRefreshResult
 from habitus.memory.uri import MemoryURI
 from habitus.memory.workflow.jobs import (
@@ -51,8 +49,6 @@ class MemoryJobCompletion:
     job: MemoryJob
     change_receipt: MemoryChangeReceipt
     summary_generated: bool
-    summary_indexed: bool
-    vector_indexed: bool
     journal_cleaned: bool
 
     def __post_init__(self) -> None:
@@ -70,10 +66,8 @@ class MemoryCommittedJobFinalizer:
         store: MemoryJobStore,
         conversations: ConversationMessageJournal,
         summary_service: ConversationSummaryService,
-        summary_vector_index: PersistentConversationSummaryVectorIndex,
         change_receipts: MemoryChangeReceiptStore,
         semantic_refresher: MemorySemanticRefresher,
-        vector_index: PersistentMemoryVectorIndex,
         transaction_recovery: MemoryJobTransactionRecovery,
         recall_state_cleaner: MemoryRecallStateCleaner,
         *,
@@ -81,25 +75,17 @@ class MemoryCommittedJobFinalizer:
     ) -> None:
         if summary_service.store.layout.root != conversations.layout.root:
             raise ValueError("summary service and conversations must use one conversation root")
-        if summary_vector_index.journal is not conversations:
-            raise ValueError("summary vector index and conversations must use one journal")
-        if summary_vector_index.compactor.segment_store is not summary_service.store:
-            raise ValueError("summary vector index and summary service must share one store")
         if change_receipts.root != store.root:
             raise ValueError("change receipts and MemoryJobStore must use one workflow root")
         if semantic_refresher.tree.root != store.memory_root:
             raise ValueError("semantic refresher and MemoryJobStore must use one memory root")
-        if vector_index.tree.root != store.memory_root:
-            raise ValueError("vector index and MemoryJobStore must use one memory root")
         if transaction_recovery.transaction.tree.root != store.memory_root:
             raise ValueError("transaction recovery and MemoryJobStore must use one memory root")
         self.store = store
         self.conversations = conversations
         self.summary_service = summary_service
-        self.summary_vector_index = summary_vector_index
         self.change_receipts = change_receipts
         self.semantic_refresher = semantic_refresher
-        self.vector_index = vector_index
         self.transaction_recovery = transaction_recovery
         self.recall_state_cleaner = recall_state_cleaner
         self.observer = observer or NullObserver()
@@ -129,12 +115,6 @@ class MemoryCommittedJobFinalizer:
         summary.require_matches_source(segment)
         self.store.assert_current(lease)
         resolved_summary_generated = not summary_existed if summary_generated is None else summary_generated
-        with observe_operation(self.observer, "workflow", "summary_vector_publish"):
-            await self.summary_vector_index.synchronize(
-                address,
-                checkpoint=job.memory_sequence,
-            )
-        self.store.assert_current(lease)
 
         source = MemoryChangeSource.from_job(job)
         with observe_operation(self.observer, "workflow", "receipt_finalize"):
@@ -142,14 +122,7 @@ class MemoryCommittedJobFinalizer:
         self.store.assert_current(lease)
         await self._forget_retired_recall_state(change_receipt.expected_deleted_uris)
         with observe_operation(self.observer, "workflow", "semantic_refresh"):
-            semantic_results = await to_thread(self._refresh_semantic_layers, change_receipt)
-        self.store.assert_current(lease)
-        with observe_operation(self.observer, "workflow", "memory_vector_publish"):
-            await self.vector_index.synchronize(
-                changed_uris=change_receipt.changed_uris,
-                semantic_results=semantic_results,
-                checkpoint=change_receipt.source.memory_sequence,
-            )
+            await to_thread(self._refresh_semantic_layers, change_receipt)
         self.store.assert_current(lease)
         with observe_operation(self.observer, "workflow", "job_complete"):
             committed = self.store.complete(lease)
@@ -159,19 +132,13 @@ class MemoryCommittedJobFinalizer:
             job=committed,
             change_receipt=change_receipt,
             summary_generated=resolved_summary_generated,
-            summary_indexed=True,
-            vector_indexed=True,
             journal_cleaned=journal_cleaned,
         )
 
     async def finalize_skipped(self, lease: MemoryJobLease, reason: str) -> MemoryJob:
-        """这一段跳过了（裁定 108）：长期记忆不动、没有回执；摘要要是已经做出来了照常进摘要检索（同步这一 Conversation 的
-        活跃摘要前沿），然后把任务记成 SKIPPED。摘要也没做出来的，这一段的原文不释放（没有摘要接替它）。"""
+        """这一段跳过了（裁定 108）：长期记忆不动、没有回执；摘要要是已经做出来了，检索直接从摘要文件读到它。
+        任务记成 SKIPPED。摘要也没做出来的，这一段的原文不释放（没有摘要接替它）。"""
 
-        job = self.store.assert_current(lease)
-        address = ConversationAddress(job.conversation_id, job.started_on)
-        with observe_operation(self.observer, "workflow", "summary_vector_publish"):
-            await self.summary_vector_index.synchronize(address, checkpoint=job.memory_sequence)
         self.store.assert_current(lease)
         with observe_operation(self.observer, "workflow", "job_skip"):
             return self.store.skip(lease, reason)

@@ -15,8 +15,8 @@ from habitus.memory.conversation import (
     ConversationSummaryCompactor,
     ConversationSummaryRetirementStore,
     ConversationSummaryStore,
+    summary_reference,
 )
-from habitus.memory.conversation.indexing import PersistentConversationSummaryVectorIndex, summary_reference
 from habitus.memory.editor import MemoryTransactionJournal
 from habitus.memory.workflow.archive_retirement import ArchiveRetirementOutcome, ConversationArchiveRetirementRunner
 from habitus.memory.workflow.committed_cleanup import CommittedWorkflowCleanup
@@ -61,7 +61,6 @@ class ConversationLifecycleMaintenanceResult:
     """一次显式维护的压缩结果与各层实际物理清理结果。"""
 
     compaction: ConversationSummaryCompactionResult
-    summary_indexed: bool
     purged_history_segment_ids: tuple[str, ...]
     released_history_segment_ids: tuple[str, ...]
     deleted_segment_summary_ids: tuple[str, ...]
@@ -95,7 +94,6 @@ class ConversationLifecycleManager:
         journal: ConversationMessageJournal,
         segment_store: ConversationSummaryStore,
         range_store: ConversationRangeSummaryStore,
-        summary_vector_index: PersistentConversationSummaryVectorIndex,
         jobs: MemoryJobStore,
         receipts: MemoryChangeReceiptStore,
         transaction_journal: MemoryTransactionJournal,
@@ -110,10 +108,6 @@ class ConversationLifecycleManager:
             and compactor.range_store is range_store
         ):
             raise ValueError("lifecycle manager must reuse the compactor Conversation stores")
-        if summary_vector_index.compactor is not compactor:
-            raise ValueError("lifecycle manager must reuse the Summary vector index compactor")
-        if summary_vector_index.sources.retirement_store is not retirement_store:
-            raise ValueError("lifecycle manager and Summary index must share one retirement store")
         if receipts.codec is not transaction_journal.codec:
             raise ValueError("lifecycle receipts and transaction journal must share one codec")
         resolved_summary_config = compactor.config if summary_config is None else summary_config
@@ -123,7 +117,6 @@ class ConversationLifecycleManager:
         self.journal = journal
         self.segment_store = segment_store
         self.range_store = range_store
-        self.summary_vector_index = summary_vector_index
         self.jobs = jobs
         self.receipts = receipts
         self.transaction_journal = transaction_journal
@@ -142,7 +135,6 @@ class ConversationLifecycleManager:
             journal,
             segment_store,
             range_store,
-            summary_vector_index,
             retirement_store,
             self.committed_cleanup,
             cleanup_batch_size=resolved_summary_config.cleanup_batch_size,
@@ -171,12 +163,10 @@ class ConversationLifecycleManager:
         purged, released, deleted_segments, deleted_ranges, deleted_archives = await self._retire_archive_chain(
             address, current_time
         )
-        await self.summary_vector_index.synchronize(address)
         deleted_jobs = self.committed_cleanup.delete_expired_jobs(address, current_time)
         deleted_receipts = self.committed_cleanup.delete_expired_receipts(address, current_time)
         return ConversationLifecycleMaintenanceResult(
             compaction=compaction,
-            summary_indexed=True,
             purged_history_segment_ids=purged,
             released_history_segment_ids=released,
             deleted_segment_summary_ids=deleted_segments,

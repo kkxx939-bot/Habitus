@@ -1,6 +1,5 @@
-"""Chat/Embedding 运行层、重试和真实协议 Adapter 测试。"""
+"""Chat 运行层、重试和真实协议 Adapter 测试。"""
 
-import asyncio
 import json
 from dataclasses import dataclass
 
@@ -13,9 +12,6 @@ from habitus.model_client import (
     ChatMessage,
     ChatModelConfig,
     ChatRequest,
-    EmbeddingClient,
-    EmbeddingModelConfig,
-    EmbeddingVector,
     ModelAuthenticationError,
     ModelQuotaError,
     ModelRateLimitError,
@@ -34,7 +30,6 @@ from habitus.model_client import (
     ToolDefinition,
 )
 from habitus.model_client.adapters.openai_compatible_chat import OpenAICompatibleChatProvider
-from habitus.model_client.adapters.openai_compatible_embedding import OpenAICompatibleEmbeddingProvider
 from habitus.model_client.failures import classify_failure, retry_delay
 from tests.model_helpers import prepare_chat_request
 
@@ -140,63 +135,6 @@ def test_chat_stream_does_not_retry_after_any_event_has_been_emitted() -> None:
     assert next(stream).content_delta == "partial"
     with pytest.raises(ModelTransportError):
         next(stream)
-
-
-@dataclass
-class FlakyEmbeddingProvider:
-    failures: int = 0
-    wrong_dimension: bool = False
-    provider_name: str = "test-provider"
-    model: str = "test-model"
-    is_remote: bool = False
-
-    def __post_init__(self) -> None:
-        self.calls: list[tuple[str, bool]] = []
-
-    async def embed(self, text: str, *, is_query: bool) -> EmbeddingVector:
-        self.calls.append((text, is_query))
-        if len(self.calls) <= self.failures:
-            raise ConnectionError("temporary")
-        return EmbeddingVector((1, 0, 0) if self.wrong_dimension else (1, 0))
-
-
-def test_embedding_client_trims_input_batches_documents_and_preserves_query_mode() -> None:
-    provider = FlakyEmbeddingProvider()
-    client = EmbeddingClient(
-        EmbeddingModelConfig(route("test-adapter", max_retries=0), dimension=2, max_batch_size=2),
-        provider,
-    )
-
-    query = asyncio.run(client.embed_query("  query  "))
-    documents = asyncio.run(client.embed_documents(("a", "b", "c")))
-    assert query.dimension == 2
-    assert len(documents) == 3
-    assert provider.calls == [("query", True), ("a", False), ("b", False), ("c", False)]
-
-
-def test_embedding_client_retries_transport_error_and_rejects_wrong_dimension_and_oversize() -> None:
-    sleeps: list[float] = []
-
-    async def record_sleep(delay: float) -> None:
-        sleeps.append(delay)
-
-    provider = FlakyEmbeddingProvider(failures=1)
-    client = EmbeddingClient(
-        EmbeddingModelConfig(route("test-adapter"), dimension=2, max_input_chars=5),
-        provider,
-        async_sleep=record_sleep,
-    )
-    assert asyncio.run(client.embed_query("query")).dimension == 2
-    assert len(sleeps) == 1
-    with pytest.raises(ValueError, match="character bound"):
-        asyncio.run(client.embed_query("too-long"))
-
-    wrong = EmbeddingClient(
-        EmbeddingModelConfig(route("test-adapter", max_retries=0), dimension=2),
-        FlakyEmbeddingProvider(wrong_dimension=True),
-    )
-    with pytest.raises(ModelResponseError, match="dimension"):
-        asyncio.run(wrong.embed_query("query"))
 
 
 class StatusError(RuntimeError):
@@ -320,58 +258,3 @@ def test_openai_compatible_adapter_normalizes_tool_calls_and_stream_events() -> 
     assert response.tool_calls == (ToolCall("call-1", "inspect", {"path": "."}),)
     assert [event.kind for event in events] == ["content_delta", "done"]
     assert events[0].content_delta == "hello"
-
-
-def _prefixed_embedding_client(**config_values: object) -> tuple[EmbeddingClient, list[dict[str, object]]]:
-    config = EmbeddingModelConfig(
-        route("openai_compatible_embedding", max_retries=0),
-        dimension=2,
-        query_parameters={"instruction": "query"},
-        document_parameters={"instruction": "document"},
-        query_prefix="query: ",
-        document_prefix="passage: ",
-        **config_values,
-    )
-    provider = OpenAICompatibleEmbeddingProvider(config, api_key="secret")
-    captured: list[dict[str, object]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(json.loads(request.content))
-        return httpx.Response(200, json={"data": [{"embedding": [3, 4]}]})
-
-    transport = httpx.MockTransport(handler)
-    provider._client = lambda: httpx.AsyncClient(transport=transport)
-    return EmbeddingClient(config, provider), captured
-
-
-def test_embedding_client_sends_query_and_document_through_their_own_prefix_and_parameters() -> None:
-    """查询走 query_parameters + query_prefix，文档走 document_parameters + document_prefix，前缀拼在适配器之前。"""
-
-    client, captured = _prefixed_embedding_client()
-
-    async def invoke() -> tuple[EmbeddingVector, tuple[EmbeddingVector, ...]]:
-        return await client.embed_query("  where is it  "), await client.embed_documents(("  the doc  ",))
-
-    query_vector, document_vectors = asyncio.run(invoke())
-    assert query_vector.values == pytest.approx((0.6, 0.8))
-    assert len(document_vectors) == 1
-    assert captured == [
-        {"instruction": "query", "model": "test-model", "input": "query: where is it", "encoding_format": "float"},
-        {"instruction": "document", "model": "test-model", "input": "passage: the doc", "encoding_format": "float"},
-    ]
-
-
-def test_embedding_input_bound_counts_the_prefix() -> None:
-    """max_input_chars 按拼好前缀之后的长度算：正文正好占满剩下的预算能过，多一个字符就拒。"""
-
-    client, captured = _prefixed_embedding_client(max_input_chars=20)
-    room_for_query = 20 - len("query: ")
-    room_for_document = 20 - len("passage: ")
-    asyncio.run(client.embed_query("q" * room_for_query))
-    asyncio.run(client.embed_documents(("d" * room_for_document,)))
-    assert [len(str(item["input"])) for item in captured] == [20, 20]
-    with pytest.raises(ValueError, match="character bound"):
-        asyncio.run(client.embed_query("q" * (room_for_query + 1)))
-    with pytest.raises(ValueError, match="character bound"):
-        asyncio.run(client.embed_documents(("d" * (room_for_document + 1),)))
-    assert len(captured) == 2

@@ -29,7 +29,6 @@ from habitus.memory.editor.transaction import (
     MemoryCommitTransaction,
 )
 from habitus.memory.editor.transaction_log import MemoryTransactionJournal
-from habitus.memory.indexing import MemoryIndexSourceReader, MemoryVectorIndexConfig
 from habitus.memory.model import MemoryKind
 from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.tree import MemoryTree, MemoryTreeConsistencyError
@@ -212,15 +211,6 @@ def test_multi_document_commit_is_visible_to_readers_as_one_snapshot(
         transaction_id_factory=lambda: "c" * 32,
     )
     late_reader = MemorySnapshotReader(tree)
-    index_sources = MemoryIndexSourceReader(
-        tree,
-        config=MemoryVectorIndexConfig(),
-        path_lock=transaction.path_lock,
-    )
-    unlocked_index_sources = MemoryIndexSourceReader(
-        tree,
-        config=MemoryVectorIndexConfig(),
-    )
     first_document_published = Event()
     release_writer = Event()
     original_write = tree.write
@@ -248,8 +238,6 @@ def test_multi_document_commit_is_visible_to_readers_as_one_snapshot(
     worker = Thread(target=commit)
     worker.start()
     assert first_document_published.wait(timeout=5)
-    with pytest.raises(RuntimeError, match="prepared transaction"):
-        unlocked_index_sources.walk()
     with pytest.raises(MemoryTreeConsistencyError, match="prepared multi-document"):
         tree.exists(profile.address)
     with pytest.raises(MemoryTreeConsistencyError, match="prepared multi-document"):
@@ -267,27 +255,10 @@ def test_multi_document_commit_is_visible_to_readers_as_one_snapshot(
     late_observed = tuple(
         snapshot.exists for snapshot in late_reader.read_many((profile_uri, preference_uri)).snapshots
     )
-    source_started = Event()
-    source_finished = Event()
-    indexed_identities: list[str] = []
-
-    def read_index_sources() -> None:
-        source_started.set()
-        indexed_identities.extend(source.identity for source in index_sources.walk())
-        source_finished.set()
-
-    source_worker = Thread(target=read_index_sources)
-    source_worker.start()
-    assert source_started.wait(timeout=5)
-    assert not source_finished.wait(timeout=0.05)
     release_writer.set()
     worker.join(timeout=5)
-    source_worker.join(timeout=5)
 
     assert not worker.is_alive()
-    assert not source_worker.is_alive()
     assert failures == []
     assert observed in {(False, False), (True, True)}
     assert late_observed in {(False, False), (True, True)}
-    assert str(profile_uri) in indexed_identities
-    assert str(preference_uri) in indexed_identities

@@ -21,7 +21,7 @@ from habitus.memory.conversation import (
     ConversationSummaryRetirementStore,
     ConversationSummaryStore,
 )
-from habitus.memory.conversation.indexing import ConversationSummaryReference, ConversationSummaryStage
+from habitus.memory.conversation.summary_reference import ConversationSummaryReference, ConversationSummaryStage
 from habitus.pre.conversation import ConversationRangeSummaryStage
 from tests.helpers import BASE_TIME, closed_turn, segment, segment_summary
 
@@ -181,7 +181,7 @@ def test_retirement_manifest_read_rejects_wrongly_typed_fields(
     reference = ConversationSummaryReference(address, ConversationSummaryStage.ARCHIVE, _ARCHIVE_ID)
     archive: dict[str, object] = {"identity": reference.identity, "digest": "a" * 64}
     value: dict[str, object] = {
-        "schema": "conversation_summary_retirement_v1",
+        "schema": "conversation_summary_retirement_v2",
         "archive": archive,
         "start_sequence": 0,
         "end_sequence": 3,

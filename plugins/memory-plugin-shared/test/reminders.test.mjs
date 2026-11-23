@@ -130,7 +130,7 @@ test("real Codex hook process injects the reminder block after the memory block 
         : request.url === "/ready"
           ? { ready: true, recall_ready: true, status: "healthy" }
           : request.url === "/api/v1/memory/recall"
-            ? { context: "remembered context", query: "prompt", queries: ["prompt"], memories: [], summaries: [], degradations: [], budget_exhausted: false }
+            ? { context: "remembered context", query: "prompt", memories: [], records: [], summaries: [], notes: [], degradations: [], budget_exhausted: false, timed_out: false }
             : request.url === "/api/v1/reminders/claim"
               ? ((claimBody = JSON.parse(payload)), { reminders: [REMINDER] })
               : {};

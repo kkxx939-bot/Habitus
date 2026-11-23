@@ -7,25 +7,18 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class MemorySemanticConfig:
-    """限制单次目录刷新和全树重建的资源使用。"""
+    """限制单个目录概览的条数与字数，以及全树重建一次最多走多少个目录。"""
 
     max_direct_entries: int = 256
     max_rebuild_directories: int = 10_000
-    max_prompt_chars: int = 120_000
-    max_entry_summary_chars: int = 1_000
-    max_directory_summary_chars: int = 2_000
     max_overview_chars: int = 64_000
     max_abstract_chars: int = 800
     lock_ttl_seconds: int = 120
-    stale_retries: int = 1
 
     def __post_init__(self) -> None:
         positive = {
             "max_direct_entries": self.max_direct_entries,
             "max_rebuild_directories": self.max_rebuild_directories,
-            "max_prompt_chars": self.max_prompt_chars,
-            "max_entry_summary_chars": self.max_entry_summary_chars,
-            "max_directory_summary_chars": self.max_directory_summary_chars,
             "max_overview_chars": self.max_overview_chars,
             "max_abstract_chars": self.max_abstract_chars,
             "lock_ttl_seconds": self.lock_ttl_seconds,
@@ -33,8 +26,6 @@ class MemorySemanticConfig:
         for name, value in positive.items():
             if value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        if not 0 <= self.stale_retries <= 5:
-            raise ValueError("stale_retries must be between zero and five")
         if self.max_abstract_chars > self.max_overview_chars:
             raise ValueError("max_abstract_chars cannot exceed max_overview_chars")
 

@@ -1,4 +1,4 @@
-"""长期记忆文档、检索、索引、解析与语义层配置。"""
+"""长期记忆文档、检索、解析与语义层配置。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 
 from habitus.config.loader import construct_config, group_fields
 from habitus.infrastructure.editor.snapshot import SnapshotReadConfig
-from habitus.infrastructure.vector import VectorStoreConfig
 from habitus.memory.compaction import (
     MemoryFieldCompactionConfig,
     MemoryLifecycleMaintenanceConfig,
@@ -18,14 +17,10 @@ from habitus.memory.editor import (
     MemoryRetrievalConfig,
     MemoryTransactionJournalConfig,
 )
-from habitus.memory.indexing import MemoryVectorIndexConfig
 from habitus.memory.recall import (
     MemoryRecallLifecycleConfig,
 )
-from habitus.memory.retrieval import (
-    MemorySearchServiceConfig,
-    MemorySemanticSearchConfig,
-)
+from habitus.memory.retrieval import MemorySearchServiceConfig
 from habitus.memory.semantic import MemorySemanticConfig
 from habitus.memory.tree import MemoryTreeConfig
 
@@ -42,9 +37,6 @@ class MemoryConfig:
     field_compaction: MemoryFieldCompactionConfig = field(default_factory=MemoryFieldCompactionConfig)
     lifecycle_maintenance: MemoryLifecycleMaintenanceConfig = field(default_factory=MemoryLifecycleMaintenanceConfig)
     editor_retrieval: MemoryRetrievalConfig = field(default_factory=MemoryRetrievalConfig)
-    vector_store: VectorStoreConfig = field(default_factory=VectorStoreConfig)
-    vector_index: MemoryVectorIndexConfig = field(default_factory=MemoryVectorIndexConfig)
-    semantic_search: MemorySemanticSearchConfig = field(default_factory=MemorySemanticSearchConfig)
     extraction: MemoryExtractionConfig = field(default_factory=MemoryExtractionConfig)
     commit: MemoryCommitConfig = field(default_factory=MemoryCommitConfig)
     transaction_journal: MemoryTransactionJournalConfig = field(default_factory=MemoryTransactionJournalConfig)
@@ -94,17 +86,6 @@ class MemoryConfig:
                 data.get("editor_retrieval", {}),
                 "config.memory.editor_retrieval",
             ),
-            vector_store=_vector_store_config(data.get("vector_store", {})),
-            vector_index=construct_config(
-                MemoryVectorIndexConfig,
-                data.get("vector_index", {}),
-                "config.memory.vector_index",
-            ),
-            semantic_search=construct_config(
-                MemorySemanticSearchConfig,
-                data.get("semantic_search", {}),
-                "config.memory.semantic_search",
-            ),
             extraction=construct_config(
                 MemoryExtractionConfig,
                 data.get("extraction", {}),
@@ -129,12 +110,3 @@ class MemoryConfig:
 
 
 __all__ = ["MemoryConfig"]
-
-
-def _vector_store_config(value: object) -> VectorStoreConfig:
-    try:
-        return VectorStoreConfig.from_mapping(value)
-    except (TypeError, ValueError) as exc:
-        from habitus.config.loader import ConfigError
-
-        raise ConfigError(f"invalid 'config.memory.vector_store': {exc}") from exc

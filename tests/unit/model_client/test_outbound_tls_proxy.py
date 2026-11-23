@@ -20,19 +20,17 @@ from habitus.memory.workflow.failure import MemoryJobFailureKind, memory_job_fai
 from habitus.model_client import (
     MODEL_UNAVAILABLE,
     ChatModelConfig,
-    EmbeddingModelConfig,
     ModelClientError,
     ModelErrorRule,
     ModelProxyAuthError,
     ModelTLSError,
     ModelTransportError,
     ProviderConfig,
-    RerankModelConfig,
 )
 from habitus.model_client.adapters import register_builtin_adapters
 from habitus.model_client.factory import ProviderFactory
 from habitus.model_client.failures import classify_failure
-from tests.tls_helpers import EMBEDDING_DIMENSION, FAKE_MODEL_HOST, TEST_CA, ConnectProxy, HTTPSModelServer
+from tests.tls_helpers import FAKE_MODEL_HOST, TEST_CA, ConnectProxy, HTTPSModelServer
 
 _PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
 _CERTIFICATE_VARIABLES = ("SSL_CERT_FILE", "SSL_CERT_DIR")
@@ -77,19 +75,6 @@ def _route(adapter: str, base_url: str, *, credential_ref: str = "") -> Provider
 def _chat(base_url: str, outbound: OutboundSettings):
     config = ChatModelConfig(_route("openai_compatible_chat", base_url))
     return _factory().create_chat_client(config, outbound=outbound)
-
-
-def _embedder(base_url: str, outbound: OutboundSettings):
-    config = EmbeddingModelConfig(
-        _route("openai_compatible_embedding", base_url, credential_ref="embedding"),
-        dimension=EMBEDDING_DIMENSION,
-    )
-    return _factory().create_embedder(config, credentials={"api_key": "test-key"}, outbound=outbound)
-
-
-def _reranker(base_url: str, outbound: OutboundSettings):
-    config = RerankModelConfig(_route("openai_compatible_rerank", base_url, credential_ref="rerank"))
-    return _factory().create_reranker(config, credentials={"api_key": "test-key"}, outbound=outbound)
 
 
 def _close(component: object) -> None:
@@ -159,45 +144,6 @@ def test_hostname_mismatch_is_a_tls_error_too() -> None:
         finally:
             _close(chat)
         assert server.connections == 1
-
-
-def test_embedding_adapter_trusts_the_configured_ca_and_fails_once_without_it() -> None:
-    async def scenario(server: HTTPSModelServer) -> None:
-        trusted = _embedder(server.base_url, TRUSTED)
-        untrusted = _embedder(server.base_url, OutboundSettings())
-        try:
-            vector = await trusted.embed_query("ping")
-            assert len(vector.values) == EMBEDDING_DIMENSION
-            before = server.connections
-            with pytest.raises(ModelTLSError):
-                await untrusted.embed_query("ping")
-            assert server.connections == before + 1
-        finally:
-            await trusted.aclose()
-            await untrusted.aclose()
-
-    with HTTPSModelServer() as server:
-        asyncio.run(scenario(server))
-        assert ("POST", "/v1/embeddings") in server.requests
-
-
-def test_rerank_adapter_trusts_the_configured_ca_and_fails_once_without_it() -> None:
-    async def scenario(server: HTTPSModelServer) -> None:
-        trusted = _reranker(server.base_url, TRUSTED)
-        untrusted = _reranker(server.base_url, OutboundSettings())
-        try:
-            assert await trusted.rerank("ping", ["pong"]) == (0.5,)
-            before = server.connections
-            with pytest.raises(ModelTLSError):
-                await untrusted.rerank("ping", ["pong"])
-            assert server.connections == before + 1
-        finally:
-            await trusted.aclose()
-            await untrusted.aclose()
-
-    with HTTPSModelServer() as server:
-        asyncio.run(scenario(server))
-        assert ("POST", "/v1/reranks") in server.requests
 
 
 def test_factory_default_outbound_is_the_system_trust_store(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -283,77 +229,32 @@ def test_without_configured_proxy_the_environment_variable_still_applies(monkeyp
         assert environment.connects == [f"{FAKE_MODEL_HOST}:443"]
 
 
-@pytest.mark.parametrize("adapter", ["chat", "embedding", "rerank"])
-def test_loopback_model_address_never_goes_through_the_configured_proxy(adapter: str) -> None:
+def test_loopback_model_address_never_goes_through_the_configured_proxy() -> None:
     with HTTPSModelServer() as server, ConnectProxy() as proxy:
         outbound = OutboundSettings(ca_bundle=TEST_CA, proxy=proxy.url)
-        if adapter == "chat":
-            chat = _chat(server.base_url, outbound)
-            try:
-                assert chat.complete("ping").content == "pong"
-            finally:
-                _close(chat)
-        elif adapter == "embedding":
-            embedder = _embedder(server.base_url, outbound)
-
-            async def embed() -> None:
-                try:
-                    await embedder.embed_query("ping")
-                finally:
-                    await embedder.aclose()
-
-            asyncio.run(embed())
-        else:
-            reranker = _reranker(server.base_url, outbound)
-
-            async def rerank() -> None:
-                try:
-                    await reranker.rerank("ping", ["pong"])
-                finally:
-                    await reranker.aclose()
-
-            asyncio.run(rerank())
+        chat = _chat(server.base_url, outbound)
+        try:
+            assert chat.complete("ping").content == "pong"
+        finally:
+            _close(chat)
         assert proxy.connects == []
         assert len(server.requests) == 1
 
 
 @pytest.mark.parametrize("variable", ["HTTPS_PROXY", "ALL_PROXY", "https_proxy"])
-@pytest.mark.parametrize("adapter", ["chat", "embedding", "rerank"])
 def test_loopback_model_address_never_goes_through_an_environment_proxy(
     monkeypatch: pytest.MonkeyPatch,
-    adapter: str,
     variable: str,
 ) -> None:
     """公司电脑统一设了代理环境变量、没设 NO_PROXY，本机跑的模型服务照样直连（用户 2026-11-06 定）。"""
 
     with HTTPSModelServer() as server, ConnectProxy() as proxy:
         monkeypatch.setenv(variable, proxy.url)
-        if adapter == "chat":
-            chat = _chat(server.base_url, TRUSTED)
-            try:
-                assert chat.complete("ping").content == "pong"
-            finally:
-                _close(chat)
-        elif adapter == "embedding":
-            embedder = _embedder(server.base_url, TRUSTED)
-
-            async def embed() -> None:
-                try:
-                    await embedder.embed_query("ping")
-                finally:
-                    await embedder.aclose()
-
-            asyncio.run(embed())
-        else:
-            reranker = _reranker(server.base_url, TRUSTED)
-
-            async def rerank() -> None:
-                try:
-                    await reranker.rerank("ping", ["pong"])
-                finally:
-                    await reranker.aclose()
-
-            asyncio.run(rerank())
+        chat = _chat(server.base_url, TRUSTED)
+        try:
+            assert chat.complete("ping").content == "pong"
+        finally:
+            _close(chat)
         assert proxy.connects == []
         assert len(server.requests) == 1
 
@@ -383,16 +284,12 @@ def test_proxy_authentication_required_from_the_environment_proxy_is_classified_
 ) -> None:
     with ConnectProxy(mode="auth") as proxy:
         monkeypatch.setenv("HTTPS_PROXY", proxy.url)
-        embedder = _embedder(FAKE_BASE_URL, OutboundSettings())
-
-        async def embed() -> None:
-            try:
-                await embedder.embed_query("ping")
-            finally:
-                await embedder.aclose()
-
-        with pytest.raises(ModelProxyAuthError):
-            asyncio.run(embed())
+        chat = _chat(FAKE_BASE_URL, OutboundSettings())
+        try:
+            with pytest.raises(ModelProxyAuthError):
+                chat.complete("ping")
+        finally:
+            _close(chat)
         assert len(proxy.connects) == 1
 
 

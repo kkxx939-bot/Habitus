@@ -1,4 +1,4 @@
-"""模型适配器（OpenAI 兼容的 rerank、embedding，以及 anthropic_messages）共用的单次 JSON POST 与 HTTP 错误换算。
+"""模型适配器（anthropic_messages）用的单次 JSON POST 与 HTTP 错误换算。
 
 只负责一次请求：带上限地读响应、把 4xx/5xx 换成带 ``status_code`` 与 ``retry_after`` 的异常（交给
 ``model_client.failures`` 归类）、把成功响应解析成 JSON 对象。重试、并发与业务字段校验都不在这里。

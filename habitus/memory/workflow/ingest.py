@@ -18,10 +18,7 @@ from habitus.memory.conversation.retention import (
     ConversationRetentionPlan,
     ConversationRetentionPlanner,
 )
-from habitus.memory.conversation.segmentation import (
-    ConversationBoundaryHints,
-    ConversationMessageChunker,
-)
+from habitus.memory.conversation.segmentation import ConversationMessageChunker
 from habitus.memory.conversation.tool_result_reduction import ConversationToolResultReducer
 from habitus.memory.workflow.jobs import MemoryJob, MemoryJobError, MemoryJobStatus, MemoryJobStore
 from habitus.memory.workflow.recovery import staged_job_segment
@@ -157,31 +154,12 @@ class ConversationMemoryEnqueuer:
         )
         return ConversationMemoryFlushResult(jobs=queued, retention=final_plan)
 
-    def preview_retention(
-        self,
-        address: ConversationAddress,
-        *,
-        after_turn: bool,
-        flush: bool = False,
-        boundary_hints: ConversationBoundaryHints | None = None,
-    ) -> ConversationRetentionPlan:
-        """读取当前 live 快照并执行一次无副作用切段规划。"""
-
-        return self._plan(
-            address,
-            after_turn=after_turn,
-            flush=flush,
-            drain_pending=False,
-            boundary_hints=boundary_hints,
-        )
-
     def enqueue_ready_segments(
         self,
         address: ConversationAddress,
         *,
         after_turn: bool,
         flush: bool,
-        boundary_hints: ConversationBoundaryHints | None = None,
     ) -> tuple[tuple[MemoryJob, ...], ConversationRetentionPlan]:
         queued: list[MemoryJob] = []
         final_plan = self._plan(
@@ -189,7 +167,6 @@ class ConversationMemoryEnqueuer:
             after_turn=after_turn,
             flush=flush,
             drain_pending=False,
-            boundary_hints=boundary_hints,
         )
         staged_checked = False
         for _ in range(1_000):
@@ -205,7 +182,6 @@ class ConversationMemoryEnqueuer:
                         after_turn=after_turn,
                         flush=flush,
                         drain_pending=False,
-                        boundary_hints=boundary_hints,
                     )
                     continue
             assert final_plan.through_sequence is not None
@@ -220,7 +196,6 @@ class ConversationMemoryEnqueuer:
                 after_turn=after_turn,
                 flush=flush,
                 drain_pending=after_turn and not flush,
-                boundary_hints=boundary_hints,
             )
         raise MemoryJobError("automatic conversation sealing exceeded its progress bound")
 
@@ -231,7 +206,6 @@ class ConversationMemoryEnqueuer:
         after_turn: bool,
         flush: bool,
         drain_pending: bool,
-        boundary_hints: ConversationBoundaryHints | None,
     ) -> ConversationRetentionPlan:
         live = self.conversations.read_live(address)
         state = self.conversations.read_state(address)
@@ -246,7 +220,6 @@ class ConversationMemoryEnqueuer:
             after_turn=after_turn,
             flush=flush,
             drain_pending=drain_pending,
-            boundary_hints=boundary_hints,
             leading_continuation=leading_continuation,
         )
 

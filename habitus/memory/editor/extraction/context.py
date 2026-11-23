@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+from collections.abc import Callable
 
 from habitus.foundation.integrity import canonical_json
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
@@ -17,24 +18,31 @@ from habitus.memory.editor.extraction.model import (
 )
 from habitus.memory.editor.page_id import EXISTING_PAGE_ID_MAX, MemoryPageIdMap
 from habitus.memory.editor.retrieval import (
+    MemoryNameEntry,
     MemoryRelatedContext,
+    MemorySearchHit,
+    memory_content_search,
+    memory_directory_listing,
 )
-from habitus.memory.retrieval import MemorySearchHit, MemorySemanticSearch
+from habitus.memory.model import MemoryDirectory
 from habitus.memory.snapshot import MemorySnapshotBatch, MemorySnapshotReader
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
-from habitus.model_client import estimate_utf8_bytes_tokens
+from habitus.model_client import estimate_text_tokens, estimate_utf8_bytes_tokens
+
+_LISTABLE_ROOTS = ("preferences", "entities", "tools")
+MemorySearcher = Callable[[tuple[str, ...], MemoryDirectory | None, int], tuple[MemorySearchHit, ...]]
 
 
 class MemoryExtractionContext:
-    """累计完整快照，并只允许一次搜索或一次受控读取。"""
+    """累计完整快照；每轮只允许列一个目录、按词搜一次卡片内容，或读若干个已经暴露过的地址。"""
 
     def __init__(
         self,
         initial: MemoryRelatedContext,
         *,
         snapshot_reader: MemorySnapshotReader,
-        semantic_search: MemorySemanticSearch,
         config: MemoryExtractionConfig,
+        searcher: MemorySearcher | None = None,
     ) -> None:
         if config.max_old_memory_items > snapshot_reader.config.max_items:
             raise ValueError("extraction item limit cannot exceed the snapshot reader item limit")
@@ -43,31 +51,23 @@ class MemoryExtractionContext:
 
         self.initial = initial
         self.snapshot_reader = snapshot_reader
-        self.semantic_search = semantic_search
         self.config = config
         self._snapshots: dict[str, VersionedSnapshot[MemoryDocument]] = {}
         self._total_bytes = 0
         self._total_tokens = 0
         self._page_ids = MemoryPageIdMap()
         self._allowed_read_uris: set[str] = set()
-        self._search_hits: dict[str, MemorySearchHit] = {}
-        self._query_hits: dict[str, tuple[MemorySearchHit, ...]] = {}
+        self._listed: dict[str, tuple[MemoryNameEntry, ...]] = {}
+        self._searched: dict[str, tuple[MemorySearchHit, ...]] = {}
+        self._searcher = searcher or _tree_searcher(snapshot_reader)
         self._relation_neighbor_uris: set[str] = set()
         self._expanded_relation_seeds: set[str] = set()
-        self._relationship_expectations: dict[
-            str,
-            list[tuple[str, MemoryStoredLink, bool]],
-        ] = {}
+        self._relationship_expectations: dict[str, list[tuple[str, MemoryStoredLink, bool]]] = {}
 
-        self._ingest(initial.snapshots)
-        for hit in initial.search_hits:
-            snapshot = self._snapshots.get(str(hit.uri))
-            if snapshot is None or not snapshot.exists:
-                raise MemoryExtractionError("initial semantic search hit has no complete existing snapshot")
-            self._remember_search_hit(hit)
-        initial_query = self._query(initial.query)
-        self._query_hits[initial_query] = initial.search_hits
+        self.ingest(initial.snapshots)
         self._allowed_read_uris.update(self._snapshots)
+        self.shown_listing, self.omitted_listing = _fit_listing(initial, config.max_listing_tokens)
+        self._allowed_read_uris.update(str(entry.uri) for entry in self.shown_listing)
         self._expand_relation_seeds(
             tuple(snapshot.identity for snapshot in initial.snapshots.snapshots if snapshot.exists)
         )
@@ -91,12 +91,6 @@ class MemoryExtractionContext:
 
         return tuple(sorted(self._allowed_read_uris))
 
-    @property
-    def search_hits(self) -> tuple[MemorySearchHit, ...]:
-        """返回所有查询中每个 URI 的最佳命中。"""
-
-        return tuple(sorted(self._search_hits.values(), key=lambda hit: (-hit.score, str(hit.uri))))
-
     async def execute(
         self,
         decision: MemoryRetrievalDecision,
@@ -107,94 +101,84 @@ class MemoryExtractionContext:
 
         if decision.action is MemoryRetrievalAction.FINISH:
             raise ValueError("finish does not execute a retrieval action")
-        if decision.action is MemoryRetrievalAction.SEARCH:
-            assert decision.query is not None
-            observation = await self._search(decision.query, iteration=iteration)
+        if decision.action is MemoryRetrievalAction.LIST:
+            assert decision.directory is not None
+            observation = await asyncio.to_thread(self._list, decision.directory, iteration=iteration)
+        elif decision.action is MemoryRetrievalAction.SEARCH:
+            observation = await asyncio.to_thread(self._search, decision, iteration=iteration)
         else:
-            assert decision.uri is not None
-            observation = self._read(decision.uri, iteration=iteration)
+            observation = self._read(decision.uris[: self.config.max_reads_per_action], iteration=iteration)
         if len(canonical_json(observation.to_dict())) > self.config.max_observation_chars:
             raise MemoryExtractionError("retrieval observation exceeds its configured limit")
         return observation
 
-    async def _search(self, query: str, *, iteration: int) -> MemoryRetrievalObservation:
-        normalized_query = self._query(query)
-        cached_hits = self._query_hits.get(normalized_query)
-        if cached_hits is not None:
-            return MemoryRetrievalObservation(
-                iteration=iteration,
-                action=MemoryRetrievalAction.SEARCH,
-                input_value=normalized_query,
-                result_uris=tuple(str(hit.uri) for hit in cached_hits),
-                added_uris=(),
-                relation_expanded_uris=(),
-                cached=True,
-            )
-        if not self.initial.search_roots:
-            raise MemoryExtractionError("memory_search has no allowed memory roots")
-        try:
-            raw_hits = await self.semantic_search.search(
-                normalized_query,
-                roots=self.initial.search_roots,
-                kinds=(),
-                limit=self.config.additional_search_limit,
-            )
-        except Exception as exc:
-            raise MemoryExtractionError("additional memory semantic search failed") from exc
-        hits = self._fit_hits(self._validated_hits(raw_hits))
-        self._query_hits[normalized_query] = hits
-        for hit in hits:
-            self._remember_search_hit(hit)
-            self._allowed_read_uris.add(str(hit.uri))
+    @property
+    def listed_directories(self) -> dict[str, tuple[MemoryNameEntry, ...]]:
+        return dict(self._listed)  # 列过的目录内容（地址与说明），给下一轮的模型看
 
-        before = set(self._snapshots)
-        hit_uris = tuple(str(hit.uri) for hit in hits)
-        if hit_uris:
-            batch = self.snapshot_reader.read_many(hit_uris)
-            missing = tuple(snapshot.identity for snapshot in batch.snapshots if not snapshot.exists)
-            if missing:
-                raise MemoryExtractionError(f"semantic search returned memory that disappeared before read: {missing}")
-            self._ingest(batch)
-        relation_uris = self._expand_relation_seeds(hit_uris)
-        added = tuple(sorted(set(self._snapshots) - before))
-        return MemoryRetrievalObservation(
-            iteration=iteration,
-            action=MemoryRetrievalAction.SEARCH,
-            input_value=normalized_query,
-            result_uris=hit_uris,
-            added_uris=added,
-            relation_expanded_uris=relation_uris,
-        )
+    @property
+    def searched(self) -> dict[str, tuple[MemorySearchHit, ...]]:
+        return dict(self._searched)  # 搜过的词与命中的卡片（地址、名字、片段），给下一轮的模型看
 
-    def _read(self, uri: str, *, iteration: int) -> MemoryRetrievalObservation:
-        try:
-            parsed = MemoryURI.parse(uri)
-            parsed.to_address()
-        except (TypeError, ValueError) as exc:
-            raise MemoryExtractionError("memory_read requires a valid L2 memory URI") from exc
+    def _search(self, decision: MemoryRetrievalDecision, *, iteration: int) -> MemoryRetrievalObservation:
+        directory = None if decision.directory is None else _directory(decision.directory, "memory_search")
+        inputs = (*(() if directory is None else (str(MemoryURI.from_directory(directory)),)), *decision.keywords)
+        key = " ".join(inputs)
+        hits = self._searched.get(key)
+        cached = hits is not None
+        if hits is None:
+            hits = self._searcher(decision.keywords, directory, self.config.max_search_results)
+            self._searched[key] = hits
+            self._allowed_read_uris.update(str(hit.uri) for hit in hits)
+        return _seen(iteration, MemoryRetrievalAction.SEARCH, inputs, tuple(str(hit.uri) for hit in hits), cached)
+
+    def _list(self, directory: str, *, iteration: int) -> MemoryRetrievalObservation:
+        target = _directory(directory, "memory_list")
+        parsed = MemoryURI.from_directory(target)
         identity = str(parsed)
-        if identity not in self._allowed_read_uris:
-            raise MemoryExtractionError("memory_read URI was not exposed by prefetch, search, or one-hop relations")
-        if identity in self._snapshots:
-            return MemoryRetrievalObservation(
-                iteration=iteration,
-                action=MemoryRetrievalAction.READ,
-                input_value=identity,
-                result_uris=(identity,),
-                added_uris=(),
-                relation_expanded_uris=(),
-                cached=True,
-            )
-        snapshot = self.snapshot_reader.read(parsed)
-        self._ingest(SnapshotBatch(snapshots=(snapshot,), total_bytes=snapshot.size_bytes))
-        self._validate_relationship_neighbor(identity)
+        if identity in self._listed:
+            entries = self._listed[identity]
+            return _seen(iteration, MemoryRetrievalAction.LIST, (identity,), tuple(str(e.uri) for e in entries), True)
+        tree = self.snapshot_reader.tree
+        entries = memory_directory_listing(tree, target)
+        children = tree.child_directories(target) if tree.directory_exists(target) else ()
+        self._listed[identity] = entries
+        self._allowed_read_uris.update(str(entry.uri) for entry in entries)
+        results = (*(str(entry.uri) for entry in entries), *(str(MemoryURI.from_directory(c)) for c in children))
+        return _seen(iteration, MemoryRetrievalAction.LIST, (identity,), results)
+
+    def _read(self, uris: tuple[str, ...], *, iteration: int) -> MemoryRetrievalObservation:
+        identities: list[str] = []
+        for uri in uris:
+            try:
+                parsed = MemoryURI.parse(uri)
+                parsed.to_address()
+            except (TypeError, ValueError) as exc:
+                raise MemoryExtractionError("memory_read requires valid L2 memory URIs") from exc
+            identity = str(parsed)
+            if identity not in self._allowed_read_uris:
+                raise MemoryExtractionError(
+                    "memory_read URI was not exposed by the name listing, a directory listing, a content search, "
+                    "or one-hop relations"
+                )
+            identities.append(identity)
+        unread = tuple(identity for identity in dict.fromkeys(identities) if identity not in self._snapshots)
+        if not unread:
+            return _seen(iteration, MemoryRetrievalAction.READ, tuple(identities), tuple(identities), True)
+        batch = self.snapshot_reader.read_many(unread)
+        added = self.ingest(batch)
+        for identity in unread:
+            self._validate_relationship_neighbor(identity)
+        relation_uris = self._expand_relation_seeds(
+            tuple(identity for identity in unread if identity in self._snapshots)
+        )
         return MemoryRetrievalObservation(
             iteration=iteration,
             action=MemoryRetrievalAction.READ,
-            input_value=identity,
-            result_uris=(identity,),
-            added_uris=(identity,),
-            relation_expanded_uris=(),
+            inputs=tuple(identities),
+            result_uris=tuple(identities),
+            added_uris=added,
+            relation_expanded_uris=relation_uris,
         )
 
     def _expand_relation_seeds(self, seed_uris: tuple[str, ...]) -> tuple[str, ...]:
@@ -245,7 +229,7 @@ class MemoryExtractionContext:
         unread = tuple(sorted(uri for uri in selected_neighbors if uri not in self._snapshots))
         if unread:
             batch = self.snapshot_reader.read_many(unread)
-            self._ingest(batch)
+            self.ingest(batch)
         for neighbor_uri in sorted(selected_neighbors):
             self._validate_relationship_neighbor(neighbor_uri)
         return tuple(sorted(selected_neighbors))
@@ -265,7 +249,7 @@ class MemoryExtractionContext:
                     f"stored memory relation is not bidirectionally consistent between {seed_uri} and {identity}"
                 )
 
-    def _ingest(self, batch: MemorySnapshotBatch) -> tuple[str, ...]:
+    def ingest(self, batch: MemorySnapshotBatch) -> tuple[str, ...]:
         pending: list[VersionedSnapshot[MemoryDocument]] = []
         for snapshot in batch.snapshots:
             current = self._snapshots.get(snapshot.identity)
@@ -305,47 +289,63 @@ class MemoryExtractionContext:
                 self._page_ids.register_existing(snapshot.identity)
         return tuple(snapshot.identity for snapshot in pending)
 
-    def _validated_hits(self, raw_hits: Sequence[MemorySearchHit]) -> tuple[MemorySearchHit, ...]:
-        if len(raw_hits) > self.config.additional_search_limit:
-            raise MemoryExtractionError("memory semantic search exceeded its requested limit")
-        by_uri: dict[MemoryURI, MemorySearchHit] = {}
-        for hit in raw_hits:
-            if hit.uri.node_type is not MemoryURINodeType.DOCUMENT:
-                raise MemoryExtractionError("memory semantic search returned a non-L2 URI")
-            if not any(hit.uri.matches_prefix(root) for root in self.initial.search_roots):
-                raise MemoryExtractionError("memory semantic search returned an out-of-scope URI")
-            current = by_uri.get(hit.uri)
-            if current is None or hit.score > current.score:
-                by_uri[hit.uri] = hit
-        return tuple(sorted(by_uri.values(), key=lambda hit: (-hit.score, str(hit.uri))))
 
-    def _remember_search_hit(self, hit: MemorySearchHit) -> None:
-        current = self._search_hits.get(str(hit.uri))
-        if current is None or hit.score > current.score:
-            self._search_hits[str(hit.uri)] = hit
+def _seen(
+    iteration: int,
+    action: MemoryRetrievalAction,
+    inputs: tuple[str, ...],
+    results: tuple[str, ...],
+    cached: bool = False,
+) -> MemoryRetrievalObservation:
+    """没有新读进快照的一次动作结果（列目录、搜内容、读已读过的地址）。"""
 
-    def _fit_hits(self, hits: tuple[MemorySearchHit, ...]) -> tuple[MemorySearchHit, ...]:
-        """在累计快照上限内保留相关性最高的已有或新 URI。"""
+    return MemoryRetrievalObservation(
+        iteration=iteration,
+        action=action,
+        inputs=inputs,
+        result_uris=results,
+        added_uris=(),
+        relation_expanded_uris=(),
+        cached=cached,
+    )
 
-        remaining = self.config.max_old_memory_items - len(self._snapshots)
-        selected: list[MemorySearchHit] = []
-        selected_new: set[str] = set()
-        for hit in hits:
-            identity = str(hit.uri)
-            if identity not in self._snapshots and identity not in selected_new:
-                if len(selected_new) >= remaining:
-                    continue
-                selected_new.add(identity)
-            selected.append(hit)
-        return tuple(selected)
 
-    def _query(self, value: str) -> str:
-        normalized = " ".join(value.split())
-        if not normalized:
-            raise MemoryExtractionError("memory search query must be non-empty")
-        if len(normalized) > self.config.max_query_chars:
-            raise MemoryExtractionError("memory search query exceeds its character limit")
-        return normalized
+def _tree_searcher(reader: MemorySnapshotReader) -> MemorySearcher:
+    """没有注入搜索时直接在记忆树上搜（不剔退休卡片，只给单测与不接冷热的场合用）。"""
+
+    def search(keywords: tuple[str, ...], directory: MemoryDirectory | None, limit: int) -> tuple[MemorySearchHit, ...]:
+        return memory_content_search(reader.tree, None, keywords=keywords, directory=directory, limit=limit)
+
+    return search
+
+
+def _directory(value: str, action: str) -> MemoryDirectory:
+    """列目录、搜内容时给的目录：必须是 preferences、entities、tools 或它们下面的目录。"""
+
+    try:
+        parsed = MemoryURI.parse(value)
+    except (TypeError, ValueError) as exc:
+        raise MemoryExtractionError(f"{action} requires a valid memory:// directory URI") from exc
+    if parsed.node_type is not MemoryURINodeType.DIRECTORY:
+        raise MemoryExtractionError(f"{action} requires a directory URI")
+    target = parsed.to_directory()
+    if not target.parts or target.parts[0] not in _LISTABLE_ROOTS:
+        raise MemoryExtractionError(f"{action} only lists or searches preferences, entities or tools")
+    return target
+
+
+def _fit_listing(initial: MemoryRelatedContext, max_tokens: int) -> tuple[tuple[MemoryNameEntry, ...], int]:
+    """名字清单在 ``max_listing_tokens`` 之内放得下的前缀，以及没给模型看到的张数。
+
+    只有给模型看到的名字算暴露过；按输入预算截掉的那部分要先列目录才能读。
+    """
+
+    entries, used = initial.listing, 0
+    for index, entry in enumerate(entries):
+        used += estimate_text_tokens(entry.line()) + 1
+        if used > max_tokens:
+            return entries[:index], len(entries) - index + initial.omitted_listing_entries
+    return entries, initial.omitted_listing_entries
 
 
 __all__ = ["MemoryExtractionContext"]

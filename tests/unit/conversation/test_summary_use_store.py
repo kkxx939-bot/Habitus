@@ -12,7 +12,7 @@ from habitus.memory.conversation import (
     ConversationSummaryUseError,
     SQLiteConversationSummaryUseStore,
 )
-from habitus.memory.conversation.indexing import summary_reference
+from habitus.memory.conversation.summary_reference import summary_reference
 from tests.helpers import BASE_TIME, segment, segment_summary
 
 

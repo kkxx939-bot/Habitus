@@ -151,18 +151,14 @@ class CapabilityHandlers:
         return RecallResult.model_validate(
             {
                 "query": query,
-                "queries": [query],
                 "context": "用户偏好简洁回答。",
-                "memories": [
-                    {
-                        "uri": "memory://preferences/response_style.md",
-                        "score": 0.91,
-                        "matched_queries": [query],
-                    }
-                ],
+                "memories": [{"uri": "memory://preferences/response_style.md"}],
+                "records": [],
                 "summaries": [],
+                "notes": [],
                 "degradations": [],
                 "budget_exhausted": False,
+                "timed_out": False,
             }
         )
 

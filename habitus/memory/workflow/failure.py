@@ -4,12 +4,6 @@ from __future__ import annotations
 
 from enum import Enum
 
-from habitus.infrastructure.vector import (
-    VectorStoreBusyError,
-    VectorStoreConflictError,
-    VectorStoreError,
-    VectorStoreIntegrityError,
-)
 from habitus.memory.editor.extraction.model import MemoryExtractionPermanentError
 from habitus.memory.editor.transaction import MemoryCommitConflictError
 from habitus.memory.workflow.jobs import MemoryJobError, MemoryJobLeaseLostError
@@ -29,7 +23,7 @@ class MemoryJobSkipped(RuntimeError):  # noqa: N818 - 不是故障，是"这一�
 class MemoryJobFailureKind(str, Enum):
     """一次 Job 失败之后怎么处置。"""
 
-    #: 依赖此刻用不了：模型（统一规则里的"等一等可能好"用尽、"要人处理"、熔断开着）或向量库忙（``VectorStoreBusyError``）。
+    #: 依赖此刻用不了：模型（统一规则里的"等一等可能好"用尽、"要人处理"、熔断开着）。
     #: 不计入尝试次数，排回队列等依赖恢复、挡住后面的序号（裁定 80 问题 2、裁定 82 第 3 条、裁定 108）。
     WAITS_FOR_MODEL = "waits_for_model"
     #: 明确瞬态、答复用完结构纠错仍不合格（模型回答的正常波动，裁定 80 第 4 条）或未知运行时故障：有界退避重试，
@@ -85,14 +79,10 @@ def _known_failure_kind(error: BaseException, *, outermost: bool) -> MemoryJobFa
             if error.rule is ModelErrorRule.INPUT
             else MemoryJobFailureKind.WAITS_FOR_MODEL
         )
-    if isinstance(error, VectorStoreBusyError):
-        return MemoryJobFailureKind.WAITS_FOR_MODEL
     if isinstance(error, ModelStructuredOutputError):
         return MemoryJobFailureKind.RETRYABLE
-    if isinstance(error, MemoryCommitConflictError | TimeoutError | VectorStoreConflictError):
+    if isinstance(error, MemoryCommitConflictError | TimeoutError):
         return MemoryJobFailureKind.RETRYABLE
-    if isinstance(error, VectorStoreIntegrityError | VectorStoreError):
-        return MemoryJobFailureKind.PERMANENT
     if isinstance(error, MemoryExtractionPermanentError):
         return MemoryJobFailureKind.PERMANENT
     if outermost and isinstance(error, MemoryJobError | ValueError | TypeError):

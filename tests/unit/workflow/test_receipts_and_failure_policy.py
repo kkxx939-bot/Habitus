@@ -9,12 +9,6 @@ import pytest
 
 from habitus.foundation.integrity import canonical_json
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.vector import (
-    VectorStoreBusyError,
-    VectorStoreConflictError,
-    VectorStoreError,
-    VectorStoreIntegrityError,
-)
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.editor.extraction import (
     MemoryExtractionCapacityError,
@@ -238,19 +232,11 @@ def wrapped(outer: BaseException, cause: BaseException) -> BaseException:
     [
         (TimeoutError("slow"), RETRY),
         (MemoryCommitConflictError("changed"), RETRY),
-        (VectorStoreConflictError("generation"), RETRY),
-        # 向量库连不上（断网、超时、5xx、索引重建中）：与等模型同一档（裁定 82 第 3 条）
-        (VectorStoreBusyError("busy"), WAITS),
         # 检索、抽取把依赖失败包成自己的 RuntimeError 之后按根因归类
-        (wrapped(MemoryRetrievalError("memory semantic search failed"), VectorStoreBusyError("down")), WAITS),
-        (wrapped(MemoryExtractionError("additional search failed"), VectorStoreBusyError("down")), WAITS),
-        (wrapped(MemoryRetrievalError("memory semantic search failed"), ModelTransportError("embedding")), WAITS),
-        (
-            wrapped(MemoryRetrievalError("memory semantic search failed"), VectorStoreError("401 Unauthorized")),
-            PERMANENT,
-        ),
-        (wrapped(MemoryRetrievalError("memory semantic search failed"), RuntimeError("unknown")), RETRY),
-        (wrapped(MemoryRetrievalError("memory semantic search failed"), ValueError("bad hit")), RETRY),
+        (wrapped(MemoryRetrievalError("memory read failed"), ModelTransportError("network")), WAITS),
+        (wrapped(MemoryExtractionError("memory read failed"), ModelTransportError("network")), WAITS),
+        (wrapped(MemoryRetrievalError("memory read failed"), RuntimeError("unknown")), RETRY),
+        (wrapped(MemoryRetrievalError("memory read failed"), ValueError("bad hit")), RETRY),
         (wrapped(MemoryExtractionPermanentError("invalid"), ModelTransportError("network")), PERMANENT),
         # 模型此刻用不了：断网 / 5xx、限流、额度或余额、鉴权、权限、服务端答坏 → 等模型恢复（裁定 80 问题 2）
         (ModelTransportError("network"), WAITS),
@@ -269,7 +255,6 @@ def wrapped(outer: BaseException, cause: BaseException) -> BaseException:
         (MemoryExtractionCapacityError("too large"), PERMANENT),
         (MemoryExtractionPermanentError("invalid candidates"), PERMANENT),
         (MemoryJobLeaseLostError("lost"), PERMANENT),
-        (VectorStoreIntegrityError("corrupt"), PERMANENT),
         (MemoryJobError("invalid state"), PERMANENT),
         (ValueError("bad input"), PERMANENT),
         (RuntimeError("unknown runtime fault"), RETRY),

@@ -51,7 +51,6 @@ def recall_candidate(document: MemoryDocument) -> MemoryRecallCandidate:
         recall_target(document),
         document.kind,
         document.metadata.updated_at,
-        1.0,
     )
 
 

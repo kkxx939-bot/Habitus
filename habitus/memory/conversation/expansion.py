@@ -6,9 +6,9 @@ from collections.abc import Iterator
 from dataclasses import replace
 
 from habitus.memory.conversation.compaction import ConversationRangeSummaryStore
-from habitus.memory.conversation.indexing.model import ConversationSummaryMatch
 from habitus.memory.conversation.layout import ConversationAddress
 from habitus.memory.conversation.summary import ConversationSummaryStore
+from habitus.memory.conversation.summary_reference import ConversationSummaryMatch
 from habitus.pre.conversation import (
     ConversationRangeSummary,
     ConversationRangeSummaryStage,

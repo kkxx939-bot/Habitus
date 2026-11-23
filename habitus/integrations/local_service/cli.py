@@ -246,20 +246,18 @@ def _prompt_cloud_setup(
     if not isinstance(defaults, CloudSetupSelection):
         raise TypeError("cloud setup defaults must be CloudSetupSelection")
     resolved_registry = registry or build_builtin_setup_registry()
-    sys.stdout.write(
-        "\nCloud provider setup\nLocal Chat, Embedding and Rerank are intentionally not included in this setup.\n"
-    )
+    sys.stdout.write("\nCloud provider setup\nA local Chat model is intentionally not included in this setup.\n")
     selections = {
         capability: _prompt_registered_profile(
             resolved_registry,
             capability,
             getattr(defaults, capability),
         )
-        for capability in ("chat", "embedding", "rerank", "vector")
+        for capability in ("chat",)
     }
     selection = CloudSetupSelection(**selections)
     sys.stdout.write("\nCloud setup summary\n")
-    for capability in ("chat", "embedding", "rerank", "vector"):
+    for capability in ("chat",):
         selected = getattr(selection, capability)
         profile = resolved_registry.profile(capability, selected.profile_id)
         sys.stdout.write(f"  {capability.title()}: {profile.display_name}\n")
@@ -360,7 +358,7 @@ def _configure_missing_credentials(path: Path) -> None:
 def _write_missing_credentials_hint(path: Path) -> None:
     from habitus.integrations.local_service.initialization import missing_credential_fields, unfilled_setup_hints
 
-    for hint in unfilled_setup_hints(path):  # 非交互 init 写出的 Embedding 模板：列出还要填的项（W7）
+    for hint in unfilled_setup_hints(path):  # 非交互 init 写出的 Chat 模板：列出还要填的项（W7）
         sys.stdout.write(f"Not configured yet: {hint}\n")
     missing = missing_credential_fields(path)
     if missing:
@@ -471,7 +469,6 @@ def _repair_source_outputs(args: argparse.Namespace, values: Mapping[str, str]) 
         runtime = build_runtime(
             config,
             providers=catalog.providers,
-            vector_stores=catalog.vector_stores,
         )
         try:
             runtime.initialize()
@@ -589,7 +586,6 @@ def _serve(values: Mapping[str, str]) -> None:
     runtime = build_runtime(
         config,
         providers=catalog.providers,
-        vector_stores=catalog.vector_stores,
     )
     app = _StartupFailureGuard(
         create_http_app(
@@ -792,7 +788,7 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--config", default=argparse.SUPPRESS, help="配置文件")
     doctor.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     doctor.add_argument("--skip-port", action="store_true", help="不检查监听端口")
-    doctor.add_argument("--deep", action="store_true", help="探测 embedding 与向量服务")
+    doctor.add_argument("--deep", action="store_true", help="探测对话模型服务")
     doctor.add_argument("--probe-timeout", type=float, default=15.0, help="单项探测超时秒数")
 
     init = subparsers.add_parser("init", help="安全初始化配置、Doctor 和 Agent Harness")

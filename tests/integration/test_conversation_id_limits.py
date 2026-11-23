@@ -63,11 +63,10 @@ def test_casefold_growth_of_the_directory_name_is_counted() -> None:
 
 
 def _runtime(tmp_path: Path):
-    providers, vectors = runtime_dependencies()
+    providers = runtime_dependencies()
     runtime = build_runtime(
         runtime_config(tmp_path),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     runtime.initialize()

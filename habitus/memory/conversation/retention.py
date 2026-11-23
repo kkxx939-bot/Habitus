@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from habitus.foundation.integrity import canonical_json
 from habitus.memory.conversation.segmentation import (
     SEMANTIC_CHUNKER_VERSION,
-    ConversationBoundaryHints,
 )
 from habitus.pre.conversation.messages import (
     ConversationBatch,
@@ -138,7 +137,6 @@ class ConversationRetentionPlan:
     budget_exceeded: bool
     reason: str
     boundary_kind: str | None = None
-    embedding_fingerprint: str | None = None
     chunker_version: str = SEMANTIC_CHUNKER_VERSION
 
     def __post_init__(self) -> None:
@@ -148,8 +146,6 @@ class ConversationRetentionPlan:
             raise ValueError("retention reason must be non-empty text")
         if self.boundary_kind is not None and not self.boundary_kind.strip():
             raise ValueError("boundary_kind must be non-empty text or None")
-        if self.embedding_fingerprint is not None and not self.embedding_fingerprint.strip():
-            raise ValueError("embedding_fingerprint must be non-empty text or None")
         if not self.chunker_version.strip():
             raise ValueError("chunker_version must be non-empty text")
         if self.through_sequence is None:
@@ -184,7 +180,6 @@ class ConversationRetentionPlanner:
         after_turn: bool = False,
         flush: bool = False,
         drain_pending: bool = False,
-        boundary_hints: ConversationBoundaryHints | None = None,
         leading_continuation: bool = False,
     ) -> ConversationRetentionPlan:
         """在完整轮次已闭合后选择连续、安全且不超过硬上限的语义前缀。"""
@@ -193,8 +188,6 @@ class ConversationRetentionPlanner:
             raise ValueError("drain_pending is only valid while completing one afterTurn commit")
         if live is None:
             return self._empty(flush=flush, reason="live conversation is empty")
-        # 消息序号一经写入不可改；后续封存只裁剪前缀，因此完整 live 快照产生的
-        # 边界提示仍可安全用于它的连续后缀。新追加内容没有提示时自动使用结构分数。
 
         messages = live.messages
         if not after_turn and not flush:
@@ -247,12 +240,8 @@ class ConversationRetentionPlanner:
                 reason=f"{trigger_reason}; retained window does not require a safe prefix",
             )
 
-        archived, boundary_kind = self._bounded_archive_prefix(
-            pending_messages,
-            boundary_hints=boundary_hints,
-        )
+        archived, boundary_kind = self._bounded_archive_prefix(pending_messages)
         retained = messages[len(archived) :]
-        embedding_fingerprint = boundary_hints.embedding_fingerprint if boundary_hints is not None else None
         return ConversationRetentionPlan(
             through_sequence=archived[-1].sequence,
             archive_messages=archived,
@@ -263,7 +252,6 @@ class ConversationRetentionPlanner:
             budget_exceeded=self._live_safety_exceeded(retained),
             reason=f"{trigger_reason}; selected {boundary_kind} boundary",
             boundary_kind=boundary_kind,
-            embedding_fingerprint=embedding_fingerprint,
         )
 
     def _trigger(
@@ -334,8 +322,6 @@ class ConversationRetentionPlanner:
     def _bounded_archive_prefix(
         self,
         messages: tuple[ConversationMessage, ...],
-        *,
-        boundary_hints: ConversationBoundaryHints | None,
     ) -> tuple[tuple[ConversationMessage, ...], str]:
         if self._within_segment_budget(messages):
             return messages, self._boundary_kind(messages, len(messages) - 1)
@@ -357,11 +343,8 @@ class ConversationRetentionPlanner:
                 "message": 20.0,
                 "content": 10.0,
             }[boundary_kind]
-            semantic = 0.0
-            if boundary_hints is not None:
-                semantic = boundary_hints.distance_after(message.sequence) or 0.0
             budget_closeness = tokens / self.config.max_segment_tokens
-            score = structural + semantic * 2.0 + budget_closeness
+            score = structural + budget_closeness
             candidates.append((score, index, boundary_kind))
 
         if not candidates:

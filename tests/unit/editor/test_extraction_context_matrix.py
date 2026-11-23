@@ -1,4 +1,4 @@
-"""记忆提取上下文的受控检索、读取和关系扩展场景矩阵。"""
+"""记忆提取上下文的列目录、读取和关系扩展场景矩阵。"""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import pytest
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, SnapshotReadConfig, VersionedSnapshot
 from habitus.memory.document import MemoryLinkType, MemoryStoredLink
 from habitus.memory.editor import (
+    MemoryExtractionCapacityError,
     MemoryExtractionConfig,
     MemoryExtractionContext,
     MemoryExtractionError,
@@ -19,58 +20,29 @@ from habitus.memory.editor import (
     MemoryRetrievalDecision,
     MemoryRetrievalStatus,
 )
-from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind
-from habitus.memory.retrieval import MemorySearchHit
+from habitus.memory.editor.retrieval import MemoryNameEntry
+from habitus.memory.model import MemoryAddress, MemoryKind
 from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.tree import MemoryTree
 from habitus.memory.uri import MemoryURI
 from tests.helpers import codec, document
 
 
-class RecordingSearch:
-    """返回排队结果，并记录每次附加语义检索的完整约束。"""
-
-    def __init__(self, *results: object) -> None:
-        self.results = list(results)
-        self.calls: list[tuple[str, dict[str, object]]] = []
-
-    async def search(self, query: str, **kwargs: object) -> object:
-        self.calls.append((query, kwargs))
-        current = self.results.pop(0) if self.results else ()
-        if isinstance(current, BaseException):
-            raise current
-        return current
-
-
-def retrieval_decision(
-    action: MemoryRetrievalAction,
-    *,
-    value: str = "补充查询",
-) -> MemoryRetrievalDecision:
-    """构造一个满足动作互斥规则的检索决策。"""
-
-    if action is MemoryRetrievalAction.FINISH:
-        return MemoryRetrievalDecision(
-            MemoryRetrievalStatus.SUFFICIENT,
-            action,
-            None,
-            None,
-            "已有上下文足够。",
-        )
-    if action is MemoryRetrievalAction.SEARCH:
-        return MemoryRetrievalDecision(
-            MemoryRetrievalStatus.INSUFFICIENT,
-            action,
-            value,
-            None,
-            "需要补充搜索。",
-        )
+def finish_decision() -> MemoryRetrievalDecision:
     return MemoryRetrievalDecision(
-        MemoryRetrievalStatus.INSUFFICIENT,
-        action,
-        None,
-        value,
-        "需要读取完整节点。",
+        MemoryRetrievalStatus.SUFFICIENT, MemoryRetrievalAction.FINISH, None, (), "已有上下文足够。"
+    )
+
+
+def list_decision(directory: str) -> MemoryRetrievalDecision:
+    return MemoryRetrievalDecision(
+        MemoryRetrievalStatus.INSUFFICIENT, MemoryRetrievalAction.LIST, directory, (), "需要列目录。"
+    )
+
+
+def read_decision(*uris: str) -> MemoryRetrievalDecision:
+    return MemoryRetrievalDecision(
+        MemoryRetrievalStatus.INSUFFICIENT, MemoryRetrievalAction.READ, None, uris, "需要读取完整节点。"
     )
 
 
@@ -110,14 +82,11 @@ def extraction_context(
     *,
     documents=(),
     selected=(),
-    hits: tuple[MemorySearchHit, ...] = (),
-    roots: tuple[MemoryURI, ...] | None = None,
-    query: str = "初始查询",
-    search: RecordingSearch | None = None,
+    listing: tuple[MemoryURI, ...] = (),
     config: MemoryExtractionConfig | None = None,
     reader_config: SnapshotReadConfig | None = None,
-) -> tuple[MemoryExtractionContext, MemoryTree, MemorySnapshotReader, RecordingSearch]:
-    """使用真实 MemoryTree 和 SnapshotReader 构造提取上下文。"""
+) -> tuple[MemoryExtractionContext, MemoryTree, MemorySnapshotReader]:
+    """使用真实 MemoryTree 和 SnapshotReader 构造提取上下文；``listing`` 是第一轮给出的名字清单。"""
 
     tree = MemoryTree(tmp_path / "memory")
     for current in documents:
@@ -128,19 +97,19 @@ def extraction_context(
         conversation_id="conversation-1",
         segment_id="segment-1",
         source_segment_digest="0" * 64,
-        query=query,
-        search_roots=(MemoryURI.from_directory(MemoryDirectory.preferences()),) if roots is None else roots,
-        search_hits=hits,
+        listing=tuple(MemoryNameEntry(uri) for uri in listing),
         snapshots=snapshots,
     )
-    semantic_search = search or RecordingSearch()
     context = MemoryExtractionContext(
         initial,
         snapshot_reader=reader,
-        semantic_search=semantic_search,
         config=config or MemoryExtractionConfig(),
     )
-    return context, tree, reader, semantic_search
+    return context, tree, reader
+
+
+def preference(topic: str):
+    return document(MemoryKind.PREFERENCE, fields={"topic": topic, "content": f"- {topic}"})
 
 
 @pytest.mark.parametrize(
@@ -169,237 +138,192 @@ def test_context_limit_cannot_exceed_snapshot_reader_limit(
         extraction_context(tmp_path, config=config, reader_config=reader_config)
 
 
-def test_initial_hit_requires_a_complete_existing_snapshot(tmp_path: Path) -> None:
-    uri = MemoryURI.from_address(MemoryAddress.preference("不存在"))
-    hit = MemorySearchHit(uri, 0.8)
-    with pytest.raises(MemoryExtractionError, match="no complete existing snapshot"):
-        extraction_context(tmp_path, selected=(uri,), hits=(hit,))
-
-
 def test_initial_documents_receive_stable_page_ids_and_sorted_properties(tmp_path: Path) -> None:
     first = document(MemoryKind.PROFILE)
     second = document(MemoryKind.PREFERENCE)
     second_uri = MemoryURI.from_address(second.address)
-    hit = MemorySearchHit(second_uri, 0.8)
-    context, _tree, _reader, _search = extraction_context(
+    context, _tree, _reader = extraction_context(
         tmp_path,
         documents=(first, second),
         selected=(second_uri, MemoryURI.from_address(first.address)),
-        hits=(hit,),
     )
 
     identities = tuple(snapshot.identity for snapshot in context.snapshots.snapshots)
     assert identities == tuple(sorted(identities))
     assert context.page_ids.existing_items() == tuple(enumerate(identities, start=1))
-    assert context.search_hits == (hit,)
     assert set(context.allowed_read_uris) == set(identities)
 
 
-def test_initial_query_is_cached_without_calling_semantic_search(tmp_path: Path) -> None:
-    search = RecordingSearch(AssertionError("缓存查询不应调用后端"))
-    context, _tree, _reader, _search = extraction_context(tmp_path, search=search, query="  初始   查询  ")
-    observation = asyncio.run(
-        context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH, value="初始 查询"), iteration=1)
-    )
+def test_name_listing_exposes_its_uris_for_reading_without_reading_them(tmp_path: Path) -> None:
+    target = preference("回答风格")
+    uri = MemoryURI.from_address(target.address)
+    context, _tree, _reader = extraction_context(tmp_path, documents=(target,), listing=(uri,))
 
-    assert observation.cached is True
-    assert observation.result_uris == ()
-    assert search.calls == []
+    assert context.snapshots.snapshots == ()
+    assert context.allowed_read_uris == (str(uri),)
 
 
 def test_execute_rejects_finish_because_finish_has_no_tool_action(tmp_path: Path) -> None:
-    context, _tree, _reader, _search = extraction_context(tmp_path)
+    context, _tree, _reader = extraction_context(tmp_path)
     with pytest.raises(ValueError, match="finish does not execute"):
-        asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.FINISH), iteration=1))
+        asyncio.run(context.execute(finish_decision(), iteration=1))
 
 
-def test_additional_search_uses_configured_scope_and_limit(tmp_path: Path) -> None:
-    target = document(MemoryKind.PREFERENCE)
-    uri = MemoryURI.from_address(target.address)
-    hit = MemorySearchHit(uri, 0.75)
-    search = RecordingSearch((hit,))
-    context, _tree, _reader, _search = extraction_context(
-        tmp_path,
-        documents=(target,),
-        search=search,
-        config=MemoryExtractionConfig(additional_search_limit=7),
-    )
-    observation = asyncio.run(
-        context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH, value="  回答   风格 "), iteration=2)
-    )
+def test_list_returns_direct_cards_and_child_directories_and_exposes_cards(tmp_path: Path) -> None:
+    top = preference("回答风格")
+    entity = document(MemoryKind.ENTITY, fields={"category": "项目", "name": "Habitus", "summary": "记忆系统。"})
+    context, _tree, _reader = extraction_context(tmp_path, documents=(top, entity))
+    top_uri = str(MemoryURI.from_address(top.address))
+    entity_uri = str(MemoryURI.from_address(entity.address))
 
-    assert observation.result_uris == (str(uri),)
-    assert observation.added_uris == (str(uri),)
-    assert context.page_ids.page_id_for(uri) == 1
-    assert search.calls == [
-        (
-            "回答 风格",
-            {
-                "roots": (MemoryURI.from_directory(MemoryDirectory.preferences()),),
-                "kinds": (),
-                "limit": 7,
-            },
-        )
-    ]
+    preferences = asyncio.run(context.execute(list_decision("memory://preferences"), iteration=1))
+    entities = asyncio.run(context.execute(list_decision("memory://entities"), iteration=2))
+    project = asyncio.run(context.execute(list_decision("memory://entities/项目"), iteration=3))
+
+    assert preferences.action is MemoryRetrievalAction.LIST
+    assert preferences.inputs == ("memory://preferences",)
+    assert preferences.result_uris == (top_uri,)
+    assert entities.result_uris == ("memory://entities/项目",)
+    assert project.result_uris == (entity_uri,)
+    assert preferences.added_uris == () and project.added_uris == ()
+    assert set(context.allowed_read_uris) == {top_uri, entity_uri}
+    assert set(context.listed_directories) == {"memory://preferences", "memory://entities", "memory://entities/项目"}
+    assert context.snapshots.snapshots == ()
 
 
-def test_repeated_additional_query_is_cached_and_keeps_best_global_hit(tmp_path: Path) -> None:
-    target = document(MemoryKind.PREFERENCE)
-    uri = MemoryURI.from_address(target.address)
-    search = RecordingSearch((MemorySearchHit(uri, 0.6),))
-    context, _tree, _reader, _search = extraction_context(tmp_path, documents=(target,), search=search)
-    decision = retrieval_decision(MemoryRetrievalAction.SEARCH, value="回答风格")
-
-    first = asyncio.run(context.execute(decision, iteration=1))
-    second = asyncio.run(context.execute(decision, iteration=2))
+def test_repeated_list_is_cached(tmp_path: Path) -> None:
+    target = preference("回答风格")
+    context, _tree, _reader = extraction_context(tmp_path, documents=(target,))
+    first = asyncio.run(context.execute(list_decision("memory://preferences"), iteration=1))
+    second = asyncio.run(context.execute(list_decision("memory://preferences"), iteration=2))
 
     assert first.cached is False
     assert second.cached is True
-    assert len(search.calls) == 1
-    assert context.search_hits == (MemorySearchHit(uri, 0.6),)
+    assert second.result_uris == first.result_uris
 
 
-def test_additional_search_deduplicates_uri_using_highest_score(tmp_path: Path) -> None:
-    target = document(MemoryKind.PREFERENCE)
-    uri = MemoryURI.from_address(target.address)
-    search = RecordingSearch((MemorySearchHit(uri, 0.2), MemorySearchHit(uri, 0.9)))
-    context, _tree, _reader, _search = extraction_context(tmp_path, documents=(target,), search=search)
-    observation = asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH), iteration=1))
-
-    assert observation.result_uris == (str(uri),)
-    assert context.search_hits == (MemorySearchHit(uri, 0.9),)
-
-
-def test_search_fits_new_hits_to_remaining_item_slots_by_relevance(tmp_path: Path) -> None:
-    first = document(
-        MemoryKind.PREFERENCE,
-        fields={"topic": "A", "content": "- A"},
-    )
-    second = document(
-        MemoryKind.PREFERENCE,
-        fields={"topic": "B", "content": "- B"},
-    )
-    first_hit = MemorySearchHit(MemoryURI.from_address(first.address), 0.9)
-    second_hit = MemorySearchHit(MemoryURI.from_address(second.address), 0.8)
-    search = RecordingSearch((first_hit, second_hit))
-    config = MemoryExtractionConfig(max_old_memory_items=1)
-    reader_config = SnapshotReadConfig(max_items=1, max_item_bytes=256_000, max_total_bytes=4_000_000)
-    context, _tree, _reader, _search = extraction_context(
-        tmp_path,
-        documents=(first, second),
-        search=search,
-        config=config,
-        reader_config=reader_config,
-    )
-    observation = asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH), iteration=1))
-
-    assert observation.result_uris == (str(first_hit.uri),)
-    assert context.search_hits == (first_hit,)
+def test_list_of_missing_directory_is_empty(tmp_path: Path) -> None:
+    context, _tree, _reader = extraction_context(tmp_path)
+    observation = asyncio.run(context.execute(list_decision("memory://tools"), iteration=1))
+    assert observation.result_uris == ()
 
 
 @pytest.mark.parametrize(
-    ("raw_result", "message"),
+    ("directory", "message"),
     [
-        (RuntimeError("provider down"), "semantic search failed"),
+        ("invalid", "valid memory:// directory"),
+        ("memory://profile.md", "requires a directory"),
+        ("memory://", "only lists"),
     ],
 )
-def test_additional_search_wraps_backend_and_result_contract_failures(
-    tmp_path: Path,
-    raw_result: object,
-    message: str,
+def test_list_rejects_invalid_non_directory_and_unlistable_targets(
+    tmp_path: Path, directory: str, message: str
 ) -> None:
-    context, _tree, _reader, _search = extraction_context(
-        tmp_path,
-        search=RecordingSearch(raw_result),
-    )
+    context, _tree, _reader = extraction_context(tmp_path)
     with pytest.raises(MemoryExtractionError, match=message):
-        asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH), iteration=1))
-
-
-def test_additional_search_rejects_more_hits_than_requested(tmp_path: Path) -> None:
-    documents = tuple(
-        document(MemoryKind.PREFERENCE, fields={"topic": f"主题-{index}", "content": f"- {index}"})
-        for index in range(3)
-    )
-    hits = tuple(
-        MemorySearchHit(MemoryURI.from_address(item.address), 0.9 - index / 10) for index, item in enumerate(documents)
-    )
-    context, _tree, _reader, _search = extraction_context(
-        tmp_path,
-        documents=documents,
-        search=RecordingSearch(hits),
-        config=MemoryExtractionConfig(additional_search_limit=2),
-    )
-    with pytest.raises(MemoryExtractionError, match="requested limit"):
-        asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH), iteration=1))
-
-
-def test_additional_search_rejects_out_of_scope_hit(tmp_path: Path) -> None:
-    target = document(MemoryKind.ENTITY)
-    hit = MemorySearchHit(MemoryURI.from_address(target.address), 0.8)
-    context, _tree, _reader, _search = extraction_context(
-        tmp_path,
-        documents=(target,),
-        search=RecordingSearch((hit,)),
-    )
-    with pytest.raises(MemoryExtractionError, match="out-of-scope"):
-        asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH), iteration=1))
-
-
-def test_additional_search_rejects_hit_that_disappeared_before_snapshot_read(tmp_path: Path) -> None:
-    uri = MemoryURI.from_address(MemoryAddress.preference("已消失"))
-    context, _tree, _reader, _search = extraction_context(
-        tmp_path,
-        search=RecordingSearch((MemorySearchHit(uri, 0.8),)),
-    )
-    with pytest.raises(MemoryExtractionError, match="disappeared before read"):
-        asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH), iteration=1))
-
-
-def test_search_without_allowed_roots_fails_before_backend_call(tmp_path: Path) -> None:
-    search = RecordingSearch(AssertionError("不应访问后端"))
-    context, _tree, _reader, _search = extraction_context(tmp_path, roots=(), search=search)
-    with pytest.raises(MemoryExtractionError, match="no allowed memory roots"):
-        asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH), iteration=1))
-    assert search.calls == []
+        asyncio.run(context.execute(list_decision(directory), iteration=1))
 
 
 @pytest.mark.parametrize("uri", ["invalid", "memory://preferences", "memory://preferences/.overview.md"])
 def test_read_requires_a_valid_l2_memory_uri(tmp_path: Path, uri: str) -> None:
-    context, _tree, _reader, _search = extraction_context(tmp_path)
+    context, _tree, _reader = extraction_context(tmp_path)
     with pytest.raises(MemoryExtractionError, match="valid L2"):
-        asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.READ, value=uri), iteration=1))
+        asyncio.run(context.execute(read_decision(uri), iteration=1))
 
 
-def test_read_rejects_valid_but_unexposed_uri(tmp_path: Path) -> None:
-    context, _tree, _reader, _search = extraction_context(tmp_path)
-    uri = str(MemoryURI.from_address(MemoryAddress.preference("未暴露")))
+def test_read_rejects_valid_uri_outside_listing_and_listed_directories(tmp_path: Path) -> None:
+    listed = preference("已列出")
+    hidden = preference("未暴露")
+    context, _tree, _reader = extraction_context(
+        tmp_path,
+        documents=(listed, hidden),
+        listing=(MemoryURI.from_address(listed.address),),
+    )
     with pytest.raises(MemoryExtractionError, match="not exposed"):
-        asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.READ, value=uri), iteration=1))
+        asyncio.run(context.execute(read_decision(str(MemoryURI.from_address(hidden.address))), iteration=1))
+    assert context.snapshots.snapshots == ()
+
+
+def test_read_of_listed_uris_adds_complete_snapshots_and_page_ids(tmp_path: Path) -> None:
+    first = preference("A")
+    second = preference("B")
+    uris = tuple(MemoryURI.from_address(item.address) for item in (first, second))
+    context, _tree, _reader = extraction_context(tmp_path, documents=(first, second), listing=uris)
+    observation = asyncio.run(context.execute(read_decision(*(str(uri) for uri in uris)), iteration=1))
+
+    assert observation.action is MemoryRetrievalAction.READ
+    assert observation.inputs == tuple(str(uri) for uri in uris)
+    assert set(observation.added_uris) == {str(uri) for uri in uris}
+    assert {context.page_ids.page_id_for(uri) for uri in uris} == {1, 2}
+
+
+def test_read_after_list_is_allowed(tmp_path: Path) -> None:
+    target = preference("回答风格")
+    uri = str(MemoryURI.from_address(target.address))
+    context, _tree, _reader = extraction_context(tmp_path, documents=(target,))
+    with pytest.raises(MemoryExtractionError, match="not exposed"):
+        asyncio.run(context.execute(read_decision(uri), iteration=1))
+    asyncio.run(context.execute(list_decision("memory://preferences"), iteration=1))
+    observation = asyncio.run(context.execute(read_decision(uri), iteration=2))
+    assert observation.added_uris == (uri,)
+
+
+def test_read_is_truncated_to_configured_reads_per_action(tmp_path: Path) -> None:
+    items = tuple(preference(f"主题-{index}") for index in range(3))
+    uris = tuple(str(MemoryURI.from_address(item.address)) for item in items)
+    context, _tree, _reader = extraction_context(
+        tmp_path,
+        documents=items,
+        listing=tuple(MemoryURI.parse(uri) for uri in uris),
+        config=MemoryExtractionConfig(max_reads_per_action=2),
+    )
+    observation = asyncio.run(context.execute(read_decision(*uris), iteration=1))
+    assert observation.inputs == uris[:2]
+    assert len(context.snapshots.snapshots) == 2
+
+
+def test_listed_uri_that_disappeared_reads_as_missing_without_page_id(tmp_path: Path) -> None:
+    uri = MemoryURI.from_address(MemoryAddress.preference("已消失"))
+    context, _tree, _reader = extraction_context(tmp_path, listing=(uri,))
+    observation = asyncio.run(context.execute(read_decision(str(uri)), iteration=1))
+    assert observation.added_uris == (str(uri),)
+    assert context.page_ids.page_id_for(uri) is None
 
 
 def test_read_of_prefetched_document_is_cached(tmp_path: Path) -> None:
     target = document(MemoryKind.PREFERENCE)
     uri = MemoryURI.from_address(target.address)
-    context, _tree, _reader, _search = extraction_context(
+    context, _tree, _reader = extraction_context(
         tmp_path,
         documents=(target,),
         selected=(uri,),
     )
-    observation = asyncio.run(
-        context.execute(retrieval_decision(MemoryRetrievalAction.READ, value=str(uri)), iteration=3)
-    )
+    observation = asyncio.run(context.execute(read_decision(str(uri)), iteration=3))
 
     assert observation.cached is True
     assert observation.added_uris == ()
     assert observation.result_uris == (str(uri),)
 
 
+def test_read_beyond_item_limit_fails_as_capacity(tmp_path: Path) -> None:
+    items = tuple(preference(f"主题-{index}") for index in range(2))
+    uris = tuple(MemoryURI.from_address(item.address) for item in items)
+    context, _tree, _reader = extraction_context(
+        tmp_path,
+        documents=items,
+        listing=uris,
+        config=MemoryExtractionConfig(max_old_memory_items=1),
+        reader_config=SnapshotReadConfig(max_items=2, max_item_bytes=256_000, max_total_bytes=4_000_000),
+    )
+    with pytest.raises(MemoryExtractionCapacityError, match="item limit"):
+        asyncio.run(context.execute(read_decision(*(str(uri) for uri in uris)), iteration=1))
+
+
 def test_consistent_one_hop_relation_is_eagerly_read_and_exposed(tmp_path: Path) -> None:
     source, target, _relation = related_documents()
     source_uri = MemoryURI.from_address(source.address)
     target_uri = MemoryURI.from_address(target.address)
-    context, _tree, _reader, _search = extraction_context(
+    context, _tree, _reader = extraction_context(
         tmp_path,
         documents=(source, target),
         selected=(source_uri,),
@@ -410,6 +334,17 @@ def test_consistent_one_hop_relation_is_eagerly_read_and_exposed(tmp_path: Path)
     )
     assert set(context.allowed_read_uris) == {str(source_uri), str(target_uri)}
     assert context.page_ids.page_ids() == frozenset({1, 2})
+
+
+def test_read_expands_one_hop_relations_of_newly_read_document(tmp_path: Path) -> None:
+    source, target, _relation = related_documents()
+    source_uri = MemoryURI.from_address(source.address)
+    target_uri = MemoryURI.from_address(target.address)
+    context, _tree, _reader = extraction_context(tmp_path, documents=(source, target), listing=(source_uri,))
+    observation = asyncio.run(context.execute(read_decision(str(source_uri)), iteration=1))
+
+    assert observation.relation_expanded_uris == (str(target_uri),)
+    assert {snapshot.identity for snapshot in context.snapshots.snapshots} == {str(source_uri), str(target_uri)}
 
 
 def test_inconsistent_one_hop_relation_aborts_context_construction(tmp_path: Path) -> None:
@@ -464,7 +399,7 @@ def test_relation_expansion_respects_per_seed_limit(tmp_path: Path) -> None:
         )
         for item, link in zip(targets, links, strict=True)
     )
-    context, _tree, _reader, _search = extraction_context(
+    context, _tree, _reader = extraction_context(
         tmp_path,
         documents=(source, *linked_targets),
         selected=(source_uri,),
@@ -479,61 +414,21 @@ def test_relation_expansion_respects_per_seed_limit(tmp_path: Path) -> None:
     assert str(source_uri) in identities
 
 
-def test_context_detects_memory_revision_change_during_search(tmp_path: Path) -> None:
-    target = document(MemoryKind.PREFERENCE)
-    uri = MemoryURI.from_address(target.address)
-    initial_hit = MemorySearchHit(uri, 0.5)
-    search = RecordingSearch((MemorySearchHit(uri, 0.9),))
-    context, tree, _reader, _search = extraction_context(
-        tmp_path,
-        documents=(target,),
-        selected=(uri,),
-        hits=(initial_hit,),
-        search=search,
-    )
-    updated = codec().build(
-        target.kind,
-        target.fields,
-        metadata=target.metadata.next_revision(target.metadata.updated_at),
-    )
-    tree.write(updated)
-
-    with pytest.raises(MemoryExtractionError, match="changed during extraction"):
-        asyncio.run(
-            context.execute(
-                retrieval_decision(MemoryRetrievalAction.SEARCH, value="不同查询"),
-                iteration=1,
-            )
-        )
-
-
-@pytest.mark.parametrize("query", ["", "   ", "x" * 6])
-def test_search_query_is_non_empty_and_bounded(tmp_path: Path, query: str) -> None:
-    context, _tree, _reader, _search = extraction_context(
-        tmp_path,
-        config=MemoryExtractionConfig(max_query_chars=5),
-    )
-    with pytest.raises(MemoryExtractionError, match="query"):
-        context._query(query)
-
-
 def test_observation_size_limit_is_enforced_after_action(tmp_path: Path) -> None:
     target = document(MemoryKind.PREFERENCE)
-    uri = MemoryURI.from_address(target.address)
-    context, _tree, _reader, _search = extraction_context(
+    context, _tree, _reader = extraction_context(
         tmp_path,
         documents=(target,),
-        search=RecordingSearch((MemorySearchHit(uri, 0.8),)),
         config=MemoryExtractionConfig(max_observation_chars=1),
     )
     with pytest.raises(MemoryExtractionError, match="observation exceeds"):
-        asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH), iteration=1))
+        asyncio.run(context.execute(list_decision("memory://preferences"), iteration=1))
 
 
 def test_snapshots_and_page_ids_are_defensive_views(tmp_path: Path) -> None:
     target = document(MemoryKind.PREFERENCE)
     uri = MemoryURI.from_address(target.address)
-    context, _tree, _reader, _search = extraction_context(
+    context, _tree, _reader = extraction_context(
         tmp_path,
         documents=(target,),
         selected=(uri,),
@@ -546,7 +441,7 @@ def test_snapshots_and_page_ids_are_defensive_views(tmp_path: Path) -> None:
 
 
 def test_existing_snapshot_with_mismatched_document_identity_is_rejected(tmp_path: Path) -> None:
-    context, _tree, _reader, _search = extraction_context(tmp_path)
+    context, _tree, _reader = extraction_context(tmp_path)
     target = document(MemoryKind.PREFERENCE)
     wrong = VersionedSnapshot(
         identity=str(MemoryURI.from_address(MemoryAddress.preference("错误身份"))),
@@ -557,20 +452,41 @@ def test_existing_snapshot_with_mismatched_document_identity_is_rejected(tmp_pat
         size_bytes=1,
     )
     with pytest.raises(MemoryExtractionError, match="identity does not match"):
-        context._ingest(SnapshotBatch((wrong,), 1))
+        context.ingest(SnapshotBatch((wrong,), 1))
 
 
 def test_reingesting_same_snapshot_is_idempotent_but_changed_snapshot_is_rejected(tmp_path: Path) -> None:
     target = document(MemoryKind.PREFERENCE)
     uri = MemoryURI.from_address(target.address)
-    context, _tree, reader, _search = extraction_context(
+    context, _tree, reader = extraction_context(
         tmp_path,
         documents=(target,),
         selected=(uri,),
     )
     original = reader.read(uri)
-    assert context._ingest(SnapshotBatch((original,), original.size_bytes)) == ()
+    assert context.ingest(SnapshotBatch((original,), original.size_bytes)) == ()
 
     changed = replace(original, source_digest="f" * 64)
     with pytest.raises(MemoryExtractionError, match="changed during extraction"):
-        context._ingest(SnapshotBatch((changed,), changed.size_bytes))
+        context.ingest(SnapshotBatch((changed,), changed.size_bytes))
+
+
+def test_names_cut_from_the_listing_by_its_token_budget_are_not_readable_until_listed(tmp_path: Path) -> None:
+    """名字清单按 ``max_listing_tokens`` 截断：没给模型看到的地址不算暴露过，列过目录之后才能读。"""
+
+    shown, cut = preference("看得到"), preference("被截掉的偏好主题名字很长" * 4)
+    uris = tuple(MemoryURI.from_address(item.address) for item in (shown, cut))
+    context, _tree, _reader = extraction_context(
+        tmp_path,
+        documents=(shown, cut),
+        listing=uris,
+        config=MemoryExtractionConfig(max_listing_tokens=len(str(uris[0])) // 2 + 4),
+    )
+
+    assert [entry.uri for entry in context.shown_listing] == [uris[0]]
+    assert context.omitted_listing == 1
+    with pytest.raises(MemoryExtractionError, match="not exposed"):
+        asyncio.run(context.execute(read_decision(str(uris[1])), iteration=1))
+    asyncio.run(context.execute(list_decision("memory://preferences"), iteration=1))
+    observation = asyncio.run(context.execute(read_decision(str(uris[1])), iteration=2))
+    assert observation.added_uris == (str(uris[1]),)

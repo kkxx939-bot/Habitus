@@ -1374,6 +1374,7 @@ def test_model_unavailable_is_classified_only_through_the_shared_group() -> None
         "behavior/fusion/lanes/session/service.py",
         "behavior/kinds/calls.py",
         "memory/conversation/compaction_refusals.py",
+        "memory/retrieval/service.py",
         "memory/workflow/failure.py",
     ]
 

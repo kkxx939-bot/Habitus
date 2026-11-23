@@ -7,11 +7,9 @@ from dataclasses import dataclass
 
 from habitus.foundation.observability import NullObserver, Observer, bind_observation_context, observe_operation
 from habitus.memory.conversation import ConversationMessageJournal
-from habitus.memory.conversation.indexing import PersistentConversationSummaryVectorIndex
 from habitus.memory.conversation.summary import ConversationSummaryService
 from habitus.memory.editor import MemoryEditor
 from habitus.memory.editor.transaction import MemoryCommitResult
-from habitus.memory.indexing import PersistentMemoryVectorIndex
 from habitus.memory.semantic import MemorySemanticRefresher
 from habitus.memory.workflow.completion import MemoryCommittedJobFinalizer, MemoryRecallStateCleaner
 from habitus.memory.workflow.execution import MemoryJobExecutor
@@ -54,8 +52,6 @@ class MemoryJobRunResult:
     commit: MemoryCommitResult | None
     recovered: bool = False
     semantic_refreshed: bool = False
-    vector_indexed: bool = False
-    summary_indexed: bool = False
     journal_cleaned: bool = True
     summary_generated: bool = False
     change_receipt: MemoryChangeReceipt | None = None
@@ -70,9 +66,7 @@ class MemoryJobRunner:
         conversations: ConversationMessageJournal,
         editor: MemoryEditor,
         semantic_refresher: MemorySemanticRefresher,
-        vector_index: PersistentMemoryVectorIndex,
         summary_service: ConversationSummaryService,
-        summary_vector_index: PersistentConversationSummaryVectorIndex,
         change_receipts: MemoryChangeReceiptStore,
         recall_state_cleaner: MemoryRecallStateCleaner,
         *,
@@ -101,10 +95,8 @@ class MemoryJobRunner:
             store,
             conversations,
             summary_service,
-            summary_vector_index,
             change_receipts,
             semantic_refresher,
-            vector_index,
             self.transaction_recovery,
             recall_state_cleaner,
             observer=self.observer,
@@ -152,8 +144,6 @@ class MemoryJobRunner:
                         commit=None,
                         recovered=True,
                         semantic_refreshed=True,
-                        vector_indexed=completion.vector_indexed,
-                        summary_indexed=completion.summary_indexed,
                         journal_cleaned=completion.journal_cleaned,
                         summary_generated=completion.summary_generated,
                         change_receipt=completion.change_receipt,
@@ -169,8 +159,6 @@ class MemoryJobRunner:
                     job=completion.job,
                     commit=execution.commit,
                     semantic_refreshed=True,
-                    vector_indexed=completion.vector_indexed,
-                    summary_indexed=completion.summary_indexed,
                     journal_cleaned=completion.journal_cleaned,
                     summary_generated=completion.summary_generated,
                     change_receipt=completion.change_receipt,
@@ -190,7 +178,7 @@ class MemoryJobRunner:
         """这一段的输入有问题，跳过（裁定 108）：长期记忆不动，任务进 SKIPPED，后面的序号照常往下走。"""
 
         job = await self.committed_finalizer.finalize_skipped(lease, reason)
-        return MemoryJobRunResult(job=job, commit=None, summary_indexed=True, journal_cleaned=False)
+        return MemoryJobRunResult(job=job, commit=None, journal_cleaned=False)
 
     def _record_failure(self, lease: MemoryJobLease, exc: Exception, source: MemoryChangeSource) -> MemoryJob:
         kind = memory_job_failure_kind(exc)

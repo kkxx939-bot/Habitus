@@ -9,10 +9,6 @@ storage:
 credentials:
   chat:
     api_key: ""
-  embedding:
-    api_key: ""
-  dashscope:
-    api_key: ""
 
 http:
   host: 127.0.0.1
@@ -21,7 +17,7 @@ http:
   remember_parts_max_bytes: 67108864
   remember_parts_ttl_seconds: 600.0
 
-# 调模型服务（chat、embedding、rerank）时的出站网络。整组可省略，省略等于下面这组默认值。
+# 调模型服务（chat）时的出站网络。整组可省略，省略等于下面这组默认值。
 # 在公司网络里用得上：代理做 TLS 解密时，它的根证书通常已经装在系统证书库里，默认的 system 不用改就能通。
 network:
   # system：读操作系统证书库（Windows 证书存储、macOS 钥匙串、Linux /etc/ssl）；
@@ -92,60 +88,6 @@ models:
     structured_output_mode: json_object
     reasoning: false
 
-  # Embedding 不预置任何厂商：用 OpenAI 兼容协议（POST {base_url}/embeddings），OpenAI、阿里云百炼、硅基流动，
-  # 以及自己部署的 vLLM、TEI、Ollama 都靠这一段接入。下面 model、base_url 是占位值（带 example.），dimension 也要
-  # 改成所选模型的实际输出维度；不填 doctor 与启动前检查会直接报"还是占位值"。本机服务不要密钥时把 credential_ref 置空。
-  embedding:
-    route:
-      provider: custom
-      adapter: openai_compatible_embedding
-      model: example.embedding-model
-      base_url: https://embedding.example.com/v1
-      credential_ref: embedding
-      timeout_seconds: 30.0
-      max_retries: 2
-      retry_base_delay_seconds: 0.5
-      retry_max_delay_seconds: 30.0
-      max_concurrent: 16
-      max_response_bytes: 8388608
-      extra_headers: {}
-      extra_body: {}
-    # 服务返回的维度必须与它相同，不截取；服务支持 dimensions 参数时可在 extra_body 里写 dimensions
-    dimension: 1024
-    max_batch_size: 32
-    # 按拼上前缀之后的长度算
-    max_input_chars: 16000
-    query_parameters: {}
-    document_parameters: {}
-    # 拼在文本前面区分查询和文档，例如 E5 用 "query: " / "passage: "，BGE、Qwen3-Embedding 用一句指令；
-    # document_prefix 改了会让已有向量索引全量重建，query_prefix 不会。
-    # 注意：max_input_chars 按拼上前缀之后算，所以填了非空前缀，要把 memory.vector_index 与
-    # conversation.summary_vector_index 的 max_record_chars（以及查询类上限）各留出至少前缀的长度，或把
-    # max_input_chars 相应调大，否则配置加载会报 max_record_chars 超限。
-    query_prefix: ""
-    document_prefix: ""
-
-  rerank:
-    route:
-      provider: aliyun
-      adapter: openai_compatible_rerank
-      model: qwen3-rerank
-      # 替换为创建 API Key 时显示的 API Host；华北 2（北京）需填真实 WorkspaceId。
-      base_url: https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-api/v1
-      credential_ref: dashscope
-      timeout_seconds: 30.0
-      max_retries: 2
-      retry_base_delay_seconds: 0.5
-      retry_max_delay_seconds: 30.0
-      max_concurrent: 8
-      max_response_bytes: 8388608
-      extra_headers: {}
-      extra_body:
-        instruct: Given a web search query, retrieve relevant passages that answer the query.
-    max_documents: 100
-    max_query_chars: 8000
-    max_document_chars: 16000
-
   structured_output:
     allow_json_repair: true
     validation_retries: 1
@@ -156,7 +98,7 @@ models:
   # - 要人处理（密钥错、没权限、额度用完、模型或地址不存在、不支持、网络设置）：不重试，熔断直接打开，降到试探的节奏，
   #   健康检查显示原因；额度恢复、权限开通这类服务那边的恢复，下一次试探成功就自己接上；改了本文件要重启服务。
   # - 这一条输入有问题（请求不合法、太长、内容安全）：同一份输入不重发、不计入熔断；长期记忆跳过这一段。
-  # 对话、向量、重排各一个熔断，共用这组数：连着 breaker_failure_threshold 次调用失败（每次已按路由重试过）打开，
+  # 对话能力（唯一的模型能力）带一个熔断，用这组数：连着 breaker_failure_threshold 次调用失败（每次已按路由重试过）打开，
   # breaker_reset_base_seconds 后放一个请求试探，试探失败等待加倍、封顶 breaker_reset_max_seconds。
   call_failures:
     rate_limit_retry_base_delay_seconds: 5.0
@@ -213,40 +155,11 @@ conversation:
     max_file_bytes: 2097152
     max_files_per_conversation: 10000
 
-  # 默认是进程内的本地向量库：存储根下 vector/{collection}.sqlite3，标准库 SQLite 存记录、numpy 算余弦，不要账号。
-  # local_sqlite 不走网络：base_url、credential_ref、extra_headers 必须为空，timeout/retry/并发/回包上限这几项它不用；
-  # collection 就是文件名 vector/{collection}.sqlite3，只收小写（macOS / Windows 的文件系统不分大小写）。
-  # options.busy_timeout_seconds：另一连接正持有写锁时最多等几秒，等不到算"向量库忙"；磁盘满、IO 错误同样算忙，记忆 Job 按等依赖恢复处理。
-  summary_vector_store:
-    route:
-      provider: local
-      adapter: local_sqlite
-      base_url: ""
-      credential_ref: ""
-      timeout_seconds: 30.0
-      max_retries: 2
-      retry_base_delay_seconds: 0.5
-      retry_max_delay_seconds: 30.0
-      max_concurrent: 16
-      max_response_bytes: 8388608
-      extra_headers: {}
-    collection: conversation_summaries
-    options:
-      busy_timeout_seconds: 5.0
-
-  summary_vector_index:
+  # 检索按日期或关键词找会话摘要时，一次读全部当前有效的摘要（没有索引）：这里限制读多少份、每份给模型多少字。
+  summary_reader:
     max_records: 100000
     max_records_per_conversation: 30000
-    max_search_hits: 10000
     max_record_chars: 16000
-    embedding_batch_size: 128
-    stale_retries: 2
-    candidate_multiplier: 4
-    min_vector_candidates: 20
-    max_rerank_candidates: 50
-    max_rerank_document_chars: 12000
-    vector_score_threshold: -1.0
-    rerank_score_threshold: 0.0
 
   lifecycle:
     max_conversations_per_cycle: 100
@@ -288,37 +201,40 @@ memory:
     max_item_bytes: 256000
     max_total_bytes: 4000000
 
+  # 助手查记忆：清单（不调模型）→ 挑（调一次）→ 找（读卡片、按日期列与按关键词搜每一轮的记录、找会话摘要）→ 判（调一次），
+  # 不够最多再走一轮（max_rounds）。整次查询含"被用到"的记账不超过 time_limit_seconds（要小于插件单个请求的
+  # 超时 15 秒），到点交出已找到的；其中留 accounting_reserve_seconds 给记账，拿不到锁就跳过这一次。
+  # max_record_days：每一轮的记录没有索引、按天逐天读，一次最多读这么多天（给了日期范围就取范围里最晚的这么多天）。
   search_service:
     default_limit: 10
     max_limit: 20
-    candidate_multiplier: 4
     max_query_chars: 5000
-    max_planned_queries: 4
-    max_planned_query_chars: 2000
-    max_query_intent_chars: 500
+    time_limit_seconds: 12.0
+    accounting_reserve_seconds: 1.0
+    max_rounds: 2
+    catalog_retries: 3
+    catalog_retry_delay_seconds: 0.2
+    max_catalog_chars: 40000
+    max_reads_per_round: 8
+    max_unlisted_scan: 1000
+    max_keywords: 6
+    max_keyword_chars: 50
+    max_record_days: 92
+    max_record_list: 80
+    max_record_hits: 20
+    max_summary_hits: 5
+    max_material_chars: 120000
+    max_prompt_chars: 200000
+    step_max_output_tokens: 1000
     max_summary_context_chars: 30000
     max_recent_messages: 5
     max_recent_message_chars: 4000
-    max_target_context_chars: 8000
-    max_planner_context_chars: 70000
-    planner_max_output_tokens: 2000
-    max_target_roots: 16
     max_relation_neighbors_per_match: 5
     max_relation_neighbors_total: 32
     max_context_chars: 120000
-    retrieval_grader_max_context_chars: 120000
-    retrieval_grader_max_output_tokens: 1000
-    retrieval_grader_max_reason_chars: 1000
-    retrieval_grader_max_missing_items: 3
-    retrieval_grader_max_missing_item_chars: 1000
-    summary_fallback_enabled: true
-    summary_fallback_limit: 3
-    summary_fallback_max_query_chars: 2000
-    summary_fallback_max_context_chars: 24000
 
   recall_lifecycle:
     enabled: true
-    ranking_alpha: 0.2
     cold2_threshold: 0.08
     cold1_threshold: 0.2
     hot_threshold: 0.6
@@ -331,9 +247,6 @@ memory:
     entity_retire_days: 270.0
     tool_retire_days: 180.0
     retire_candidate_grace_days: 30.0
-    cold2_probe_interval_days: 30.0
-    cold2_probe_limit: 2
-    max_cold2_probes_per_search: 1
     sqlite_timeout_seconds: 5.0
     max_batch_size: 1000
     max_useful_recall_count: 1000000000
@@ -348,65 +261,23 @@ memory:
     max_compactions_per_cycle: 4
     max_retirements_per_cycle: 4
 
+  # 提取记忆时查旧卡片：档案和本段真实工具名对应的工具卡片固定直读；偏好主题与实体名字列成清单放进第一轮输入。
   editor_retrieval:
-    max_query_chars: 5000
-    max_prompt_chars: 1000
-    max_completion_chars: 500
-    max_tool_message_chars: 500
-    search_limit: 5
     max_tool_uris: 32
+    max_listing_entries: 2000
 
-  # 与 conversation.summary_vector_store 同一个本地后端，Collection 不同（各一个 SQLite 文件）。
-  vector_store:
-    route:
-      provider: local
-      adapter: local_sqlite
-      base_url: ""
-      credential_ref: ""
-      timeout_seconds: 30.0
-      max_retries: 2
-      retry_base_delay_seconds: 0.5
-      retry_max_delay_seconds: 30.0
-      max_concurrent: 16
-      max_response_bytes: 8388608
-      extra_headers: {}
-    collection: memory
-    options:
-      busy_timeout_seconds: 5.0
-
-  vector_index:
-    max_records: 10000
-    max_direct_entries: 1000
-    max_directories: 2000
-    max_search_hits: 10000
-    max_record_chars: 16000
-    embedding_batch_size: 128
-    stale_retries: 2
-    lock_ttl_seconds: 30
-    lock_wait_timeout_seconds: 30.0
-    lock_retry_delay_seconds: 0.02
-
-  semantic_search:
-    mode: hierarchical
-    candidate_multiplier: 4
-    min_vector_candidates: 20
-    directory_candidates: 20
-    child_candidates: 32
-    max_directory_expansions: 128
-    max_rerank_candidates: 50
-    max_rerank_document_chars: 12000
-    vector_score_threshold: 0.0
-    rerank_score_threshold: 0.2
-    score_propagation_alpha: 0.8
-    rerank_hierarchy: false
-
+  # 只读动作有"列目录""搜内容"（按词在卡片字段文字里字面查找，至多返回 max_search_results 张，搜到的可以直接读）和"读文件"
+  # （一次读至多 max_reads_per_action 个地址）。轮数 3 按逻辑下限定：列目录或搜内容一次、读一次、结束。
+  # 名字清单占输入的固定预算 max_listing_tokens；它与 max_old_memory_tokens 相加仍是原来旧记忆的 28000，留给对话与提示词的
+  # 28000 不变（一段满 12000 token 的对话加上前面各段的摘要要放得下）。
   extraction:
     max_retrieval_iterations: 3
-    additional_search_limit: 5
-    max_query_chars: 5000
+    max_reads_per_action: 8
+    max_search_results: 8
+    max_listing_tokens: 8000
     max_old_memory_items: 64
     max_old_memory_bytes: 4000000
-    max_old_memory_tokens: 28000
+    max_old_memory_tokens: 20000
     max_context_chars: 1000000
     max_input_tokens: 56000
     max_observation_chars: 12000
@@ -422,16 +293,14 @@ memory:
     max_record_bytes: 33554432
     max_records: 1000
 
+  # 目录概览按模板拼出，不调模型：每张卡片一行（名字、一小段说明、更新时间、版本）；一个目录超出
+  # max_direct_entries 条或 max_overview_chars 字时只列最新的，末尾写明还有多少张没列出。
   semantic:
     max_direct_entries: 256
     max_rebuild_directories: 10000
-    max_prompt_chars: 120000
-    max_entry_summary_chars: 1000
-    max_directory_summary_chars: 2000
     max_overview_chars: 64000
     max_abstract_chars: 800
     lock_ttl_seconds: 120
-    stale_retries: 1
 
 workflow:
   jobs:

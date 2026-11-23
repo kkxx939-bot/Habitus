@@ -27,13 +27,9 @@ from habitus.benchmark.protocol import (
     OPENVIKING_PUBLIC_RETRIEVAL_LIMIT,
     BenchmarkJudgePolicy,
 )
-from habitus.benchmark.recovery_boundary import RecoveryBoundaryBenchmark
-from habitus.benchmark.reliability import RecoveryBenchmark
 from habitus.benchmark.report import build_report
 from habitus.benchmark.runner import BenchmarkRunner
 from habitus.benchmark.runtime_boundary import RuntimeBoundaryBenchmark
-from habitus.benchmark.vector import VectorBenchmarkRunner, load_vector_dataset
-from habitus.benchmark.vector_boundary import VectorBoundaryBenchmark
 from habitus.config import HabitusConfig
 
 
@@ -99,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     boundary_runtime = commands.add_parser("boundary-runtime", help="测量 Runtime、读写混合和 Job 队列边界")
     _dataset_arguments(boundary_runtime)
-    _boundary_run_arguments(boundary_runtime, vector_capacity=False)
+    _boundary_run_arguments(boundary_runtime)
     boundary_runtime.add_argument("--config", type=Path, required=True)
     boundary_runtime.add_argument("--work", type=Path, required=True)
     boundary_runtime.add_argument("--top-k", type=int, default=10)
@@ -107,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     boundary_http = commands.add_parser("boundary-http", help="从真实远程调用方测量 HTTP 服务边界")
     _dataset_arguments(boundary_http)
-    _boundary_run_arguments(boundary_http, conversation_scale=False, vector_capacity=False)
+    _boundary_run_arguments(boundary_http, conversation_scale=False)
     boundary_http.add_argument("--server-url", required=True)
     boundary_http.add_argument(
         "--server-identity",
@@ -120,21 +116,10 @@ def build_parser() -> argparse.ArgumentParser:
     boundary_http.add_argument("--request-timeout", type=float, default=120.0)
     boundary_http.add_argument("--drain-timeout", type=float, default=1_800.0)
 
-    boundary_vector = commands.add_parser("boundary-vector", help="测量 VectorStore 规模与并发边界")
-    _boundary_run_arguments(boundary_vector, conversation_scale=False, write_fraction=False)
-    boundary_vector.add_argument("--input", type=Path, required=True, help="habitus_vector_benchmark_v1 JSON")
-    boundary_vector.add_argument("--config", type=Path, required=True)
-    boundary_vector.add_argument("--work", type=Path, required=True)
-    boundary_vector.add_argument("--top-k", type=int, default=10)
-    boundary_vector.add_argument("--update-fraction", type=float, default=0.05)
-    boundary_vector.add_argument("--delete-fraction", type=float, default=0.05)
-    boundary_vector.add_argument("--maximum-documents", type=int)
-
     boundary_lifecycle = commands.add_parser("boundary-lifecycle", help="测量正式 Conversation 生命周期边界")
     _dataset_arguments(boundary_lifecycle)
     _boundary_run_arguments(
         boundary_lifecycle,
-        vector_capacity=False,
         concurrency=False,
         write_fraction=False,
         timing=False,
@@ -143,20 +128,6 @@ def build_parser() -> argparse.ArgumentParser:
     boundary_lifecycle.add_argument("--work", type=Path, required=True)
     boundary_lifecycle.add_argument("--age-days", type=int, default=400)
     boundary_lifecycle.add_argument("--max-cycles", type=int, default=10_000)
-
-    boundary_recovery = commands.add_parser("boundary-recovery", help="测量连续故障与 Job 重试耗尽边界")
-    _dataset_arguments(boundary_recovery)
-    _boundary_run_arguments(
-        boundary_recovery,
-        conversation_scale=False,
-        vector_capacity=False,
-        concurrency=False,
-        write_fraction=False,
-        timing=False,
-    )
-    boundary_recovery.add_argument("--config", type=Path, required=True)
-    boundary_recovery.add_argument("--work", type=Path, required=True)
-    boundary_recovery.add_argument("--fault-count", type=int, action="append")
 
     boundary_aggregate = commands.add_parser("boundary-aggregate", help="聚合不同进程的独立边界结果")
     boundary_aggregate.add_argument("inputs", nargs="+", type=Path)
@@ -183,22 +154,6 @@ def build_parser() -> argparse.ArgumentParser:
     lifecycle.add_argument("--max-cycles", type=int, default=100)
     lifecycle.add_argument("--stage-source-count", type=int, default=2)
 
-    recovery = commands.add_parser("recovery", help="注入一次瞬态向量故障并测量耐久恢复")
-    _dataset_arguments(recovery)
-    recovery.add_argument("--config", type=Path, required=True)
-    recovery.add_argument("--output", type=Path, required=True)
-    recovery.add_argument("--work", type=Path, required=True)
-
-    vector = commands.add_parser("vector", help="执行真实 VectorStore 质量与性能基准")
-    vector.add_argument("--input", type=Path, required=True, help="habitus_vector_benchmark_v1 JSON")
-    vector.add_argument("--config", type=Path, required=True)
-    vector.add_argument("--output", type=Path, required=True)
-    vector.add_argument("--work", type=Path, required=True)
-    vector.add_argument("--top-k", type=int, default=10)
-    vector.add_argument("--concurrency", type=int, default=8)
-    vector.add_argument("--repeats", type=int, default=1)
-    vector.add_argument("--update-fraction", type=float, default=0.05)
-    vector.add_argument("--delete-fraction", type=float, default=0.05)
     return parser
 
 
@@ -222,7 +177,6 @@ def _boundary_profile_arguments(
     parser: argparse.ArgumentParser,
     *,
     conversation_scale: bool = True,
-    vector_capacity: bool = True,
     concurrency: bool = True,
     write_fraction: bool = True,
     timing: bool = True,
@@ -234,8 +188,6 @@ def _boundary_profile_arguments(
     )
     if conversation_scale:
         parser.add_argument("--conversation-scale", type=int, action="append")
-    if vector_capacity:
-        parser.add_argument("--vector-capacity-fraction", type=float, action="append")
     if concurrency:
         parser.add_argument("--concurrency", type=int, action="append")
     if write_fraction:
@@ -250,7 +202,6 @@ def _boundary_run_arguments(
     parser: argparse.ArgumentParser,
     *,
     conversation_scale: bool = True,
-    vector_capacity: bool = True,
     concurrency: bool = True,
     write_fraction: bool = True,
     timing: bool = True,
@@ -258,7 +209,6 @@ def _boundary_run_arguments(
     _boundary_profile_arguments(
         parser,
         conversation_scale=conversation_scale,
-        vector_capacity=vector_capacity,
         concurrency=concurrency,
         write_fraction=write_fraction,
         timing=timing,
@@ -291,40 +241,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
-        if args.command == "boundary-vector":
-            result = asyncio.run(
-                VectorBoundaryBenchmark(
-                    HabitusConfig.from_file(args.config),
-                    load_vector_dataset(args.input),
-                    profile=_boundary_profile(args),
-                    policy=BoundaryPolicy.from_file(args.policy),
-                    output_directory=args.output,
-                    work_directory=args.work,
-                    top_k=args.top_k,
-                    update_fraction=args.update_fraction,
-                    delete_fraction=args.delete_fraction,
-                    maximum_documents=args.maximum_documents,
-                ).run()
-            )
-            print(json.dumps(result["aggregate"], ensure_ascii=False, indent=2))
-            return 0
-        if args.command == "vector":
-            result = asyncio.run(
-                VectorBenchmarkRunner(
-                    HabitusConfig.from_file(args.config),
-                    load_vector_dataset(args.input),
-                    output_directory=args.output,
-                    work_directory=args.work,
-                    top_k=args.top_k,
-                    concurrency=args.concurrency,
-                    repeats=args.repeats,
-                    update_fraction=args.update_fraction,
-                    delete_fraction=args.delete_fraction,
-                ).run()
-            )
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            return 0
-
         dataset = _load_selected_dataset(args)
         if args.command == "boundary-runtime":
             result = asyncio.run(
@@ -370,20 +286,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     work_directory=args.work,
                     age_days=args.age_days,
                     max_cycles=args.max_cycles,
-                ).run()
-            )
-            print(json.dumps(result["aggregate"], ensure_ascii=False, indent=2))
-            return 0
-        if args.command == "boundary-recovery":
-            result = asyncio.run(
-                RecoveryBoundaryBenchmark(
-                    HabitusConfig.from_file(args.config),
-                    dataset,
-                    profile=_boundary_profile(args),
-                    policy=BoundaryPolicy.from_file(args.policy),
-                    output_directory=args.output,
-                    work_directory=args.work,
-                    fault_counts=args.fault_count,
                 ).run()
             )
             print(json.dumps(result["aggregate"], ensure_ascii=False, indent=2))
@@ -436,17 +338,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     age_days=args.age_days,
                     max_cycles=args.max_cycles,
                     stage_source_count=args.stage_source_count,
-                ).run()
-            )
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            return 0
-        if args.command == "recovery":
-            result = asyncio.run(
-                RecoveryBenchmark(
-                    HabitusConfig.from_file(args.config),
-                    dataset,
-                    output_directory=args.output,
-                    work_directory=args.work,
                 ).run()
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -518,7 +409,6 @@ def _load_selected_dataset(args: argparse.Namespace) -> BenchmarkDataset:
 def _boundary_profile(args: argparse.Namespace) -> BoundaryProfile:
     return BoundaryProfile.named(args.profile).override(
         conversation_scales=getattr(args, "conversation_scale", None),
-        vector_capacity_fractions=getattr(args, "vector_capacity_fraction", None),
         concurrency_levels=getattr(args, "concurrency", None),
         write_fractions=getattr(args, "write_fraction", None),
         warmup_seconds=getattr(args, "warmup_seconds", None),

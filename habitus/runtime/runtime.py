@@ -534,25 +534,11 @@ class Runtime:
         """在完整轮次边界封存剩余消息并返回提交任务。"""
 
         self._require_initialized("conversation flush")
-        preview = await asyncio.to_thread(
-            self.components.workflow.enqueuer.preview_retention,
-            address,
-            after_turn=False,
-            flush=True,
-        )
-        boundary_hints = None
-        if preview.should_seal:
-            live = await asyncio.to_thread(
-                self.components.conversation.journal.read_live,
-                address,
-            )
-            boundary_hints = await self.components.conversation.boundary_scorer.score(live)
         jobs, retention = await asyncio.to_thread(
             self.components.workflow.enqueuer.enqueue_ready_segments,
             address,
             after_turn=False,
             flush=True,
-            boundary_hints=boundary_hints,
         )
         result = ConversationMemoryFlushResult(jobs=jobs, retention=retention)
         if result.jobs and self._state is RuntimeState.RUNNING:
@@ -649,26 +635,6 @@ class Runtime:
         self._require_initialized("failed memory job abandonment")
         return await self._failed_jobs.abandon(failed_job, reason=reason)
 
-    async def find_memory(
-        self,
-        query: str,
-        *,
-        target_uris: MemoryURI | str | tuple[MemoryURI | str, ...] | None = None,
-        limit: int | None = None,
-        score_threshold: float | None = None,
-        kinds: tuple[MemoryKind, ...] = (),
-    ) -> MemorySearchResult:
-        """不使用 Conversation 上下文，直接执行 Agent 记忆检索。"""
-
-        self._require_initialized("memory search")
-        return await self.components.memory.search.find(
-            query,
-            target_uris=target_uris,
-            limit=limit,
-            score_threshold=score_threshold,
-            kinds=kinds,
-        )
-
     async def list_memory(self, uri: MemoryURI | str | None = None) -> MemoryListing:
         """浏览记忆树：列一个目录（省略是根）的子目录与文档，只给 ``memory://`` 地址（方案 36 第 2 步）。"""
 
@@ -686,22 +652,13 @@ class Runtime:
         query: str,
         *,
         conversation: ConversationAddress | None = None,
-        target_uris: MemoryURI | str | tuple[MemoryURI | str, ...] | None = None,
         limit: int | None = None,
-        score_threshold: float | None = None,
         kinds: tuple[MemoryKind, ...] = (),
     ) -> MemorySearchResult:
-        """执行 Memory 主召回，并在信息不足时按需补充历史 Summary。"""
+        """查记忆：模型看清单挑、系统找卡片 / 每一轮的记录 / 会话摘要、模型判断够不够；有总时间上限。"""
 
         self._require_initialized("memory search")
-        return await self.components.memory.search.search(
-            query,
-            conversation=conversation,
-            target_uris=target_uris,
-            limit=limit,
-            score_threshold=score_threshold,
-            kinds=kinds,
-        )
+        return await self.components.memory.search.search(query, conversation=conversation, limit=limit, kinds=kinds)
 
     async def maintain_conversation(
         self,
@@ -716,7 +673,7 @@ class Runtime:
         return await self.components.workflow.lifecycle.maintain_once(address, now=now)
 
     async def health(self, *, deep: bool = False) -> RuntimeHealthReport:
-        """返回无副作用健康报告；deep 额外探测模型与两套派生索引。"""
+        """返回无副作用健康报告；deep 额外探测对话模型。"""
 
         return await self._health.report(self._state.value, deep=deep)
 

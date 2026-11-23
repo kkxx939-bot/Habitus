@@ -91,10 +91,7 @@ class LifecycleBoundaryBenchmark:
                 "sample_id": self.sample.sample_id,
                 "policy_mode": "production",
                 "age_days": self.age_days,
-                "provider": self.config.memory.vector_store.provider,
-                "adapter": self.config.memory.vector_store.adapter,
-                "model": self.config.models.embedding.route.model,
-                "dimension": self.config.models.embedding.dimension,
+                "chat_model": self.config.models.chat.route.model,
             }
         )
         return write_boundary_outputs(
@@ -113,13 +110,10 @@ class LifecycleBoundaryBenchmark:
             isolated_config(
                 self.config,
                 storage_root=work,
-                collection_scope=f"lifecycle-boundary:{self.output_directory}:{point_id}",
             )
         )
         runtime.initialize()
         try:
-            await runtime.components.memory.vector_index.rebuild(checkpoint=0)
-            await runtime.components.conversation.summary_vector_index.rebuild(checkpoint=0)
             sessions = _scaled_sessions(self.sample, session_count)
             address = ConversationAddress(
                 f"lifecycle-boundary-{point_id}",

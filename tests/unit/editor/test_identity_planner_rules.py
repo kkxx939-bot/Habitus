@@ -81,7 +81,7 @@ def extraction(old_documents, candidate, proposal, *, relations=()):
                 MemoryRetrievalStatus.IRRELEVANT,
                 MemoryRetrievalAction.FINISH,
                 None,
-                None,
+                (),
                 "上下文已经足够。",
             ),
         ),

@@ -27,11 +27,6 @@ from habitus.pre.conversation import (
 )
 from habitus.runtime import build_runtime
 from tests.helpers import message, summary_content
-from tests.integration.test_memory_job_full_chain import (
-    DurableVectorBackend,
-    EmbeddingProvider,
-    RerankProvider,
-)
 from tests.lock_store import ProcessLocalLockStore
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -66,8 +61,9 @@ class ScriptedChat(OpenAICompatibleChatProvider):
             "memory_retrieval_decision": {
                 "status": "irrelevant",
                 "action": "finish",
-                "query": None,
-                "uri": None,
+                "directory": None,
+                "uris": [],
+                "keywords": [],
                 "reason": "当前没有相关旧记忆。",
             },
             "memory_candidate_batch": {
@@ -81,20 +77,10 @@ class ScriptedChat(OpenAICompatibleChatProvider):
         }
         if name == "memory_candidate_batch":
             self.candidate_payloads.append(json.loads(str(chat_request.messages[-1].content).split("\n", 1)[1]))
-        if name == "memory_directory_overview":
-            snapshot = json.loads(str(chat_request.messages[-1].content).split("目录快照：", 1)[1])
-            payloads[name] = {
-                "directory_summary": "目录保存有来源支持的长期记忆。",
-                "entries": [
-                    {"name": item["name"], "kind": item["kind"], "summary": f"{item['name']} 的稳定摘要。"}
-                    for item in snapshot["entries"]
-                ],
-            }
         return ModelResponse(json.dumps(payloads[name], ensure_ascii=False), self.model, self.provider_name)
 
 
 def runtime_and_chat(tmp_path: Path, *, max_segment_tokens: int | None = None):
-    from habitus.infrastructure.vector import VectorStoreFactory
     from habitus.model_client import ProviderFactory
 
     payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
@@ -103,17 +89,6 @@ def runtime_and_chat(tmp_path: Path, *, max_segment_tokens: int | None = None):
     payload["observability"]["tracing"]["enabled"] = False
     # chat 保持默认路由（deepseek / openai_compatible_chat / 64000 / json_object），只去掉凭据引用（不发网络）
     payload["models"]["chat"]["route"]["credential_ref"] = ""
-    for route in (
-        payload["models"]["embedding"]["route"],
-        payload["models"]["rerank"]["route"],
-        payload["memory"]["vector_store"]["route"],
-        payload["conversation"]["summary_vector_store"]["route"],
-    ):
-        route.update(provider="fake", credential_ref="")
-    payload["models"]["embedding"]["route"]["adapter"] = "fake_embedding"
-    payload["models"]["rerank"]["route"]["adapter"] = "fake_rerank"
-    payload["memory"]["vector_store"]["route"]["adapter"] = "fake_vector"
-    payload["conversation"]["summary_vector_store"]["route"]["adapter"] = "fake_vector"
     if max_segment_tokens is not None:
         payload["conversation"]["segmentation"].update(
             max_segment_tokens=max_segment_tokens, retained_message_token_budget=max_segment_tokens
@@ -129,22 +104,7 @@ def runtime_and_chat(tmp_path: Path, *, max_segment_tokens: int | None = None):
 
     providers = ProviderFactory()
     providers.register_adapter("chat", "openai_compatible_chat", chat_builder)
-    providers.register_adapter(
-        "embedding",
-        "fake_embedding",
-        lambda context: EmbeddingProvider(context.route.provider, context.route.model, context.config.dimension),
-    )
-    providers.register_adapter(
-        "rerank", "fake_rerank", lambda context: RerankProvider(context.route.provider, context.route.model)
-    )
-    vectors = VectorStoreFactory()
-    vectors.register_adapter(
-        "fake_vector",
-        lambda context: DurableVectorBackend(context.config.provider, context.config.collection),
-    )
-    runtime = build_runtime(
-        config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
-    )
+    runtime = build_runtime(config, providers=providers, path_lock=PathLock(ProcessLocalLockStore()))
     runtime.initialize()
     return runtime, chats[0]
 

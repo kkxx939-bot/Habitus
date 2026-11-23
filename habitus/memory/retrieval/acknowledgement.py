@@ -1,19 +1,19 @@
-"""最终 Context 的召回升温确认：只让最终模型可见的主记忆升温，失败或过期目标从 Context 中剔除。"""
+"""最终交出的卡片记一次"被用到"，整个记账限在留出的时间里。
+
+拿不到锁或到点了就跳过这一次记账并写观测，卡片照常交出：插件到点就断，拿到空的比少记一次热度更糟。
+失去版本围栏的卡片（记账时发现内容已经变了）不交出。
+"""
 
 from __future__ import annotations
 
-from dataclasses import replace
+import asyncio
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Protocol
 
 from habitus.memory.document import MemoryDocument
-from habitus.memory.recall import MemoryRecallLifecycle, MemoryRecallLifecycleError, MemoryRecallTarget
-from habitus.memory.retrieval.assembler import MemoryContextAssembler, MemoryContextAssembly
-from habitus.memory.retrieval.model import (
-    MemoryMatchedMemory,
-    MemorySearchDegradation,
-    MemorySearchDegradationStage,
-)
+from habitus.memory.recall import MemoryRecallLifecycle, MemoryRecallTarget
+from habitus.memory.retrieval.model import MemoryMatchedMemory
 from habitus.memory.uri import MemoryURI
 
 
@@ -24,9 +24,12 @@ class MemoryContextUseReceipt(Protocol):
     @property
     def rejected_uris(self) -> tuple[MemoryURI, ...]: ...
 
+    @property
+    def skipped_uris(self) -> tuple[MemoryURI, ...]: ...
+
 
 class MemoryColdProbeExpander(Protocol):
-    """展开活动基线，并在最终 Context 前完成 L2 恢复与使用确认。"""
+    """展开压缩过的卡片的活动基线，并在交出前完成 L2 恢复与使用确认（``MemoryLifecycleManager`` 满足它）。"""
 
     def expand_for_probe(self, document: MemoryDocument) -> MemoryDocument: ...
 
@@ -35,149 +38,53 @@ class MemoryColdProbeExpander(Protocol):
         targets: tuple[MemoryRecallTarget, ...],
         *,
         used_at: datetime | None = None,
+        lock_wait_seconds: float = 5.0,
     ) -> MemoryContextUseReceipt: ...
 
 
-def append_degradation(
-    degradations: list[MemorySearchDegradation],
-    stage: MemorySearchDegradationStage,
-    error: BaseException,
-) -> None:
-    """每个降级阶段最多记录一次，保留首个错误类型。"""
+@dataclass(frozen=True)
+class UseAccounting:
+    """记账之后要交出的卡片，以及这一次没记上账的张数（拿不到锁、到点或出错）。"""
 
-    if any(item.stage is stage for item in degradations):
-        return
-    degradations.append(MemorySearchDegradation(stage, type(error).__name__))
+    memories: tuple[MemoryMatchedMemory, ...]
+    skipped: int
+    error_type: str | None = None
 
 
-class FinalContextAcknowledger(Protocol):
-    """对最终 Context 中的直接命中执行使用确认，返回剔除未确认目标后的重新组装结果。"""
-
-    async def acknowledge(
-        self,
-        assembly: MemoryContextAssembly,
-        *,
-        targets: dict[MemoryURI, MemoryRecallTarget],
-        used_at: datetime,
-        degradations: list[MemorySearchDegradation],
-    ) -> MemoryContextAssembly: ...
-
-
-def _retained_targets(
-    assembly: MemoryContextAssembly,
-    targets: dict[MemoryURI, MemoryRecallTarget],
-) -> tuple[MemoryRecallTarget, ...]:
-    return tuple(targets[memory.uri] for memory in assembly.memories if memory.uri in targets)
-
-
-class RecallLifecycleContextAcknowledger:
-    """没有冷探针展开器时直接写召回生命周期；无法同步恢复的 COLD_2 从最终 Context 排除。"""
-
-    def __init__(self, *, recall_lifecycle: MemoryRecallLifecycle, assembler: MemoryContextAssembler) -> None:
-        self.recall_lifecycle = recall_lifecycle
-        self.assembler = assembler
-
-    async def acknowledge(
-        self,
-        assembly: MemoryContextAssembly,
-        *,
-        targets: dict[MemoryURI, MemoryRecallTarget],
-        used_at: datetime,
-        degradations: list[MemorySearchDegradation],
-    ) -> MemoryContextAssembly:
-        retained_targets = _retained_targets(assembly, targets)
-        if not retained_targets:
-            return assembly
-        cold = {
-            memory.uri
-            for memory in assembly.memories
-            if memory.hit.lifecycle_temperature is not None and memory.hit.lifecycle_temperature.value == "cold_2"
-        }
-        safe_targets = tuple(target for target in retained_targets if target.uri not in cold)
-        try:
-            self.recall_lifecycle.record_use(safe_targets, used_at=used_at)
-        except MemoryRecallLifecycleError as exc:
-            append_degradation(degradations, MemorySearchDegradationStage.RECALL_LIFECYCLE, exc)
-            # 普通详细 L2 仍可安全返回；只把无法同步恢复的 COLD_2 排除。
-        accepted = {target.uri for target in safe_targets}
-        if accepted != {target.uri for target in retained_targets}:
-            append_degradation(
-                degradations,
-                MemorySearchDegradationStage.RECALL_LIFECYCLE,
-                MemoryRecallLifecycleError("COLD_2 final Context requires synchronous L2 restore"),
-            )
-        safe_memories = tuple(memory for memory in assembly.memories if memory.uri in accepted)
-        return self.assembler.assemble(
-            safe_memories,
-            summary_fallbacks=assembly.summary_fallbacks,
-        )
-
-
-class ColdProbeContextAcknowledger:
-    """由冷探针展开器完成 L2 恢复与使用确认；被拒绝或未返回的目标从最终 Context 剔除。"""
-
-    def __init__(self, *, expander: MemoryColdProbeExpander, assembler: MemoryContextAssembler) -> None:
-        self.expander = expander
-        self.assembler = assembler
-
-    async def acknowledge(
-        self,
-        assembly: MemoryContextAssembly,
-        *,
-        targets: dict[MemoryURI, MemoryRecallTarget],
-        used_at: datetime,
-        degradations: list[MemorySearchDegradation],
-    ) -> MemoryContextAssembly:
-        retained_targets = _retained_targets(assembly, targets)
-        if not retained_targets:
-            return assembly
-        try:
-            receipt = await self.expander.record_context_use(retained_targets, used_at=used_at)
-            documents = tuple(receipt.documents)
-            rejected = set(receipt.rejected_uris)
-        except Exception as exc:
-            append_degradation(degradations, MemorySearchDegradationStage.RECALL_LIFECYCLE, exc)
-            return self.assembler.assemble((), summary_fallbacks=assembly.summary_fallbacks)
-        if rejected:
-            append_degradation(
-                degradations,
-                MemorySearchDegradationStage.RECALL_LIFECYCLE,
-                MemoryRecallLifecycleError("one or more final Context memories lost their lifecycle fence"),
-            )
-        by_uri = {MemoryURI.from_address(document.address): document for document in documents}
-        retained: list[MemoryMatchedMemory] = []
-        for memory in assembly.memories:
-            if memory.uri in rejected:
-                continue
-            document = by_uri.get(memory.uri)
-            if document is None:
-                continue
-            retained.append(replace(memory, document=document))
-        return self.assembler.assemble(
-            tuple(retained),
-            summary_fallbacks=assembly.summary_fallbacks,
-        )
-
-
-def final_context_acknowledger(
+async def account_use(
+    memories: tuple[MemoryMatchedMemory, ...],
     *,
+    targets: dict[MemoryURI, MemoryRecallTarget],
+    used_at: datetime,
+    seconds: float,
     recall_lifecycle: MemoryRecallLifecycle,
-    cold_probe_expander: MemoryColdProbeExpander | None,
-    assembler: MemoryContextAssembler,
-) -> FinalContextAcknowledger:
-    """有冷探针展开器时由它确认，否则直接写召回生命周期。"""
+    expander: MemoryColdProbeExpander | None,
+) -> UseAccounting:
+    """在 ``seconds`` 之内给交出的卡片记账；超时或出错时原样交出并报告没记上的张数。"""
 
-    if cold_probe_expander is None:
-        return RecallLifecycleContextAcknowledger(recall_lifecycle=recall_lifecycle, assembler=assembler)
-    return ColdProbeContextAcknowledger(expander=cold_probe_expander, assembler=assembler)
+    owned = tuple(targets[memory.uri] for memory in memories if memory.uri in targets)
+    if not owned:
+        return UseAccounting(memories, 0)
+    try:
+        if expander is None:
+            await asyncio.wait_for(
+                asyncio.to_thread(recall_lifecycle.record_use, owned, used_at=used_at), timeout=seconds
+            )
+            return UseAccounting(memories, 0)
+        receipt = await asyncio.wait_for(
+            expander.record_context_use(owned, used_at=used_at, lock_wait_seconds=max(0.0, seconds * 0.8)),
+            timeout=seconds,
+        )
+    except Exception as exc:
+        return UseAccounting(memories, len(owned), type(exc).__name__)
+    rejected = set(receipt.rejected_uris)
+    confirmed = {MemoryURI.from_address(document.address): document for document in receipt.documents}
+    kept = tuple(
+        replace(memory, document=confirmed.get(memory.uri, memory.document))
+        for memory in memories
+        if memory.uri not in rejected
+    )
+    return UseAccounting(kept, len(receipt.skipped_uris), "TimeoutError" if receipt.skipped_uris else None)
 
 
-__all__ = [
-    "ColdProbeContextAcknowledger",
-    "FinalContextAcknowledger",
-    "MemoryColdProbeExpander",
-    "MemoryContextUseReceipt",
-    "RecallLifecycleContextAcknowledger",
-    "append_degradation",
-    "final_context_acknowledger",
-]
+__all__ = ["MemoryColdProbeExpander", "MemoryContextUseReceipt", "UseAccounting", "account_use"]

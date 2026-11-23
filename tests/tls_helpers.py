@@ -1,7 +1,7 @@
 """W18 测试用的本机 HTTPS 模型服务与 CONNECT 代理（不连外网）。
 
 - ``HTTPSModelServer``：用 ``tests/fixtures/tls`` 里测试 CA 签发的证书，在 ``127.0.0.1`` 上模拟 OpenAI 兼容的
-  chat（``/chat/completions``、``/models``）、OpenAI 兼容 embedding（``/embeddings``）与 rerank（``/reranks``）。
+  chat（``/chat/completions``、``/models``）。
   ``connections`` 数的是服务端 accept 到的 TCP 连接（握手之前就计数），用来证明证书不被信任时只发了一次请求。
 - ``ConnectProxy``：只认 ``CONNECT``。``tunnel`` 模式把 ``model.habitus.test:443`` 接到上面的本机服务（客户端不自己
   解析假主机名，交给代理），``auth`` 模式对每条 CONNECT 回 ``407`` 并带 ``Proxy-Authenticate: NTLM``。
@@ -24,7 +24,6 @@ TEST_CA = TLS_FIXTURES / "ca.pem"
 TEST_SERVER_CERT = TLS_FIXTURES / "server.pem"
 TEST_SERVER_KEY = TLS_FIXTURES / "server.key"
 FAKE_MODEL_HOST = "model.habitus.test"
-EMBEDDING_DIMENSION = 2
 
 
 class _ModelHandler(BaseHTTPRequestHandler):
@@ -47,15 +46,6 @@ class _ModelHandler(BaseHTTPRequestHandler):
         self.server.requests.append(("POST", self.path))
         if self.path.endswith("/chat/completions"):
             self._json({"model": "test-model", "choices": [{"message": {"content": "pong"}, "finish_reason": "stop"}]})
-        elif self.path.endswith("/embeddings"):
-            self._json(
-                {
-                    "object": "list",
-                    "data": [{"object": "embedding", "index": 0, "embedding": [0.6, 0.8][:EMBEDDING_DIMENSION]}],
-                }
-            )
-        elif self.path.endswith("/reranks"):
-            self._json({"results": [{"index": 0, "relevance_score": 0.5}]})
         else:
             self._json({"error": {"message": "not found"}}, status=404)
 
@@ -219,7 +209,6 @@ class ConnectProxy:
 
 
 __all__ = [
-    "EMBEDDING_DIMENSION",
     "FAKE_MODEL_HOST",
     "TEST_CA",
     "TLS_FIXTURES",

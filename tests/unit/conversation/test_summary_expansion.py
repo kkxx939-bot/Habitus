@@ -13,7 +13,7 @@ from habitus.memory.conversation import (
     ConversationSummaryExpansionError,
     ConversationSummaryStore,
 )
-from habitus.memory.conversation.indexing import ConversationSummaryMatch, summary_reference
+from habitus.memory.conversation.summary_reference import ConversationSummaryMatch, summary_reference
 from habitus.pre.conversation import (
     ConversationRangeSummary,
     ConversationRangeSummaryStage,
@@ -60,8 +60,6 @@ def test_range_fallback_expands_verified_child_summaries_without_changing_fronti
         summary_reference(address, parent),
         parent,
         "parent compact summary",
-        0.9,
-        0.9,
     )
 
     expanded = ConversationSummaryExpander(segment_store, range_store).expand(

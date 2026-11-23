@@ -11,7 +11,7 @@ from habitus.memory.conversation import (
     ConversationSummaryRetirementPhase,
     SQLiteConversationSummaryUseStore,
 )
-from habitus.memory.conversation.indexing import summary_reference
+from habitus.memory.conversation.summary_reference import summary_reference
 from habitus.memory.workflow import MemoryChangeReceipt, MemoryChangeReceiptState, MemoryChangeSource
 from habitus.pre.conversation import (
     ConversationBatch,
@@ -50,7 +50,7 @@ def _prepared_retirement(tmp_path: Path, *, committed: bool = False):
     """两份 Range、一份 Archive 覆盖四份 History，并为 Archive 准备好退休清单。"""
 
     use_store = SQLiteConversationSummaryUseStore(tmp_path / "workflow" / "summary-use.sqlite3")
-    manager, calls = lifecycle_manager(tmp_path, compaction_enabled=False, use_store=use_store)
+    manager = lifecycle_manager(tmp_path, compaction_enabled=False, use_store=use_store)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     summaries = []
     for start in (0, 2, 4, 6):
@@ -96,27 +96,30 @@ def _prepared_retirement(tmp_path: Path, *, committed: bool = False):
         expected_use_version=version,
         prepared_at=BASE_TIME + timedelta(days=1),
     )
-    return manager, calls, use_store, address, archive, manifest
+    return manager, use_store, address, archive, manifest
 
 
-def test_history_is_not_released_while_its_memory_workflow_is_uncommitted(tmp_path: Path) -> None:
-    manager, calls, _use_store, address, archive, _manifest = _prepared_retirement(tmp_path)
+def test_claimed_retirement_keeps_history_while_its_memory_workflow_is_uncommitted(tmp_path: Path) -> None:
+    """认领后直接进入释放 History；记忆工作流未提交时停在 RETIRING（已认领），History 原样保留。"""
+
+    manager, use_store, address, archive, _manifest = _prepared_retirement(tmp_path)
     history = manager.journal.list_history(address)
 
     result = asyncio.run(manager.maintain_once(address, now=BASE_TIME + timedelta(days=2)))
 
     assert result.released_history_segment_ids == result.purged_history_segment_ids == ()
     assert result.deleted_archive_summary_ids == ()
-    assert calls == [(address, None, (summary_reference(address, archive).identity,)), (address, None, ())]
     (pending,) = manager.retirement_store.for_address(address)
-    assert pending.phase is ConversationSummaryRetirementPhase.INDEX_REMOVED
+    assert pending.phase is ConversationSummaryRetirementPhase.RETIRING
+    reference = summary_reference(address, archive)
+    assert use_store.read_many((reference,))[0].retiring_at == BASE_TIME + timedelta(days=2)
     assert manager.journal.list_history(address) == history
     assert manager.journal.read_state(address).released_through < archive.start_sequence
     assert manager.range_store.list(address, ConversationRangeSummaryStage.ARCHIVE) == (archive,)
 
 
 def test_retirement_is_abandoned_when_archive_use_changed_after_prepare(tmp_path: Path) -> None:
-    manager, calls, use_store, address, archive, _manifest = _prepared_retirement(tmp_path)
+    manager, use_store, address, archive, _manifest = _prepared_retirement(tmp_path)
     reference = summary_reference(address, archive)
     use_store.record_use((reference,), used_at=BASE_TIME + timedelta(days=1, hours=1))
 
@@ -124,14 +127,13 @@ def test_retirement_is_abandoned_when_archive_use_changed_after_prepare(tmp_path
 
     assert result.compaction.reason == "resumed pending Archive retirement before new compaction"
     assert result.released_history_segment_ids == result.deleted_archive_summary_ids == ()
-    assert calls == [(address, None, ())]
     assert manager.retirement_store.for_address(address) == ()
     assert use_store.read_many((reference,))[0].retiring_at is None
     assert manager.range_store.list(address, ConversationRangeSummaryStage.ARCHIVE) == (archive,)
 
 
 def test_finished_retirement_completes_manifest_then_expired_workflow_records_are_cleaned(tmp_path: Path) -> None:
-    manager, _calls, use_store, address, archive, _manifest = _prepared_retirement(tmp_path, committed=True)
+    manager, use_store, address, archive, _manifest = _prepared_retirement(tmp_path, committed=True)
     reference = summary_reference(address, archive)
 
     retired = asyncio.run(manager.maintain_once(address, now=BASE_TIME + timedelta(days=2)))

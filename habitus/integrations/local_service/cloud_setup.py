@@ -35,23 +35,15 @@ class CloudSetupSelection:
     """云端能力选择；厂商细节只通过已注册 Profile 进入。"""
 
     chat: ProfileSelection
-    embedding: ProfileSelection
-    rerank: ProfileSelection
-    vector: ProfileSelection
 
 
 def default_cloud_selection(
     registry: SetupRegistry | None = None,
 ) -> CloudSetupSelection:
-    """返回发行包默认 Profile 组合：Chat 与 Embedding 都不预置厂商，写出的是待用户填写的占位模板。"""
+    """返回发行包默认 Profile：Chat 不预置厂商，写出的是待用户填写的占位模板。"""
 
     resolved = registry or build_builtin_setup_registry()
-    return CloudSetupSelection(
-        chat=_default_selection(resolved.profile("chat", "chat.openai_compatible.custom")),
-        embedding=_default_selection(resolved.profile("embedding", "embedding.openai_compatible.custom")),
-        rerank=_default_selection(resolved.profile("rerank", "rerank.disabled")),
-        vector=_default_selection(resolved.profile("vector", "vector.local_sqlite")),
-    )
+    return CloudSetupSelection(chat=_default_selection(resolved.profile("chat", "chat.openai_compatible.custom")))
 
 
 def selection_from_mapping(
@@ -63,49 +55,8 @@ def selection_from_mapping(
     config = HabitusConfig.from_mapping(payload)
     resolved = registry or build_builtin_setup_registry()
     models = _mapping(payload, "models")
-    rerank_value = models.get("rerank")
-    rerank_document: Mapping[str, object]
-    if rerank_value is None:
-        rerank_document = {"enabled": False}
-    elif isinstance(rerank_value, Mapping):
-        rerank_document = rerank_value
-    else:
-        raise TypeError("config.models.rerank must be an object or null")
-    vector_document = {
-        "memory": _normalized_route_document(
-            _mapping(_mapping(payload, "memory"), "vector_store"),
-            config.memory.vector_store.route,
-        ),
-        "summary": deepcopy(
-            _normalized_route_document(
-                _mapping(_mapping(payload, "conversation"), "summary_vector_store"),
-                config.conversation.summary_vector_store.route,
-            )
-        ),
-    }
-    chat_document = _normalized_route_document(
-        _mapping(models, "chat"),
-        config.models.chat.route,
-    )
-    embedding_document = _normalized_route_document(
-        _mapping(models, "embedding"),
-        config.models.embedding.route,
-    )
-    if config.models.rerank is not None:
-        rerank_document = _normalized_route_document(
-            rerank_document,
-            config.models.rerank.route,
-        )
-    return CloudSetupSelection(
-        chat=_current_selection(resolved, "chat", chat_document),
-        embedding=_current_selection(
-            resolved,
-            "embedding",
-            embedding_document,
-        ),
-        rerank=_current_selection(resolved, "rerank", rerank_document),
-        vector=_current_selection(resolved, "vector", vector_document),
-    )
+    chat_document = _normalized_route_document(_mapping(models, "chat"), config.models.chat.route)
+    return CloudSetupSelection(chat=_current_selection(resolved, "chat", chat_document))
 
 
 def selection_from_config(
@@ -136,64 +87,7 @@ def apply_cloud_selection(
         _normalized_route_document(_section(models, "chat"), current_config.models.chat.route),
     )
     models["chat"] = chat
-    embedding = _apply_profile(
-        resolved,
-        "embedding",
-        selection.embedding,
-        _normalized_route_document(
-            _section(models, "embedding"),
-            current_config.models.embedding.route,
-        ),
-    )
-    models["embedding"] = embedding
-    rerank_profile = resolved.profile("rerank", selection.rerank.profile_id)
-    if rerank_profile.target_state == "disabled":
-        models["rerank"] = None
-        rerank = None
-    else:
-        existing_rerank = models.get("rerank")
-        base = dict(existing_rerank) if isinstance(existing_rerank, Mapping) else {}
-        if current_config.models.rerank is not None:
-            base = _normalized_route_document(base, current_config.models.rerank.route)
-        rerank = _apply_profile(
-            resolved,
-            "rerank",
-            selection.rerank,
-            base,
-        )
-        models["rerank"] = rerank
-
-    vector_base = {
-        "memory": _normalized_route_document(
-            _section(_section(result, "memory"), "vector_store"),
-            current_config.memory.vector_store.route,
-        ),
-        "summary": deepcopy(
-            _normalized_route_document(
-                _section(_section(result, "conversation"), "summary_vector_store"),
-                current_config.conversation.summary_vector_store.route,
-            )
-        ),
-    }
-    vector = _apply_profile(
-        resolved,
-        "vector",
-        selection.vector,
-        vector_base,
-    )
-    memory_vector = _mapping(vector, "memory")
-    summary_vector = _mapping(vector, "summary")
-    _section(result, "memory")["vector_store"] = deepcopy(dict(memory_vector))
-    _section(result, "conversation")["summary_vector_store"] = deepcopy(dict(summary_vector))
-
-    documents: list[tuple[SetupCapability, Mapping[str, object]]] = [
-        ("chat", chat),
-        ("embedding", embedding),
-        ("vector", memory_vector),
-        ("vector", summary_vector),
-    ]
-    if rerank is not None:
-        documents.append(("rerank", rerank))
+    documents: list[tuple[SetupCapability, Mapping[str, object]]] = [("chat", chat)]
     required = resolved.required_credentials_for_documents(tuple(documents))
     result["credentials"] = _additive_credentials(result, required)
     config = HabitusConfig.from_mapping(result)
@@ -218,7 +112,7 @@ def profile_selection(
 
 
 def _default_selection(profile: SetupProfile) -> ProfileSelection:
-    # 不带字段值：只套 Profile 模板。模板里的占位值（例如 Chat、Embedding 的 example. 模型名与地址）原样写出，
+    # 不带字段值：只套 Profile 模板。模板里的占位值（例如 Chat 的 example. 模型名与地址）原样写出，
     # 由 doctor 与启动前检查报"还是占位值"；交互式向导会逼用户填真实值
     return ProfileSelection(profile_id=profile.profile_id)
 

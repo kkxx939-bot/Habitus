@@ -31,19 +31,12 @@ def test_example_yaml_declares_a_complete_cross_domain_configuration(tmp_path) -
     assert config.workflow_root == config.storage_root / "workflow"
     assert config.foresight_root == config.storage_root / "foresight"
     assert config.memory.recall_lifecycle.enabled
-    assert config.memory.recall_lifecycle.ranking_alpha == 0.2
     assert config.memory.recall_lifecycle.profile_half_life_days == 180.0
     assert config.memory.recall_lifecycle.tool_half_life_days == 30.0
-    assert config.memory.semantic_search.vector_score_threshold == 0.0
-    assert config.memory.semantic_search.rerank_score_threshold == 0.2
     assert config.workflow.jobs.max_attempts == 5
-    assert config.memory.vector_index.lock_ttl_seconds == 30
-    assert config.memory.vector_index.lock_wait_timeout_seconds == 30.0
-    assert config.memory.vector_index.lock_retry_delay_seconds == 0.02
-    assert config.models.rerank is not None
-    assert config.models.rerank.route.provider == "aliyun"
-    assert config.models.rerank.route.adapter == "openai_compatible_rerank"
-    assert config.models.rerank.route.model == "qwen3-rerank"
+    assert config.conversation.summary_reader.max_records == 100_000
+    assert config.conversation.summary_reader.max_records_per_conversation == 30_000
+    assert config.conversation.summary_reader.max_record_chars == 16_000
 
 
 def test_from_file_and_from_env_use_only_the_single_yaml_entrypoint(tmp_path) -> None:
@@ -61,21 +54,15 @@ def test_from_file_and_from_env_use_only_the_single_yaml_entrypoint(tmp_path) ->
 def test_named_credentials_support_multiple_vendors_without_leaking_repr(tmp_path) -> None:
     payload = valid_mapping(tmp_path)
     payload["credentials"]["chat"]["api_key"] = "chat-secret"
-    payload["credentials"]["embedding"]["api_key"] = "embedding-secret"
-    payload["credentials"]["dashscope"]["api_key"] = "dashscope-secret"
+    payload["credentials"]["other_vendor"] = {"api_key": "other-secret"}
 
     config = HabitusConfig.from_mapping(payload)
 
     assert config.models.chat.route.credential_ref == "chat"
-    assert config.models.embedding.route.credential_ref == "embedding"
-    assert config.models.rerank is not None
-    assert config.models.rerank.route.credential_ref == "dashscope"
-    assert dict(config.credentials.resolve("dashscope")) == {"api_key": "dashscope-secret"}
-    assert config.memory.vector_store.route.credential_ref == ""
-    assert config.conversation.summary_vector_store.route.credential_ref == ""
+    assert dict(config.credentials.resolve("other_vendor")) == {"api_key": "other-secret"}
     rendered = repr(config)
     assert "chat-secret" not in rendered
-    assert "dashscope-secret" not in rendered
+    assert "other-secret" not in rendered
 
 
 def test_secret_bearing_yaml_requires_private_file_permissions(tmp_path) -> None:
@@ -128,8 +115,8 @@ def test_memory_editor_retrieval_group_is_named_for_the_write_side_prefetch(tmp_
     """写入侧旧记忆预取的配置节叫 ``memory.editor_retrieval``；旧键 ``memory.retrieval`` 不再被接受。"""
 
     payload = valid_mapping(tmp_path)
-    payload["memory"]["editor_retrieval"]["search_limit"] = 4
-    assert HabitusConfig.from_mapping(payload).memory.editor_retrieval.search_limit == 4
+    payload["memory"]["editor_retrieval"]["max_tool_uris"] = 4
+    assert HabitusConfig.from_mapping(payload).memory.editor_retrieval.max_tool_uris == 4
 
     payload = valid_mapping(tmp_path)
     payload["memory"]["retrieval"] = payload["memory"].pop("editor_retrieval")
@@ -224,20 +211,11 @@ def test_strict_helpers_reject_loose_types_and_missing_required_fields() -> None
             "snapshot.max_item_bytes",
         ),
         (
-            lambda p: p["conversation"]["summary_vector_store"].update(
-                collection=p["memory"]["vector_store"]["collection"]
-            ),
-            "different vector collections",
-        ),
-        (
             lambda p: p["workflow"]["worker"].update(heartbeat_interval_seconds=60.0),
             "one third",
         ),
         (
-            lambda p: p["memory"]["search_service"].update(
-                max_recent_messages=201,
-                max_planner_context_chars=1_000_000,
-            ),
+            lambda p: p["memory"]["search_service"].update(max_recent_messages=201),
             "live message bound",
         ),
         (
@@ -245,8 +223,12 @@ def test_strict_helpers_reject_loose_types_and_missing_required_fields() -> None
             "context_window_tokens",
         ),
         (
-            lambda p: p["memory"]["recall_lifecycle"].update(max_batch_size=10),
-            "maximum search candidate batch",
+            lambda p: p["conversation"]["summary_reader"].update(max_records_per_conversation=100),
+            "three physical stages",
+        ),
+        (
+            lambda p: p["memory"]["extraction"].update(max_listing_tokens=40_000),
+            "max_listing_tokens",
         ),
     ],
 )
@@ -257,22 +239,29 @@ def test_cross_domain_capacity_mismatches_fail_before_runtime_assembly(tmp_path,
         HabitusConfig.from_mapping(payload)
 
 
-def test_rerank_limits_are_checked_only_when_a_real_route_is_configured(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("group", "name"),
+    [
+        ("models", "embedding"),
+        ("models", "rerank"),
+        ("memory", "vector_store"),
+        ("memory", "vector_index"),
+        ("memory", "semantic_search"),
+        ("conversation", "summary_vector_store"),
+        ("conversation", "summary_vector_index"),
+    ],
+)
+def test_removed_vector_and_rerank_sections_are_named_instead_of_reported_as_typos(
+    tmp_path, group: str, name: str
+) -> None:
+    """向量检索与重排已经移除：旧配置里还留着这些段时明确指出是哪一段、该删掉，不当成拼写错误给"did you mean"。"""
+
     payload = valid_mapping(tmp_path)
-    payload["models"]["rerank"] = {
-        "route": {
-            "provider": "future-provider",
-            "adapter": "future-rerank",
-            "model": "rerank-model",
-            "base_url": "https://example.com/v1",
-            "credential_ref": "dashscope",
-        },
-        "max_documents": 1,
-        "max_query_chars": 8000,
-        "max_document_chars": 16000,
-    }
-    with pytest.raises(ConfigError, match="max_rerank_candidates"):
+    payload[group][name] = {}
+    with pytest.raises(ConfigError, match="已经从 Habitus 移除") as error:
         HabitusConfig.from_mapping(payload)
+    assert f"config.{group}.{name}" in str(error.value)
+    assert "did you mean" not in str(error.value)
 
 
 def test_behavior_config_enforces_its_scalar_bounds() -> None:
@@ -600,19 +589,7 @@ def startup_yaml(tmp_path: Path, *, behavior: dict[str, object], scene: dict[str
     """example.yaml 换上 fake 路由、写进 behavior / scene 两段，落成真实的 YAML 文件。"""
 
     payload = valid_mapping(tmp_path)
-    for route in (
-        payload["models"]["chat"]["route"],
-        payload["models"]["embedding"]["route"],
-        payload["models"]["rerank"]["route"],
-        payload["memory"]["vector_store"]["route"],
-        payload["conversation"]["summary_vector_store"]["route"],
-    ):
-        route.update(provider="fake", credential_ref="")
-    payload["models"]["chat"]["route"]["adapter"] = "fake_chat"
-    payload["models"]["embedding"]["route"]["adapter"] = "fake_embedding"
-    payload["models"]["rerank"]["route"]["adapter"] = "fake_rerank"
-    payload["memory"]["vector_store"]["route"]["adapter"] = "fake_vector"
-    payload["conversation"]["summary_vector_store"]["route"]["adapter"] = "fake_vector"
+    payload["models"]["chat"]["route"].update(provider="fake", adapter="fake_chat", credential_ref="")
     payload["behavior"] = behavior
     payload["scene"] = scene
     path = tmp_path / "habitus.yaml"
@@ -645,9 +622,9 @@ def test_out_of_range_overrides_are_refused_at_startup(
     from tests.lock_store import ProcessLocalLockStore
 
     config = HabitusConfig.from_file(startup_yaml(tmp_path, behavior=behavior, scene=scene))
-    providers, vectors = runtime_dependencies()
+    providers = runtime_dependencies()
     with pytest.raises(ConfigError, match=f"invalid '{key}'"):
-        build_runtime(config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore()))
+        build_runtime(config, providers=providers, path_lock=PathLock(ProcessLocalLockStore()))
 
 
 def test_the_scene_relations_group_lists_every_relation_threshold() -> None:
@@ -782,78 +759,6 @@ def test_http_max_request_bytes_outside_its_range_is_rejected(value: int) -> Non
         HTTPAPIConfig(max_request_bytes=value)
 
 
-@pytest.mark.parametrize("value", ["text", "multimodal"])
-def test_embedding_input_mode_left_in_yaml_is_an_unknown_field(tmp_path, value: str) -> None:
-    """``input_mode`` 只为一家厂商的专用协议存在过，W7 删掉：旧配置里还写着它要明确报未知字段，不能静默忽略。"""
-
-    payload = valid_mapping(tmp_path)
-    payload["models"]["embedding"]["input_mode"] = value
-
-    with pytest.raises(ConfigError, match=r"unknown config field 'config\.models\.embedding\.input_mode'"):
-        HabitusConfig.from_mapping(payload)
-
-
-def test_embedding_prefixes_load_from_yaml_and_must_be_strings(tmp_path) -> None:
-    payload = valid_mapping(tmp_path)
-    payload["models"]["embedding"]["max_input_chars"] += 64  # 记录与查询上限按"减去前缀"算，要给前缀留出位置
-    payload["models"]["embedding"]["query_prefix"] = "query: "
-    payload["models"]["embedding"]["document_prefix"] = "passage: "
-    embedding = HabitusConfig.from_mapping(payload).models.embedding
-    assert (embedding.query_prefix, embedding.document_prefix) == ("query: ", "passage: ")
-
-    for name, invalid in (("query_prefix", 1), ("document_prefix", ["passage: "]), ("document_prefix", None)):
-        broken = valid_mapping(tmp_path)
-        broken["models"]["embedding"][name] = invalid
-        with pytest.raises(ConfigError, match=f"config.models.embedding.{name}"):
-            HabitusConfig.from_mapping(broken)
-
-
-@pytest.mark.parametrize(
-    ("section", "field", "prefix"),
-    [
-        ("memory.vector_index", "max_record_chars", "document_prefix"),
-        ("conversation.summary_vector_index", "max_record_chars", "document_prefix"),
-        ("memory.editor_retrieval", "max_query_chars", "query_prefix"),
-    ],
-)
-def test_prefix_counts_against_the_record_and_query_budgets(tmp_path, section: str, field: str, prefix: str) -> None:
-    """记录与查询上限按"max_input_chars 减去对应前缀"校验，不然索引或召回时才因超长失败。每条单独钉：其余两项放宽。"""
-
-    payload = valid_mapping(tmp_path)
-    budget = payload["models"]["embedding"]["max_input_chars"]
-    payload["memory"]["vector_index"]["max_record_chars"] = budget - 64
-    payload["conversation"]["summary_vector_index"]["max_record_chars"] = budget - 64
-    payload["models"]["rerank"]["max_query_chars"] = budget  # 查询上限还受 rerank 查询上限约束，这里放开
-    group = payload
-    for part in section.split("."):
-        group = group[part]
-    group[field] = budget
-    HabitusConfig.from_mapping(payload)
-
-    payload["models"]["embedding"][prefix] = "passage: "
-    with pytest.raises(ConfigError, match=prefix):
-        HabitusConfig.from_mapping(payload)
-
-
-def test_prefix_budget_error_says_what_to_change(tmp_path) -> None:
-    """默认 max_record_chars 与 max_input_chars 相等，照文档设非空 document_prefix 会加载失败；报错要能自说明：
-    点名 max_input_chars、前缀，并给出改法（调小上限或调大 max_input_chars），不然用户只知道失败不知道怎么办。"""
-
-    payload = valid_mapping(tmp_path)
-    budget = payload["models"]["embedding"]["max_input_chars"]
-    payload["memory"]["vector_index"]["max_record_chars"] = budget
-    payload["conversation"]["summary_vector_index"]["max_record_chars"] = budget
-    payload["models"]["embedding"]["document_prefix"] = "passage: "
-
-    with pytest.raises(ConfigError) as error:
-        HabitusConfig.from_mapping(payload)
-    message = str(error.value)
-    assert "max_input_chars" in message
-    assert "document_prefix" in message
-    assert str(budget) in message
-    assert "lower" in message or "raise" in message
-
-
 @pytest.mark.parametrize(
     ("field", "bad"),
     [
@@ -947,9 +852,6 @@ def test_field_type_check_skips_multi_member_unions_and_reports_text_tuples() ->
         (("chat", "route", "max_concurrent"), None, r"config\.models\.chat\.route\.max_concurrent must be an integer"),
         (("chat", "max_output_tokens"), True, r"config\.models\.chat\.max_output_tokens must be an integer"),
         (("chat", "reasoning"), "false", r"config\.models\.chat\.reasoning must be a boolean"),
-        (("embedding", "dimension"), "1024", r"config\.models\.embedding\.dimension must be an integer"),
-        (("embedding", "max_batch_size"), 1.5, r"config\.models\.embedding\.max_batch_size must be an integer"),
-        (("rerank", "max_documents"), True, r"config\.models\.rerank\.max_documents must be an integer"),
     ],
 )
 def test_model_route_yaml_with_wrong_types_is_refused_before_construction(

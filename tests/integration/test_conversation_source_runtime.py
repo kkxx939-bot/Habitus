@@ -37,11 +37,10 @@ def only_envelope(runtime):
 
 def test_runtime_start_recovers_durable_source_with_only_missing_outcomes(tmp_path: Path) -> None:
     async def scenario() -> None:
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         runtime = build_runtime(
             runtime_config(tmp_path),
             providers=providers,
-            vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
         )
         runtime.initialize()
@@ -131,11 +130,10 @@ def test_a_broken_memory_source_degrades_only_its_address_at_startup(tmp_path: P
     """裁定 60 第 6 条：一份 Memory 源恢复不成不再整体阻断启动；别的地址照常恢复，出事的那一份留给周期恢复按退避再试。"""
 
     async def scenario() -> None:
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         runtime = build_runtime(
             runtime_config(tmp_path),
             providers=providers,
-            vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
         )
         runtime.initialize()
@@ -177,11 +175,10 @@ def test_a_broken_memory_source_degrades_only_its_address_at_startup(tmp_path: P
 
 def test_runtime_append_returns_after_memory_without_waiting_for_blocked_behavior(tmp_path: Path) -> None:
     async def scenario() -> None:
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         runtime = build_runtime(
             runtime_config(tmp_path),
             providers=providers,
-            vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
         )
         runtime.initialize()
@@ -219,11 +216,10 @@ def test_runtime_append_returns_after_memory_without_waiting_for_blocked_behavio
 
 def test_runtime_memory_wait_can_remain_blocked_while_behavior_finishes(tmp_path: Path) -> None:
     async def scenario() -> None:
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         runtime = build_runtime(
             runtime_config(tmp_path),
             providers=providers,
-            vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
         )
         runtime.initialize()
@@ -263,7 +259,7 @@ def test_runtime_memory_wait_can_remain_blocked_while_behavior_finishes(tmp_path
 
 def test_runtime_close_timeout_is_explicit_and_does_not_cancel_behavior_consumer(tmp_path: Path) -> None:
     async def scenario() -> None:
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         config = runtime_config(tmp_path)
         config = replace(
             config,
@@ -275,7 +271,6 @@ def test_runtime_close_timeout_is_explicit_and_does_not_cancel_behavior_consumer
         runtime = build_runtime(
             config,
             providers=providers,
-            vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
         )
         runtime.initialize()
@@ -314,11 +309,10 @@ def test_a_corrupt_envelope_does_not_stop_the_runtime_from_starting(tmp_path: Pa
     """一份信封读不出来：启动照常，别的地址照常恢复（L10.9；原先 ``Runtime.start`` 整体失败）。"""
 
     async def scenario() -> None:
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         runtime = build_runtime(
             runtime_config(tmp_path),
             providers=providers,
-            vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
         )
         runtime.initialize()
@@ -343,11 +337,10 @@ def test_an_envelope_over_the_read_bound_does_not_stop_the_runtime_from_starting
     """读上限调低后有一份信封比它大：启动照常，别的地址照常恢复（裁定 60 第 6 条）。"""
 
     async def scenario() -> None:
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         runtime = build_runtime(
             runtime_config(tmp_path),
             providers=providers,
-            vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
         )
         runtime.initialize()
@@ -374,11 +367,10 @@ def test_a_failing_recovery_round_does_not_stop_the_runtime_from_starting(tmp_pa
     """整轮恢复本身出错（例如账读不了）也不挡启动：记一条失败事件，交给周期恢复再来（裁定 60 第 6 条）。"""
 
     async def scenario() -> None:
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         runtime = build_runtime(
             runtime_config(tmp_path),
             providers=providers,
-            vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
         )
         runtime.initialize()

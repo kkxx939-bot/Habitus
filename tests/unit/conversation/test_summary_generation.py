@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field, replace
-from datetime import date, timedelta
+from datetime import UTC, date, timedelta
 from pathlib import Path
 
 import pytest
@@ -104,7 +104,7 @@ def test_segment_summary_binds_all_source_identity_in_code_and_preserves_process
         messages=closed_turn() + closed_turn(start_sequence=2, prompt="改为更详细回答"),
     )
     provider = RecordingProvider([content_dict()])
-    generator = ConversationSummaryGenerator(structured(provider), clock=lambda: SUMMARY_TIME)
+    generator = ConversationSummaryGenerator(structured(provider), zone=UTC, clock=lambda: SUMMARY_TIME)
 
     result = asyncio.run(generator.generate(source))
 
@@ -125,7 +125,7 @@ def test_partial_segment_summary_preserves_system_owned_turn_boundaries() -> Non
         messages=(message(0, ConversationMessageRole.PROMPT, "继续分析这个大任务"),),
     )
     provider = RecordingProvider([content_dict()])
-    generator = ConversationSummaryGenerator(structured(provider), clock=lambda: SUMMARY_TIME)
+    generator = ConversationSummaryGenerator(structured(provider), zone=UTC, clock=lambda: SUMMARY_TIME)
 
     result = asyncio.run(generator.generate(source))
 
@@ -139,7 +139,7 @@ def test_partial_segment_summary_preserves_system_owned_turn_boundaries() -> Non
 def test_segment_summary_rejects_unknown_model_field_in_server_merge() -> None:
     source = segment(segment_id="000000000000-000000000001")
     provider = RecordingProvider([{"operations": [{"field": "system_metadata", "operation": "keep"}]}])
-    generator = ConversationSummaryGenerator(structured(provider), clock=lambda: SUMMARY_TIME)
+    generator = ConversationSummaryGenerator(structured(provider), zone=UTC, clock=lambda: SUMMARY_TIME)
 
     with pytest.raises(ConversationSummaryError, match="field operations"):
         asyncio.run(generator.generate(source))
@@ -150,6 +150,7 @@ def test_segment_summary_rejects_oversized_complete_source_without_truncating_or
     provider = RecordingProvider([content_dict()])
     generator = ConversationSummaryGenerator(
         structured(provider),
+        zone=UTC,
         config=ConversationSummaryConfig(max_input_chars=1024),
     )
 
@@ -171,7 +172,7 @@ def test_summary_service_reuses_bound_immutable_summary_without_second_model_cal
     provider = RecordingProvider([content_dict(), content_dict()])
     service = ConversationSummaryService(
         store,
-        ConversationSummaryGenerator(structured(provider), clock=lambda: SUMMARY_TIME),
+        ConversationSummaryGenerator(structured(provider), zone=UTC, clock=lambda: SUMMARY_TIME),
     )
 
     first = asyncio.run(service.get_or_create(address, source))

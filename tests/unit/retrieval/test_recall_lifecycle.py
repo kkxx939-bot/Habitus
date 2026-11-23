@@ -19,7 +19,6 @@ from habitus.memory.recall import (
     MemoryRecallTarget,
     MemoryTemperature,
     SQLiteMemoryRecallLifecycleStore,
-    lifecycle_adjusted_score,
     memory_hotness,
     memory_temperature,
 )
@@ -32,7 +31,6 @@ NOW = datetime(2026, 7, 31, 8, 0, tzinfo=UTC)
 def candidate(
     kind: MemoryKind = MemoryKind.PREFERENCE,
     *,
-    semantic_score: float = 0.9,
     updated_at: datetime = NOW,
     revision: int = 1,
     suffix: str = "a",
@@ -50,7 +48,6 @@ def candidate(
         ),
         item.kind,
         item.metadata.updated_at,
-        semantic_score,
     )
 
 
@@ -138,38 +135,31 @@ def test_temperature_boundaries_are_explicit(hotness: float, expected: MemoryTem
     )
 
 
-def test_cold2_probe_must_be_inside_semantic_topk_and_never_expands_k(tmp_path: Path) -> None:
-    config = MemoryRecallLifecycleConfig(
-        preference_half_life_days=1,
-        cold2_probe_interval_days=30,
-        cold2_probe_limit=2,
-        max_cold2_probes_per_search=1,
-    )
+def test_rank_orders_candidates_by_hotness_highest_first(tmp_path: Path) -> None:
+    config = MemoryRecallLifecycleConfig(preference_half_life_days=1)
     instance = lifecycle(tmp_path, config)
-    warm = candidate(MemoryKind.PROFILE, semantic_score=0.8, suffix="warm")
-    cold2 = candidate(semantic_score=0.95, updated_at=NOW - timedelta(days=10), suffix="cold2")
+    cold = candidate(updated_at=NOW - timedelta(days=10), suffix="cold")
+    warm = candidate(suffix="warm")
+    used = candidate(suffix="used")
+    instance.record_use((used.target,), used_at=NOW)
 
-    first = instance.select((cold2, warm), limit=1, now=NOW)
-    assert tuple(item.candidate.uri for item in first) == (cold2.uri,)
-    assert instance.store.read_many((cold2.uri,)) == ()
+    ranked = instance.rank((cold, warm, used), now=NOW)
 
-    stronger_warm = replace(warm, semantic_score=0.99)
-    outside = instance.select((cold2, stronger_warm), limit=1, now=NOW)
-    assert tuple(item.candidate.uri for item in outside) == (warm.uri,)
-
-    bounded = instance.select((cold2, warm), limit=2, now=NOW)
-    assert len(bounded) == 2
-    assert {item.candidate.uri for item in bounded} == {cold2.uri, warm.uri}
+    assert tuple(item.candidate.uri for item in ranked) == (used.uri, warm.uri, cold.uri)
+    assert tuple(item.temperature for item in ranked) == (
+        MemoryTemperature.HOT,
+        MemoryTemperature.WARM,
+        MemoryTemperature.COLD_2,
+    )
+    assert instance.store.read_many((cold.uri, warm.uri)) == ()
 
 
-def test_compacted_cold2_retires_after_inactivity_and_explicit_grace_without_probe_quota(
+def test_compacted_cold2_retires_after_inactivity_and_explicit_grace(
     tmp_path: Path,
 ) -> None:
     config = MemoryRecallLifecycleConfig(
         preference_half_life_days=1,
         preference_retire_days=5,
-        cold2_probe_interval_days=1,
-        cold2_probe_limit=2,
         retire_candidate_grace_days=1,
     )
     instance = lifecycle(tmp_path, config)
@@ -262,7 +252,7 @@ def test_new_business_revision_exits_old_compaction_and_keeps_use_history(tmp_pa
     assert persisted.compacted_at is None
 
 
-def test_probe_on_new_revision_cannot_resurrect_old_compaction_or_retirement_state(
+def test_use_on_new_revision_cannot_resurrect_old_compaction_or_retirement_state(
     tmp_path: Path,
 ) -> None:
     instance = lifecycle(tmp_path)
@@ -285,7 +275,7 @@ def test_probe_on_new_revision_cannot_resurrect_old_compaction_or_retirement_sta
     )
     revised = MemoryRecallTarget(old.uri, 2, old.target.document_created_at)
 
-    state = instance.store.record_probe((revised,), probed_at=NOW + timedelta(days=3))[0]
+    state = instance.store.record_use((revised,), used_at=NOW + timedelta(days=3))[0]
 
     assert state.document_revision == 2
     assert state.compacted_at is None
@@ -394,12 +384,6 @@ def test_store_with_stale_compaction_first_constraint_fails_on_open_and_names_th
     assert stale_path.read_bytes() == before
 
 
-def test_lifecycle_score_only_degrades_positive_and_negative_semantic_scores() -> None:
-    assert lifecycle_adjusted_score(0.8, 0.5, alpha=0.2) == pytest.approx(0.72)
-    assert lifecycle_adjusted_score(-0.8, 0.5, alpha=0.2) == pytest.approx(-0.8 / 0.9)
-    assert lifecycle_adjusted_score(0.8, 1.0, alpha=0.2) == pytest.approx(0.8)
-
-
 def test_disabled_lifecycle_neither_reads_nor_writes_store() -> None:
     class UnusedStore:
         def __getattr__(self, _name):
@@ -411,7 +395,7 @@ def test_disabled_lifecycle_neither_reads_nor_writes_store() -> None:
     instance = MemoryRecallLifecycle(UnusedStore(), config=MemoryRecallLifecycleConfig(enabled=False))
     item = candidate()
     ranking = instance.rank((item,), now=NOW)[0]
-    assert ranking.final_score == item.semantic_score
+    assert ranking.hotness is None
     assert ranking.temperature is None
     assert instance.record_use((item.target,), used_at=NOW) == ()
     assert instance.forget((item.uri,)) == 0
@@ -420,17 +404,16 @@ def test_disabled_lifecycle_neither_reads_nor_writes_store() -> None:
 @pytest.mark.parametrize(
     "changes",
     [
-        {"ranking_alpha": 0.951},
-        {"ranking_alpha": 0},
+        {"ranking_alpha": 0.5},
         {"cold2_threshold": 0},
         {"cold2_threshold": 0.2, "cold1_threshold": 0.2},
         {"cold1_threshold": 0.61, "hot_threshold": 0.6},
         {"hot_threshold": 2 / 3},
         {"tool_half_life_days": 0},
         {"profile_retire_days": 0},
-        {"cold2_probe_limit": 0},
+        {"cold2_probe_limit": 1},
         {"retire_candidate_grace_days": 0},
-        {"max_cold2_probes_per_search": 2},
+        {"max_cold2_probes_per_search": 1},
         {"sqlite_timeout_seconds": 61},
     ],
 )

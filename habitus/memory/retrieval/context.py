@@ -12,14 +12,14 @@ from habitus.memory.conversation import (
     ConversationSummaryCompactor,
 )
 from habitus.memory.conversation.compaction import SummarySource
-from habitus.memory.conversation.indexing import ConversationSummaryReference, summary_reference
+from habitus.memory.conversation.summary_reference import ConversationSummaryReference, summary_reference
 from habitus.memory.retrieval.model import MemorySearchError, MemorySearchServiceConfig
 from habitus.pre.conversation import ConversationMessage
 
 
 @dataclass(frozen=True)
 class ConversationSearchContext:
-    """只用于查询规划、不会代替 Conversation 原文或写回记忆的临时上下文。"""
+    """只用来补全问题里的指代、不会代替 Conversation 原文或写回记忆的临时上下文。"""
 
     conversation_id: str
     summary_context: str
@@ -39,7 +39,7 @@ class ConversationSummaryServingFilter(Protocol):
 
 
 class ConversationSearchContextReader:
-    """按照当前不可变摘要前沿和 live 尾部构造有界查询规划上下文。"""
+    """按照当前不可变摘要前沿和 live 尾部构造有界的指代补全上下文。"""
 
     def __init__(
         self,
@@ -101,7 +101,7 @@ def render_recent_messages(
     *,
     max_message_chars: int,
 ) -> str:
-    """严格保留角色、工具名和调用 ID，同时限制每条规划输入大小。"""
+    """严格保留角色、工具名和调用 ID，同时限制每条输入大小。"""
 
     rendered: list[str] = []
     for message in messages:

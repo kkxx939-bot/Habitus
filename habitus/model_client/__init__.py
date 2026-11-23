@@ -1,16 +1,13 @@
 """统一模型配置、Provider 工厂和供应商无关能力契约。"""
 
-from habitus.foundation.embedding import EmbeddingVector
 from habitus.model_client.client import ChatClient
 from habitus.model_client.config import (
     CallFailureConfig,
     CapabilityConfig,
     ChatModelConfig,
     ChatStructuredOutputMode,
-    EmbeddingModelConfig,
     ModelCapability,
     ProviderConfig,
-    RerankModelConfig,
 )
 from habitus.model_client.contracts import (
     ChatCallContext,
@@ -28,11 +25,6 @@ from habitus.model_client.contracts import (
     TokenUsage,
     ToolCall,
     ToolDefinition,
-)
-from habitus.model_client.embedding import (
-    Embedder,
-    EmbeddingClient,
-    EmbeddingProvider,
 )
 from habitus.model_client.errors import (
     BRIEFS,
@@ -69,7 +61,6 @@ from habitus.model_client.errors import (
 )
 from habitus.model_client.factory import ProviderBuildContext, ProviderBuilder, ProviderFactory
 from habitus.model_client.json_parser import JSONParseMode, ParsedJSON, parse_json_response
-from habitus.model_client.rerank import RerankClient, Reranker, RerankProvider
 from habitus.model_client.schema_validation import JSONSchemaValidationError, validate_json_schema
 from habitus.model_client.structured import StructuredChatClient, StructuredResponse
 from habitus.model_client.token_budget import (
@@ -94,11 +85,6 @@ __all__ = [
     "ChatProvider",
     "ChatRequest",
     "ChatStructuredOutputMode",
-    "Embedder",
-    "EmbeddingClient",
-    "EmbeddingModelConfig",
-    "EmbeddingProvider",
-    "EmbeddingVector",
     "JSONParseMode",
     "JSONSchemaValidationError",
     "MessageRole",
@@ -135,10 +121,6 @@ __all__ = [
     "ProviderConfig",
     "ProviderFactory",
     "ReasoningOptions",
-    "RerankClient",
-    "RerankModelConfig",
-    "RerankProvider",
-    "Reranker",
     "ResponseFormat",
     "StreamEventKind",
     "StructuredChatClient",

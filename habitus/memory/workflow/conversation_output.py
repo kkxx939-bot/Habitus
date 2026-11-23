@@ -39,7 +39,7 @@ from habitus.pre.conversation import ConversationBatch, ConversationMessage
 
 # TODO(conversation-source): 修改 ConversationMemoryIngestResult Codec 或输出记录结构时，
 # 必须同步提升本版本，避免新旧快照共享同一 output_id 身份空间。
-MEMORY_CONVERSATION_OUTPUT_SCHEMA_VERSION = "memory_conversation_output_v1"
+MEMORY_CONVERSATION_OUTPUT_SCHEMA_VERSION = "memory_conversation_output_v2"
 MEMORY_CONVERSATION_OUTPUT_KIND = "memory_conversation_output"
 _OUTPUT_FILE = re.compile(r"^(?P<output_id>[0-9a-f]{64})\.json$")
 _NORMALIZED_MESSAGE = "{} must be non-empty normalized text"
@@ -175,7 +175,6 @@ def _retention_to_dict(value: ConversationRetentionPlan) -> dict[str, Any]:
             "budget_exceeded": value.budget_exceeded,
             "reason": value.reason,
             "boundary_kind": value.boundary_kind,
-            "embedding_fingerprint": value.embedding_fingerprint,
             "chunker_version": value.chunker_version,
         }
     )
@@ -192,7 +191,6 @@ def _retention_from_dict(value: object) -> ConversationRetentionPlan:
         "budget_exceeded",
         "reason",
         "boundary_kind",
-        "embedding_fingerprint",
         "chunker_version",
     }
     if not isinstance(value, Mapping) or set(value) != expected:
@@ -216,9 +214,6 @@ def _retention_from_dict(value: object) -> ConversationRetentionPlan:
         budget_exceeded=_flag_field(value["budget_exceeded"], "budget_exceeded must be boolean"),
         reason=text_field(value["reason"], "retention reason must be non-empty text"),
         boundary_kind=optional_text_field(value["boundary_kind"], "boundary_kind must be non-empty text or None"),
-        embedding_fingerprint=optional_text_field(
-            value["embedding_fingerprint"], "embedding_fingerprint must be non-empty text or None"
-        ),
         chunker_version=text_field(value["chunker_version"], "chunker_version must be non-empty text"),
     )
 
@@ -350,6 +345,11 @@ class MemoryConversationOutput:
         }
         if not isinstance(value, Mapping) or set(value) != expected:
             raise ConversationSourceError("memory output schema is invalid")
+        if value.get("schema_version") == "memory_conversation_output_v1":
+            raise ConversationSourceError(
+                "memory output schema version is invalid: 这是旧版输出文件（v1，切段计划里带已删掉的向量指纹 "
+                "embedding_fingerprint），新版本不迁移；换一个新的存储根，或清掉 conversation 根下的旧会话源与输出后重启"
+            )
         if value.get("schema_version") != MEMORY_CONVERSATION_OUTPUT_SCHEMA_VERSION:
             raise ConversationSourceError("memory output schema version is invalid")
         try:

@@ -9,8 +9,6 @@ from importlib import metadata
 from typing import cast
 
 from habitus.config import HabitusConfig
-from habitus.infrastructure.vector import VectorBackendBuilder, VectorStoreFactory
-from habitus.infrastructure.vector.adapters import register_builtin_vector_adapters
 from habitus.model_client import ModelCapability, ProviderBuilder, ProviderFactory
 from habitus.model_client.adapters import register_builtin_adapters
 
@@ -30,7 +28,6 @@ class AdapterCatalog:
 
     setup: SetupRegistry
     providers: ProviderFactory
-    vector_stores: VectorStoreFactory
 
     def register_model_adapter(
         self,
@@ -50,48 +47,18 @@ class AdapterCatalog:
         for profile in profiles:
             self.setup.register_profile(profile)
 
-    def register_vector_adapter(
-        self,
-        adapter: str,
-        builder: VectorBackendBuilder,
-        *,
-        product: AdapterProductRegistration,
-        profiles: Sequence[SetupProfile] = (),
-    ) -> None:
-        if product.capability != "vector" or product.adapter != adapter:
-            raise ValueError("vector product metadata must match its runtime adapter key")
-        if any(profile.capability != "vector" for profile in profiles):
-            raise ValueError("vector setup profiles must have vector capability")
-        self.vector_stores.register_adapter(adapter, builder)
-        self.setup.register_adapter(product)
-        for profile in profiles:
-            self.setup.register_profile(profile)
-
     def validate(self, config: HabitusConfig) -> None:
         self.setup.validate(config)
         for capability, adapter in self.setup.configured_adapters(config):
-            if capability == "vector":
-                registered = self.vector_stores.registered_adapters()
-            else:
-                registered = self.providers.registered_adapters(capability)
-            if adapter not in registered:
+            if adapter not in self.providers.registered_adapters(capability):
                 raise ValueError(f"runtime adapter is not registered: {capability}/{adapter}")
 
     def assert_consistent(self) -> None:
-        for capability in ("chat", "embedding", "rerank"):
-            product = set(self.setup.registered_adapters(capability))
-            runtime = set(self.providers.registered_adapters(capability))
-            if product != runtime:
-                raise ValueError(
-                    f"model adapter registry mismatch for {capability}: "
-                    f"product={sorted(product)}, runtime={sorted(runtime)}"
-                )
-        product_vectors = set(self.setup.registered_adapters("vector"))
-        runtime_vectors = set(self.vector_stores.registered_adapters())
-        if product_vectors != runtime_vectors:
+        product = set(self.setup.registered_adapters("chat"))
+        runtime = set(self.providers.registered_adapters("chat"))
+        if product != runtime:
             raise ValueError(
-                "vector adapter registry mismatch: "
-                f"product={sorted(product_vectors)}, runtime={sorted(runtime_vectors)}"
+                f"model adapter registry mismatch for chat: product={sorted(product)}, runtime={sorted(runtime)}"
             )
 
 
@@ -109,7 +76,6 @@ def build_adapter_catalog(
     catalog = AdapterCatalog(
         setup=build_builtin_setup_registry(),
         providers=providers,
-        vector_stores=register_builtin_vector_adapters(),
     )
     for registrar in registrars:
         if not callable(registrar):

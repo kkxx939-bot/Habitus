@@ -47,20 +47,20 @@ def benchmark_suite_matrix() -> tuple[Mapping[str, object], ...]:
             "aligned",
             "LoCoMo、LongMemEval；Top-10、4000 字符回答预算、数据集专用 Answer/Judge 协议",
         ),
-        _suite("retrieval_effectiveness", "implemented", "证据 Recall、Answer Judge、关系和 Summary 路由"),
+        _suite("retrieval_effectiveness", "implemented", "证据 Recall、Answer Judge、关系一跳和会话摘要"),
         _suite("retrieval_performance", "implemented", "稳态并发阶梯、Recall、QPS、p50/p95/p99 与饱和拐点"),
-        _suite("vector_backend", "implemented", "按配置容量比例扩展、并发阶梯、过滤 Recall、增量更新删除"),
         _suite("runtime_contention", "implemented", "读写比例矩阵、MemoryJob 队列深度/年龄、排空和资源增长"),
         _suite("http_service", "implemented", "真实 HTTP 预热、稳态并发、写入任务跟踪和端到端长尾"),
         _suite("conversation_lifecycle", "implemented", "正式策略下按 Session 规模测量压缩、归档、清理和磁盘变化"),
         _suite("memory_semantic_evolution", "implemented", "仓库 native 数据覆盖四类节点、更新删除合并和关系"),
-        _suite("failure_recovery", "implemented", "连续增加瞬态 VectorStore 故障直到正式 Job 重试预算耗尽"),
         _suite("boundary_aggregation", "implemented", "显式预算、独立运行 median/MAD、并发和规模双边界判定"),
         _suite("resource_rag", "not_applicable", "Resource 已退出当前 Habitus 主链"),
-        _suite("grep_bm25", "not_applicable", "当前记忆检索没有 grep/BM25 公共能力"),
+        _suite(
+            "grep_bm25", "not_applicable", "当前记忆检索由模型挑选，只对每一轮的记录与会话摘要做子串匹配，没有 BM25"
+        ),
         _suite("skillsbench", "not_applicable", "Skill 已退出当前 Habitus 主链"),
         _suite("tau2_agent_trajectory", "not_applicable", "Agent/trajectory 不属于当前仓库能力"),
-        _suite("cuvs_local_index", "not_applicable", "Habitus 只支持远程 VectorStore Adapter"),
+        _suite("vector_index", "not_applicable", "Habitus 已不使用向量检索"),
     )
 
 

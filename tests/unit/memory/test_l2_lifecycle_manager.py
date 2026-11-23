@@ -56,8 +56,6 @@ def manager(tmp_path, responses, *, maintenance_config=None, recall_config=None)
     config = recall_config or MemoryRecallLifecycleConfig(
         preference_half_life_days=1,
         preference_retire_days=30,
-        cold2_probe_interval_days=1,
-        cold2_probe_limit=2,
         retire_candidate_grace_days=1,
     )
     recall = MemoryRecallLifecycle(

@@ -297,10 +297,10 @@ class MemoryLifecycleManager:
         targets: tuple[MemoryRecallTarget, ...],
         *,
         used_at: datetime | None = None,
+        lock_wait_seconds: float = 5.0,
     ) -> MemoryContextUseResult:
-        """最终模型可见 Context 的 L2 才计成功；COLD_2 必须先同步恢复。"""
-
-        return await self.context_use.record_context_use(targets, used_at=used_at)
+        """最终模型可见 Context 的 L2 才计成功；COLD_2 必须先同步恢复。等锁超过 ``lock_wait_seconds`` 的跳过这一次。"""
+        return await self.context_use.record_context_use(targets, used_at=used_at, lock_wait_seconds=lock_wait_seconds)
 
     def expand_for_probe(self, document: MemoryDocument) -> MemoryDocument:
         """只为最终 Context 预算临时展开活动基线，不修改 L2 或热度。"""

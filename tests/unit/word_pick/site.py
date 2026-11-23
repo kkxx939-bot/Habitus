@@ -28,10 +28,8 @@ import yaml
 from habitus.behavior.fusion.lanes.session import SessionMessage, SessionMessageRole, SessionTurn, split_turns
 from habitus.config import HabitusConfig
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.vector import VectorStoreFactory
 from habitus.model_client import ModelResponse, ProviderCapabilities, ProviderFactory
 from habitus.runtime import build_runtime
-from tests.integration.test_runtime_assembly import FakeEmbeddingProvider, FakeRerankProvider, FakeVectorBackend
 from tests.lock_store import ProcessLocalLockStore
 from tests.model_helpers import prepare_chat_request
 
@@ -338,12 +336,6 @@ def example_mapping(tmp_path: Path) -> dict[str, Any]:
     raw["storage"]["root"] = str(tmp_path / "data")
     raw["observability"]["tracing"]["enabled"] = False
     raw["models"]["chat"]["route"].update(provider="fake", adapter="fake_chat", credential_ref="")
-    raw["models"]["embedding"]["route"].update(provider="fake", adapter="fake_embedding", credential_ref="")
-    raw["models"]["rerank"]["route"].update(provider="fake", adapter="fake_rerank", credential_ref="")
-    raw["memory"]["vector_store"]["route"].update(provider="fake", adapter="fake_vector", credential_ref="")
-    raw["conversation"]["summary_vector_store"]["route"].update(
-        provider="fake", adapter="fake_vector", credential_ref=""
-    )
     return raw
 
 
@@ -365,7 +357,7 @@ def config(
     return HabitusConfig.from_mapping(raw)
 
 
-def dependencies(router: Router) -> tuple[ProviderFactory, VectorStoreFactory]:
+def dependencies(router: Router) -> ProviderFactory:
     providers = ProviderFactory()
 
     def chat(context: Any) -> Router:
@@ -373,27 +365,13 @@ def dependencies(router: Router) -> tuple[ProviderFactory, VectorStoreFactory]:
         return router
 
     providers.register_adapter("chat", "fake_chat", chat)
-    providers.register_adapter(
-        "embedding",
-        "fake_embedding",
-        lambda context: FakeEmbeddingProvider(context.route.provider, context.route.model, context.config.dimension),
-    )
-    providers.register_adapter(
-        "rerank", "fake_rerank", lambda context: FakeRerankProvider(context.route.provider, context.route.model)
-    )
-    vectors = VectorStoreFactory()
-    vectors.register_adapter(
-        "fake_vector", lambda context: FakeVectorBackend(context.config.provider, context.config.collection)
-    )
-    return providers, vectors
+    return providers
 
 
 def runtime_of(habitus_config: HabitusConfig, router: Router | None = None) -> tuple[Any, Router]:
     router = router if router is not None else Router()
-    providers, vectors = dependencies(router)
-    runtime = build_runtime(
-        habitus_config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
-    )
+    providers = dependencies(router)
+    runtime = build_runtime(habitus_config, providers=providers, path_lock=PathLock(ProcessLocalLockStore()))
     runtime.initialize()
     return runtime, router
 

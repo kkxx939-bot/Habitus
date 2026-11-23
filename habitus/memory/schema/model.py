@@ -90,6 +90,8 @@ class MemoryTypeSchema:
     path_template: str
     markdown_template: str
     fields: tuple[MemoryFieldSchema, ...]
+    overview_fields: tuple[str, ...] = ()
+    overview_max_chars: int = 160
     min_non_empty_content_fields: int = 0
     omit_empty_sections: bool = False
 
@@ -127,6 +129,15 @@ class MemoryTypeSchema:
             raise MemorySchemaError("memory markdown template references undeclared fields")
         if not content_fields <= markdown_fields:
             raise MemorySchemaError("every content field must appear in the Markdown template")
+        object.__setattr__(self, "overview_fields", tuple(self.overview_fields))
+        if not self.overview_fields or len(set(self.overview_fields)) != len(self.overview_fields):
+            raise MemorySchemaError("memory overview_line fields must be a non-empty list of unique names")
+        if not set(self.overview_fields) <= content_fields:
+            raise MemorySchemaError("memory overview_line fields must be declared string content fields")
+        if any(self.field_map[name].field_type is not MemoryFieldType.STRING for name in self.overview_fields):
+            raise MemorySchemaError("memory overview_line fields must be declared string content fields")
+        if not 16 <= self.overview_max_chars <= 2_000:
+            raise MemorySchemaError("memory overview_line max_chars must be between 16 and 2000")
 
     @property
     def field_map(self) -> dict[str, MemoryFieldSchema]:
@@ -139,6 +150,22 @@ class MemoryTypeSchema:
     @property
     def content_fields(self) -> tuple[MemoryFieldSchema, ...]:
         return tuple(field for field in self.fields if field.role is MemoryFieldRole.CONTENT)
+
+    def overview_line(self, fields: Mapping[str, Any]) -> str:
+        """目录概览里这张卡片的一小段说明：按声明顺序取第一个非空字段，压成一行后截到 ``overview_max_chars``。"""
+
+        for name in self.overview_fields:
+            value = fields.get(name)
+            if not isinstance(value, str):
+                continue
+            lines = (line.strip() for line in value.splitlines())
+            text = " ".join(" ".join(line.lstrip("-*").split()) for line in lines if line and not line.startswith("#"))
+            if not text:
+                continue
+            if len(text) <= self.overview_max_chars:
+                return text
+            return text[: self.overview_max_chars - 1].rstrip() + "…"
+        return ""
 
     def validate_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """严格校验单条记忆字段；不容错转换未知结构或忽略额外字段。"""

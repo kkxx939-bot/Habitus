@@ -21,7 +21,6 @@ config/scene.py
 config/storage.py
 config/temporal.py
 config/workflow.py
-infrastructure/vector/config.py
 integrations/local_service/adapter_catalog.py
 memory/schema/model.py
 memory/schema/registry.py
@@ -60,10 +59,8 @@ memory/editor/candidate_codec.py
 memory/editor/extraction/loop.py
 memory/editor/extraction/prompt.py
 memory/field_ops.py
-memory/retrieval/grader.py
 memory/retrieval/model.py
-memory/retrieval/planner.py
-memory/semantic/generator.py
+memory/retrieval/steps.py
 model_client/contracts.py
 model_client/json_parser.py
 model_client/schema_validation.py
@@ -76,8 +73,6 @@ model_client/adapters/anthropic_messages.py
 model_client/adapters/anthropic_messages_decode.py
 model_client/adapters/anthropic_messages_schema.py
 model_client/adapters/openai_compatible_chat.py
-model_client/adapters/openai_compatible_embedding.py
-model_client/adapters/openai_compatible_rerank.py
 
 # F 用户给的外部文件与命令行
 conditions/calendar_data.py
@@ -92,8 +87,6 @@ memory/compaction/recovery.py
 memory/compaction/scan.py
 memory/conversation/access.py
 memory/conversation/compaction.py
-memory/conversation/indexing/index.py
-memory/conversation/indexing/model.py
 memory/conversation/messages.py
 memory/conversation/retirement.py
 memory/conversation/summary.py
@@ -102,8 +95,6 @@ memory/document/link.py
 memory/editor/mutation/reader.py
 memory/editor/relation_reader.py
 memory/editor/transaction_log.py
-memory/indexing/index.py
-memory/indexing/source.py
 memory/recall/state.py
 memory/recall/store.py
 memory/snapshot.py
@@ -189,5 +180,3 @@ infrastructure/store/filesystem/durable_io/atomic_file.py
 infrastructure/store/filesystem/durable_io/common.py
 infrastructure/store/filesystem/durable_io/windows_file.py
 infrastructure/store/filesystem/path_safety.py
-infrastructure/vector/adapters/local_sqlite.py
-infrastructure/vector/publication/store.py

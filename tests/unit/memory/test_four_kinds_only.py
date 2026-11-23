@@ -64,7 +64,7 @@ def test_recall_request_rejects_a_removed_kind(kind: str) -> None:
 def test_search_request_rejects_a_removed_kind(kind: str) -> None:
     normalizer = MemorySearchRequestNormalizer(MemorySearchServiceConfig())
     with pytest.raises(ValueError):
-        normalizer.normalize("最近在做什么", target_uris=None, limit=None, score_threshold=None, kinds=(kind,))  # type: ignore[arg-type]
+        normalizer.normalize("最近在做什么", limit=None, kinds=(kind,))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("old_directory", ["events", "intentions"])

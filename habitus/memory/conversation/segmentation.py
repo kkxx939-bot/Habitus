@@ -1,14 +1,12 @@
-"""超大 Conversation 的文本分块与可选语义边界评分。"""
+"""超大 Conversation 的文本分块。"""
 
 from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
-from typing import Protocol
+from collections.abc import Callable
+from dataclasses import replace
 
-from habitus.foundation.integrity import canonical_json
 from habitus.pre.conversation import (
     ConversationBatch,
     ConversationMessage,
@@ -18,139 +16,6 @@ from habitus.pre.conversation import (
 logger = logging.getLogger(__name__)
 
 SEMANTIC_CHUNKER_VERSION = "conversation_semantic_chunker_v1"
-
-
-class ConversationBoundaryVector(Protocol):
-    """边界评分只依赖归一化向量值，不绑定具体模型客户端。"""
-
-    @property
-    def values(self) -> tuple[float, ...]: ...
-
-
-class ConversationBoundaryEmbedder(Protocol):
-    """供 Conversation 切段使用的最小异步 Embedding 契约。"""
-
-    async def embed_documents(
-        self,
-        texts: Sequence[str],
-    ) -> Sequence[ConversationBoundaryVector]: ...
-
-
-@dataclass(frozen=True)
-class ConversationSemanticBoundary:
-    """一个安全消息边界两侧的语义距离。"""
-
-    after_sequence: int
-    distance: float
-
-    def __post_init__(self) -> None:
-        if self.after_sequence < 0:
-            raise ValueError("after_sequence must be a non-negative integer")
-        if not 0.0 <= float(self.distance) <= 2.0:
-            raise ValueError("semantic boundary distance must be between zero and two")
-        object.__setattr__(self, "distance", float(self.distance))
-
-
-@dataclass(frozen=True)
-class ConversationBoundaryHints:
-    """与一个 live 快照严格绑定的可选语义提示。"""
-
-    source_digest: str
-    boundaries: tuple[ConversationSemanticBoundary, ...]
-    embedding_fingerprint: str | None
-    fallback_reason: str | None = None
-
-    def __post_init__(self) -> None:
-        if len(self.source_digest) != 64:
-            raise ValueError("source_digest must be a SHA-256 digest")
-        sequences = tuple(item.after_sequence for item in self.boundaries)
-        if sequences != tuple(sorted(set(sequences))):
-            raise ValueError("semantic boundaries must be unique and ordered")
-        if self.embedding_fingerprint is not None and not self.embedding_fingerprint.strip():
-            raise ValueError("embedding_fingerprint must be non-empty text or None")
-        if self.fallback_reason is not None and not self.fallback_reason.strip():
-            raise ValueError("fallback_reason must be non-empty text or None")
-
-    def distance_after(self, sequence: int) -> float | None:
-        for item in self.boundaries:
-            if item.after_sequence == sequence:
-                return item.distance
-        return None
-
-
-# TODO(conversation-source): 修改此评分算法语义时，必须同步提升
-# memory/workflow/conversation_consumer.py 中 semantic_boundary.version。
-class ConversationSemanticBoundaryScorer:
-    """用相邻安全单元的向量距离辅助选点，失败时返回结构化降级结果。"""
-
-    def __init__(
-        self,
-        embedder: ConversationBoundaryEmbedder,
-        *,
-        embedding_fingerprint: str,
-        max_unit_chars: int,
-    ) -> None:
-        if not embedding_fingerprint.strip():
-            raise ValueError("embedding_fingerprint must be non-empty text")
-        if max_unit_chars < 256:
-            raise ValueError("max_unit_chars must be at least 256")
-        self.embedder = embedder
-        self.embedding_fingerprint = embedding_fingerprint.strip()
-        self.max_unit_chars = max_unit_chars
-
-    async def score(self, live: ConversationBatch | None) -> ConversationBoundaryHints | None:
-        """只为安全结构边界生成提示；任何模型失败都不阻断 Conversation。"""
-
-        if live is None:
-            return None
-        units = _safe_semantic_units(live.messages)
-        if len(units) < 2:
-            return ConversationBoundaryHints(live.digest, (), None, "fewer than two safe units")
-        texts = tuple(self._bounded_text(text) for _sequence, text in units)
-        try:
-            vectors = await self.embedder.embed_documents(texts)
-            if len(vectors) != len(units):
-                raise ValueError("embedding result count does not match semantic units")
-            boundaries = tuple(
-                ConversationSemanticBoundary(
-                    after_sequence=units[index][0],
-                    distance=max(
-                        0.0,
-                        min(
-                            2.0,
-                            1.0
-                            - sum(
-                                left * right
-                                for left, right in zip(
-                                    vectors[index].values,
-                                    vectors[index + 1].values,
-                                    strict=True,
-                                )
-                            ),
-                        ),
-                    ),
-                )
-                for index in range(len(units) - 1)
-            )
-            return ConversationBoundaryHints(
-                live.digest,
-                boundaries,
-                self.embedding_fingerprint,
-            )
-        except Exception as exc:
-            reason = f"{type(exc).__name__}: {' '.join(str(exc).split())}"[:500]
-            logger.warning(
-                "Conversation 语义边界评分失败，退回确定性结构边界：%s",
-                type(exc).__name__,
-            )
-            return ConversationBoundaryHints(live.digest, (), None, reason)
-
-    def _bounded_text(self, value: str) -> str:
-        if len(value) <= self.max_unit_chars:
-            return value
-        head = self.max_unit_chars * 2 // 3
-        tail = self.max_unit_chars - head
-        return value[:head] + value[-tail:]
 
 
 # TODO(conversation-source): 修改此拆分算法语义时，必须同步提升
@@ -299,36 +164,6 @@ class ConversationMessageChunker:
         return value <= self.max_message_tokens
 
 
-def _safe_semantic_units(
-    messages: tuple[ConversationMessage, ...],
-) -> tuple[tuple[int, str], ...]:
-    units: list[tuple[int, str]] = []
-    buffered: list[ConversationMessage] = []
-    open_tool_calls: set[str] = set()
-    for index, message in enumerate(messages):
-        buffered.append(message)
-        if message.role is ConversationMessageRole.TOOL_CALL:
-            assert message.tool_call_id is not None
-            open_tool_calls.add(message.tool_call_id)
-        elif message.role is ConversationMessageRole.TOOL_RESULT:
-            assert message.tool_call_id is not None
-            open_tool_calls.discard(message.tool_call_id)
-        if open_tool_calls:
-            continue
-        following = messages[index + 1] if index + 1 < len(messages) else None
-        if (
-            message.role is ConversationMessageRole.COMPLETION
-            and message.completes_logical_message
-            and following is not None
-            and not following.starts_turn
-        ):
-            continue
-        rendered = "\n".join(f"{item.role.value}: {canonical_json(item.content)}" for item in buffered)
-        units.append((message.sequence, rendered))
-        buffered = []
-    return tuple(units)
-
-
 def _split_markdown_fences(value: str) -> list[str]:
     return [item for item in re.split(r"(```[\s\S]*?```)", value) if item]
 
@@ -354,8 +189,5 @@ def _split_after(value: str, pattern: str) -> list[str]:
 
 __all__ = [
     "SEMANTIC_CHUNKER_VERSION",
-    "ConversationBoundaryHints",
     "ConversationMessageChunker",
-    "ConversationSemanticBoundary",
-    "ConversationSemanticBoundaryScorer",
 ]

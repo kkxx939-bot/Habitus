@@ -7,6 +7,9 @@ description: >-
   写进那个实体的卡片，没有可以挂的实体就不记。临时举例、顺带提及或没有可复用事实的普通名词不生成
   Entity。
 path_template: entities/{category}/{name}.md
+overview_line:
+  fields: [summary]
+  max_chars: 160
 markdown_template: |
   # {name}
 

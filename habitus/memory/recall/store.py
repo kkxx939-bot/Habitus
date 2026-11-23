@@ -31,8 +31,6 @@ _TABLE_LAYOUT = (
     ("useful_recall_count", "INTEGER", 1, None, 0),
     ("last_useful_recall_at", "TEXT", 0, None, 0),
     ("lifecycle_activity_at", "TEXT", 0, None, 0),
-    ("cold2_probe_count", "INTEGER", 1, None, 0),
-    ("last_cold2_probe_at", "TEXT", 0, None, 0),
     ("compacted_at", "TEXT", 0, None, 0),
     ("retire_candidate_at", "TEXT", 0, None, 0),
     ("retired_at", "TEXT", 0, None, 0),
@@ -90,14 +88,11 @@ class SQLiteMemoryRecallLifecycleStore:
                             useful_recall_count INTEGER NOT NULL CHECK(useful_recall_count >= 0),
                             last_useful_recall_at TEXT,
                             lifecycle_activity_at TEXT,
-                            cold2_probe_count INTEGER NOT NULL CHECK(cold2_probe_count >= 0),
-                            last_cold2_probe_at TEXT,
                             compacted_at TEXT,
                             retire_candidate_at TEXT,
                             retired_at TEXT,
                             version INTEGER NOT NULL CHECK(version > 0),
                             CHECK((useful_recall_count = 0) = (last_useful_recall_at IS NULL)),
-                            CHECK((cold2_probe_count = 0) = (last_cold2_probe_at IS NULL)),
                             CHECK(retired_at IS NULL OR retire_candidate_at IS NOT NULL)
                         )
                         """
@@ -150,8 +145,6 @@ class SQLiteMemoryRecallLifecycleStore:
                     useful_recall_count=1,
                     last_useful_recall_at=timestamp,
                     lifecycle_activity_at=None,
-                    cold2_probe_count=0,
-                    last_cold2_probe_at=None,
                     compacted_at=None,
                     retire_candidate_at=None,
                     retired_at=None,
@@ -170,8 +163,6 @@ class SQLiteMemoryRecallLifecycleStore:
                 ),
                 last_useful_recall_at=max(current.last_useful_recall_at or timestamp, timestamp),
                 lifecycle_activity_at=None if revised else current.lifecycle_activity_at,
-                cold2_probe_count=0,
-                last_cold2_probe_at=None,
                 compacted_at=None if revised else current.compacted_at,
                 retire_candidate_at=None,
                 retired_at=None,
@@ -179,54 +170,6 @@ class SQLiteMemoryRecallLifecycleStore:
             )
 
         return self._update_targets(values, update, "record memory recall use")
-
-    def record_probe(
-        self,
-        targets: tuple[MemoryRecallTarget, ...],
-        *,
-        probed_at: datetime,
-    ) -> tuple[MemoryRecallState, ...]:
-        values = self._targets(targets)
-        if not values:
-            return ()
-        timestamp = self._timestamp(probed_at)
-
-        def update(current: MemoryRecallState | None, target: MemoryRecallTarget) -> MemoryRecallState:
-            if current is None or not self._same_generation(current, target):
-                return MemoryRecallState(
-                    uri=target.uri,
-                    document_revision=target.document_revision,
-                    document_created_at=target.document_created_at,
-                    useful_recall_count=0,
-                    last_useful_recall_at=None,
-                    lifecycle_activity_at=None,
-                    cold2_probe_count=1,
-                    last_cold2_probe_at=timestamp,
-                    compacted_at=None,
-                    retire_candidate_at=None,
-                    retired_at=None,
-                    version=1 if current is None else current.version + 1,
-                )
-            revised = current.document_revision != target.document_revision
-            return MemoryRecallState(
-                uri=target.uri,
-                document_revision=target.document_revision,
-                document_created_at=target.document_created_at,
-                useful_recall_count=current.useful_recall_count,
-                last_useful_recall_at=current.last_useful_recall_at,
-                lifecycle_activity_at=None if revised else current.lifecycle_activity_at,
-                cold2_probe_count=max(
-                    current.cold2_probe_count,
-                    min(current.cold2_probe_count + 1, self.config.cold2_probe_limit),
-                ),
-                last_cold2_probe_at=max(current.last_cold2_probe_at or timestamp, timestamp),
-                compacted_at=None if revised else current.compacted_at,
-                retire_candidate_at=None if revised else current.retire_candidate_at,
-                retired_at=None if revised else current.retired_at,
-                version=current.version + 1,
-            )
-
-        return self._update_targets(values, update, "record COLD_2 probe")
 
     def mark_compacted(
         self,
@@ -258,8 +201,6 @@ class SQLiteMemoryRecallLifecycleStore:
                 useful_recall_count=useful_recall_count,
                 last_useful_recall_at=last_useful_recall_at,
                 lifecycle_activity_at=activity,
-                cold2_probe_count=0,
-                last_cold2_probe_at=None,
                 compacted_at=timestamp,
                 retire_candidate_at=None,
                 retired_at=None,
@@ -291,8 +232,6 @@ class SQLiteMemoryRecallLifecycleStore:
                 useful_recall_count=current.useful_recall_count,
                 last_useful_recall_at=current.last_useful_recall_at,
                 lifecycle_activity_at=current.lifecycle_activity_at,
-                cold2_probe_count=current.cold2_probe_count,
-                last_cold2_probe_at=current.last_cold2_probe_at,
                 compacted_at=current.compacted_at,
                 retire_candidate_at=current.retire_candidate_at,
                 retired_at=max(current.retired_at or timestamp, timestamp),
@@ -329,8 +268,6 @@ class SQLiteMemoryRecallLifecycleStore:
                     useful_recall_count=current.useful_recall_count if current and same_generation else 0,
                     last_useful_recall_at=current.last_useful_recall_at if current and same_generation else None,
                     lifecycle_activity_at=None,
-                    cold2_probe_count=0,
-                    last_cold2_probe_at=None,
                     compacted_at=None,
                     retire_candidate_at=None,
                     retired_at=None,
@@ -343,8 +280,6 @@ class SQLiteMemoryRecallLifecycleStore:
                 useful_recall_count=base.useful_recall_count,
                 last_useful_recall_at=base.last_useful_recall_at,
                 lifecycle_activity_at=base.lifecycle_activity_at,
-                cold2_probe_count=base.cold2_probe_count,
-                last_cold2_probe_at=base.last_cold2_probe_at,
                 compacted_at=base.compacted_at,
                 retire_candidate_at=base.retire_candidate_at or timestamp,
                 retired_at=None,
@@ -411,15 +346,13 @@ class SQLiteMemoryRecallLifecycleStore:
     def _write(cls, connection: sqlite3.Connection, state: MemoryRecallState) -> None:
         connection.execute(
             f"""
-            INSERT INTO {_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO {_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(uri) DO UPDATE SET
                 document_revision = excluded.document_revision,
                 document_created_at = excluded.document_created_at,
                 useful_recall_count = excluded.useful_recall_count,
                 last_useful_recall_at = excluded.last_useful_recall_at,
                 lifecycle_activity_at = excluded.lifecycle_activity_at,
-                cold2_probe_count = excluded.cold2_probe_count,
-                last_cold2_probe_at = excluded.last_cold2_probe_at,
                 compacted_at = excluded.compacted_at,
                 retire_candidate_at = excluded.retire_candidate_at,
                 retired_at = excluded.retired_at,
@@ -432,8 +365,6 @@ class SQLiteMemoryRecallLifecycleStore:
                 state.useful_recall_count,
                 cls._optional_timestamp(state.last_useful_recall_at),
                 cls._optional_timestamp(state.lifecycle_activity_at),
-                state.cold2_probe_count,
-                cls._optional_timestamp(state.last_cold2_probe_at),
                 cls._optional_timestamp(state.compacted_at),
                 cls._optional_timestamp(state.retire_candidate_at),
                 cls._optional_timestamp(state.retired_at),
@@ -460,7 +391,7 @@ class SQLiteMemoryRecallLifecycleStore:
             raise MemoryRecallLifecycleError(
                 f"这是旧版 recall 状态库（表上还带已撤掉的约束 {_STALE_CONSTRAINT}），新版本不迁移；"
                 f"删除 {self.path} 后重启即可重建。会丢掉的只有这个库里的状态：记忆的使用计数与最近被用到的时刻、"
-                "压缩标记（含压缩前的活动时刻）、COLD_2 探测计数、退休候选标记；L2 记忆文件本身不在这个库里"
+                "压缩标记（含压缩前的活动时刻）、退休候选标记；L2 记忆文件本身不在这个库里"
             )
         rows = connection.execute(f"PRAGMA table_info({_TABLE})").fetchall()
         layout = tuple(
@@ -474,7 +405,10 @@ class SQLiteMemoryRecallLifecycleStore:
             for row in rows
         )
         if layout != _TABLE_LAYOUT:
-            raise MemoryRecallLifecycleError("memory recall lifecycle store schema is incompatible")
+            raise MemoryRecallLifecycleError(
+                f"memory recall lifecycle store schema is incompatible: 这是旧版 recall 状态库（列与当前不同，例如还带已删掉的"
+                f" COLD_2 抽查计数），新版本不迁移；删除 {self.path} 后重启即可重建"
+            )
 
     def _uris(self, values: tuple[MemoryURI, ...]) -> tuple[MemoryURI, ...]:
         if len(values) > self.config.max_batch_size:
@@ -506,8 +440,6 @@ class SQLiteMemoryRecallLifecycleStore:
             useful_recall_count=_row_count(row, "useful_recall_count"),
             last_useful_recall_at=cls._parse_optional_timestamp(row["last_useful_recall_at"]),
             lifecycle_activity_at=cls._parse_optional_timestamp(row["lifecycle_activity_at"]),
-            cold2_probe_count=_row_count(row, "cold2_probe_count"),
-            last_cold2_probe_at=cls._parse_optional_timestamp(row["last_cold2_probe_at"]),
             compacted_at=cls._parse_optional_timestamp(row["compacted_at"]),
             retire_candidate_at=cls._parse_optional_timestamp(row["retire_candidate_at"]),
             retired_at=cls._parse_optional_timestamp(row["retired_at"]),

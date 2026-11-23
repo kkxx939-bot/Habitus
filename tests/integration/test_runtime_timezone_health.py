@@ -31,10 +31,8 @@ def _checks(tmp_path: Path, zone: str) -> dict[str, object]:
     config = runtime_config(tmp_path)
     config = replace(config, locale=replace(config.locale, timezone=zone))
     assert isinstance(config.locale, LocaleConfig)
-    providers, vectors = runtime_dependencies()
-    runtime = build_runtime(
-        config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
-    )
+    providers = runtime_dependencies()
+    runtime = build_runtime(config, providers=providers, path_lock=PathLock(ProcessLocalLockStore()))
 
     async def scenario():  # type: ignore[no-untyped-def]
         try:

@@ -400,6 +400,9 @@ memory_type: profile
 description: description
 path_template: profile.md
 markdown_template: "{content}"
+overview_line:
+  fields: [content]
+  max_chars: 160
 """
     with pytest.raises(MemorySchemaError, match="fields must be a list"):
         registry_module._load_schema(base + "fields: {}\n", "invalid.yaml")
@@ -413,6 +416,9 @@ memory_type: profile
 description: description
 path_template: profile.md
 markdown_template: "{content}"
+overview_line:
+  fields: [content]
+  max_chars: 160
 fields:
   - name: content
     type: string
@@ -434,6 +440,52 @@ fields:
         registry_module._load_schema(valid_field.replace("    merge: patch\n", ""), "profile.yaml")
 
 
+_OVERVIEW_SCHEMA_SOURCE = """
+memory_type: profile
+description: description
+path_template: profile.md
+markdown_template: "{content}"
+OVERVIEW
+fields:
+  - name: content
+    type: string
+    role: content
+    required: true
+    merge: patch
+    description: description
+"""
+
+
+@pytest.mark.parametrize(
+    ("overview", "message"),
+    [
+        ("", "missing fields: \\['overview_line'\\]"),
+        ("overview_line: content", "overview_line"),
+        ("overview_line:\n  fields: [content]", "must declare fields and max_chars"),
+        ("overview_line:\n  fields: [content]\n  max_chars: 160\n  extra: 1", "unsupported keys"),
+        ("overview_line:\n  fields: content\n  max_chars: 160", "must be a list of field names"),
+        ("overview_line:\n  fields: []\n  max_chars: 160", "non-empty list"),
+        ("overview_line:\n  fields: [missing]\n  max_chars: 160", "declared string content fields"),
+        ("overview_line:\n  fields: [content]\n  max_chars: 15", "between 16 and 2000"),
+    ],
+)
+def test_schema_loader_requires_a_valid_overview_line(overview: str, message: str) -> None:
+    """四份 Schema 都必须声明目录概览里每张卡片取哪些字段作说明、最多多少字。"""
+
+    valid = _OVERVIEW_SCHEMA_SOURCE.replace("OVERVIEW", "overview_line:\n  fields: [content]\n  max_chars: 160")
+    assert registry_module._load_schema(valid, "profile.yaml").overview_fields == ("content",)
+    with pytest.raises(MemorySchemaError, match=message):
+        registry_module._load_schema(_OVERVIEW_SCHEMA_SOURCE.replace("OVERVIEW", overview), "profile.yaml")
+
+
+def test_overview_line_takes_first_non_empty_field_as_one_bounded_line() -> None:
+    tool = registry_module.MemorySchemaRegistry.load_default().get(MemoryKind.TOOL)
+    assert tool.overview_line({"tool_name": "x", "purpose": "", "when_to_use": "- 需要时\n- 再说"}) == "需要时 再说"
+    long = tool.overview_line({"tool_name": "x", "purpose": "长" * 500})
+    assert len(long) == tool.overview_max_chars and long.endswith("…")
+    assert tool.overview_line({"tool_name": "x"}) == ""
+
+
 @pytest.mark.parametrize("bad", ['"true"', "1", "null", "[true]"])
 def test_schema_loader_rejects_non_boolean_required_flag_before_building_the_field(bad: str) -> None:
     """YAML 里 ``required`` 类型错时在字段解码器就被拒（W16：类型检查在边界）。"""
@@ -443,6 +495,9 @@ memory_type: profile
 description: description
 path_template: profile.md
 markdown_template: "{content}"
+overview_line:
+  fields: [content]
+  max_chars: 160
 fields:
   - name: content
     type: string
@@ -460,6 +515,9 @@ memory_type: profile
 description: TYPE_DESCRIPTION
 path_template: profile.md
 markdown_template: MARKDOWN
+overview_line:
+  fields: [content]
+  max_chars: 160
 min_non_empty_content_fields: MINIMUM
 omit_empty_sections: OMIT
 fields:

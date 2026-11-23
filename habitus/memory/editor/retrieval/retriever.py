@@ -1,86 +1,87 @@
-"""按 Schema 范围搜索并预取相关旧记忆完整快照。"""
+"""提取记忆时读取固定旧卡片，并给出偏好主题与实体名字清单。
+
+不靠向量搜索：档案和按本段真实工具名对应的工具卡片固定直读；偏好与实体靠名字清单定位，清单放进第一轮输入，
+清单里出现过的地址模型可以要求读。名字取自记忆树目录本身（完整），说明取自模板概览（读不到就只给名字）。
+"""
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+import asyncio
 
 from habitus.memory.editor.retrieval.model import (
+    MemoryNameEntry,
     MemoryRelatedContext,
     MemoryRetrievalConfig,
     MemoryRetrievalError,
 )
-from habitus.memory.editor.retrieval.query import ConversationSegmentQueryBuilder
-from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind
-from habitus.memory.retrieval import MemorySearchHit, MemorySemanticSearch
+from habitus.memory.editor.retrieval.search import MemorySearchHit, memory_content_search
+from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryLevel
+from habitus.memory.recall import MemoryRecallLifecycle
 from habitus.memory.schema import MemorySchemaRegistry
+from habitus.memory.semantic import MemoryOverview, MemoryOverviewFormatError
 from habitus.memory.snapshot import MemorySnapshotReader
-from habitus.memory.uri import MemoryURI, MemoryURINodeType
+from habitus.memory.tree import MemoryTree
+from habitus.memory.uri import MemoryURI
 from habitus.pre.conversation import ConversationMessageRole, ConversationSegment
+
+_LISTED_DIRECTORIES = (MemoryDirectory(("preferences",)), MemoryDirectory(("entities",)))
+_OVERVIEW_MAX_BYTES = 4 * 1024 * 1024
 
 
 class MemoryRelatedRetriever:
-    """编排固定节点直读、受限目录搜索和有界 Top-N 旧记忆预取。"""
+    """固定节点直读、名字清单有界列出。"""
 
     def __init__(
         self,
         *,
         schema_registry: MemorySchemaRegistry,
         snapshot_reader: MemorySnapshotReader,
-        semantic_search: MemorySemanticSearch,
         config: MemoryRetrievalConfig | None = None,
+        recall_lifecycle: MemoryRecallLifecycle | None = None,
     ) -> None:
         self.schema_registry = schema_registry
+        self.recall_lifecycle = recall_lifecycle  # 搜内容时剔掉退休的卡片
         self.snapshot_reader = snapshot_reader
-        self.semantic_search = semantic_search
         self.config = config or MemoryRetrievalConfig()
-        self.query_builder = ConversationSegmentQueryBuilder(self.config)
+        if 1 + self.config.max_tool_uris > self.snapshot_reader.config.max_items:
+            raise ValueError("fixed old-memory reads can exceed the snapshot reader item limit")
 
-        fixed_uris, _roots = self._schema_read_plan()
-        maximum_snapshots = len(fixed_uris) + self.config.max_tool_uris + self.config.search_limit
-        if maximum_snapshots > self.snapshot_reader.config.max_items:
-            raise ValueError("retrieval result can exceed the snapshot reader item limit")
+    @property
+    def tree(self) -> MemoryTree:
+        return self.snapshot_reader.tree
 
     async def retrieve(self, segment: ConversationSegment) -> MemoryRelatedContext:
-        """确定相关 URI，并在返回前完整读取每一个选中 L2 文档。"""
+        """读档案与本段工具卡片的完整快照，并列出偏好主题与实体名字；读盘放到线程里，不堵事件循环。"""
 
-        query = self.query_builder.build(segment)
-        fixed_uris, search_roots = self._schema_read_plan()
-        tool_uris = self._tool_uris(segment)
-        search_hits = await self._search(query, search_roots)
-        selected = tuple(
-            sorted(
-                {
-                    *(str(uri) for uri in fixed_uris),
-                    *(str(uri) for uri in tool_uris),
-                    *(str(hit.uri) for hit in search_hits),
-                }
-            )
-        )
-        snapshots = self.snapshot_reader.read_many(selected)
+        return await asyncio.to_thread(self._retrieve, segment)
+
+    def _retrieve(self, segment: ConversationSegment) -> MemoryRelatedContext:
+        fixed = (MemoryURI.from_address(MemoryAddress.profile()), *self._tool_uris(segment))
+        snapshots = self.snapshot_reader.read_many(tuple(sorted({str(uri) for uri in fixed})))
+        entries: list[MemoryNameEntry] = []
+        for directory in _LISTED_DIRECTORIES:
+            if not self.tree.directory_exists(directory):
+                continue
+            children = self.tree.child_directories(directory)
+            for child in (directory, *children):
+                entries.extend(memory_directory_listing(self.tree, child))
+        kept = tuple(entries[: self.config.max_listing_entries])
         return MemoryRelatedContext(
             conversation_id=segment.conversation_id,
             segment_id=segment.segment_id,
             source_segment_digest=segment.digest,
-            query=query,
-            search_roots=search_roots,
-            search_hits=search_hits,
+            listing=kept,
             snapshots=snapshots,
+            omitted_listing_entries=len(entries) - len(kept),
         )
 
-    def _schema_read_plan(self) -> tuple[tuple[MemoryURI, ...], tuple[MemoryURI, ...]]:
-        fixed: set[MemoryURI] = set()
-        roots: set[MemoryURI] = set()
-        for schema in self.schema_registry.all():
-            if schema.kind is MemoryKind.PROFILE:
-                fixed.add(MemoryURI.from_address(MemoryAddress.profile()))
-                continue
-            if schema.kind is MemoryKind.TOOL:
-                continue
-            path_root = PurePosixPath(schema.path_template).parts[0]
-            roots.add(MemoryURI.from_directory(MemoryDirectory((path_root,))))
-        return (
-            tuple(sorted(fixed, key=str)),
-            tuple(sorted(roots, key=str)),
+    def search(
+        self, keywords: tuple[str, ...], directory: MemoryDirectory | None, *, limit: int
+    ) -> tuple[MemorySearchHit, ...]:
+        """按关键词在卡片字段文字里字面查找（同步读盘，调用方放进线程）。"""
+
+        return memory_content_search(
+            self.tree, self.recall_lifecycle, keywords=keywords, directory=directory, limit=limit
         )
 
     def _tool_uris(self, segment: ConversationSegment) -> tuple[MemoryURI, ...]:
@@ -93,46 +94,35 @@ class MemoryRelatedRetriever:
             if len(names) > self.config.max_tool_uris:
                 raise MemoryRetrievalError("conversation segment contains too many distinct tool names")
         try:
-            return tuple(
-                sorted(
-                    (MemoryURI.from_address(MemoryAddress.tool(name)) for name in names),
-                    key=str,
-                )
-            )
+            return tuple(sorted((MemoryURI.from_address(MemoryAddress.tool(name)) for name in names), key=str))
         except (TypeError, ValueError) as exc:
             raise MemoryRetrievalError(
                 "conversation tool name cannot map exactly to the confirmed memory tree"
             ) from exc
 
-    async def _search(
-        self,
-        query: str,
-        roots: tuple[MemoryURI, ...],
-    ) -> tuple[MemorySearchHit, ...]:
-        if not roots:
-            return ()
+
+def memory_directory_listing(tree: MemoryTree, directory: MemoryDirectory) -> tuple[MemoryNameEntry, ...]:
+    """一个目录里直接的卡片：名字取目录本身（完整），说明取模板概览；最近更新的在前，没有概览的按名字。"""
+
+    if not tree.directory_exists(directory):
+        return ()
+    descriptions: dict[str, tuple[str, float]] = {}
+    if tree.layer_exists(directory, MemoryLevel.OVERVIEW):
         try:
-            raw_hits = await self.semantic_search.search(
-                query,
-                roots=roots,
-                kinds=(),
-                limit=self.config.search_limit,
+            overview = MemoryOverview.parse(
+                directory, tree.read_layer_bounded(directory, MemoryLevel.OVERVIEW, max_bytes=_OVERVIEW_MAX_BYTES)
             )
-        except Exception as exc:
-            raise MemoryRetrievalError("memory semantic search failed") from exc
-        if len(raw_hits) > self.config.search_limit:
-            raise MemoryRetrievalError("memory semantic search exceeded its requested result limit")
-
-        by_uri: dict[MemoryURI, MemorySearchHit] = {}
-        for hit in raw_hits:
-            if hit.uri.node_type is not MemoryURINodeType.DOCUMENT:
-                raise MemoryRetrievalError("memory semantic search returned a non-L2 URI")
-            if not any(hit.uri.matches_prefix(root) for root in roots):
-                raise MemoryRetrievalError("memory semantic search returned an out-of-scope URI")
-            current = by_uri.get(hit.uri)
-            if current is None or hit.score > current.score:
-                by_uri[hit.uri] = hit
-        return tuple(sorted(by_uri.values(), key=lambda hit: (-hit.score, str(hit.uri))))
+        except (MemoryOverviewFormatError, ValueError):
+            overview = None
+        if overview is not None:
+            descriptions = {card.filename: (card.description, card.updated_at.timestamp()) for card in overview.cards}
+    entries = []
+    for address in tree.direct_addresses(directory):
+        filename = tree.path_for(address).name
+        description, updated = descriptions.get(filename, ("", 0.0))
+        entries.append((-updated, filename, MemoryNameEntry(MemoryURI.from_address(address), description)))
+    entries.sort(key=lambda item: (item[0], item[1]))
+    return tuple(entry for _updated, _filename, entry in entries)
 
 
-__all__ = ["MemoryRelatedRetriever", "MemorySemanticSearch"]
+__all__ = ["MemoryRelatedRetriever", "memory_directory_listing"]

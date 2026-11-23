@@ -7,6 +7,9 @@ description: >-
 path_template: tools/{tool_name}.md
 min_non_empty_content_fields: 1
 omit_empty_sections: true
+overview_line:
+  fields: [purpose, when_to_use, invocation, constraints, failure_recovery, verification]
+  max_chars: 160
 markdown_template: |
   # {tool_name}
 

@@ -51,28 +51,23 @@ class MemoryExtractionPromptBuilder:
         """构造一次 Retrieval Grader 与受控动作选择请求；``context`` 为空时不带旧记忆（只用于估算对话材料的预算）。"""
 
         payload = self._base_payload(segment, context, turn_context)
-        payload["previous_retrieval_decisions"] = [
-            {
-                "status": decision.status.value,
-                "action": decision.action.value,
-                "query": decision.query,
-                "uri": decision.uri,
-                "reason": decision.reason,
-            }
-            for decision in decisions
-        ]
+        payload["previous_retrieval_decisions"] = [_decision(decision) for decision in decisions]
         payload["previous_retrieval_observations"] = [observation.to_dict() for observation in observations]
         payload["tool_actions_enabled"] = allow_action
         content = self._bounded_payload(payload)
         final_rule = (
-            "当前仍允许一个只读动作：只能给出一个 query，禁止拆成多个查询；memory_read 只能选择"
-            " allowed_read_uris 中的一个 URI。"
+            "当前仍允许一个只读动作：memory_list 列一个目录（preferences、entities 或它下面的类别、tools）；"
+            "memory_search 按 keywords 在卡片的字段文字里字面查找（不分大小写，directory 可以限定目录，也可以为 null），"
+            f"返回至多 {self.config.max_search_results} 张卡片的地址、名字和命中片段，用在名字看不出、但内容里可能出现"
+            "某个词的时候；"
+            f"memory_read 一次读至多 {self.config.max_reads_per_action} 个 URI，只能选名字清单、列过的目录、搜索结果、"
+            "一跳关系或已读快照里出现过的地址。名字清单里已经有偏好主题与实体名字时，直接读要用的，不必先列目录。"
             if allow_action
             else (
-                "检索轮次预算已经用完，系统不会再执行任何 memory_search 或 memory_read，不要再请求工具。"
-                "现在只能返回 finish（query 与 uri 为 null），按已读到的完整旧记忆快照和先前检索结果结束检索；"
-                "status 如实记录这些材料是否充分，insufficient 也不会导致失败。先前检索没有返回任何"
-                "旧记忆，即表示没有可更新或去重的旧记忆，后续按新建处理。"
+                "检索轮次预算已经用完，系统不会再执行任何 memory_list、memory_search 或 memory_read，不要再请求工具。"
+                "现在只能返回 finish（directory 为 null、uris 与 keywords 为空数组），按已读到的完整旧记忆快照结束检索；"
+                "status 如实记录这些材料是否充分，insufficient 也不会导致失败。名字清单里没有对应的旧记忆，"
+                "即表示没有可更新或去重的旧记忆，后续按新建处理。"
             )
         )
         return ChatRequest(
@@ -91,7 +86,7 @@ class MemoryExtractionPromptBuilder:
                     role="user",
                     content=(
                         "以下 JSON 包含完整 ConversationSegment、当前完整旧 L2 快照、稳定临时 page_id、"
-                        "搜索范围和先前动作结果。请返回一个严格的检索决策。\n" + content
+                        "偏好主题与实体名字清单、列过的目录和先前动作结果。请返回一个严格的检索决策。\n" + content
                     ),
                 ),
             ),
@@ -184,9 +179,9 @@ class MemoryExtractionPromptBuilder:
             return {
                 "old_memory_snapshots": [],
                 "existing_page_ids": [],
-                "semantic_search_roots": [],
-                "semantic_search_hits": [],
-                "allowed_read_uris": [],
+                "name_listing": "",
+                "listed_directories": {},
+                "searched": {},
             }
         page_ids = context.page_ids
         snapshots: list[dict[str, object]] = []
@@ -217,18 +212,24 @@ class MemoryExtractionPromptBuilder:
         return {
             "old_memory_snapshots": snapshots,
             "existing_page_ids": [{"page_id": page_id, "uri": uri} for page_id, uri in page_ids.existing_items()],
-            "semantic_search_roots": [str(root) for root in context.initial.search_roots],
-            "semantic_search_hits": [
-                {
-                    "uri": str(hit.uri),
-                    "score": hit.score,
-                    "vector_score": hit.vector_score,
-                    "rerank_score": hit.rerank_score,
-                }
-                for hit in context.search_hits
-            ],
-            "allowed_read_uris": list(context.allowed_read_uris),
+            "name_listing": self._name_listing(context),
+            "listed_directories": {
+                directory: [entry.line() for entry in entries]
+                for directory, entries in sorted(context.listed_directories.items())
+            },
+            "searched": {query: [hit.line() for hit in hits] for query, hits in sorted(context.searched.items())},
         }
+
+    @staticmethod
+    def _name_listing(context: MemoryExtractionContext) -> str:
+        """偏好主题与实体名字清单（已按 ``max_listing_tokens`` 截好）；放不下的写明张数，可以再列目录找。"""
+
+        lines = [entry.line() for entry in context.shown_listing]
+        if context.omitted_listing:
+            lines.append(
+                f"（还有 {context.omitted_listing} 张没列出，可以用 memory_list 列目录或 memory_search 按内容查找）"
+            )
+        return "\n".join(lines) or "（还没有偏好或实体卡片）"
 
     def _local_segment(self, segment: ConversationSegment) -> dict[str, object]:
         """片段的规范字典，只把每条消息的时刻换成主体所在地的本地时间（带偏移）。"""
@@ -253,6 +254,17 @@ class MemoryExtractionPromptBuilder:
                 "complete conversation and old-memory context exceeds its configured character limit"
             )
         return text
+
+
+def _decision(decision: MemoryRetrievalDecision) -> dict[str, object]:
+    return {
+        "status": decision.status.value,
+        "action": decision.action.value,
+        "directory": decision.directory,
+        "uris": list(decision.uris),
+        "keywords": list(decision.keywords),
+        "reason": decision.reason,
+    }
 
 
 __all__ = ["MemoryExtractionPromptBuilder"]

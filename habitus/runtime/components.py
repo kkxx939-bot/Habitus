@@ -24,22 +24,19 @@ from habitus.conversation import (
 from habitus.foundation.observability import Observer
 from habitus.infrastructure.observability import ManagedObservability, MetricRegistry
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.vector import VectorStoreFactory
 from habitus.memory.browse import MemoryBrowser
 from habitus.memory.compaction import MemoryLifecycleManager
 from habitus.memory.conversation import (
     ConversationMessageJournal,
     ConversationRetentionPlanner,
-    ConversationSemanticBoundaryScorer,
     ConversationSummaryCompactor,
     ConversationSummaryExpander,
+    ConversationSummaryReader,
     ConversationSummaryService,
-    PersistentConversationSummaryVectorIndex,
     SQLiteConversationSummaryUseStore,
 )
 from habitus.memory.editor import MemoryEditor
-from habitus.memory.indexing import PersistentMemoryVectorIndex
-from habitus.memory.retrieval import MemorySemanticSearchEngine, SearchService
+from habitus.memory.retrieval import SearchService
 from habitus.memory.semantic import MemorySemanticRefresher
 from habitus.memory.tree import MemoryTree
 from habitus.memory.workflow import (
@@ -53,9 +50,7 @@ from habitus.memory.workflow import (
 )
 from habitus.model_client import (
     ChatClient,
-    Embedder,
     ProviderFactory,
-    Reranker,
     StructuredChatClient,
 )
 from habitus.runtime.behavior import BehaviorBranches
@@ -77,7 +72,6 @@ class RuntimeInfrastructure:
     """Runtime 共享的锁基础设施及其显式初始化边界。"""
 
     path_lock: PathLock
-    vector_stores: VectorStoreFactory
     observability: MetricRegistry = field(default_factory=MetricRegistry)
     observer: Observer | None = None
     managed_observability: ManagedObservability | None = None
@@ -103,35 +97,18 @@ class RuntimeModels:
     providers: ProviderFactory
     chat: ChatClient
     structured_chat: StructuredChatClient
-    embedder: Embedder
-    reranker: Reranker | None
 
     def __post_init__(self) -> None:
         if self.structured_chat.client is not self.chat:
             raise ValueError("structured_chat must wrap the shared chat client")
 
     async def aclose(self) -> None:
-        """关闭所有模型能力；即使某一项失败也继续释放剩余资源。"""
+        """关闭对话能力的客户端。"""
 
-        resources = (self.chat, self.embedder, self.reranker)
-        first_error: BaseException | None = None
-        seen: set[int] = set()
-        for resource in resources:
-            if resource is None or id(resource) in seen:
-                continue
-            seen.add(id(resource))
-            close = getattr(resource, "aclose", None)
-            if not callable(close):
-                if first_error is None:
-                    first_error = TypeError("runtime model resource does not implement aclose")
-                continue
-            try:
-                await cast(Awaitable[None], close())
-            except BaseException as exc:
-                if first_error is None:
-                    first_error = exc
-        if first_error is not None:
-            raise first_error
+        close = getattr(self.chat, "aclose", None)
+        if not callable(close):
+            raise TypeError("runtime model resource does not implement aclose")
+        await cast(Awaitable[None], close())
 
 
 @dataclass(frozen=True)
@@ -153,10 +130,9 @@ class RuntimeConversation:
     source_releaser: ConversationSourceReleaser
     journal: ConversationMessageJournal
     retention: ConversationRetentionPlanner
-    boundary_scorer: ConversationSemanticBoundaryScorer
     summaries: ConversationSummaryService
     summary_compactor: ConversationSummaryCompactor
-    summary_vector_index: PersistentConversationSummaryVectorIndex
+    summary_reader: ConversationSummaryReader
     summary_use: SQLiteConversationSummaryUseStore
     summary_expander: ConversationSummaryExpander
 
@@ -177,8 +153,8 @@ class RuntimeConversation:
             raise ValueError("conversation summary compactor must use the shared journal")
         if self.summary_compactor.segment_store is not self.summaries.store:
             raise ValueError("conversation summary compactor must use the shared segment summary store")
-        if self.summary_vector_index.compactor is not self.summary_compactor:
-            raise ValueError("Conversation must share one Summary compactor and vector index")
+        if self.summary_reader.compactor is not self.summary_compactor:
+            raise ValueError("Conversation must share one Summary compactor and reader")
         if self.summary_compactor.use_store is not self.summary_use:
             raise ValueError("Conversation must share one Summary use store")
         if self.summary_expander.segment_store is not self.summaries.store:
@@ -214,27 +190,20 @@ class RuntimeMemory:
     search: SearchService
     editor: MemoryEditor
     semantic_refresher: MemorySemanticRefresher
-    vector_index: PersistentMemoryVectorIndex
     lifecycle: MemoryLifecycleManager
     browser: MemoryBrowser
 
     def __post_init__(self) -> None:
         if self.browser.tree is not self.tree:
             raise ValueError("memory browser must use the shared memory tree")
-        if self.search.tree is not self.tree:
+        if self.search.catalog.tree is not self.tree or self.search.snapshot_reader.tree is not self.tree:
             raise ValueError("memory search must use the shared memory tree")
         if self.editor.transaction.tree is not self.tree:
             raise ValueError("memory editor must use the shared memory tree")
         if self.semantic_refresher.tree is not self.tree:
             raise ValueError("semantic refresher must use the shared memory tree")
-        if self.vector_index.tree is not self.tree:
-            raise ValueError("memory vector index must use the shared memory tree")
         if self.lifecycle.tree is not self.tree:
             raise ValueError("memory lifecycle must use the shared memory tree")
-        if not isinstance(self.search.semantic_search, MemorySemanticSearchEngine):
-            raise TypeError("memory search must use MemorySemanticSearchEngine")
-        if self.search.semantic_search.index is not self.vector_index:
-            raise ValueError("memory search must use the shared persistent vector index")
 
 
 @dataclass(frozen=True)
@@ -257,8 +226,6 @@ class RuntimeWorkflow:
             raise ValueError("memory workflow must share one Conversation enqueuer")
         if self.lifecycle.jobs is not self.jobs or self.lifecycle.receipts is not self.receipts:
             raise ValueError("conversation lifecycle must share workflow stores")
-        if self.lifecycle.summary_vector_index is not self.runner.committed_finalizer.summary_vector_index:
-            raise ValueError("workflow must share one Summary vector index")
         if self.runner.transaction_recovery.change_receipts is not self.receipts:
             raise ValueError("memory workflow must share one receipt store")
         if self.worker.runner is not self.runner:
@@ -305,18 +272,14 @@ class RuntimeComponents:
             raise ValueError("Source Coordinator must use the shared Memory Conversation Consumer")
         if self.workflow.runner.executor.editor is not self.memory.editor:
             raise ValueError("workflow runner must use the shared memory editor")
-        if self.workflow.runner.committed_finalizer.vector_index is not self.memory.vector_index:
-            raise ValueError("workflow runner must publish the shared persistent vector index")
+        if self.workflow.runner.committed_finalizer.semantic_refresher is not self.memory.semantic_refresher:
+            raise ValueError("workflow runner must refresh the shared semantic layers")
         if self.memory.search.conversation_context.journal is not self.conversation.journal:
             raise ValueError("memory search must use the shared Conversation journal")
-        if self.memory.search.query_planner.client is not self.models.structured_chat:
+        if self.memory.search.steps.client is not self.models.structured_chat:
             raise ValueError("memory search must use the shared structured chat client")
-        if self.memory.search.retrieval_grader.client is not self.models.structured_chat:
-            raise ValueError("retrieval grader must use the shared structured chat client")
-        if self.memory.search.summary_search is not self.conversation.summary_vector_index:
-            raise ValueError("memory search must use the shared Summary fallback index")
-        if self.memory.search.semantic_search is not self.memory.editor.extraction_loop.retriever.semantic_search:
-            raise ValueError("memory search and editor must share one semantic search engine")
+        if self.memory.search.summaries is not self.conversation.summary_reader:
+            raise ValueError("memory search must use the shared Summary reader")
         if self.workflow.jobs.path_lock is not self.infrastructure.path_lock:
             raise ValueError("workflow and Runtime must share one path lock")
 

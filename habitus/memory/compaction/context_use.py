@@ -34,8 +34,12 @@ from habitus.memory.uri import MemoryURI
 
 @dataclass(frozen=True)
 class MemoryContextUseResult:
+    """``documents`` 是确认过的（COLD_2 已恢复）；``rejected_uris`` 失去了版本围栏，不能交出；
+    ``skipped_uris`` 只是这一次没拿到锁、没记账，卡片本身照常可用。"""
+
     documents: tuple[MemoryDocument, ...]
     rejected_uris: tuple[MemoryURI, ...]
+    skipped_uris: tuple[MemoryURI, ...] = ()
 
 
 class MemoryContextUseAcknowledger:
@@ -65,28 +69,35 @@ class MemoryContextUseAcknowledger:
         targets: tuple[MemoryRecallTarget, ...],
         *,
         used_at: datetime | None = None,
+        lock_wait_seconds: float = 5.0,
     ) -> MemoryContextUseResult:
-        """最终模型可见 Context 的 L2 才计成功；COLD_2 必须先同步恢复。"""
+        """最终模型可见 Context 的 L2 才计成功；COLD_2 必须先同步恢复。拿不到锁的跳过这一次记账。"""
 
         if len({item.uri for item in targets}) != len(targets):
             raise ValueError("context use targets must be unique")
         timestamp = lifecycle_timestamp(self.clock() if used_at is None else used_at)
         documents: list[MemoryDocument] = []
         rejected: list[MemoryURI] = []
+        skipped: list[MemoryURI] = []
         for target in targets:
             try:
-                documents.append(await self._acknowledge(target, timestamp))
+                documents.append(await self._acknowledge(target, timestamp, lock_wait_seconds))
             except asyncio.CancelledError:
                 raise
+            except TimeoutError:
+                skipped.append(target.uri)
             except Exception:
                 rejected.append(target.uri)
-        return MemoryContextUseResult(tuple(documents), tuple(rejected))
+        return MemoryContextUseResult(tuple(documents), tuple(rejected), tuple(skipped))
 
-    async def _acknowledge(self, target: MemoryRecallTarget, timestamp: datetime) -> MemoryDocument:
+    async def _acknowledge(
+        self, target: MemoryRecallTarget, timestamp: datetime, lock_wait_seconds: float
+    ) -> MemoryDocument:
         snapshot, state, detailed = await asyncio.to_thread(
             self._prepare_context_use,
             target,
             timestamp,
+            lock_wait_seconds,
         )
         if detailed is None:
             assert isinstance(snapshot.value, MemoryDocument)
@@ -110,10 +121,11 @@ class MemoryContextUseAcknowledger:
         self,
         target: MemoryRecallTarget,
         timestamp: datetime,
+        lock_wait_seconds: float,
     ) -> tuple[MemorySnapshot, MemoryRecallState | None, MemoryDocument | None]:
-        """在 operation URI 锁内提交普通 use，或冻结待恢复的精确来源。"""
+        """在 operation URI 锁内提交普通 use，或冻结待恢复的精确来源；等锁超时抛 ``TimeoutError``。"""
 
-        with self.operation_store.acquire(target.uri, wait_timeout_seconds=5.0):
+        with self.operation_store.acquire(target.uri, wait_timeout_seconds=lock_wait_seconds):
             pending = self.operation_store.try_read(target.uri)
             snapshot = self.snapshot_reader.read(target.uri)
             if not matches_target(snapshot, target):

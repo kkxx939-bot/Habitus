@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import time
 from collections.abc import Mapping, Sequence
@@ -73,20 +72,16 @@ class RuntimeLoadBenchmark:
             raise BenchmarkRunError("runtime load benchmark output directory is not empty")
         self.output_directory.mkdir(parents=True, exist_ok=True)
         require_empty_directory(self.work_directory, label="runtime load work directory")
-        scope = hashlib.sha256(str(self.output_directory).encode("utf-8")).hexdigest()
         runtime = build_runtime(
             isolated_config(
                 self.config,
                 storage_root=self.work_directory,
-                collection_scope=f"runtime-load:{scope}",
             )
         )
         runtime.initialize()
         events: list[dict[str, object]] = []
         started_at = datetime.now(UTC).isoformat()
         try:
-            await runtime.components.memory.vector_index.rebuild(checkpoint=0)
-            await runtime.components.conversation.summary_vector_index.rebuild(checkpoint=0)
             baseline_started = time.perf_counter()
             await _ingest_baseline(runtime, self.sample)
             baseline_latency_ms = (time.perf_counter() - baseline_started) * 1_000
@@ -157,7 +152,7 @@ class RuntimeLoadBenchmark:
                         "latency_ms": (time.perf_counter() - started) * 1_000,
                         "success": True,
                         "direct_memory_count": len(result.memories),
-                        "summary_fallback_count": len(result.summary_fallbacks),
+                        "summary_count": len(result.summaries),
                         "error": "",
                     }
                 except Exception as exc:
@@ -168,7 +163,7 @@ class RuntimeLoadBenchmark:
                         "latency_ms": (time.perf_counter() - started) * 1_000,
                         "success": False,
                         "direct_memory_count": 0,
-                        "summary_fallback_count": 0,
+                        "summary_count": 0,
                         "error": f"{type(exc).__name__}: {exc}",
                     }
 

@@ -19,7 +19,7 @@ Python 运行时）。用户裁定：插件不该在本地建数据库表；各�
    ``SQLiteConversationSummaryUseStore``，表 ``conversation_summary_use``，主键 identity
    （started_on / conversation_id / stage / summary_id）。一行 = 一份 Summary 的实际使用回执与
    退休候选/退休中状态。写入方是 Summary 压缩器与检索服务的 use recorder；Summary 文件仍是内容真相源。
-3. ``locks.sqlite3`` / ``memory_vector_locks.sqlite3`` / ``summary_vector_locks.sqlite3`` ——
+3. ``locks.sqlite3`` ——
    ``infrastructure/store/sqlite/lock_store.py`` 的 ``SQLiteLockStore``，表 ``locks``
    （lock_key、token、expires_at、owner、created_at、fence）。这是跨进程租约锁：**行为归约 runner、
    行为写入器、情景刷新器、记忆提交事务全靠它**。进程内实现只在测试里
@@ -74,8 +74,6 @@ from habitus.infrastructure.lifecycle import CapacitySnapshotStore, LifecyclePar
 from habitus.infrastructure.observability import ManagedObservability, MetricRegistry
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.sqlite import SQLiteLockStore
-from habitus.infrastructure.vector import VectorStoreFactory
-from habitus.infrastructure.vector.adapters import register_builtin_vector_adapters
 from habitus.memory.browse import MemoryBrowser
 from habitus.memory.compaction import (
     MemoryFieldCompactor,
@@ -90,14 +88,13 @@ from habitus.memory.conversation import (
     ConversationRangeSummaryGenerator,
     ConversationRangeSummaryStore,
     ConversationRetentionPlanner,
-    ConversationSemanticBoundaryScorer,
     ConversationSummaryCompactor,
     ConversationSummaryExpander,
     ConversationSummaryGenerator,
+    ConversationSummaryReader,
     ConversationSummaryRetirementStore,
     ConversationSummaryService,
     ConversationSummaryStore,
-    PersistentConversationSummaryVectorIndex,
     SQLiteConversationSummaryUseStore,
 )
 from habitus.memory.document import MemoryDocumentCodec
@@ -109,21 +106,18 @@ from habitus.memory.editor import (
     MemoryRelatedRetriever,
     MemoryTransactionJournal,
 )
-from habitus.memory.indexing import PersistentMemoryVectorIndex
 from habitus.memory.recall import (
     MemoryRecallLifecycle,
     SQLiteMemoryRecallLifecycleStore,
 )
 from habitus.memory.retrieval import (
     ConversationSearchContextReader,
-    MemoryContextAssembler,
-    MemoryRetrievalGrader,
-    MemorySearchQueryPlanner,
-    MemorySemanticSearchEngine,
+    MemoryCatalogReader,
+    NoBehaviorRecords,
     SearchService,
 )
 from habitus.memory.schema import MemorySchemaRegistry
-from habitus.memory.semantic import LLMMemoryOverviewGenerator, MemorySemanticRefresher
+from habitus.memory.semantic import MemorySemanticRefresher
 from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.tree import MemoryTree
 from habitus.memory.workflow import (
@@ -135,12 +129,13 @@ from habitus.memory.workflow import (
     MemoryJobRunner,
     MemoryJobStore,
 )
-from habitus.model_client import ChatClient, Embedder, ProviderFactory, Reranker, StructuredChatClient
+from habitus.model_client import ChatClient, ProviderFactory, StructuredChatClient
 from habitus.pre.conversation import ConversationAdapterRegistry
 from habitus.runtime.behavior import (
     behavior_domain_configs,
     build_behavior_components,
 )
+from habitus.runtime.behavior_records import BehaviorTreeRecords
 from habitus.runtime.components import (
     RuntimeComponents,
     RuntimeConversation,
@@ -150,7 +145,6 @@ from habitus.runtime.components import (
     RuntimeWorkflow,
 )
 from habitus.runtime.conditions import local_calendar
-from habitus.runtime.embedding_fingerprints import embedding_fingerprints
 from habitus.runtime.evidence import evidence_of
 from habitus.runtime.foresight import (
     build_outlet,
@@ -178,7 +172,6 @@ from habitus.runtime.session_lane import (
     session_salvager,
     unwatched_writer,
 )
-from habitus.runtime.vector_stores import build_vector_store
 from habitus.runtime.worker import MemoryWorker
 
 
@@ -197,7 +190,6 @@ def build_runtime(
     config: HabitusConfig,
     *,
     providers: ProviderFactory | None = None,
-    vector_stores: VectorStoreFactory | None = None,
     conversation_adapters: ConversationAdapterRegistry | None = None,
     path_lock: PathLock | None = None,
     observer: Observer | None = None,
@@ -211,7 +203,6 @@ def build_runtime(
         conversation_adapters if conversation_adapters is not None else ConversationAdapterRegistry.with_builtins()
     )
     resolved_providers = providers or _builtin_provider_factory()
-    resolved_vector_stores = vector_stores or register_builtin_vector_adapters()
     metrics_config = config.observability.metrics
     observability = MetricRegistry(
         enabled=metrics_config.enabled,
@@ -236,26 +227,9 @@ def build_runtime(
         ),
         observer=operation_observer,
     )
-    memory_vector_lock = path_lock or PathLock(
-        SQLiteLockStore(
-            config.workflow_root / "memory_vector_locks.sqlite3",
-            config=config.storage.sqlite_lock,
-            initialize=False,
-        ),
-        observer=operation_observer,
-    )
-    summary_vector_lock = path_lock or PathLock(
-        SQLiteLockStore(
-            config.workflow_root / "summary_vector_locks.sqlite3",
-            config=config.storage.sqlite_lock,
-            initialize=False,
-        ),
-        observer=operation_observer,
-    )
 
     schema_registry = MemorySchemaRegistry.load_default()
     codec = MemoryDocumentCodec(schema_registry)
-    model_config = config.models
     conversation_config = config.conversation
     memory_config = config.memory
     workflow_config = config.workflow
@@ -266,37 +240,25 @@ def build_runtime(
         tree_config=memory_config.tree,
     )
     snapshot_reader = MemorySnapshotReader(tree, config=memory_config.snapshot)
-
-    embedder, reranker, chat = _model_clients(resolved_providers, config, operation_observer)
-    vector_store = build_vector_store(
-        resolved_vector_stores, config, memory_config.vector_store, memory_config.vector_index, memory_vector_lock
+    recall_lifecycle = MemoryRecallLifecycle(  # 提取时搜内容要剔退休卡片，所以在检索器之前建
+        SQLiteMemoryRecallLifecycleStore(
+            config.workflow_root / "memory_recall_lifecycle.sqlite3",
+            config=memory_config.recall_lifecycle,
+            initialize=False,
+        ),
+        config=memory_config.recall_lifecycle,
     )
-    vector_index = PersistentMemoryVectorIndex(
-        tree,
-        embedder,
-        vector_store,
-        dimension=model_config.embedding.dimension,
-        embedding_fingerprint=embedding_fingerprints(model_config.embedding)[0],
-        config=memory_config.vector_index,
-        path_lock=resolved_lock,
-    )
-    semantic_search = MemorySemanticSearchEngine(
-        embedder=embedder,
-        index=vector_index,
-        reranker=reranker,
-        config=memory_config.semantic_search,
-        observer=operation_observer,
-    )
+    chat = _chat_client(resolved_providers, config, operation_observer)
     retriever = MemoryRelatedRetriever(
         schema_registry=schema_registry,
         snapshot_reader=snapshot_reader,
-        semantic_search=semantic_search,
         config=memory_config.editor_retrieval,
+        recall_lifecycle=recall_lifecycle,
     )
     structured_chat = StructuredChatClient(
         chat,
-        allow_json_repair=model_config.structured_output.allow_json_repair,
-        validation_retries=model_config.structured_output.validation_retries,
+        allow_json_repair=config.models.structured_output.allow_json_repair,
+        validation_retries=config.models.structured_output.validation_retries,
     )
     extraction_loop = MemoryExtractionLoop(
         client=structured_chat,
@@ -323,8 +285,7 @@ def build_runtime(
         transaction=transaction,
     )
 
-    overview_generator = LLMMemoryOverviewGenerator(structured_chat, config=memory_config.semantic)
-    semantic_refresher = MemorySemanticRefresher(tree, overview_generator, resolved_lock, config=memory_config.semantic)
+    semantic_refresher = MemorySemanticRefresher(tree, schema_registry, resolved_lock, config=memory_config.semantic)
 
     conversations = ConversationMessageJournal(
         config.conversation_root,
@@ -332,18 +293,13 @@ def build_runtime(
         config=conversation_config.journal,
     )
     retention = ConversationRetentionPlanner(conversation_config.segmentation)
-    boundary_embedding_fingerprint = embedding_fingerprints(model_config.embedding)[1]
-    boundary_scorer = ConversationSemanticBoundaryScorer(
-        embedder,
-        embedding_fingerprint=boundary_embedding_fingerprint,
-        max_unit_chars=model_config.embedding.max_document_text_chars,
-    )
     summary_store = ConversationSummaryStore(
         conversations.layout,
         config=conversation_config.summary,
     )
     summary_generator = ConversationSummaryGenerator(
         structured_chat,
+        zone=config.locale.zone(),
         config=conversation_config.summary,
     )
     summaries = ConversationSummaryService(summary_store, summary_generator)
@@ -377,23 +333,10 @@ def build_runtime(
             * (1 + conversation_config.lifecycle.summary_compaction.segment_to_range.max_source_count)
         ),
     )
-    summary_vector_store = build_vector_store(
-        resolved_vector_stores,
-        config,
-        conversation_config.summary_vector_store,
-        conversation_config.summary_vector_index,
-        summary_vector_lock,
-    )
-    summary_vector_index = PersistentConversationSummaryVectorIndex(
+    summary_reader = ConversationSummaryReader(
         conversations,
         summary_compactor,
-        embedder,
-        summary_vector_store,
-        dimension=model_config.embedding.dimension,
-        embedding_fingerprint=boundary_embedding_fingerprint,
-        reranker=reranker,
-        config=conversation_config.summary_vector_index,
-        observer=operation_observer,
+        config=conversation_config.summary_reader,
         retirement_store=summary_retirements,
     )
     search_context_reader = ConversationSearchContextReader(
@@ -401,22 +344,6 @@ def build_runtime(
         summary_compactor,
         config=memory_config.search_service,
         retirement_filter=summary_retirements,
-    )
-    search_query_planner = MemorySearchQueryPlanner(
-        structured_chat,
-        config=memory_config.search_service,
-    )
-    retrieval_grader = MemoryRetrievalGrader(
-        structured_chat,
-        config=memory_config.search_service,
-    )
-    recall_lifecycle = MemoryRecallLifecycle(
-        SQLiteMemoryRecallLifecycleStore(
-            config.workflow_root / "memory_recall_lifecycle.sqlite3",
-            config=memory_config.recall_lifecycle,
-            initialize=False,
-        ),
-        config=memory_config.recall_lifecycle,
     )
     field_compactor = MemoryFieldCompactor(
         structured_chat,
@@ -429,7 +356,6 @@ def build_runtime(
     async def refresh_lifecycle_derivatives(uris):
         addresses = tuple(uri.to_address() for uri in uris)
         await asyncio.to_thread(semantic_refresher.refresh_for_many, addresses)
-        await vector_index.rebuild()
 
     memory_lifecycle = MemoryLifecycleManager(
         tree,
@@ -443,23 +369,6 @@ def build_runtime(
         config=memory_config.lifecycle_maintenance,
         derived_refresh=refresh_lifecycle_derivatives,
     )
-    search_service = SearchService(
-        tree=tree,
-        snapshot_reader=snapshot_reader,
-        semantic_search=semantic_search,
-        summary_search=summary_vector_index,
-        query_planner=search_query_planner,
-        retrieval_grader=retrieval_grader,
-        recall_lifecycle=recall_lifecycle,
-        conversation_context=search_context_reader,
-        assembler=MemoryContextAssembler(config=memory_config.search_service),
-        config=memory_config.search_service,
-        cold_probe_expander=memory_lifecycle,
-        summary_fallback_expander=summary_expander,
-        summary_use_recorder=summary_use,
-        observer=operation_observer,
-    )
-
     jobs = MemoryJobStore(config.workflow_root, resolved_lock, memory_root=tree.root, config=workflow_config.jobs)
     receipts = MemoryChangeReceiptStore(config.workflow_root, codec, config=workflow_config.receipts)
     conversation_lifecycle = ConversationLifecycleManager(
@@ -467,7 +376,6 @@ def build_runtime(
         conversations,
         summary_store,
         range_summary_store,
-        summary_vector_index,
         jobs,
         receipts,
         transaction_journal,
@@ -512,7 +420,6 @@ def build_runtime(
     memory_conversation_consumer = MemoryConversationConsumer(
         enqueuer,
         conversations,
-        boundary_scorer,
         memory_output_store,
     )
 
@@ -531,6 +438,33 @@ def build_runtime(
         observer=operation_observer,
         span_controller=managed_observability,
         source_settled=behavior_settled,
+    )
+    # 检索在行为组件之后建：它要读两支行为树里每一轮的记录（行为侧没开就没有这一处来源）。
+    search_service = SearchService(
+        catalog=MemoryCatalogReader(
+            tree,
+            schema_registry,
+            recall_lifecycle,
+            max_catalog_chars=memory_config.search_service.max_catalog_chars,
+            overview_max_bytes=memory_config.semantic.max_overview_chars * 4 + 4,
+            max_unlisted_scan=memory_config.search_service.max_unlisted_scan,
+        ),
+        snapshot_reader=snapshot_reader,
+        client=structured_chat,
+        recall_lifecycle=recall_lifecycle,
+        conversation_context=search_context_reader,
+        summaries=summary_reader,
+        records=(
+            NoBehaviorRecords()
+            if behavior_components is None
+            else BehaviorTreeRecords(tuple((branch.lane.value, branch.tree) for branch in behavior_components))
+        ),
+        zone=config.locale.zone(),
+        config=memory_config.search_service,
+        cold_probe_expander=memory_lifecycle,
+        summary_use_recorder=summary_use,
+        summary_expander=summary_expander,
+        observer=operation_observer,
     )
     # behavior 关着而 scene / foresight 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
     # 所以这里 behavior_components 为 None 时换代与预测层必然都没开，直接跳过即可。
@@ -657,9 +591,7 @@ def build_runtime(
         conversations,
         editor,
         semantic_refresher,
-        vector_index,
         summaries,
-        summary_vector_index,
         receipts,
         recall_lifecycle,
         observer=operation_observer,
@@ -678,7 +610,7 @@ def build_runtime(
             lock_store=lifecycle_lock_store,
             lease_ttl_seconds=config.lifecycle.worker.lease_ttl_seconds,
         ),
-        MemoryL2Participant(memory_lifecycle),
+        MemoryL2Participant(memory_lifecycle, semantic_refresher),
         ConversationSourceParticipant(source_releaser, batch_addresses=source_config.release_batch_addresses),
         ConversationSourceRecoveryParticipant(source_recovery, source_coordinator, wake_memory=worker.wake),
     ]
@@ -698,7 +630,6 @@ def build_runtime(
         frequent=(
             ConversationIdleSealParticipant(
                 enqueuer,
-                boundary_scorer,
                 source_releaser,
                 resolved_lock,
                 conversation_config.lifecycle,
@@ -713,7 +644,6 @@ def build_runtime(
     components = RuntimeComponents(
         infrastructure=RuntimeInfrastructure(
             path_lock=resolved_lock,
-            vector_stores=resolved_vector_stores,
             observability=observability,
             observer=operation_observer,
             managed_observability=managed_observability,
@@ -722,8 +652,6 @@ def build_runtime(
             providers=resolved_providers,
             chat=chat,
             structured_chat=structured_chat,
-            embedder=embedder,
-            reranker=reranker,
         ),
         conversation=RuntimeConversation(
             sources=source_store,
@@ -740,10 +668,9 @@ def build_runtime(
             source_releaser=source_releaser,
             journal=conversations,
             retention=retention,
-            boundary_scorer=boundary_scorer,
             summaries=summaries,
             summary_compactor=summary_compactor,
-            summary_vector_index=summary_vector_index,
+            summary_reader=summary_reader,
             summary_use=summary_use,
             summary_expander=summary_expander,
         ),
@@ -752,7 +679,6 @@ def build_runtime(
             search=search_service,
             editor=editor,
             semantic_refresher=semantic_refresher,
-            vector_index=vector_index,
             lifecycle=memory_lifecycle,
             browser=MemoryBrowser(tree),
         ),
@@ -785,36 +711,17 @@ def _builtin_provider_factory() -> ProviderFactory:
     return providers
 
 
-def _model_clients(
-    providers: ProviderFactory, config: HabitusConfig, observer: Observer
-) -> tuple[Embedder, Reranker | None, ChatClient]:
-    """三种模型能力的客户端；每个客户端带自己的熔断，共用 ``models.call_failures`` 这组数（裁定 108）。"""
+def _chat_client(providers: ProviderFactory, config: HabitusConfig, observer: Observer) -> ChatClient:
+    """对话能力的客户端，带自己的熔断，用 ``models.call_failures`` 这组数（裁定 108）。"""
 
     models = config.models
-    embedder = providers.create_embedder(
-        models.embedding,
-        credentials=_model_credentials(config, models.embedding.route.credential_ref),
-        observer=observer,
-        outbound=config.network,
-        failures=models.call_failures,
-    )
-    reranker = None
-    if models.rerank is not None:
-        reranker = providers.create_reranker(
-            models.rerank,
-            credentials=_model_credentials(config, models.rerank.route.credential_ref),
-            observer=observer,
-            outbound=config.network,
-            failures=models.call_failures,
-        )
-    chat = providers.create_chat_client(
+    return providers.create_chat_client(
         models.chat,
         credentials=_model_credentials(config, models.chat.route.credential_ref),
         observer=observer,
         outbound=config.network,
         failures=models.call_failures,
     )
-    return embedder, reranker, chat
 
 
 def _model_credentials(config: HabitusConfig, reference: str) -> Mapping[str, str]:

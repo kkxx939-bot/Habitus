@@ -1,670 +1,537 @@
-"""面向 Agent 的完整只读记忆 SearchService。"""
+"""面向 Agent 的只读记忆检索：清单 → 挑 → 找 → 判，最多再走一轮。
+
+能查三处：四类卡片、每一轮的记录、会话摘要。整次查询（含"被用到"的记账）有一个总时间上限，到点就把已经
+找到的交出去，不返回空。模型不可用时只交出档案并写明原因，不拿关键词匹配顶替"挑"和"判"。
+"""
 
 from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Sequence
-from dataclasses import replace
-from datetime import UTC, datetime
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, tzinfo
 from typing import Protocol
 
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
-from habitus.memory.conversation import ConversationAddress
-from habitus.memory.conversation.indexing import ConversationSummaryMatch
-from habitus.memory.model import MemoryDirectory, MemoryKind, MemoryLevel
-from habitus.memory.recall import (
-    MemoryRecallCandidate,
-    MemoryRecallLifecycle,
-    MemoryRecallLifecycleError,
-    MemoryRecallTarget,
-)
-from habitus.memory.retrieval.acknowledgement import (
-    MemoryColdProbeExpander,
-    append_degradation,
-    final_context_acknowledger,
-)
-from habitus.memory.retrieval.assembler import MemoryContextAssembler, MemoryContextAssembly
-from habitus.memory.retrieval.context import ConversationSearchContextReader
-from habitus.memory.retrieval.grader import MemoryRetrievalGrader
+from habitus.memory.conversation import ConversationAddress, ConversationSummaryMatch, ConversationSummaryReader
+from habitus.memory.document import MemoryDocument
+from habitus.memory.model import MemoryAddress, MemoryKind
+from habitus.memory.recall import MemoryRecallLifecycle, MemoryRecallTarget, MemoryTemperature
+from habitus.memory.retrieval.acknowledgement import MemoryColdProbeExpander, account_use
+from habitus.memory.retrieval.assembler import MemoryContextAssembler
+from habitus.memory.retrieval.catalog import CatalogCard, MemoryCatalog, MemoryCatalogReader
+from habitus.memory.retrieval.context import ConversationSearchContext, ConversationSearchContextReader
 from habitus.memory.retrieval.model import (
     MemoryMatchedMemory,
-    MemoryQueryPlan,
-    MemoryQueryResult,
-    MemoryRetrievalAssessment,
-    MemoryRetrievalSufficiency,
     MemorySearchDegradation,
     MemorySearchDegradationStage,
-    MemorySearchError,
-    MemorySearchHit,
     MemorySearchResult,
     MemorySearchServiceConfig,
-    MemoryTypedQuery,
 )
-from habitus.memory.retrieval.planner import MemorySearchQueryPlanner
+from habitus.memory.retrieval.records import (
+    BehaviorRecord,
+    BehaviorRecordSource,
+    days_in_range,
+    keyword_hits,
+    search_records,
+)
 from habitus.memory.retrieval.relations import RelationExpander
 from habitus.memory.retrieval.request import MemorySearchRequestNormalizer
+from habitus.memory.retrieval.steps import SearchPlan, SearchSteps, SourceQuery
 from habitus.memory.snapshot import MemorySnapshotReader
+from habitus.memory.tree import MemoryTreeConsistencyError
 from habitus.memory.uri import MemoryURI
+from habitus.model_client import BRIEFS, StructuredChatClient, model_failure
 
-
-class MemorySemanticSearch(Protocol):
-    """公共 SearchService 和 Memory Editor 共同依赖的语义搜索契约。"""
-
-    async def search(
-        self,
-        query: str,
-        *,
-        roots: tuple[MemoryURI, ...],
-        kinds: tuple[MemoryKind, ...],
-        limit: int,
-    ) -> Sequence[MemorySearchHit]: ...
-
-
-class ConversationSummarySemanticSearch(Protocol):
-    """仅供 Memory 召回不足后使用的历史 Summary 搜索契约。"""
-
-    async def search(
-        self,
-        query: str,
-        *,
-        limit: int,
-    ) -> Sequence[ConversationSummaryMatch]: ...
-
-
-class ConversationSummaryFallbackExpander(Protocol):
-    def expand(
-        self,
-        match: ConversationSummaryMatch,
-        *,
-        max_chars: int,
-    ) -> ConversationSummaryMatch: ...
+_PROFILE_URI = MemoryURI.from_address(MemoryAddress.profile())
 
 
 class ConversationSummaryUseRecorder(Protocol):
     def record_use(self, references: tuple, *, used_at: datetime) -> tuple: ...
 
 
-class MemoryDirectoryLayerReader(Protocol):
-    """SearchService 读取目录 L0 目标上下文所需的最小记忆树契约；``MemoryTree`` 结构化满足它。"""
+class ConversationSummaryFallbackExpander(Protocol):
+    """把 Range/Archive 摘要按来源链临时补上子摘要语义（``ConversationSummaryExpander`` 满足它）。"""
 
-    def directory_exists(self, directory: MemoryDirectory) -> bool: ...
-
-    def layer_exists(self, directory: MemoryDirectory, level: MemoryLevel) -> bool: ...
-
-    def read_layer_bounded(self, directory: MemoryDirectory, level: MemoryLevel, *, max_bytes: int) -> str: ...
+    def expand(self, match: ConversationSummaryMatch, *, max_chars: int) -> ConversationSummaryMatch: ...
 
 
-def _temperature_count(memories: tuple[MemoryMatchedMemory, ...], temperature: str) -> int:
-    return sum(
-        memory.hit.lifecycle_temperature is not None and memory.hit.lifecycle_temperature.value == temperature
-        for memory in memories
-    )
+@dataclass
+class _Found:
+    """一次查询里找到的材料；编号在整次查询里不变，给模型的"判"只写编号。"""
 
+    now: datetime
+    cards: dict[str, MemoryDocument] = field(default_factory=dict)
+    card_temperatures: dict[MemoryURI, MemoryTemperature | None] = field(default_factory=dict)
+    card_targets: dict[MemoryURI, MemoryRecallTarget] = field(default_factory=dict)
+    records: dict[str, BehaviorRecord] = field(default_factory=dict)
+    full_records: set[str] = field(default_factory=set)
+    summaries: dict[str, ConversationSummaryMatch] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+    degradations: list[MemorySearchDegradation] = field(default_factory=list)
+    cold_picked: bool = False
+    rounds: int = 0
+    used: tuple[str, ...] | None = None
+    model_down: bool = False
+    timed_out: bool = False
 
-def _recall_target(memory: MemoryMatchedMemory) -> MemoryRecallTarget:
-    return MemoryRecallTarget(
-        memory.uri,
-        memory.document.metadata.revision,
-        memory.document.metadata.created_at,
-    )
+    def degrade(self, stage: MemorySearchDegradationStage, error: BaseException | str) -> None:
+        """每个阶段只记第一次的错误类型。"""
 
+        name = error if isinstance(error, str) else type(error).__name__
+        if all(item.stage is not stage for item in self.degradations):
+            self.degradations.append(MemorySearchDegradation(stage, name))
 
-def _search_observation(plan: MemoryQueryPlan, result: MemorySearchResult, *, started: float) -> ObservationEvent:
-    """一次 find/search 完成后的检索观察事件；有任何降级即记为 DEGRADED。"""
+    def card_id(self, document: MemoryDocument) -> str:
+        uri = MemoryURI.from_address(document.address)
+        for key, value in self.cards.items():
+            if MemoryURI.from_address(value.address) == uri:
+                return key
+        key = f"c{len(self.cards) + 1}"
+        self.cards[key] = document
+        return key
 
-    return ObservationEvent(
-        category="retrieval",
-        operation="search",
-        status=(ObservationStatus.DEGRADED if result.degradations else ObservationStatus.SUCCESS),
-        duration_seconds=max(0.0, time.monotonic() - started),
-        attributes={
-            "queries": len(plan.queries),
-            "memories": len(result.memories),
-            "summaries": len(result.summary_fallbacks),
-            "degradations": len(result.degradations),
-            "result_count": len(result.memories) + len(result.summary_fallbacks),
-            "degradation_count": len(result.degradations),
-            "hot_memories": _temperature_count(result.memories, "hot"),
-            "warm_memories": _temperature_count(result.memories, "warm"),
-            "cold1_memories": _temperature_count(result.memories, "cold_1"),
-            "cold2_memories": _temperature_count(result.memories, "cold_2"),
-        },
-    )
+    def record_id(self, record: BehaviorRecord, *, full: bool) -> str:
+        for key, value in self.records.items():
+            if value.address == record.address:
+                if full:
+                    self.full_records.add(key)
+                return key
+        key = f"r{len(self.records) + 1}"
+        self.records[key] = record
+        if full:
+            self.full_records.add(key)
+        return key
+
+    def summary_id(self, match: ConversationSummaryMatch) -> str:
+        for key, value in self.summaries.items():
+            if value.reference.identity == match.reference.identity:
+                return key
+        key = f"s{len(self.summaries) + 1}"
+        self.summaries[key] = match
+        return key
 
 
 class SearchService:
-    """按 find/search 分层返回完整且可溯源的 L2 记忆上下文。"""
+    """按"清单 → 挑 → 找 → 判"交出完整、可溯源、受预算约束的记忆上下文。"""
 
     def __init__(
         self,
         *,
-        tree: MemoryDirectoryLayerReader,
+        catalog: MemoryCatalogReader,
         snapshot_reader: MemorySnapshotReader,
-        semantic_search: MemorySemanticSearch,
-        summary_search: ConversationSummarySemanticSearch,
-        query_planner: MemorySearchQueryPlanner,
-        retrieval_grader: MemoryRetrievalGrader,
+        client: StructuredChatClient,
         recall_lifecycle: MemoryRecallLifecycle,
         conversation_context: ConversationSearchContextReader,
-        assembler: MemoryContextAssembler | None = None,
+        summaries: ConversationSummaryReader,
+        records: BehaviorRecordSource,
+        zone: tzinfo,
         config: MemorySearchServiceConfig | None = None,
         cold_probe_expander: MemoryColdProbeExpander | None = None,
-        summary_fallback_expander: ConversationSummaryFallbackExpander | None = None,
         summary_use_recorder: ConversationSummaryUseRecorder | None = None,
+        summary_expander: ConversationSummaryFallbackExpander | None = None,
         clock: Callable[[], datetime] | None = None,
         observer: Observer | None = None,
     ) -> None:
-        if snapshot_reader.tree is not tree:
-            raise ValueError("SearchService and snapshot reader must share one memory tree")
-        resolved_config = config or MemorySearchServiceConfig()
-        resolved_assembler = assembler or MemoryContextAssembler(config=resolved_config)
-        if query_planner.config != resolved_config:
-            raise ValueError("SearchService and query planner must share one search config")
-        if retrieval_grader.config != resolved_config:
-            raise ValueError("SearchService and retrieval grader must share one search config")
-        if conversation_context.config != resolved_config:
+        resolved = config or MemorySearchServiceConfig()
+        if conversation_context.config != resolved:
             raise ValueError("SearchService and Conversation context reader must share one search config")
-        if resolved_assembler.config != resolved_config:
-            raise ValueError("SearchService and context assembler must share one search config")
-        self.tree = tree
+        self.catalog = catalog
         self.snapshot_reader = snapshot_reader
-        self.semantic_search = semantic_search
-        self.summary_search = summary_search
-        self.query_planner = query_planner
-        self.retrieval_grader = retrieval_grader
         self.recall_lifecycle = recall_lifecycle
         self.conversation_context = conversation_context
-        self.assembler = resolved_assembler
-        self.config = resolved_config
+        self.summaries = summaries
+        self.records = records
+        self.zone = zone
+        self.config = resolved
+        self.steps = SearchSteps(client, config=resolved)
+        self.assembler = MemoryContextAssembler(zone=zone, config=resolved)
+        self.relation_expander = RelationExpander(snapshot_reader=snapshot_reader, config=resolved)
         self.cold_probe_expander = cold_probe_expander
-        self.summary_fallback_expander = summary_fallback_expander
         self.summary_use_recorder = summary_use_recorder
+        self.summary_expander = summary_expander
         self.clock = clock or (lambda: datetime.now(UTC))
         self.observer = observer or NullObserver()
-        self.request_normalizer = MemorySearchRequestNormalizer(resolved_config)
-        self.relation_expander = RelationExpander(
-            snapshot_reader=snapshot_reader,
-            config=resolved_config,
-        )
-
-    async def find(
-        self,
-        query: str,
-        *,
-        target_uris: MemoryURI | str | tuple[MemoryURI | str, ...] | None = None,
-        limit: int | None = None,
-        score_threshold: float | None = None,
-        kinds: tuple[MemoryKind, ...] = (),
-    ) -> MemorySearchResult:
-        """不调用查询规划模型，直接执行一次完整语义检索。"""
-
-        request = self.request_normalizer.normalize(
-            query,
-            target_uris=target_uris,
-            limit=limit,
-            score_threshold=score_threshold,
-            kinds=kinds,
-        )
-        plan = self.query_planner.direct(request.query)
-        return await self._execute(
-            plan,
-            request.roots,
-            request.limit,
-            request.score_threshold,
-            request.kinds,
-            assess_for_summary=False,
-            degradations=(),
-        )
+        self.request_normalizer = MemorySearchRequestNormalizer(resolved)
 
     async def search(
         self,
         query: str,
         *,
         conversation: ConversationAddress | None = None,
-        target_uris: MemoryURI | str | tuple[MemoryURI | str, ...] | None = None,
         limit: int | None = None,
-        score_threshold: float | None = None,
         kinds: tuple[MemoryKind, ...] = (),
     ) -> MemorySearchResult:
-        """完成 Memory 主召回，并仅在 Grader 判定不足时补查历史 Summary。"""
-
-        request = self.request_normalizer.normalize(
-            query,
-            target_uris=target_uris,
-            limit=limit,
-            score_threshold=score_threshold,
-            kinds=kinds,
-        )
-        degradations: tuple[MemorySearchDegradation, ...] = ()
-        if conversation is None:
-            plan = self.query_planner.direct(request.query)
-        else:
-            try:
-                context = self.conversation_context.read(conversation)
-                plan = await self.query_planner.plan(
-                    request.query,
-                    context,
-                    target_context=self._target_context(request.roots),
-                )
-            except Exception as exc:
-                plan = self.query_planner.direct(request.query)
-                degradations = (
-                    MemorySearchDegradation(
-                        MemorySearchDegradationStage.QUERY_PLANNER,
-                        type(exc).__name__,
-                    ),
-                )
-        return await self._execute(
-            plan,
-            request.roots,
-            request.limit,
-            request.score_threshold,
-            request.kinds,
-            assess_for_summary=True,
-            degradations=degradations,
-        )
-
-    async def _execute(
-        self,
-        plan: MemoryQueryPlan,
-        roots: tuple[MemoryURI, ...],
-        limit: int,
-        score_threshold: float | None,
-        kinds: tuple[MemoryKind, ...],
-        *,
-        assess_for_summary: bool,
-        degradations: tuple[MemorySearchDegradation, ...] = (),
-    ) -> MemorySearchResult:
+        request = self.request_normalizer.normalize(query, limit=limit, kinds=kinds)
         started = time.monotonic()
-        applied_degradations = list(degradations)
-        query_results = await self._execute_queries(plan, roots, limit, score_threshold, kinds)
-        hits, matched_queries = self._aggregate(query_results)
+        deadline = started + self.config.time_limit_seconds
         now = self._timestamp()
-        direct = self._select_direct(
-            hits,
-            matched_queries,
-            limit=limit,
-            now=now,
-            kinds=kinds,
-            degradations=applied_degradations,
+        found = _Found(now)
+        try:
+            async with asyncio.timeout(max(0.0, deadline - self.config.accounting_reserve_seconds - time.monotonic())):
+                await self._look(request.query, request.kinds, conversation, now, found)
+        except TimeoutError:
+            found.timed_out = True
+            found.degrade(MemorySearchDegradationStage.TIME_LIMIT, "TimeoutError")
+            found.notes.append("查资料到了时间上限，交出的是到那时已经找到的全部材料。")
+        selected = (
+            (await self._profile_only(found, deadline), (), ())
+            if found.model_down
+            else self._selected(found, found.used, request.limit)
         )
-        direct_targets = {memory.uri: _recall_target(memory) for memory in direct}
-        expanded = self.relation_expander.expand(
-            self._expand_cold_for_budget(direct),
-            roots=roots,
-        )
-        assembly, assessment, summary_fallback_attempted = await self._assemble_final_context(
-            plan,
-            expanded,
-            targets=direct_targets,
-            used_at=now,
-            assess_for_summary=assess_for_summary,
-            degradations=applied_degradations,
-        )
-        result = MemorySearchResult(
-            query=plan.original_query,
-            target_roots=roots,
-            kinds=kinds,
-            plan=plan,
-            query_results=query_results,
-            memories=assembly.memories,
-            retrieval_assessment=assessment,
-            summary_fallback_attempted=summary_fallback_attempted,
-            summary_fallbacks=assembly.summary_fallbacks,
-            context=assembly.context,
-            budget_exhausted=assembly.budget_exhausted,
-            degradations=tuple(applied_degradations),
-        )
-        self.observer.record(_search_observation(plan, result, started=started))
+        result = await self._hand_over(request.query, request.kinds, selected, found, now, deadline)
+        self.observer.record(_search_event(result, started))
         return result
 
-    async def _execute_queries(
-        self,
-        plan: MemoryQueryPlan,
-        roots: tuple[MemoryURI, ...],
-        limit: int,
-        score_threshold: float | None,
-        kinds: tuple[MemoryKind, ...],
-    ) -> tuple[MemoryQueryResult, ...]:
-        """并发执行查询计划里的每条查询，每条按候选倍数放宽到有界上限。"""
-
-        candidate_limit = min(
-            1_000,
-            max(limit, limit * self.config.candidate_multiplier),
-        )
-        return tuple(
-            await asyncio.gather(
-                *(
-                    self._execute_query(
-                        query,
-                        roots=roots,
-                        limit=candidate_limit,
-                        score_threshold=score_threshold,
-                        kinds=kinds,
-                    )
-                    for query in plan.queries
-                )
-            )
-        )
-
-    def _select_direct(
-        self,
-        hits: tuple[MemorySearchHit, ...],
-        matched_queries: dict[MemoryURI, tuple[str, ...]],
-        *,
-        limit: int,
-        now: datetime,
-        kinds: tuple[MemoryKind, ...],
-        degradations: list[MemorySearchDegradation],
-    ) -> tuple[MemoryMatchedMemory, ...]:
-        """读取有界数量的完整 L2，再按召回生命周期排序截到 ``limit``；生命周期失败时退回语义顺序。"""
-
-        read_limit = min(
-            self.snapshot_reader.config.max_items,
-            max(limit, limit * self.config.candidate_multiplier),
-        )
-        direct_candidates = self._read_direct(
-            hits[:read_limit],
-            matched_queries,
-            kinds=kinds,
-        )
-        try:
-            return self._rank_recall_lifecycle(
-                direct_candidates,
-                limit=limit,
-                now=now,
-            )
-        except MemoryRecallLifecycleError as exc:
-            append_degradation(
-                degradations,
-                MemorySearchDegradationStage.RECALL_LIFECYCLE,
-                exc,
-            )
-            return direct_candidates[:limit]
-
-    async def _assemble_final_context(
-        self,
-        plan: MemoryQueryPlan,
-        expanded: tuple[MemoryMatchedMemory, ...],
-        *,
-        targets: dict[MemoryURI, MemoryRecallTarget],
-        used_at: datetime,
-        assess_for_summary: bool,
-        degradations: list[MemorySearchDegradation],
-    ) -> tuple[MemoryContextAssembly, MemoryRetrievalAssessment | None, bool]:
-        """组装、评估与按需补查 Summary，使用确认剔除了记忆且尚未补查时再评估一次。"""
-
-        assembly = self.assembler.assemble(expanded)
-        assessment: MemoryRetrievalAssessment | None = None
-        summary_fallback_attempted = False
-        if assess_for_summary:
-            assembly, assessment, summary_fallback_attempted = await self._assess_with_summary_fallback(
-                plan,
-                assembly,
-                memories=expanded,
-                degradations=degradations,
-            )
-        pre_ack_uris = {memory.uri for memory in assembly.memories}
-        assembly = await final_context_acknowledger(
-            recall_lifecycle=self.recall_lifecycle,
-            cold_probe_expander=self.cold_probe_expander,
-            assembler=self.assembler,
-        ).acknowledge(assembly, targets=targets, used_at=used_at, degradations=degradations)
-        post_ack_uris = {memory.uri for memory in assembly.memories}
-        if assess_for_summary and not summary_fallback_attempted and post_ack_uris != pre_ack_uris:
-            assembly, assessment, summary_fallback_attempted = await self._assess_with_summary_fallback(
-                plan,
-                assembly,
-                memories=assembly.memories,
-                degradations=degradations,
-            )
-        assembly = await self._acknowledge_final_summaries(
-            assembly,
-            used_at=used_at,
-            degradations=degradations,
-        )
-        return assembly, assessment, summary_fallback_attempted
-
-    async def _assess_with_summary_fallback(
-        self,
-        plan: MemoryQueryPlan,
-        assembly: MemoryContextAssembly,
-        *,
-        memories: tuple[MemoryMatchedMemory, ...],
-        degradations: list[MemorySearchDegradation],
-    ) -> tuple[MemoryContextAssembly, MemoryRetrievalAssessment | None, bool]:
-        """Grader 判定不足且预算未耗尽时补查一次 Summary，并以 ``memories`` 重新组装；返回是否尝试过补查。"""
-
-        try:
-            assessment: MemoryRetrievalAssessment | None = await self.retrieval_grader.assess(
-                plan,
-                assembly.memories,
-                assembly.context,
-            )
-        except Exception as exc:
-            assessment = None
-            append_degradation(degradations, MemorySearchDegradationStage.RETRIEVAL_GRADER, exc)
-        if not (
-            self.config.summary_fallback_enabled
-            and assessment is not None
-            and assessment.decision is MemoryRetrievalSufficiency.INSUFFICIENT
-            and not assembly.budget_exhausted
-        ):
-            return assembly, assessment, False
-        assert assessment.summary_query is not None
-        try:
-            summaries = await self._search_summaries(assessment.summary_query)
-        except Exception as exc:
-            append_degradation(degradations, MemorySearchDegradationStage.SUMMARY_FALLBACK, exc)
-            return assembly, assessment, True
-        return self.assembler.assemble(memories, summary_fallbacks=summaries), assessment, True
-
-    async def _search_summaries(
+    async def _look(
         self,
         query: str,
-    ) -> tuple[ConversationSummaryMatch, ...]:
-        """只在 Grader 明确判定不足后执行一次有界 Summary 后备检索。"""
-
-        try:
-            raw = await self.summary_search.search(
-                query,
-                limit=self.config.summary_fallback_limit,
-            )
-        except Exception as exc:
-            raise MemorySearchError("Conversation Summary fallback search failed") from exc
-        if len(raw) > self.config.summary_fallback_limit:
-            raise MemorySearchError("Summary fallback search exceeded its requested limit")
-        values = tuple(raw)
-        expected = tuple(sorted(values, key=lambda item: (-item.score, item.reference.identity)))
-        if values != expected or len({item.reference.identity for item in values}) != len(values):
-            raise MemorySearchError("Summary fallback matches must be unique and relevance-sorted")
-        if self.summary_fallback_expander is None:
-            return values
-        expanded: list[ConversationSummaryMatch] = []
-        remaining = self.config.summary_fallback_max_context_chars
-        for item in values:
-            value = self.summary_fallback_expander.expand(item, max_chars=max(1, remaining))
-            expanded.append(value)
-            remaining = max(0, remaining - len(value.content))
-        return tuple(expanded)
-
-    async def _execute_query(
-        self,
-        query: MemoryTypedQuery,
-        *,
-        roots: tuple[MemoryURI, ...],
-        limit: int,
-        score_threshold: float | None,
         kinds: tuple[MemoryKind, ...],
-    ) -> MemoryQueryResult:
-        try:
-            raw_hits = await self.semantic_search.search(
-                query.query,
-                roots=roots,
-                kinds=kinds,
-                limit=limit,
-            )
-        except Exception as exc:
-            self.observer.record(
-                ObservationEvent(
-                    category="retrieval",
-                    operation="semantic_search",
-                    status=ObservationStatus.FAILURE,
-                    duration_seconds=0.0,
-                    attributes={"error_type": type(exc).__name__},
-                )
-            )
-            raise MemorySearchError("memory semantic search failed") from exc
-        if len(raw_hits) > limit:
-            raise MemorySearchError("memory semantic search exceeded its requested result limit")
-        by_uri: dict[MemoryURI, MemorySearchHit] = {}
-        for hit in raw_hits:
-            if not any(hit.uri.matches_prefix(root) for root in roots):
-                raise MemorySearchError("memory semantic search returned an out-of-scope URI")
-            if kinds and hit.uri.to_address().kind not in kinds:
-                raise MemorySearchError("memory semantic search ignored its direct kind filter")
-            if score_threshold is not None and hit.score < score_threshold:
-                continue
-            previous = by_uri.get(hit.uri)
-            if previous is None or hit.score > previous.score:
-                by_uri[hit.uri] = hit
-        hits = tuple(sorted(by_uri.values(), key=lambda hit: (-hit.score, str(hit.uri))))
-        return MemoryQueryResult(query=query, hits=hits)
-
-    @staticmethod
-    def _aggregate(
-        results: tuple[MemoryQueryResult, ...],
-    ) -> tuple[tuple[MemorySearchHit, ...], dict[MemoryURI, tuple[str, ...]]]:
-        best: dict[MemoryURI, MemorySearchHit] = {}
-        queries: dict[MemoryURI, list[str]] = {}
-        for result in results:
-            for hit in result.hits:
-                previous = best.get(hit.uri)
-                if previous is None or hit.score > previous.score:
-                    best[hit.uri] = hit
-                matched = queries.setdefault(hit.uri, [])
-                if result.query.query not in matched:
-                    matched.append(result.query.query)
-        hits = tuple(sorted(best.values(), key=lambda hit: (-hit.score, str(hit.uri))))
-        return hits, {uri: tuple(values) for uri, values in queries.items()}
-
-    def _read_direct(
-        self,
-        hits: tuple[MemorySearchHit, ...],
-        matched_queries: dict[MemoryURI, tuple[str, ...]],
-        *,
-        kinds: tuple[MemoryKind, ...],
-    ) -> tuple[MemoryMatchedMemory, ...]:
-        if not hits:
-            return ()
-        try:
-            snapshots = self.snapshot_reader.read_many(tuple(hit.uri for hit in hits))
-        except Exception as exc:
-            raise MemorySearchError("failed to read complete matched memory documents") from exc
-        selected: list[MemoryMatchedMemory] = []
-        for hit in hits:
-            snapshot = snapshots.get(str(hit.uri))
-            if snapshot is None or not snapshot.exists or snapshot.value is None:
-                raise MemorySearchError("semantic index returned a missing or invalid L2 memory document")
-            document = snapshot.value
-            if kinds and document.kind not in kinds:
-                raise MemorySearchError("semantic index kind does not match the complete L2 document")
-            selected.append(
-                MemoryMatchedMemory(
-                    hit=hit,
-                    document=document,
-                    matched_queries=matched_queries[hit.uri],
-                )
-            )
-        return tuple(selected)
-
-    def _rank_recall_lifecycle(
-        self,
-        memories: tuple[MemoryMatchedMemory, ...],
-        *,
-        limit: int,
+        conversation: ConversationAddress | None,
         now: datetime,
-    ) -> tuple[MemoryMatchedMemory, ...]:
-        if not memories:
-            return ()
-        rankings = self.recall_lifecycle.select(
-            tuple(
-                MemoryRecallCandidate(
-                    target=MemoryRecallTarget(
-                        memory.uri,
-                        memory.document.metadata.revision,
-                        memory.document.metadata.created_at,
-                    ),
-                    kind=memory.document.kind,
-                    updated_at=memory.document.metadata.updated_at,
-                    semantic_score=memory.hit.score,
-                )
-                for memory in memories
-            ),
-            limit=limit,
-            now=now,
-        )
-        by_uri = {memory.uri: memory for memory in memories}
-        ranked: list[MemoryMatchedMemory] = []
-        for ranking in rankings:
-            memory = by_uri[ranking.candidate.uri]
-            hit = memory.hit
-            if ranking.hotness is not None and ranking.temperature is not None:
-                hit = replace(
-                    hit,
-                    score=ranking.final_score,
-                    lifecycle_semantic_score=ranking.candidate.semantic_score,
-                    lifecycle_hotness=ranking.hotness,
-                    lifecycle_temperature=ranking.temperature,
-                )
-            ranked.append(replace(memory, hit=hit))
-        return tuple(ranked)
+        found: _Found,
+    ) -> None:
+        """清单 → 挑 → 找 → 判，不够最多再走一轮；挑这一步模型不可用就记下，由调用方只交档案。"""
 
-    def _expand_cold_for_budget(
-        self,
-        memories: tuple[MemoryMatchedMemory, ...],
-    ) -> tuple[MemoryMatchedMemory, ...]:
-        if self.cold_probe_expander is None:
-            return memories
-        expanded: list[MemoryMatchedMemory] = []
-        for memory in memories:
-            document = memory.document
-            if memory.hit.lifecycle_temperature is not None and memory.hit.lifecycle_temperature.value == "cold_2":
-                document = self.cold_probe_expander.expand_for_probe(document)
-            expanded.append(replace(memory, document=document))
-        return tuple(expanded)
-
-    async def _acknowledge_final_summaries(
-        self,
-        assembly: MemoryContextAssembly,
-        *,
-        used_at: datetime,
-        degradations: list[MemorySearchDegradation],
-    ) -> MemoryContextAssembly:
-        if self.summary_use_recorder is None or not assembly.summary_fallbacks:
-            return assembly
-        retained: list[ConversationSummaryMatch] = []
-        for summary in assembly.summary_fallbacks:
+        context = await self._conversation(conversation, found.degrade)
+        catalog = await self._catalog(kinds, now, found, found.degrade)
+        background, listing = self._background(now), catalog.render()
+        try:
+            plan = await self.steps.pick(background=background, query=query, catalog=listing, context=context)
+        except Exception as exc:
+            found.degrade(MemorySearchDegradationStage.PICK, exc)
+            found.model_down = True
+            found.notes.append(_model_down_note(exc))
+            return
+        await self._gather(plan, catalog, found, found.degrade)
+        found.rounds = 1
+        while True:
+            last = found.rounds >= self.config.max_rounds
             try:
-                states = await asyncio.to_thread(
-                    self.summary_use_recorder.record_use,
-                    (summary.reference,),
-                    used_at=used_at,
+                verdict = await self.steps.judge(
+                    background=background,
+                    query=query,
+                    catalog=listing,
+                    context=context,
+                    materials=self._materials(found),
+                    last=last,
                 )
             except Exception as exc:
-                append_degradation(
-                    degradations,
-                    MemorySearchDegradationStage.SUMMARY_FALLBACK,
-                    exc,
-                )
-                continue
-            if states:
-                retained.append(summary)
-        return self.assembler.assemble(
-            assembly.memories,
-            summary_fallbacks=tuple(retained),
+                found.degrade(MemorySearchDegradationStage.JUDGE, exc)
+                found.model_down = True  # 模型不可用不分是"挑"还是"判"：只交出档案
+                found.notes.append(_model_down_note(exc))
+                return
+            found.used = verdict.use
+            if verdict.enough or last or verdict.next is None or verdict.next.empty:
+                return
+            await self._gather(verdict.next, catalog, found, found.degrade)
+            found.rounds += 1
+
+    async def _hand_over(
+        self,
+        query: str,
+        kinds: tuple[MemoryKind, ...],
+        selected: tuple[
+            tuple[MemoryMatchedMemory, ...], tuple[BehaviorRecord, ...], tuple[ConversationSummaryMatch, ...]
+        ],
+        found: _Found,
+        now: datetime,
+        deadline: float,
+    ) -> MemorySearchResult:
+        """补一跳关系、在剩下的时间里记账，再拼成上下文。"""
+
+        memories, records, summaries = selected
+        memories = await self._relations(memories, deadline)
+        accounting = await account_use(
+            memories,
+            targets=found.card_targets,
+            used_at=now,
+            seconds=max(0.0, deadline - time.monotonic() - 0.05),
+            recall_lifecycle=self.recall_lifecycle,
+            expander=self.cold_probe_expander,
         )
+        if accounting.skipped:
+            found.degrade(MemorySearchDegradationStage.RECALL_LIFECYCLE, accounting.error_type or "TimeoutError")
+            self.observer.record(_skipped_accounting(accounting.skipped, accounting.error_type))
+        await self._record_summary_use(summaries, now, deadline, found.degrade)
+        assembly = self.assembler.assemble(
+            accounting.memories, records=records, summaries=summaries, notes=tuple(found.notes)
+        )
+        return MemorySearchResult(
+            query=query,
+            kinds=kinds,
+            memories=assembly.memories,
+            records=assembly.records,
+            summaries=assembly.summaries,
+            context=assembly.context,
+            budget_exhausted=assembly.budget_exhausted,
+            rounds=found.rounds,
+            timed_out=found.timed_out,
+            notes=tuple(found.notes),
+            degradations=tuple(found.degradations),
+        )
+
+    async def _conversation(
+        self,
+        address: ConversationAddress | None,
+        degrade: Callable[[MemorySearchDegradationStage, BaseException | str], None],
+    ) -> ConversationSearchContext | None:
+        if address is None:
+            return None
+        try:
+            return await asyncio.to_thread(self.conversation_context.read, address)
+        except Exception as exc:
+            degrade(MemorySearchDegradationStage.CONVERSATION_CONTEXT, exc)
+            return None
+
+    async def _catalog(
+        self,
+        kinds: tuple[MemoryKind, ...],
+        now: datetime,
+        found: _Found,
+        degrade: Callable[[MemorySearchDegradationStage, BaseException | str], None],
+    ) -> MemoryCatalog:
+        """记忆任务提交的窗口内概览整层拒读：短暂重试，仍读不出就按没有卡片清单继续并说明。"""
+
+        def recall_failed(error: BaseException) -> None:
+            degrade(MemorySearchDegradationStage.RECALL_LIFECYCLE, error)
+
+        for attempt in range(self.config.catalog_retries + 1):
+            try:
+                catalog = await asyncio.to_thread(
+                    self.catalog.read, kinds=kinds, now=now, on_recall_failure=recall_failed
+                )
+            except MemoryTreeConsistencyError as exc:
+                if attempt < self.config.catalog_retries:
+                    await asyncio.sleep(self.config.catalog_retry_delay_seconds)
+                    continue
+                degrade(MemorySearchDegradationStage.CATALOG, exc)
+            except Exception as exc:
+                degrade(MemorySearchDegradationStage.CATALOG, exc)
+            else:
+                found.notes.extend(catalog.notes)
+                return catalog
+            break
+        found.notes.append("记忆卡片清单这次读不出来（记忆正在写入或概览损坏），只查了每一轮的记录和会话摘要。")
+        return MemoryCatalog((), ())
+
+    def _background(self, now: datetime) -> str:
+        local = now.astimezone(self.zone)
+        offset = local.strftime("%z")
+        return (
+            f"今天是 {local:%Y-%m-%d}，时间都是当地时间（UTC{offset[:3]}:{offset[3:]}）。资料有三处：\n"
+            "1. 记忆卡片：从过去对话里整理出的长期结论（档案、偏好、人和项目、工具），下面给出清单，每张一行：路径 — 说明。\n"
+            "2. 每一轮的记录：用户每和助手说一轮话就有一条，有时刻、名字、目标、概要、步骤；同类事情会反复出现很多次。"
+            "可以按日期范围列出（只给时刻和名字），也可以按关键词搜（给整条内容；关键词是子串匹配、任一命中即算）。\n"
+            "3. 会话摘要：每段对话一份，比每一轮的记录多一些前后经过和收尾时的状态；可以按日期范围和关键词找。"
+        )
+
+    async def _gather(
+        self,
+        plan: SearchPlan,
+        catalog: MemoryCatalog,
+        found: _Found,
+        degrade: Callable[[MemorySearchDegradationStage, BaseException | str], None],
+    ) -> None:
+        cards: list[CatalogCard] = []
+        for item in plan.read:
+            if item in found.records:
+                found.full_records.add(item)
+                continue
+            card = catalog.find(item)
+            if card is None:
+                found.notes.append(f"清单里没有 {item}，没有读。")
+                continue
+            if card.temperature is MemoryTemperature.COLD_2:
+                if found.cold_picked:
+                    continue
+                found.cold_picked = True
+            cards.append(card)
+        if plan.card_keywords and catalog.unlisted_count:
+            matched = await asyncio.to_thread(
+                self.catalog.match_unlisted, catalog, plan.card_keywords, self.config.max_reads_per_round, now=found.now
+            )
+            for card in matched:
+                if card.temperature is MemoryTemperature.COLD_2:
+                    if found.cold_picked:
+                        continue
+                    found.cold_picked = True
+                cards.append(card)
+        await self._read_cards(tuple(cards), found)
+        if plan.records is not None:
+            try:
+                await self._find_records(plan.records, found)
+            except Exception as exc:
+                degrade(MemorySearchDegradationStage.RECORDS, exc)
+        if plan.summaries is not None:
+            try:
+                await self._find_summaries(plan.summaries, found)
+            except Exception as exc:
+                degrade(MemorySearchDegradationStage.SUMMARIES, exc)
+
+    async def _read_cards(self, cards: tuple[CatalogCard, ...], found: _Found) -> None:
+        if not cards:
+            return
+        unique = tuple(dict.fromkeys(cards))
+        batch = await asyncio.to_thread(self.snapshot_reader.read_many, tuple(card.uri for card in unique))
+        for card in unique:
+            snapshot = batch.get(str(card.uri))
+            if snapshot is None or not snapshot.exists or snapshot.value is None:
+                found.notes.append(f"{card.path} 读的时候已经不在了。")
+                continue
+            document = snapshot.value
+            if card.temperature is MemoryTemperature.COLD_2 and self.cold_probe_expander is not None:
+                document = await asyncio.to_thread(self.cold_probe_expander.expand_for_probe, document)
+            found.card_id(document)
+            found.card_temperatures[card.uri] = card.temperature
+            found.card_targets[card.uri] = MemoryRecallTarget(
+                card.uri, snapshot.value.metadata.revision, snapshot.value.metadata.created_at
+            )
+
+    async def _find_records(self, query: SourceQuery, found: _Found) -> None:
+        available = await asyncio.to_thread(self.records.days)
+        days = days_in_range(available, query.date_from, query.date_to, max_days=self.config.max_record_days)
+        if not days:
+            return
+        batch = await asyncio.to_thread(self.records.read_days, days)
+        if batch.failed_days:
+            found.notes.append(
+                "这些日子的记录这次没读出来：" + "、".join(day.isoformat() for day in batch.failed_days) + "。"
+            )
+        records = tuple(sorted(batch.records, key=lambda record: (record.started_at, record.address)))
+        if query.empty:  # 没给日期也没给关键词：列最近的
+            for record in records[-self.config.max_record_list :]:
+                found.record_id(record, full=False)
+        elif query.date_from is not None or query.date_to is not None:
+            for record in records[: self.config.max_record_list]:
+                found.record_id(record, full=False)
+        if len(records) > self.config.max_record_list and not query.keywords:
+            where = "最近" if query.empty else "前"
+            found.notes.append(
+                f"{days[0]} 到 {days[-1]} 共 {len(records)} 条记录，只列出了{where} {self.config.max_record_list} 条。"
+            )
+        if query.keywords:
+            hits, total = search_records(records, query.keywords, limit=self.config.max_record_hits)
+            for record in hits:
+                found.record_id(record, full=True)
+            if total > len(hits):
+                found.notes.append(f"关键词在记录里命中 {total} 条，只给了命中词最多的 {len(hits)} 条。")
+
+    async def _find_summaries(self, query: SourceQuery, found: _Found) -> None:
+        matches = await asyncio.to_thread(self.summaries.walk)
+        selected: list[tuple[int, ConversationSummaryMatch]] = []
+        for match in matches:
+            if not _overlaps(match, query.date_from, query.date_to, self.zone):
+                continue
+            hits = keyword_hits(match.content, query.keywords) if query.keywords else 1
+            if hits:
+                selected.append((hits, match))
+        selected.sort(key=lambda item: (-item[0], -item[1].started_at.timestamp(), item[1].reference.identity))
+        for _hits, match in selected[: self.config.max_summary_hits]:
+            if self.summary_expander is not None:
+                match = await asyncio.to_thread(
+                    self.summary_expander.expand, match, max_chars=self.summaries.config.max_record_chars
+                )
+            found.summary_id(match)
+
+    def _materials(self, found: _Found) -> str:
+        blocks: list[str] = []
+        for key, document in found.cards.items():
+            updated = document.metadata.updated_at.astimezone(self.zone)
+            blocks.append(
+                f"[{key}] 卡片 {MemoryURI.from_address(document.address)}（更新于 {updated:%Y-%m-%d %H:%M}）\n"
+                f"{document.markdown_body.strip()}"
+            )
+        for key, record in found.records.items():
+            blocks.append(f"[{key}] 记录 " + (record.text() if key in found.full_records else record.line()))
+        for key, match in found.summaries.items():
+            started = match.started_at.astimezone(self.zone)
+            ended = match.ended_at.astimezone(self.zone)
+            blocks.append(f"[{key}] 会话摘要（{started:%Y-%m-%d %H:%M} 到 {ended:%Y-%m-%d %H:%M}）\n{match.content}")
+        text = "\n\n".join(blocks) or "（什么也没找到）"
+        if found.notes:
+            text += "\n\n说明：\n" + "\n".join(f"- {note}" for note in found.notes)
+        if len(text) > self.config.max_material_chars:
+            text = text[: self.config.max_material_chars - 20].rstrip() + "\n（后面的材料超出上限，没有给出）"
+        return text
+
+    def _selected(
+        self,
+        found: _Found,
+        used: tuple[str, ...] | None,
+        limit: int,
+    ) -> tuple[tuple[MemoryMatchedMemory, ...], tuple[BehaviorRecord, ...], tuple[ConversationSummaryMatch, ...]]:
+        """判断写了用哪些就交哪些；没走完判断（到点或判断失败）就交全部找到的。卡片按 ``limit`` 截。"""
+
+        keys = list(used) if used is not None else [*found.cards, *found.records, *found.summaries]
+        memories: list[MemoryMatchedMemory] = []
+        records: list[BehaviorRecord] = []
+        summaries: list[ConversationSummaryMatch] = []
+        for key in dict.fromkeys(keys):
+            if key in found.cards and len(memories) < limit:
+                document = found.cards[key]
+                uri = MemoryURI.from_address(document.address)
+                memories.append(MemoryMatchedMemory(document, found.card_temperatures.get(uri)))
+            elif key in found.records:
+                records.append(found.records[key])
+            elif key in found.summaries:
+                summaries.append(found.summaries[key])
+        return tuple(memories), tuple(records), tuple(summaries)
+
+    async def _profile_only(self, found: _Found, deadline: float) -> tuple[MemoryMatchedMemory, ...]:
+        """只交出档案；读档案也在总时间上限里，来不及就什么也不交。"""
+
+        remaining = deadline - time.monotonic() - self.config.accounting_reserve_seconds / 2
+        try:
+            snapshot = await asyncio.wait_for(asyncio.to_thread(self.snapshot_reader.read, _PROFILE_URI), remaining)
+        except Exception:
+            return ()
+        if not snapshot.exists or snapshot.value is None:
+            return ()
+        document = snapshot.value
+        found.card_targets[_PROFILE_URI] = MemoryRecallTarget(
+            _PROFILE_URI, document.metadata.revision, document.metadata.created_at
+        )
+        return (MemoryMatchedMemory(document),)
+
+    async def _relations(
+        self, memories: tuple[MemoryMatchedMemory, ...], deadline: float
+    ) -> tuple[MemoryMatchedMemory, ...]:
+        """一跳关系也在时间上限里补：来不及或读出错就不补。"""
+
+        remaining = deadline - time.monotonic() - self.config.accounting_reserve_seconds / 2
+        if not memories or remaining <= 0:
+            return memories
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(self.relation_expander.expand, memories), remaining)
+        except Exception:
+            return memories
+
+    async def _record_summary_use(
+        self,
+        summaries: tuple[ConversationSummaryMatch, ...],
+        now: datetime,
+        deadline: float,
+        degrade: Callable[[MemorySearchDegradationStage, BaseException | str], None],
+    ) -> None:
+        remaining = deadline - time.monotonic() - 0.02
+        if self.summary_use_recorder is None or not summaries:
+            return
+        if remaining <= 0:
+            degrade(MemorySearchDegradationStage.SUMMARIES, "TimeoutError")
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.summary_use_recorder.record_use,
+                    tuple(item.reference for item in summaries),
+                    used_at=now,
+                ),
+                remaining,
+            )
+        except Exception as exc:
+            degrade(MemorySearchDegradationStage.SUMMARIES, exc)
 
     def _timestamp(self) -> datetime:
         timestamp = self.clock()
@@ -672,28 +539,47 @@ class SearchService:
             raise ValueError("memory search clock must return a timezone-aware datetime")
         return timestamp.astimezone(UTC)
 
-    def _target_context(self, roots: tuple[MemoryURI, ...]) -> str:
-        rendered: list[str] = []
-        used = 0
-        for root in roots:
-            directory = root.to_directory()
-            if not self.tree.directory_exists(directory) or not self.tree.layer_exists(
-                directory,
-                MemoryLevel.ABSTRACT,
-            ):
-                continue
-            abstract = self.tree.read_layer_bounded(
-                directory,
-                MemoryLevel.ABSTRACT,
-                max_bytes=self.config.max_target_context_chars * 4 + 4,
-            ).strip()
-            block = f"[{root}] {abstract}"
-            separator = 1 if rendered else 0
-            if used + separator + len(block) > self.config.max_target_context_chars:
-                break
-            rendered.append(block)
-            used += separator + len(block)
-        return "\n".join(rendered)
+
+def _overlaps(match: ConversationSummaryMatch, date_from: date | None, date_to: date | None, zone: tzinfo) -> bool:
+    start = match.started_at.astimezone(zone).date()
+    end = match.ended_at.astimezone(zone).date()
+    return (date_to is None or start <= date_to) and (date_from is None or end >= date_from)
 
 
-__all__ = ["ConversationSummarySemanticSearch", "MemoryDirectoryLayerReader", "MemorySemanticSearch", "SearchService"]
+def _skipped_accounting(skipped: int, error_type: str | None) -> ObservationEvent:
+    return ObservationEvent(
+        category="retrieval",
+        operation="use_accounting",
+        status=ObservationStatus.DEGRADED,
+        duration_seconds=0.0,
+        attributes={"skipped": skipped, "error_type": error_type or "TimeoutError"},
+    )
+
+
+def _search_event(result: MemorySearchResult, started: float) -> ObservationEvent:
+    return ObservationEvent(
+        category="retrieval",
+        operation="search",
+        status=ObservationStatus.DEGRADED if result.degradations else ObservationStatus.SUCCESS,
+        duration_seconds=max(0.0, time.monotonic() - started),
+        attributes={
+            "rounds": result.rounds,
+            "memories": len(result.memories),
+            "records": len(result.records),
+            "summaries": len(result.summaries),
+            "timed_out": result.timed_out,
+            "degradations": len(result.degradations),
+            "result_count": len(result.memories) + len(result.records) + len(result.summaries),
+        },
+    )
+
+
+def _model_down_note(error: BaseException) -> str:
+    failure = model_failure(error)
+    kind = None if failure is None else failure.cause_kind
+    if kind is not None:
+        return f"查资料用的模型这次没能用：{BRIEFS[kind]}所以只交出了档案。"
+    return "查资料用的模型这次没给出能用的答复，所以只交出了档案。"
+
+
+__all__ = ["ConversationSummaryFallbackExpander", "ConversationSummaryUseRecorder", "SearchService"]

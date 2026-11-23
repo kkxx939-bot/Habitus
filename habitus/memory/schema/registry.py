@@ -33,6 +33,7 @@ _TYPE_KEYS = {
     "fields",
     "min_non_empty_content_fields",
     "omit_empty_sections",
+    "overview_line",
 }
 _REQUIRED_TYPE_KEYS = {
     "memory_type",
@@ -40,7 +41,9 @@ _REQUIRED_TYPE_KEYS = {
     "path_template",
     "markdown_template",
     "fields",
+    "overview_line",
 }
+_OVERVIEW_LINE_KEYS = {"fields", "max_chars"}
 _FIELD_KEYS = {
     "name",
     "type",
@@ -114,12 +117,21 @@ def _load_schema(source: str, filename: str) -> MemoryTypeSchema:
     if not isinstance(raw_fields, list):
         raise MemorySchemaError(f"schema {filename} fields must be a list")
     fields = tuple(_load_field(item, filename) for item in raw_fields)
+    overview = _mapping(payload["overview_line"], f"overview_line in {filename}")
+    _reject_unknown(overview, _OVERVIEW_LINE_KEYS, f"overview_line in {filename}")
+    if set(overview) != _OVERVIEW_LINE_KEYS:
+        raise MemorySchemaError(f"overview_line in {filename} must declare fields and max_chars")
+    overview_fields = overview["fields"]
+    if not isinstance(overview_fields, list) or any(not isinstance(item, str) for item in overview_fields):
+        raise MemorySchemaError(f"overview_line fields in {filename} must be a list of field names")
     return MemoryTypeSchema(
         kind=MemoryKind(str(payload["memory_type"])),
         description=_string(payload["description"], "memory type description"),
         path_template=_string(payload["path_template"], "memory path template"),
         markdown_template=_string(payload["markdown_template"], "memory markdown template"),
         fields=fields,
+        overview_fields=tuple(overview_fields),
+        overview_max_chars=_non_negative_integer(overview["max_chars"], "memory overview_line max_chars"),
         min_non_empty_content_fields=_non_negative_integer(
             payload.get("min_non_empty_content_fields", 0),
             "memory min_non_empty_content_fields",

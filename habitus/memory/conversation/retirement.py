@@ -22,8 +22,8 @@ from habitus.infrastructure.store.filesystem import (
     is_path_alias,
     read_regular_bytes,
 )
-from habitus.memory.conversation.indexing.model import ConversationSummaryReference, summary_reference
 from habitus.memory.conversation.layout import ConversationAddress
+from habitus.memory.conversation.summary_reference import ConversationSummaryReference, summary_reference
 from habitus.pre.conversation import (
     ConversationRangeSummary,
     ConversationSegmentSummary,
@@ -36,7 +36,6 @@ class ConversationSummaryRetirementError(RuntimeError):
 
 class ConversationSummaryRetirementPhase(str, Enum):
     RETIRING = "retiring"
-    INDEX_REMOVED = "index_removed"
     HISTORY_RELEASED = "history_released"
     SOURCES_DELETED = "sources_deleted"
 
@@ -103,7 +102,7 @@ class ConversationSummaryRetirementManifest:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema": "conversation_summary_retirement_v1",
+            "schema": "conversation_summary_retirement_v2",
             "archive": self.archive.to_dict(),
             "start_sequence": self.start_sequence,
             "end_sequence": self.end_sequence,
@@ -131,8 +130,11 @@ class ConversationSummaryRetirementManifest:
         }
         if not isinstance(value, Mapping) or set(value) != expected:
             raise ValueError("retirement manifest fields are invalid")
-        if value["schema"] != "conversation_summary_retirement_v1":
-            raise ValueError("retirement manifest schema is unsupported")
+        if value["schema"] != "conversation_summary_retirement_v2":
+            raise ValueError(
+                "retirement manifest schema is unsupported: 旧版清单（v1，带已删掉的 index_removed 相位）不迁移；"
+                "删掉 workflow/lifecycle/summary_retirements/ 下的旧清单后重启"
+            )
         start_sequence, end_sequence = value["start_sequence"], value["end_sequence"]
         if not is_int(start_sequence):
             raise ValueError("retirement manifest start_sequence must be non-negative")
@@ -155,7 +157,7 @@ class ConversationSummaryRetirementManifest:
 
 
 class ConversationSummaryRetirementStore:
-    """按 Archive 身份保存未完成退休清单，并为索引源提供隐藏判断。"""
+    """按 Archive 身份保存未完成退休清单，并为摘要读取提供隐藏判断。"""
 
     def __init__(
         self,

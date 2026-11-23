@@ -109,10 +109,7 @@ class RuntimeBoundaryBenchmark:
                 "dataset": self.dataset.name.value,
                 "sample_id": self.sample.sample_id,
                 "top_k": self.top_k,
-                "provider": self.config.memory.vector_store.provider,
-                "adapter": self.config.memory.vector_store.adapter,
-                "model": self.config.models.embedding.route.model,
-                "dimension": self.config.models.embedding.dimension,
+                "chat_model": self.config.models.chat.route.model,
             }
         )
         return write_boundary_outputs(
@@ -139,14 +136,11 @@ class RuntimeBoundaryBenchmark:
             isolated_config(
                 self.config,
                 storage_root=work,
-                collection_scope=f"runtime-boundary:{self.output_directory}:{point_id}",
             )
         )
         runtime.initialize()
         started_at = datetime.now(UTC).isoformat()
         try:
-            await runtime.components.memory.vector_index.rebuild(checkpoint=0)
-            await runtime.components.conversation.summary_vector_index.rebuild(checkpoint=0)
             ingest_started = time.perf_counter()
             await _ingest_scale(runtime, self.sample, scale)
             ingest_seconds = time.perf_counter() - ingest_started

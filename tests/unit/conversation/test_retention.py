@@ -8,12 +8,10 @@ import pytest
 
 from habitus.foundation.integrity import canonical_json
 from habitus.memory.conversation import (
-    ConversationBoundaryHints,
     ConversationMessageChunker,
     ConversationRetentionError,
     ConversationRetentionPlanner,
     ConversationSegmentationConfig,
-    ConversationSemanticBoundary,
     ConversationToolResultReducer,
 )
 from habitus.pre.conversation import (
@@ -190,43 +188,7 @@ def test_intermediate_completion_is_not_mistaken_for_a_turn_boundary() -> None:
     assert plan.archive_messages[-1].role is ConversationMessageRole.PROMPT
 
 
-def test_embedding_distance_ranks_safe_boundaries_within_the_same_structure_level() -> None:
-    chunker = ConversationMessageChunker(
-        max_message_tokens=10,
-        token_estimator=lambda item: len(item.content) if isinstance(item.content, str) else 1,
-    )
-    live = chunker.normalize(ConversationBatch("conversation-1", closed_turn(prompt="A" * 30)))
-    planner = ConversationRetentionPlanner(
-        config(
-            keep_recent_turn_count=0,
-            max_segment_tokens=2,
-            semantic_boundary_min_ratio=0.5,
-        ),
-        token_estimator=lambda _: 1,
-    )
-    hints = ConversationBoundaryHints(
-        live.digest,
-        (
-            ConversationSemanticBoundary(0, 2.0),
-            ConversationSemanticBoundary(1, 0.0),
-        ),
-        "embedding-v1",
-    )
-
-    structural = planner.plan(live, after_turn=True, flush=True)
-    semantic = planner.plan(
-        live,
-        after_turn=True,
-        flush=True,
-        boundary_hints=hints,
-    )
-
-    assert structural.through_sequence == 1
-    assert semantic.through_sequence == 0
-    assert semantic.embedding_fingerprint == "embedding-v1"
-
-
-def test_a_strong_semantic_hint_never_beats_a_complete_turn_boundary_in_the_window() -> None:
+def test_a_complete_turn_boundary_in_the_window_is_chosen() -> None:
     chunker = ConversationMessageChunker(max_message_tokens=1_000, token_estimator=lambda _: 10)
     live = chunker.normalize(
         ConversationBatch(
@@ -242,9 +204,7 @@ def test_a_strong_semantic_hint_never_beats_a_complete_turn_boundary_in_the_wind
         ),
         token_estimator=lambda _: 10,
     )
-    hints = ConversationBoundaryHints(live.digest, (ConversationSemanticBoundary(8, 2.0),), "embedding-v1")
-
-    plan = planner.plan(live, after_turn=True, flush=True, boundary_hints=hints)
+    plan = planner.plan(live, after_turn=True, flush=True)
 
     assert plan.through_sequence == 9
 
@@ -492,21 +452,6 @@ def test_a_long_turn_with_his_interjection_is_sealed_in_pieces_that_know_they_ar
         head = segment.messages[0]
         assert segment.starts_mid_turn == (not head.starts_turn)
     assert any(segment.messages[0].mid_turn and segment.starts_mid_turn for segment in segments)
-
-
-def test_semantic_cut_points_never_fall_between_a_progress_reply_and_his_interjection() -> None:
-    from habitus.memory.conversation.segmentation import _safe_semantic_units
-
-    messages = (
-        message(0, ConversationMessageRole.PROMPT, "看一下能不能写个脚本"),
-        message(1, ConversationMessageRole.COMPLETION, "我先检查客户端。"),
-        replace(message(2, ConversationMessageRole.PROMPT, "还是暂停吧"), mid_turn=True),
-        message(3, ConversationMessageRole.COMPLETION, "已暂停。"),
-        message(4, ConversationMessageRole.PROMPT, "下一个问题"),
-        message(5, ConversationMessageRole.COMPLETION, "好的。"),
-    )
-    # 中途那句答复（1）后面紧跟的是他插的话：那里不是切点（以前会在 1 后面切开）；其余照旧
-    assert [sequence for sequence, _ in _safe_semantic_units(messages)] == [0, 2, 3, 4, 5]
 
 
 def _exchange_enqueuer(tmp_path, **overrides: object):  # type: ignore[no-untyped-def]

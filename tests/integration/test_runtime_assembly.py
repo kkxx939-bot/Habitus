@@ -16,7 +16,6 @@ import yaml
 from habitus.behavior.tree import BehaviorTree
 from habitus.config import HabitusConfig
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.vector import VectorStoreFactory
 from habitus.integrations.http_api import create_http_app
 from habitus.integrations.http_api.handlers import RuntimeHTTPHandlers
 from habitus.integrations.local_service import ServiceInstanceLock
@@ -26,12 +25,7 @@ from habitus.memory.model import MemoryKind
 from habitus.memory.recall import (
     SQLiteMemoryRecallLifecycleStore,
 )
-from habitus.memory.retrieval import (
-    MemoryRetrievalSufficiency,
-)
-from habitus.memory.uri import MemoryURI
 from habitus.model_client import (
-    EmbeddingVector,
     ModelResponse,
     ProviderCapabilities,
     ProviderFactory,
@@ -47,7 +41,6 @@ from habitus.runtime import (
 from tests.helpers import BASE_TIME
 from tests.lock_store import ProcessLocalLockStore
 from tests.model_helpers import prepare_chat_request
-from tests.platform_helpers import configured_storage_root
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -83,116 +76,14 @@ class FakeChatProvider:
         self.closed = True
 
 
-class FakeEmbeddingProvider:
-    is_remote = False
-
-    def __init__(self, provider_name: str, model: str, dimension: int) -> None:
-        self.provider_name = provider_name
-        self.model = model
-        self.dimension = dimension
-        self.closed = False
-
-    async def embed(self, _text: str, *, is_query: bool) -> EmbeddingVector:
-        return EmbeddingVector((1.0,) + (0.0,) * (self.dimension - 1))
-
-    async def aclose(self):
-        self.closed = True
-
-
-class FakeRerankProvider:
-    is_remote = False
-
-    def __init__(self, provider_name: str, model: str) -> None:
-        self.provider_name = provider_name
-        self.model = model
-        self.closed = False
-
-    async def rerank(self, _query: str, documents) -> tuple[float, ...]:
-        return tuple(1.0 for _ in documents)
-
-    async def aclose(self):
-        self.closed = True
-
-
-class FakeVectorBackend:
-    adapter_name = "fake_vector"
-    max_records = 100_000
-    max_search_hits = 10_000
-
-    def __init__(self, provider_name: str, collection: str) -> None:
-        self.provider_name = provider_name
-        self.collection = collection
-
-    async def initialize(self):
-        return None
-
-    async def read_metadata(self, _names):
-        return {}
-
-    async def write_metadata(self, _values, *, dimension):
-        return None
-
-    async def ensure_schema(self, _dimension, *, published_dimension):
-        return None
-
-    async def read(self, _identities):
-        return ()
-
-    async def delete_all(self):
-        return None
-
-    async def upsert(self, _records):
-        return None
-
-    async def delete(self, _identities):
-        return None
-
-    async def validate_records(self, _records, *, replacing):
-        return None
-
-    async def wait_visible(self, _upserts, _deletes, *, complete):
-        return None
-
-    async def search(self, _query_vector, *, filters, limit):
-        return ()
-
-    async def scan(self, *, filters, limit):
-        return ()
-
-    async def close(self):
-        self.closed = True
-
-
-def runtime_dependencies() -> tuple[ProviderFactory, VectorStoreFactory]:
+def runtime_dependencies() -> ProviderFactory:
     providers = ProviderFactory()
     providers.register_adapter(
         "chat",
         "fake_chat",
         lambda context: FakeChatProvider(context.route.provider, context.route.model),
     )
-    providers.register_adapter(
-        "embedding",
-        "fake_embedding",
-        lambda context: FakeEmbeddingProvider(
-            context.route.provider,
-            context.route.model,
-            context.config.dimension,
-        ),
-    )
-    providers.register_adapter(
-        "rerank",
-        "fake_rerank",
-        lambda context: FakeRerankProvider(context.route.provider, context.route.model),
-    )
-    vectors = VectorStoreFactory()
-    vectors.register_adapter(
-        "fake_vector",
-        lambda context: FakeVectorBackend(
-            context.config.provider,
-            context.config.collection,
-        ),
-    )
-    return providers, vectors
+    return providers
 
 
 def runtime_config(tmp_path: Path, *, with_credentials: bool = False) -> HabitusConfig:
@@ -205,102 +96,36 @@ def runtime_config(tmp_path: Path, *, with_credentials: bool = False) -> Habitus
         adapter="fake_chat",
         credential_ref="chat" if with_credentials else "",
     )
-    payload["models"]["embedding"]["route"].update(
-        provider="fake",
-        adapter="fake_embedding",
-        credential_ref="embedding" if with_credentials else "",
-    )
-    payload["models"]["rerank"]["route"].update(
-        provider="fake",
-        adapter="fake_rerank",
-        credential_ref="dashscope" if with_credentials else "",
-    )
-    for name in ("vector_store",):
-        payload["memory"][name]["route"].update(
-            provider="fake",
-            adapter="fake_vector",
-            credential_ref="vector_service" if with_credentials else "",
-        )
-    payload["conversation"]["summary_vector_store"]["route"].update(
-        provider="fake",
-        adapter="fake_vector",
-        credential_ref="vector_service" if with_credentials else "",
-    )
     if with_credentials:
         payload["credentials"]["chat"]["api_key"] = "chat-secret"
-        payload["credentials"]["embedding"]["api_key"] = "embedding-secret"
-        payload["credentials"]["dashscope"]["api_key"] = "dashscope-secret"
-        payload["credentials"]["vector_service"] = {"access_key": "vector-access", "secret_key": "vector-secret"}
     return HabitusConfig.from_mapping(payload)
 
 
-def test_assembly_resolves_each_provider_and_database_credential_by_reference(tmp_path: Path) -> None:
+def test_assembly_resolves_the_chat_credential_by_reference(tmp_path: Path) -> None:
     model_credentials: dict[str, str] = {}
-    vector_credentials: list[dict[str, str]] = []
-    vector_roots: list[Path | None] = []
     providers = ProviderFactory()
 
     def chat_builder(context):
         model_credentials["chat"] = context.api_key
         return FakeChatProvider(context.route.provider, context.route.model)
 
-    def embedding_builder(context):
-        model_credentials["embedding"] = context.api_key
-        return FakeEmbeddingProvider(
-            context.route.provider,
-            context.route.model,
-            context.config.dimension,
-        )
-
-    def rerank_builder(context):
-        model_credentials["rerank"] = context.api_key
-        return FakeRerankProvider(context.route.provider, context.route.model)
-
     providers.register_adapter("chat", "fake_chat", chat_builder)
-    providers.register_adapter("embedding", "fake_embedding", embedding_builder)
-    providers.register_adapter("rerank", "fake_rerank", rerank_builder)
-    vectors = VectorStoreFactory()
-
-    def vector_builder(context):
-        vector_credentials.append(dict(context.credentials))
-        vector_roots.append(context.data_root)
-        return FakeVectorBackend(context.config.provider, context.config.collection)
-
-    vectors.register_adapter(
-        "fake_vector",
-        vector_builder,
-    )
-
-    config = runtime_config(tmp_path, with_credentials=True)
     build_runtime(
-        config,
+        runtime_config(tmp_path, with_credentials=True),
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
 
-    assert model_credentials == {
-        "chat": "chat-secret",
-        "embedding": "embedding-secret",
-        "rerank": "dashscope-secret",
-    }
-    assert vector_credentials == [
-        {"access_key": "vector-access", "secret_key": "vector-secret"},
-        {"access_key": "vector-access", "secret_key": "vector-secret"},
-    ]
-    # 两个 Collection 都拿到存储根下同一个 vector/ 目录，各自按 Collection 名落文件
-    expected_vector_root = configured_storage_root(tmp_path / "data") / "vector"
-    assert vector_roots == [config.storage_root / "vector"] * 2 == [expected_vector_root] * 2
+    assert model_credentials == {"chat": "chat-secret"}
 
 
 def test_assembly_wires_one_shared_chain_without_touching_storage(tmp_path: Path) -> None:
     config = runtime_config(tmp_path)
-    providers, vectors = runtime_dependencies()
+    providers = runtime_dependencies()
 
     runtime = build_runtime(
         config,
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
 
@@ -309,8 +134,8 @@ def test_assembly_wires_one_shared_chain_without_touching_storage(tmp_path: Path
     assert not config.storage_root.exists()
     assert components.workflow.enqueuer.conversations is components.conversation.journal
     assert components.workflow.runner.executor.editor is components.memory.editor
-    assert components.memory.search.semantic_search.index is components.memory.vector_index
-    assert components.memory.search.summary_search is components.conversation.summary_vector_index
+    assert components.memory.search.summaries is components.conversation.summary_reader
+    assert components.memory.search.steps.client is components.models.structured_chat
     assert components.memory.search.recall_lifecycle.config is config.memory.recall_lifecycle
     recall_store = components.memory.search.recall_lifecycle.store
     assert isinstance(recall_store, SQLiteMemoryRecallLifecycleStore)
@@ -320,39 +145,14 @@ def test_assembly_wires_one_shared_chain_without_touching_storage(tmp_path: Path
     assert components.workflow.worker.runner is components.workflow.runner
 
 
-def test_document_prefix_shrinks_the_segmentation_unit_budget(tmp_path: Path) -> None:
-    """切段打分把每个单元截到"max_input_chars 减去文档前缀"：不让出前缀，拼上后超长，打分静默退回结构边界（W7）。"""
-
-    config = runtime_config(tmp_path)
-    embedding = replace(
-        config.models.embedding,
-        max_input_chars=config.models.embedding.max_input_chars + 64,
-        document_prefix="passage: ",
-    )
-    config = replace(config, models=replace(config.models, embedding=embedding))
-    providers, vectors = runtime_dependencies()
-
-    runtime = build_runtime(
-        config,
-        providers=providers,
-        vector_stores=vectors,
-        path_lock=PathLock(ProcessLocalLockStore()),
-    )
-
-    assert runtime.components.conversation.boundary_scorer.max_unit_chars == embedding.max_input_chars - len(
-        "passage: "
-    )
-
-
 def test_memory_workflow_state_is_injected_from_the_configured_workflow_root(tmp_path: Path) -> None:
     """记忆侧树外状态由组装注入 ``config.workflow_root``；默认配置下路径与"记忆根的兄弟 workflow 目录"逐字相同。"""
 
     config = runtime_config(tmp_path)
-    providers, vectors = runtime_dependencies()
+    providers = runtime_dependencies()
     runtime = build_runtime(
         config,
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
 
@@ -376,14 +176,13 @@ def test_assembly_accepts_an_external_harness_protocol_registry(tmp_path: Path) 
             raise AssertionError("protocol listing must not invoke adaptation")
 
     config = runtime_config(tmp_path)
-    providers, vectors = runtime_dependencies()
+    providers = runtime_dependencies()
     adapters = ConversationAdapterRegistry()
     adapters.register(FutureHarnessAdapter())
 
     runtime = build_runtime(
         config,
         providers=providers,
-        vector_stores=vectors,
         conversation_adapters=adapters,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
@@ -391,37 +190,22 @@ def test_assembly_accepts_an_external_harness_protocol_registry(tmp_path: Path) 
     assert runtime.conversation_protocols() == ("future_harness",)
 
 
-def test_default_vector_publication_fences_use_dedicated_lock_databases(tmp_path: Path) -> None:
+def test_default_runtime_keeps_one_lock_database_and_no_vector_store(tmp_path: Path) -> None:
     config = runtime_config(tmp_path)
-    providers, vectors = runtime_dependencies()
+    runtime = build_runtime(config, providers=runtime_dependencies())
 
-    runtime = build_runtime(
-        config,
-        providers=providers,
-        vector_stores=vectors,
-    )
-
-    components = runtime.components
-    memory_store = components.memory.vector_index.store
-    summary_store = components.conversation.summary_vector_index.store
-    transaction_lock = components.infrastructure.path_lock.lock_store
-    memory_lock = memory_store._path_lock.lock_store
-    summary_lock = summary_store._path_lock.lock_store
-
-    assert transaction_lock.path == config.workflow_root / "locks.sqlite3"
-    assert memory_lock.path == config.workflow_root / "memory_vector_locks.sqlite3"
-    assert summary_lock.path == config.workflow_root / "summary_vector_locks.sqlite3"
-    assert len({transaction_lock.path, memory_lock.path, summary_lock.path}) == 3
+    assert runtime.components.infrastructure.path_lock.lock_store.path == config.workflow_root / "locks.sqlite3"
+    assert not hasattr(runtime.components.memory, "vector_index")
+    assert not hasattr(runtime.components.models, "embedder")
     assert not config.storage_root.exists()
 
 
 def test_initialize_is_idempotent_and_creates_only_local_durable_roots(tmp_path: Path) -> None:
     config = runtime_config(tmp_path)
-    providers, vectors = runtime_dependencies()
+    providers = runtime_dependencies()
     runtime = build_runtime(
         config,
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
 
@@ -461,11 +245,10 @@ def test_disabled_recall_lifecycle_ignores_bad_store_and_skips_batch_constraint(
     with closing(sqlite3.connect(path)) as connection:
         connection.execute("CREATE TABLE memory_recall_lifecycle (uri TEXT PRIMARY KEY)")
 
-    providers, vectors = runtime_dependencies()
+    providers = runtime_dependencies()
     runtime = build_runtime(
         config,
         providers=providers,
-        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     runtime.initialize()
@@ -478,11 +261,10 @@ def test_disabled_recall_lifecycle_ignores_bad_store_and_skips_batch_constraint(
 
 def test_runtime_start_stop_restart_and_close_coordinate_both_workers(tmp_path: Path) -> None:
     async def scenario() -> None:
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         runtime = build_runtime(
             runtime_config(tmp_path),
             providers=providers,
-            vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
         )
 
@@ -492,11 +274,9 @@ def test_runtime_start_stop_restart_and_close_coordinate_both_workers(tmp_path: 
         assert runtime.components.workflow.worker.state is MemoryWorkerState.RUNNING
         assert runtime.components.workflow.lifecycle_worker.state is LifecycleWorkerState.RUNNING
         deep_health = await runtime.health(deep=True)
-        assert {
-            "chat_model",
-            "memory_index_consistency",
-            "summary_index_consistency",
-        }.issubset({check.name for check in deep_health.checks})
+        names = {check.name for check in deep_health.checks}
+        assert "chat_model" in names
+        assert not {"memory_index_consistency", "summary_index_consistency"} & names
         with pytest.raises(RuntimeStateError, match="worker stopped"):
             await runtime.run_next()
 
@@ -511,10 +291,6 @@ def test_runtime_start_stop_restart_and_close_coordinate_both_workers(tmp_path: 
         await runtime.close()
         assert runtime.state is RuntimeState.CLOSED
         assert runtime.components.models.chat.provider.closed
-        assert runtime.components.models.embedder.provider.closed
-        # 两套派生索引的向量库都随 Runtime 关闭
-        assert runtime.components.memory.vector_index.store.backend.closed
-        assert runtime.components.conversation.summary_vector_index.store.backend.closed
         with pytest.raises(RuntimeStateError, match="closed runtime"):
             await runtime.start()
 
@@ -523,11 +299,10 @@ def test_runtime_start_stop_restart_and_close_coordinate_both_workers(tmp_path: 
 
 def test_runtime_public_conversation_interface_returns_pending_consistency_handle(tmp_path: Path) -> None:
     async def scenario() -> None:
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         runtime = build_runtime(
             runtime_config(tmp_path),
             providers=providers,
-            vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
         )
         runtime.initialize()
@@ -671,41 +446,24 @@ def test_runtime_public_conversation_interface_returns_pending_consistency_handl
     asyncio.run(scenario())
 
 
-def test_runtime_memory_search_facades_use_the_real_search_service_and_lifecycle_gate(tmp_path: Path) -> None:
+def test_runtime_memory_search_facade_uses_the_real_search_service_and_lifecycle_gate(tmp_path: Path) -> None:
     async def scenario() -> None:
-        providers, vectors = runtime_dependencies()
         runtime = build_runtime(
             runtime_config(tmp_path),
-            providers=providers,
-            vector_stores=vectors,
+            providers=runtime_dependencies(),
             path_lock=PathLock(ProcessLocalLockStore()),
         )
 
         with pytest.raises(RuntimeStateError, match="initialized runtime"):
-            await runtime.find_memory("回答偏好")
-        with pytest.raises(RuntimeStateError, match="initialized runtime"):
             await runtime.search_memory("之前如何决定")
 
         runtime.initialize()
-        direct = await runtime.find_memory(
-            "  回答偏好  ",
-            target_uris="memory://preferences",
-            limit=2,
-            kinds=(MemoryKind.PREFERENCE,),
-        )
-        assert direct.query == "回答偏好"
-        assert direct.target_roots == (MemoryURI.parse("memory://preferences"),)
-        assert direct.kinds == (MemoryKind.PREFERENCE,)
-        assert direct.memories == ()
-        assert direct.retrieval_assessment is None
-        assert not direct.summary_fallback_attempted
-
-        contextual = await runtime.search_memory("之前如何决定")
-        assert contextual.memories == ()
-        assert contextual.retrieval_assessment is not None
-        assert contextual.retrieval_assessment.decision is MemoryRetrievalSufficiency.INSUFFICIENT
-        assert contextual.summary_fallback_attempted
-        assert contextual.summary_fallbacks == ()
+        # 假的对话模型只回 "{}"："挑"那一步通不过结构校验，只交出档案（这里还没有档案）并写明原因
+        result = await runtime.search_memory("  回答偏好  ", limit=2, kinds=(MemoryKind.PREFERENCE,))
+        assert result.query == "回答偏好"
+        assert result.kinds == (MemoryKind.PREFERENCE,)
+        assert result.memories == ()
+        assert any("只交出了档案" in note for note in result.notes)
         await runtime.close()
 
     asyncio.run(scenario())
@@ -718,22 +476,14 @@ def _fully_enabled_runtime(tmp_path: Path, *, lifecycle: dict | None = None, for
     payload["storage"]["root"] = str(tmp_path / "data")
     # 单测不往 127.0.0.1:4318 真导出（同 ``runtime_config``）
     payload["observability"]["tracing"]["enabled"] = False
-    for route, adapter in (
-        (payload["models"]["chat"]["route"], "fake_chat"),
-        (payload["models"]["embedding"]["route"], "fake_embedding"),
-        (payload["models"]["rerank"]["route"], "fake_rerank"),
-        (payload["memory"]["vector_store"]["route"], "fake_vector"),
-        (payload["conversation"]["summary_vector_store"]["route"], "fake_vector"),
-    ):
+    for route, adapter in ((payload["models"]["chat"]["route"], "fake_chat"),):
         route.update(provider="fake", adapter=adapter, credential_ref="")
     payload["behavior"] = {"primary_subject": "家庭成员A"}
     payload["scene"] = {"enabled": True}
     payload["foresight"] = {"enabled": foresight}
     config = HabitusConfig.from_mapping(payload)
-    providers, vectors = runtime_dependencies()
-    return build_runtime(
-        config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
-    )
+    providers = runtime_dependencies()
+    return build_runtime(config, providers=providers, path_lock=PathLock(ProcessLocalLockStore()))
 
 
 def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path: Path) -> None:
@@ -1080,9 +830,9 @@ def test_a_host_transcript_with_parallel_tools_whose_times_go_backwards_is_remem
     本地服务收下（不是不可重试的 400、插件不会挡住这个会话），按转写顺序存、时刻不降。"""
 
     async def scenario() -> None:
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         runtime = build_runtime(
-            runtime_config(tmp_path), providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
+            runtime_config(tmp_path), providers=providers, path_lock=PathLock(ProcessLocalLockStore())
         )
         runtime.initialize()
         start = 1_790_000_000_000
@@ -1130,9 +880,9 @@ def test_rounds_a_host_ended_with_a_quota_error_are_remembered_and_do_not_hold_u
     ``info.error``；两轮都照出一条答复封口，后面正常的一轮照常进记忆，没有一批被挡在前一批后面。"""
 
     async def scenario() -> None:
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         runtime = build_runtime(
-            runtime_config(tmp_path), providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
+            runtime_config(tmp_path), providers=providers, path_lock=PathLock(ProcessLocalLockStore())
         )
         runtime.initialize()
         start = 1_791_467_400_000
@@ -1268,8 +1018,7 @@ def _real_storage_config(base: Path) -> HabitusConfig:
     payload["storage"]["root"] = str(base / "data")
     # 单测不往 127.0.0.1:4318 真导出（同 ``runtime_config``）
     payload["observability"]["tracing"]["enabled"] = False
-    for capability in ("chat", "embedding", "rerank"):
-        payload["models"][capability]["route"].update(provider="fake", adapter=f"fake_{capability}", credential_ref="")
+    payload["models"]["chat"]["route"].update(provider="fake", adapter="fake_chat", credential_ref="")
     return HabitusConfig.from_mapping(payload)
 
 
@@ -1289,25 +1038,23 @@ def _all_paths(root: Path) -> list[str]:
 @pytest.mark.parametrize("shape", ["chinese-space-user", "beyond-max-path"])
 def test_runtime_remembers_a_turn_under_extreme_storage_roots(tmp_path: Path, shape: str, with_service_lock: bool) -> None:
     """阶段 3 极限用例：用户名含中文与空格、存储根深到其下文件超过 Windows 260 字符时，照 ``serve`` 的顺序先取实例锁、
-    再初始化 Runtime、打开两个 local_sqlite 向量集合，收录一轮并读回。``runtime-only`` 一组不取实例锁，
+    再初始化 Runtime（建根、打开 SQLite 锁库与召回状态库），收录一轮并读回。``runtime-only`` 一组不取实例锁，
     让 Windows 上实例锁那一层若先断，Runtime 建根与 SQLite 这两层仍各自被测到。
 
-    全用真实存储：实例锁、SQLite 锁库、local_sqlite 向量库。windows-latest 上关掉了系统长路径支持，这条用例在那里
+    全用真实存储：实例锁、SQLite 锁库与召回状态库。windows-latest 上关掉了系统长路径支持，这条用例在那里
     如实反映不经耐久写入层的部分能否越过 MAX_PATH（"需要用户定的事"第 2 条等它的结果）。"""
 
     base = _extreme_base(tmp_path, shape)
     config = _real_storage_config(base)
 
     async def scenario() -> None:
-        providers, _vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         lock = ServiceInstanceLock(config.storage_root / "service" / "http.lock")
         if with_service_lock:
             lock.acquire()
         runtime = build_runtime(config, providers=providers)
         try:
             runtime.initialize()
-            await runtime.components.memory.vector_index.ensure_ready()
-            await runtime.components.conversation.summary_vector_index.ensure_ready()
             await _remember_one_turn(runtime)
             live = await runtime.read_live_conversation(ConversationAddress("极限-路径-会话", date(2026, 10, 1)))
             assert live is not None
@@ -1318,10 +1065,10 @@ def test_runtime_remembers_a_turn_under_extreme_storage_roots(tmp_path: Path, sh
 
     asyncio.run(scenario())
     paths = _all_paths(base / "data")
-    vector_files = [path for path in paths if os.path.dirname(path).endswith("vector") and ".sqlite" in path]
-    assert vector_files, paths
+    sqlite_files = [path for path in paths if ".sqlite" in os.path.basename(path)]
+    assert sqlite_files, paths
     if shape == "beyond-max-path":
-        assert max(len(path) for path in vector_files) > 260
+        assert max(len(path) for path in sqlite_files) > 260
         assert max(len(path) for path in paths) > 260
 
 
@@ -1355,11 +1102,10 @@ def test_refreshing_observability_publishes_worker_and_source_gauges_and_a_snaps
     from habitus.foundation.observability import ObservationStatus
 
     async def scenario() -> None:
-        providers, vectors = runtime_dependencies()
+        providers = runtime_dependencies()
         runtime = build_runtime(
             runtime_config(tmp_path),
             providers=providers,
-            vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
         )
         runtime.initialize()

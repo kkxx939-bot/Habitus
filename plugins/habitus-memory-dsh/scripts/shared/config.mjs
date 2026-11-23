@@ -100,7 +100,7 @@ export function loadPluginConfig(env = process.env) {
     // UserPromptSubmit 这一路（问 capabilities、ready、召回、取提醒）的总预算，宿主给这个 hook 30 s（hooks.json）：
     // 取提醒占预算的最后 reminderTimeoutMs（最多一半），前面几个请求共用其余部分；每个请求的超时取"自己的超时"与"预算剩下的"中小的那个，
     // 服务接了连接不回话时整条路径也在预算内收场。只管这一路，Stop / SessionEnd 等后台 worker 仍用 timeoutMs。
-    // 默认 20 s：召回走服务的多查询规划与充分性判断（都调模型），留给它的约 18 s 不少于原来单个请求的 15 s；加上等会话锁的最多 5 s 仍在 30 s 内
+    // 默认 20 s：召回走服务的“挑”“判”两步（都调模型），服务端整次查询有总时间上限（默认 12 s，小于单个请求的 15 s）；加上等会话锁的最多 5 s 仍在 30 s 内
     promptBudgetMs: integerValue(env.HABITUS_PLUGIN_PROMPT_BUDGET_MS, 20_000, 1_000, 25_000),
   });
 }

@@ -69,26 +69,8 @@ class RuntimeHealthService:
         checks.extend(self._foresight_checks(runtime_state))
         checks.append(await self._queue_check())
         checks.extend(await asyncio.to_thread(model_checks, self.components))
-        checks.extend(
-            await asyncio.gather(
-                self._vector_check("memory_vector", self.components.memory.vector_index.store),
-                self._vector_check("summary_vector", self.components.conversation.summary_vector_index.store),
-            )
-        )
         if deep:
-            checks.extend(
-                await asyncio.gather(
-                    self._chat_check(),
-                    _index_consistency_check(
-                        "memory_index_consistency",
-                        self.components.memory.vector_index,
-                    ),
-                    _index_consistency_check(
-                        "summary_index_consistency",
-                        self.components.conversation.summary_vector_index,
-                    ),
-                )
-            )
+            checks.append(await self._chat_check())
         critical_unhealthy = any(
             check.critical and check.status in {RuntimeHealthStatus.UNHEALTHY, RuntimeHealthStatus.CLOSED}
             for check in checks
@@ -369,20 +351,6 @@ class RuntimeHealthService:
             "memory_queue", RuntimeHealthStatus.HEALTHY, f"{job.status.value}:{job.memory_sequence}"
         )
 
-    @staticmethod
-    async def _vector_check(name: str, store: object) -> RuntimeHealthCheck:
-        try:
-            state = await store.state()  # type: ignore[attr-defined]
-        except Exception as exc:
-            return RuntimeHealthCheck(name, RuntimeHealthStatus.UNHEALTHY, type(exc).__name__)
-        if state is None:
-            return RuntimeHealthCheck(name, RuntimeHealthStatus.DEGRADED, "not_published")
-        if not state.ready:
-            return RuntimeHealthCheck(name, RuntimeHealthStatus.DEGRADED, "not_ready")
-        return RuntimeHealthCheck(
-            name, RuntimeHealthStatus.HEALTHY, f"generation={state.generation};records={state.record_count}"
-        )
-
     async def _chat_check(self) -> RuntimeHealthCheck:
         result = await asyncio.to_thread(self.components.models.chat.health_check)
         if result.get("ok") is True:
@@ -397,35 +365,6 @@ class RuntimeHealthService:
     @staticmethod
     def _error(error: BaseException | None) -> str:
         return "none" if error is None else type(error).__name__
-
-
-async def _index_consistency_check(name: str, index: object) -> RuntimeHealthCheck:
-    """执行无副作用的真相源/派生索引审计，不在健康检查中重建。"""
-
-    try:
-        state = await index.store.state()  # type: ignore[attr-defined]
-        if state is None:
-            return RuntimeHealthCheck(name, RuntimeHealthStatus.DEGRADED, "not_published")
-        if not state.ready:
-            return RuntimeHealthCheck(name, RuntimeHealthStatus.DEGRADED, "not_ready")
-        report = await index.audit_consistency()  # type: ignore[attr-defined]
-    except Exception as exc:
-        return RuntimeHealthCheck(name, RuntimeHealthStatus.UNHEALTHY, type(exc).__name__)
-    if report.ok:
-        return RuntimeHealthCheck(
-            name,
-            RuntimeHealthStatus.HEALTHY,
-            f"expected={report.expected_count};indexed={report.indexed_count}",
-        )
-    return RuntimeHealthCheck(
-        name,
-        RuntimeHealthStatus.UNHEALTHY,
-        (
-            f"missing={len(report.missing_identities)};"
-            f"stale={len(report.stale_identities)};"
-            f"orphan={len(report.orphan_identities)}"
-        ),
-    )
 
 
 def timezone_checks(zone: ZoneInfo, system: datetime) -> list[RuntimeHealthCheck]:

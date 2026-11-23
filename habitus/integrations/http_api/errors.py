@@ -16,12 +16,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from habitus.conversation import ConversationOrderedPredecessorPendingError, ConversationSourceCapacityError
 from habitus.infrastructure.store.contracts.lock import LockLostError
-from habitus.infrastructure.vector import (
-    VectorStoreBusyError,
-    VectorStoreConflictError,
-    VectorStoreError,
-    VectorStoreIntegrityError,
-)
 from habitus.integrations.http_api.body_limit import RequestBodyLimitExceeded
 from habitus.integrations.http_api.handlers import HTTPMemoryJobConflictError, HTTPMemoryJobNotFoundError
 from habitus.integrations.http_api.remember_parts import (
@@ -145,33 +139,10 @@ def _model_error_spec(exc: ModelClientError) -> HTTPErrorSpec:
     return HTTPErrorSpec(HTTPErrorCode.FAILED_PRECONDITION, f"Model provider rejected this input: {kind.value}", False)
 
 
-def _vector_error_spec(exc: VectorStoreError) -> HTTPErrorSpec:
-    if isinstance(exc, VectorStoreBusyError):
-        return HTTPErrorSpec(
-            HTTPErrorCode.UNAVAILABLE,
-            "Vector store is temporarily busy",
-            True,
-            details={"conflict_type": "vector_store_busy"},
-            retry_after_seconds=1,
-        )
-    if isinstance(exc, VectorStoreConflictError):
-        return HTTPErrorSpec(
-            HTTPErrorCode.ABORTED,
-            "Vector store state changed during the operation",
-            True,
-            details={"conflict_type": "vector_store_state"},
-        )
-    if isinstance(exc, VectorStoreIntegrityError):
-        return HTTPErrorSpec(HTTPErrorCode.INTERNAL, "Vector store integrity check failed", False)
-    return HTTPErrorSpec(HTTPErrorCode.UNAVAILABLE, "Vector store operation failed", False)
-
-
 def _wrapped_dependency_spec(exc: BaseException) -> HTTPErrorSpec | None:
     for item in _exception_chain(exc)[1:]:
         if isinstance(item, ModelClientError):
             return _model_error_spec(item)
-        if isinstance(item, VectorStoreError):
-            return _vector_error_spec(item)
         if isinstance(item, LockLostError):
             return _lock_lost_spec(item)
         if isinstance(item, TimeoutError):
@@ -300,7 +271,6 @@ _EXCEPTION_SPECS: tuple[tuple[type[BaseException], Callable[[Any], HTTPErrorSpec
     (MemoryJobError, lambda _exc: HTTPErrorSpec(HTTPErrorCode.INTERNAL, "Memory job state is inconsistent", False)),
     (MemorySearchError, _search_error_spec),
     (ModelClientError, _model_error_spec),
-    (VectorStoreError, _vector_error_spec),
     (LockLostError, _lock_lost_spec),
     (
         TimeoutError,

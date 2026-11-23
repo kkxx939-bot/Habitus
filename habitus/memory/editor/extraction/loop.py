@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import tzinfo
 from typing import TypeVar
@@ -22,6 +23,7 @@ from habitus.memory.editor.extraction.model import (
     MemoryRetrievalStatus,
 )
 from habitus.memory.editor.extraction.prompt import MemoryExtractionPromptBuilder
+from habitus.memory.editor.extraction.targets import read_unread_targets, repair_notes, stale_new_targets
 from habitus.memory.editor.extraction.turn import MemoryTurnContext
 from habitus.memory.editor.mutation import (
     MemoryFieldMergeError,
@@ -46,8 +48,8 @@ from habitus.model_client import (
 from habitus.pre.conversation import ConversationMessageRole, ConversationSegment
 
 T = TypeVar("T")
-_RETRIEVAL_PROMPT_VERSION = "memory_retrieval_grader_v3"
-_CANDIDATE_PROMPT_VERSION = "memory_candidate_extraction_v3"
+_RETRIEVAL_PROMPT_VERSION = "memory_retrieval_grader_v4"
+_CANDIDATE_PROMPT_VERSION = "memory_candidate_extraction_v4"
 
 
 class MemoryExtractionLoop:
@@ -72,7 +74,7 @@ class MemoryExtractionLoop:
 
     def turn_fits_whole(self, whole: ConversationSegment) -> bool:
         """整轮拼起来能不能一次抽取：对话材料（不带旧记忆的检索判定与候选两种请求，按真实请求投影估）放得进
-        ``max_input_tokens`` 减去旧记忆预算 ``max_old_memory_tokens`` 剩下的那部分。
+        ``max_input_tokens`` 减去旧记忆预算 ``max_old_memory_tokens`` 与名字清单预算 ``max_listing_tokens`` 剩下的那部分。
 
         旧记忆按自己的预算另行装入（``_fit_initial_context``），所以只有这样估，读到多少旧记忆都不会让请求超限；
         配置里这两个数的关系本来就是"旧记忆之外留给对话与提示词"（``config/root.py`` 校验）。只看这一轮的消息与配置，
@@ -100,8 +102,8 @@ class MemoryExtractionLoop:
         context = MemoryExtractionContext(
             initial,
             snapshot_reader=self.retriever.snapshot_reader,
-            semantic_search=self.retriever.semantic_search,
             config=self.config,
+            searcher=lambda keywords, directory, limit: self.retriever.search(keywords, directory, limit=limit),
         )
         decisions: list[MemoryRetrievalDecision] = []
         observations: list[MemoryRetrievalObservation] = []
@@ -126,24 +128,8 @@ class MemoryExtractionLoop:
                 segment, context, decisions, observations, turn_context=turn_context
             )
 
-        old_memories = context.snapshots
-        page_ids = context.page_ids
-        candidate_request = self.prompt_builder.candidate_request(segment, context, turn_context=turn_context)
-        candidate_response = await self._complete_model(
-            candidate_request,
-            model_class=MemoryCandidateBatch,
-            name="memory_candidate_batch",
-            prompt_version=_CANDIDATE_PROMPT_VERSION,
-        )
-        try:
-            candidates = candidate_response.value
-            violations = candidates.context_violations(segment, old_memories, page_ids)
-            if violations:
-                candidates = await self._repaired_candidates(candidate_request, candidate_response, violations)
-            candidates, rejections = candidates.without_context_violations(segment, old_memories, page_ids)
-            candidates.validate_context(segment, old_memories, page_ids)
-        except MemoryCandidateError as exc:
-            raise MemoryExtractionPermanentError("memory candidate batch failed source-context validation") from exc
+        candidates, rejections = await _candidate_batch(self, segment, context, turn_context)
+        old_memories, page_ids = context.snapshots, context.page_ids
 
         try:
             mutation_read_set = self.mutation_reader.load(candidates, old_memories)
@@ -173,15 +159,16 @@ class MemoryExtractionLoop:
         self,
         request: ChatRequest,
         response: StructuredResponse[MemoryCandidateBatch],
-        violations: tuple[MemoryCandidateViolation, ...],
+        notes: tuple[str, ...],
     ) -> MemoryCandidateBatch:
-        """把通不过来源校验的条目与原因发回模型改一次（照 OpenViking ``extract_loop.py`` 的修补轮）。
+        """把要改的条目与原因发回模型改一次（照 OpenViking ``extract_loop.py`` 的修补轮）：来源校验不过的，和写到
+        已有旧卡片却没读过的地址的（那张旧卡片已补进请求）。
 
         修补轮走同一个结构化客户端与同一份输入预算；请求放不下、或答复用完结构纠错仍不合格时，退回第一次的
         答复，由调用方只剔除不合格的条目。
         """
 
-        listing = "\n".join(f"- {violation.describe()}" for violation in violations)
+        listing = "\n".join(f"- {note}" for note in notes)
         repair = replace(
             request,
             messages=(
@@ -190,7 +177,7 @@ class MemoryExtractionLoop:
                 ChatMessage(
                     role="user",
                     content=(
-                        "上一次输出的 MemoryCandidateBatch 里，下列条目没有通过来源校验（冒号后是违反的规则）：\n"
+                        "上一次输出的 MemoryCandidateBatch 里，下列条目要改（没通过来源校验的，冒号后是违反的规则）：\n"
                         f"{listing}\n"
                         "重新输出一个完整的 MemoryCandidateBatch：能依据完整事实与旧记忆改对的条目改对，"
                         "缺少来源、改不对的条目删掉；其余条目原样保留。不得为通过校验编造事实。"
@@ -260,9 +247,9 @@ class MemoryExtractionLoop:
         )
 
     def _material_fits(self, segment: ConversationSegment, turn_context: MemoryTurnContext | None) -> bool:
-        """不带旧记忆的两种请求是否都放得进留给对话与提示词的那部分预算。"""
+        """不带旧记忆与名字清单的两种请求是否都放得进留给对话与提示词的那部分预算。"""
 
-        budget = self.config.max_input_tokens - self.config.max_old_memory_tokens
+        budget = self.config.max_input_tokens - self.config.max_old_memory_tokens - self.config.max_listing_tokens
         try:
             retrieval = self.prompt_builder.retrieval_request(
                 segment, None, decisions=(), observations=(), allow_action=True, turn_context=turn_context
@@ -309,7 +296,7 @@ class MemoryExtractionLoop:
         segment: ConversationSegment,
         initial: MemoryRelatedContext,
     ) -> MemoryRelatedContext:
-        """完整保留高优先级旧节点，并按相关性整节点准入其余快照。"""
+        """完整保留档案与本段工具卡片；放不下明确失败。"""
 
         by_identity = {snapshot.identity: snapshot for snapshot in initial.snapshots.snapshots}
         essential = {str(MemoryURI.from_address(MemoryAddress.profile()))}
@@ -320,7 +307,7 @@ class MemoryExtractionLoop:
 
         priority: list[str] = []
         seen: set[str] = set()
-        for identity in (*sorted(essential), *(str(hit.uri) for hit in initial.search_hits)):
+        for identity in sorted(essential):
             if identity in by_identity and identity not in seen:
                 priority.append(identity)
                 seen.add(identity)
@@ -348,19 +335,50 @@ class MemoryExtractionLoop:
             total_bytes = next_bytes
             total_tokens = next_tokens
 
-        selected_ids = {snapshot.identity for snapshot in selected}
         return MemoryRelatedContext(
             conversation_id=initial.conversation_id,
             segment_id=initial.segment_id,
             source_segment_digest=initial.source_segment_digest,
-            query=initial.query,
-            search_roots=initial.search_roots,
-            search_hits=tuple(hit for hit in initial.search_hits if str(hit.uri) in selected_ids),
+            listing=initial.listing,
+            omitted_listing_entries=initial.omitted_listing_entries,
             snapshots=SnapshotBatch(
                 snapshots=tuple(sorted(selected, key=lambda snapshot: snapshot.identity)),
                 total_bytes=total_bytes,
             ),
         )
+
+
+async def _candidate_batch(
+    loop: MemoryExtractionLoop,
+    segment: ConversationSegment,
+    context: MemoryExtractionContext,
+    turn_context: MemoryTurnContext | None,
+) -> tuple[MemoryCandidateBatch, tuple[MemoryCandidateViolation, ...]]:
+    """生成候选；来源校验不过的、写到已有旧卡片却没读过的地址的，一起交回修补轮改一次，仍不合格的只剔掉那几条。"""
+
+    request = loop.prompt_builder.candidate_request(segment, context, turn_context=turn_context)
+    response = await loop._complete_model(
+        request,
+        model_class=MemoryCandidateBatch,
+        name="memory_candidate_batch",
+        prompt_version=_CANDIDATE_PROMPT_VERSION,
+    )
+    try:
+        candidates = response.value
+        unread = await asyncio.to_thread(read_unread_targets, context, candidates)
+        old_memories, page_ids = context.snapshots, context.page_ids
+        violations = candidates.context_violations(segment, old_memories, page_ids)
+        if violations or unread:
+            if unread:  # 补读进来的旧卡片要出现在修补请求里
+                request = loop.prompt_builder.candidate_request(segment, context, turn_context=turn_context)
+            notes = (*(violation.describe() for violation in violations), *repair_notes(context, unread))
+            candidates = await loop._repaired_candidates(request, response, notes)
+        candidates, rejections = candidates.without_context_violations(segment, old_memories, page_ids)
+        candidates, stale = candidates.without(await asyncio.to_thread(stale_new_targets, context, candidates))
+        candidates.validate_context(segment, old_memories, page_ids)
+    except MemoryCandidateError as exc:
+        raise MemoryExtractionPermanentError("memory candidate batch failed source-context validation") from exc
+    return candidates, (*rejections, *stale)
 
 
 __all__ = ["MemoryExtractionLoop"]
