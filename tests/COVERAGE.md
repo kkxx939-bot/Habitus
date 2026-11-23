@@ -24,9 +24,8 @@
 | Conversation Journal | 重放冲突、history 非连续、释放后序号回退 | `unit/conversation/test_journal.py` | append、seal、release、枚举 |
 | Conversation 切段 | 拆断完整轮次或 tool_call/result、超大载荷长期保存 | `unit/conversation/test_retention.py` | afterTurn、flush、软硬阈值、降载 |
 | Summary 与压缩 | 来源错配、范围重叠、过早清理、无限层级 | `unit/conversation/test_summary_and_compaction.py`, `test_summary_generation.py` | 真实结构化生成、完整原文上限、幂等、Range、Archive、清理 |
-| 记忆 URI/树/文档 | 树外路径、旧协议、Schema/正文不一致、关系方向错误 | `unit/memory/` | 六类 L2、L0/L1、读写损坏、URI |
-| Intention | completed 误召回、时间自动失效、确认时间误刷新 | `unit/memory/test_intention.py` | active/completed、30/60/180 复核 |
-| 候选 Schema | LLM 越权输出、page_id 重定向、工具知识无真实结果 | `unit/editor/test_candidates_and_page_ids.py` | 六类、严格字段、工具恢复、完成意图 |
+| 记忆 URI/树/文档 | 树外路径、旧协议、Schema/正文不一致、关系方向错误 | `unit/memory/` | 四类 L2、L0/L1、读写损坏、URI、旧目录启动即报错（`test_four_kinds_only.py`） |
+| 候选 Schema | LLM 越权输出、page_id 重定向、工具知识无真实结果 | `unit/editor/test_candidates_and_page_ids.py` | 四类、严格字段、工具恢复 |
 | 受控提取循环 | 检索不足仍继续、候选带病提交、无限再生成 | `unit/editor/test_extraction_*` | ReAct、审查、再生成、耗尽失败 |
 | 节点变更与身份 | 同址覆盖、字段策略失真、误 MERGE/DELETE | `unit/editor/test_mutation_and_identity.py`, `test_identity_planner_rules.py` | CREATE/UPDATE/NOOP、同类合并、跨类/事件拒绝、整节点删除、PATCH/REPLACE |
 | Links/Backlinks | 单边关系、删除未迁移、自环、显式 REMOVE 误用 | `unit/editor/test_relationships.py` | ADD/REMOVE、双向派生、MERGE 迁移、损坏拒绝 |

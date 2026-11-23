@@ -39,8 +39,6 @@ def candidate_batch(candidate: MemoryCandidate | None, *, proposal, relations=()
         "preferences": (),
         "entities": (),
         "tools": (),
-        "events": (),
-        "intentions": (),
         "identity_proposals": (proposal,),
         "relations": relations,
     }
@@ -50,8 +48,6 @@ def candidate_batch(candidate: MemoryCandidate | None, *, proposal, relations=()
             MemoryKind.PREFERENCE: "preferences",
             MemoryKind.ENTITY: "entities",
             MemoryKind.TOOL: "tools",
-            MemoryKind.EVENT: "events",
-            MemoryKind.INTENTION: "intentions",
         }[candidate.kind]
         values[field] = (candidate,)
     return MemoryCandidateBatch(**values)
@@ -123,7 +119,7 @@ def test_same_memory_merge_requires_allowed_kind_and_preserves_live_target() -> 
     assert result.resolve(source_page) == MemoryURI.from_address(target.address)  # type: ignore[arg-type]
 
 
-def test_same_memory_rejects_cross_kind_and_event_merges_after_candidate_validation() -> None:
+def test_same_memory_rejects_cross_kind_and_tool_merges_after_candidate_validation() -> None:
     preference = document(MemoryKind.PREFERENCE)
     entity = document(MemoryKind.ENTITY)
     old = snapshot_batch(preference, entity)
@@ -145,19 +141,19 @@ def test_same_memory_rejects_cross_kind_and_event_merges_after_candidate_validat
             )
         )
 
-    first_event = document(
-        MemoryKind.EVENT,
-        fields={"event_date": "2026-07-01", "event_name": "旧决定", "summary": "确认采用 A。"},
+    first_tool = document(
+        MemoryKind.TOOL,
+        fields={"tool_name": "workspace.inspect", "verification": "检查退出状态。"},
     )
-    second_event = document(
-        MemoryKind.EVENT,
-        fields={"event_date": "2026-07-02", "event_name": "新决定", "summary": "确认采用 A。"},
+    second_tool = document(
+        MemoryKind.TOOL,
+        fields={"tool_name": "workspace.read", "verification": "检查退出状态。"},
     )
-    events = snapshot_batch(first_event, second_event)
-    event_pages = MemoryPageIdMap.from_snapshots(events)
-    source_id = event_pages.page_id_for(MemoryURI.from_address(first_event.address))
-    target_id = event_pages.page_id_for(MemoryURI.from_address(second_event.address))
-    event_proposal = MemoryIdentityProposal(
+    tools = snapshot_batch(first_tool, second_tool)
+    tool_pages = MemoryPageIdMap.from_snapshots(tools)
+    source_id = tool_pages.page_id_for(MemoryURI.from_address(first_tool.address))
+    target_id = tool_pages.page_id_for(MemoryURI.from_address(second_tool.address))
+    tool_proposal = MemoryIdentityProposal(
         MemoryIdentityProposalType.SAME_MEMORY,
         source_id,  # type: ignore[arg-type]
         target_id,
@@ -166,9 +162,9 @@ def test_same_memory_rejects_cross_kind_and_event_merges_after_candidate_validat
     with pytest.raises(MemoryIdentityPlanningError, match="not allowed"):
         MemoryIdentityPlanner().plan(
             extraction(
-                (first_event, second_event),
-                MemoryCandidate(target_id, MemoryKind.EVENT, second_event.fields),  # type: ignore[arg-type]
-                event_proposal,
+                (first_tool, second_tool),
+                MemoryCandidate(target_id, MemoryKind.TOOL, second_tool.fields),  # type: ignore[arg-type]
+                tool_proposal,
             )
         )
 
@@ -228,35 +224,33 @@ def test_validated_remove_memory_becomes_delete_without_creating_a_content_mutat
 
 
 def test_replace_fields_remove_absent_optional_values_while_patch_fields_preserve_them() -> None:
-    intention = document(
-        MemoryKind.INTENTION,
+    tool = document(
+        MemoryKind.TOOL,
         fields={
-            "intent_name": "补齐测试",
-            "status": "blocked",
-            "next_step": "等待依赖",
-            "blockers": "外部服务不可用",
-            "target_time": "本月底",
+            "tool_name": "workspace.inspect",
+            "purpose": "查看工作区状态",
+            "constraints": "只读",
+            "verification": "检查退出状态。",
         },
     )
-    intention_candidate = MemoryCandidate(
+    tool_candidate = MemoryCandidate(
         1,
-        MemoryKind.INTENTION,
-        {"intent_name": "补齐测试", "status": "open", "next_step": "继续实现"},
-        confirmed=True,
+        MemoryKind.TOOL,
+        {"tool_name": "workspace.inspect", "verification": "检查退出状态和输出。"},
     )
-    intention_match = MemoryNodeMatch(
-        intention_candidate,
-        MemoryURI.from_address(intention.address),
+    tool_match = MemoryNodeMatch(
+        tool_candidate,
+        MemoryURI.from_address(tool.address),
         MemoryNodeMatchStatus.EXISTING,
-        memory_snapshot(intention),
+        memory_snapshot(tool),
     )
-    merged_intention = MemoryFieldMerger().merge(intention_match)
-    assert merged_intention.fields == {
-        "intent_name": "补齐测试",
-        "status": "open",
-        "next_step": "继续实现",
+    merged_tool = MemoryFieldMerger().merge(tool_match)
+    assert merged_tool.fields == {
+        "tool_name": "workspace.inspect",
+        "constraints": "只读",
+        "verification": "检查退出状态和输出。",
     }
-    assert set(merged_intention.changed_fields) == {"status", "next_step", "blockers", "target_time"}
+    assert set(merged_tool.changed_fields) == {"purpose", "verification"}
 
     entity = document(
         MemoryKind.ENTITY,

@@ -110,7 +110,6 @@ from habitus.memory.editor import (
     MemoryTransactionJournal,
 )
 from habitus.memory.indexing import PersistentMemoryVectorIndex
-from habitus.memory.intention import MemoryIntentionReviewer
 from habitus.memory.recall import (
     MemoryRecallLifecycle,
     SQLiteMemoryRecallLifecycleStore,
@@ -455,7 +454,6 @@ def build_runtime(
         conversation_context=search_context_reader,
         assembler=MemoryContextAssembler(config=memory_config.search_service),
         config=memory_config.search_service,
-        intention_reviewer=MemoryIntentionReviewer(memory_config.intention_review),
         cold_probe_expander=memory_lifecycle,
         summary_fallback_expander=summary_expander,
         summary_use_recorder=summary_use,

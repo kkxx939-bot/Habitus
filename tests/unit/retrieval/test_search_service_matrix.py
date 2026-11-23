@@ -11,7 +11,6 @@ from types import SimpleNamespace
 import pytest
 
 from habitus.memory.document import MemoryLinkType, MemoryStoredLink
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.retrieval import (
     MemoryContextAssembler,
@@ -48,7 +47,6 @@ def _constructor_arguments(instance: SearchService) -> dict[str, object]:
         "conversation_context": instance.conversation_context,
         "assembler": instance.assembler,
         "config": instance.config,
-        "intention_reviewer": instance.intention_reviewer,
         "clock": instance.clock,
     }
 
@@ -117,7 +115,7 @@ def test_find_rejects_empty_or_non_text_query(tmp_path: Path, query: str) -> Non
         asyncio.run(instance.find(query))
 
 
-def test_find_strips_query_and_applies_default_root_limit_and_scope(tmp_path: Path) -> None:
+def test_find_strips_query_and_applies_default_root_and_limit(tmp_path: Path) -> None:
     semantic = SemanticSearch()
     instance = service(tmp_path, semantic=semantic, summaries=SummarySearch())
     result = asyncio.run(instance.find("  用户是谁  "))
@@ -129,7 +127,6 @@ def test_find_strips_query_and_applies_default_root_limit_and_scope(tmp_path: Pa
             {
                 "roots": (MemoryURI.root(),),
                 "kinds": (),
-                "intention_scope": MemoryIntentionRecallScope.ACTIVE,
                 "limit": instance.config.default_limit * instance.config.candidate_multiplier,
             },
         )
@@ -248,22 +245,6 @@ def test_search_clock_must_return_timezone_aware_datetime(tmp_path: Path, clock_
     )
     with pytest.raises((TypeError, ValueError), match="clock must return"):
         asyncio.run(instance.find("查询"))
-
-
-def test_timezone_clock_is_normalized_for_active_intention_review(tmp_path: Path) -> None:
-    intention = document(MemoryKind.INTENTION)
-    uri = MemoryURI.from_address(intention.address)
-    now = datetime(2026, 7, 10, 16, tzinfo=UTC)
-    instance = service(
-        tmp_path,
-        semantic=SemanticSearch((MemorySearchHit(uri, 0.9),)),
-        summaries=SummarySearch(),
-        clock=lambda: now,
-    )
-    instance.tree.write(intention)
-    result = asyncio.run(instance.find("待办"))
-    assert result.memories[0].intention_review is not None
-    assert result.memories[0].intention_review.unconfirmed_days == 9
 
 
 @pytest.mark.parametrize("raw", ["matches", 1, object()])

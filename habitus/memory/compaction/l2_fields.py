@@ -76,12 +76,7 @@ class MemoryFieldCompactor:
             if field.role is MemoryFieldRole.CONTENT and field.field_type is MemoryFieldType.STRING
         )
         policies = tuple(
-            SemanticFieldMergePolicy(
-                field=field.name,
-                allow_update=not bool(field.allowed_values),
-                allow_append=not bool(field.allowed_values),
-                max_chars=self.config.max_field_chars,
-            )
+            SemanticFieldMergePolicy(field=field.name, max_chars=self.config.max_field_chars)
             for field in content_fields
         )
         source_fields = {

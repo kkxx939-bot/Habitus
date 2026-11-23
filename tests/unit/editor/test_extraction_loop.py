@@ -29,7 +29,7 @@ from habitus.model_client import (
     ProviderConfig,
     StructuredChatClient,
 )
-from tests.helpers import memory_fields, segment, tool_turn
+from tests.helpers import document, memory_fields, segment, tool_turn
 from tests.model_helpers import prepare_chat_request
 
 
@@ -111,8 +111,6 @@ def empty_candidates() -> dict[str, object]:
         "preferences": [],
         "entities": [],
         "tools": [],
-        "events": [],
-        "intentions": [],
         "identity_proposals": [],
         "relations": [],
     }
@@ -121,22 +119,17 @@ def empty_candidates() -> dict[str, object]:
 def candidate_item(kind: MemoryKind, page_id: int, **controls: object) -> dict[str, object]:
     """构造一个符合对应记忆 YAML 的结构化候选。"""
 
-    item = {"page_id": page_id, **memory_fields(kind), **controls}
-    if kind is MemoryKind.EVENT:
-        item["event_date"] = "2026-07-01"
-    return item
+    return {"page_id": page_id, **memory_fields(kind), **controls}
 
 
 def all_kind_candidates() -> dict[str, object]:
-    """构造覆盖六类记忆且 page_id 唯一的新节点批次。"""
+    """构造覆盖四类记忆且 page_id 唯一的新节点批次。"""
 
     result = empty_candidates()
     result["profile"] = [candidate_item(MemoryKind.PROFILE, 100)]
     result["preferences"] = [candidate_item(MemoryKind.PREFERENCE, 101)]
     result["entities"] = [candidate_item(MemoryKind.ENTITY, 102)]
     result["tools"] = [candidate_item(MemoryKind.TOOL, 103)]
-    result["events"] = [candidate_item(MemoryKind.EVENT, 104)]
-    result["intentions"] = [candidate_item(MemoryKind.INTENTION, 105, confirmed=True)]
     return result
 
 
@@ -406,10 +399,12 @@ def test_unusable_repair_answer_falls_back_to_the_first_batch_minus_failing_item
 def test_preliminary_mutation_failure_does_not_trigger_semantic_regeneration(
     tmp_path: Path,
 ) -> None:
-    unconfirmed_intention = empty_candidates()
-    unconfirmed_intention["intentions"] = [candidate_item(MemoryKind.INTENTION, 100, confirmed=False)]
+    # 树里已有这条偏好但本轮没有读到：新编号指向它只能在初步字段规划里明确失败
+    MemoryTree(tmp_path / "memory").write(document(MemoryKind.PREFERENCE))
+    unread_target = empty_candidates()
+    unread_target["preferences"] = [candidate_item(MemoryKind.PREFERENCE, 100)]
     unused_retry = empty_candidates()
-    responses = [finish(), unconfirmed_intention, unused_retry]
+    responses = [finish(), unread_target, unused_retry]
     loop = extraction_loop(tmp_path, responses)
 
     with pytest.raises(MemoryExtractionError, match="preliminary mutation planning"):
@@ -417,7 +412,7 @@ def test_preliminary_mutation_failure_does_not_trigger_semantic_regeneration(
     assert responses == [unused_retry]
 
 
-def test_successful_loop_plans_all_six_memory_kinds_without_writing_tree(tmp_path: Path) -> None:
+def test_successful_loop_plans_all_four_memory_kinds_without_writing_tree(tmp_path: Path) -> None:
     source = segment(messages=tool_turn())
     tree_root = tmp_path / "memory"
     result = asyncio.run(

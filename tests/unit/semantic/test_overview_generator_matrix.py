@@ -111,11 +111,6 @@ DIRECTORIES = (
     MemoryDirectory.entities(),
     MemoryDirectory.entities("项目"),
     MemoryDirectory.tools(),
-    MemoryDirectory.events(),
-    MemoryDirectory.events(2026),
-    MemoryDirectory.events(2026, 7),
-    MemoryDirectory.events(2026, 7, 28),
-    MemoryDirectory.intentions(),
 )
 
 

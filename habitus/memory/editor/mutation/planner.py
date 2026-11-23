@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from habitus.memory.editor.candidate import (
     MemoryCandidateBatch,
-    MemoryIdentityProposalType,
 )
 from habitus.memory.editor.mutation.matcher import MemoryNodeMatcher
 from habitus.memory.editor.mutation.merge import MemoryFieldMerger
@@ -16,7 +15,6 @@ from habitus.memory.editor.mutation.model import (
     MemoryNodeMatchStatus,
 )
 from habitus.memory.editor.page_id import MemoryPageIdError, MemoryPageIdMap
-from habitus.memory.model import MemoryKind
 from habitus.memory.schema import MemorySchemaRegistry
 
 
@@ -42,11 +40,6 @@ class MemoryMutationPlanner:
 
         mutations: list[MemoryMutation] = []
         working_page_ids = page_ids.copy()
-        preservation_targets = {
-            proposal.target_page_id
-            for proposal in batch.identity_proposals
-            if proposal.proposal_type is MemoryIdentityProposalType.SAME_MEMORY
-        }
         for match in self.matcher.match(batch, read_set, page_ids):
             merged = self.merger.merge(match)
             if match.status is MemoryNodeMatchStatus.NEW:
@@ -55,21 +48,11 @@ class MemoryMutationPlanner:
                 action = MemoryMutationAction.UPDATE
             else:
                 action = MemoryMutationAction.NOOP
-            confirms_intention = match.candidate.confirmed is True
-            if match.candidate.kind is MemoryKind.INTENTION:
-                if not confirms_intention and (
-                    action is MemoryMutationAction.CREATE or match.candidate.page_id not in preservation_targets
-                ):
-                    raise MemoryMutationPlanningError(
-                        "unconfirmed Intention candidate may only preserve an existing same_memory merge target"
-                    )
             mutation = MemoryMutation(
                 match=match,
                 action=action,
                 fields=merged.fields,
                 changed_fields=merged.changed_fields,
-                confirms_intention=confirms_intention,
-                read_only_target=merged.read_only_target,
             )
             try:
                 working_page_ids.register_resolved(match.uri, match.candidate.page_id)

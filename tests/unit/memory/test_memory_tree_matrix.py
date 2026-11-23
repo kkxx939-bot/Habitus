@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import date, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -27,8 +27,6 @@ ADDRESSES = (
     MemoryAddress.preference("回答风格"),
     MemoryAddress.entity("项目", "Habitus"),
     MemoryAddress.tool("workspace.inspect"),
-    MemoryAddress.event(date(2026, 7, 28), "确认方案"),
-    MemoryAddress.intention("完成重构"),
 )
 DIRECTORIES = (
     MemoryDirectory.root(),
@@ -36,11 +34,6 @@ DIRECTORIES = (
     MemoryDirectory.entities(),
     MemoryDirectory.entities("项目"),
     MemoryDirectory.tools(),
-    MemoryDirectory.events(),
-    MemoryDirectory.events(2026),
-    MemoryDirectory.events(2026, 7),
-    MemoryDirectory.events(2026, 7, 28),
-    MemoryDirectory.intentions(),
 )
 
 
@@ -71,9 +64,6 @@ def test_tree_constructor_rejects_symbolic_link_root(tmp_path: Path) -> None:
         (MemoryAddress.preference("回答风格"), "preferences/回答风格.md"),
         (MemoryAddress.entity("项目", "Habitus"), "entities/项目/habitus.md"),
         (MemoryAddress.tool("workspace.inspect"), "tools/workspace.inspect.md"),
-        (MemoryAddress.event(date(1, 1, 1), "开始"), "events/0001/01/01/开始.md"),
-        (MemoryAddress.event(date(9999, 12, 31), "结束"), "events/9999/12/31/结束.md"),
-        (MemoryAddress.intention("完成重构"), "intentions/完成重构.md"),
     ],
 )
 def test_tree_maps_every_address_to_exact_confirmed_physical_path(
@@ -272,8 +262,6 @@ def test_initialize_is_idempotent_and_creates_only_static_tree(tmp_path: Path) -
     assert tree.initialize() == tree.initialize() == tree.root
     assert sorted(item.name for item in tree.root.iterdir()) == [
         "entities",
-        "events",
-        "intentions",
         "preferences",
         "tools",
     ]
@@ -386,7 +374,7 @@ def test_direct_addresses_lists_only_direct_l2_for_each_leaf(tmp_path: Path, kin
 
 
 @pytest.mark.parametrize("count", [1, 2, 5, 20])
-@pytest.mark.parametrize("kind", [MemoryKind.PREFERENCE, MemoryKind.TOOL, MemoryKind.INTENTION])
+@pytest.mark.parametrize("kind", [MemoryKind.PREFERENCE, MemoryKind.TOOL])
 def test_leaf_enumeration_is_sorted_and_bounded(tmp_path: Path, count: int, kind: MemoryKind) -> None:
     tree = MemoryTree(tmp_path / "memory")
     addresses = []
@@ -395,13 +383,12 @@ def test_leaf_enumeration_is_sorted_and_bounded(tmp_path: Path, count: int, kind
         key = {
             MemoryKind.PREFERENCE: "topic",
             MemoryKind.TOOL: "tool_name",
-            MemoryKind.INTENTION: "intent_name",
         }[kind]
         fields[key] = f"item-{index:03d}"
         item = codec().build(
             kind,
             fields,
-            metadata=MemoryDocumentMetadata.initial(BASE_TIME, confirmed=kind is MemoryKind.INTENTION),
+            metadata=MemoryDocumentMetadata.initial(BASE_TIME),
         )
         tree.write(item)
         addresses.append(item.address)
@@ -423,22 +410,14 @@ def test_direct_and_child_directory_limits_reject_invalid_values(tmp_path: Path,
         tree.child_directories(MemoryDirectory.root(), limit=limit)
 
 
-def test_child_directories_follow_entity_and_event_hierarchy(tmp_path: Path) -> None:
+def test_child_directories_follow_entity_hierarchy(tmp_path: Path) -> None:
     tree = MemoryTree(tmp_path / "memory")
-    items = (
-        document(MemoryKind.ENTITY),
-        document(MemoryKind.EVENT),
-    )
-    for item in items:
-        tree.write(item)
+    tree.write(document(MemoryKind.ENTITY))
     assert tree.child_directories(MemoryDirectory.root()) == tuple(
         MemoryDirectory((name,)) for name in tree._STATIC_DIRECTORIES
     )
     assert tree.child_directories(MemoryDirectory.entities()) == (MemoryDirectory.entities("项目"),)
-    assert tree.child_directories(MemoryDirectory.events()) == (MemoryDirectory.events(2026),)
-    assert tree.child_directories(MemoryDirectory.events(2026)) == (MemoryDirectory.events(2026, 7),)
-    assert tree.child_directories(MemoryDirectory.events(2026, 7)) == (MemoryDirectory.events(2026, 7, 1),)
-    assert tree.child_directories(MemoryDirectory.events(2026, 7, 1)) == ()
+    assert tree.child_directories(MemoryDirectory.entities("项目")) == ()
 
 
 @pytest.mark.parametrize("kind", tuple(MemoryKind))
@@ -449,7 +428,7 @@ def test_list_addresses_kind_filter_and_global_limit(tmp_path: Path, kind: Memor
         tree.write(item)
     assert tree.list_addresses(kind) == (next(item.address for item in items if item.kind is kind),)
     assert tree.list_addresses(limit=1) == (items[0].address,)
-    assert tree.list_addresses(limit=6) == tuple(item.address for item in items)
+    assert tree.list_addresses(limit=4) == tuple(item.address for item in items)
 
 
 def test_list_addresses_continues_strictly_after_cursor(tmp_path: Path) -> None:
@@ -479,35 +458,18 @@ def test_global_list_rejects_invalid_limit(tmp_path: Path, limit: int) -> None:
         MemoryTree(tmp_path / "memory").list_addresses(limit=limit)
 
 
-@pytest.mark.parametrize(
-    "uri",
-    [
-        "memory://events/26/07/28/event.md",
-        "memory://events/2026/7/28/event.md",
-        "memory://events/2026/07/8/event.md",
-    ],
-)
-def test_tree_uri_boundary_rejects_noncanonical_event_date_widths(tmp_path: Path, uri: str) -> None:
+def test_delete_prunes_only_empty_dynamic_directories_and_their_layers(tmp_path: Path) -> None:
     tree = MemoryTree(tmp_path / "memory")
-
-    with pytest.raises(ValueError):
-        tree.path_for_uri(uri)
-
-
-@pytest.mark.parametrize("kind", [MemoryKind.ENTITY, MemoryKind.EVENT])
-def test_delete_prunes_only_empty_dynamic_directories_and_their_layers(tmp_path: Path, kind: MemoryKind) -> None:
-    tree = MemoryTree(tmp_path / "memory")
-    item = document(kind)
+    item = document(MemoryKind.ENTITY)
     tree.write(item)
     directory = MemoryDirectory.for_address(item.address)
     tree.write_layers(directory, abstract="摘要", overview="概览")
     assert tree.delete(item.address) is True
     assert tree.directory_exists(directory) is False
-    static_root = MemoryDirectory.entities() if kind is MemoryKind.ENTITY else MemoryDirectory.events()
-    assert tree.directory_exists(static_root) is True
+    assert tree.directory_exists(MemoryDirectory.entities()) is True
 
 
-@pytest.mark.parametrize("kind", [MemoryKind.PREFERENCE, MemoryKind.TOOL, MemoryKind.INTENTION])
+@pytest.mark.parametrize("kind", [MemoryKind.PREFERENCE, MemoryKind.TOOL])
 def test_delete_never_prunes_static_leaf_directory(tmp_path: Path, kind: MemoryKind) -> None:
     tree = MemoryTree(tmp_path / "memory")
     item = document(kind)
@@ -528,25 +490,19 @@ def test_tree_detects_non_utf8_document_before_decode(tmp_path: Path, kind: Memo
 
 @pytest.mark.parametrize(
     "directory",
-    [MemoryDirectory.root(), MemoryDirectory.preferences(), MemoryDirectory.entities(), MemoryDirectory.events()],
+    [MemoryDirectory.root(), MemoryDirectory.preferences(), MemoryDirectory.entities()],
 )
 def test_tree_detects_unsupported_hidden_entry(tmp_path: Path, directory: MemoryDirectory) -> None:
     tree = MemoryTree(tmp_path / "memory")
     tree.initialize()
     path = tree.directory_path(directory)
     (path / ".unknown").write_text("x", encoding="utf-8")
-    operation = (
-        tree.direct_addresses
-        if directory not in {MemoryDirectory.entities(), MemoryDirectory.events()}
-        else tree.child_directories
-    )
+    operation = tree.direct_addresses if directory != MemoryDirectory.entities() else tree.child_directories
     with pytest.raises(MemoryTreeIntegrityError, match="hidden"):
         operation(directory)
 
 
-@pytest.mark.parametrize(
-    "directory", [MemoryDirectory.preferences(), MemoryDirectory.tools(), MemoryDirectory.intentions()]
-)
+@pytest.mark.parametrize("directory", [MemoryDirectory.preferences(), MemoryDirectory.tools()])
 def test_tree_detects_subdirectory_in_leaf_directory(tmp_path: Path, directory: MemoryDirectory) -> None:
     tree = MemoryTree(tmp_path / "memory")
     tree.initialize()
@@ -557,8 +513,8 @@ def test_tree_detects_subdirectory_in_leaf_directory(tmp_path: Path, directory: 
         tree.child_directories(directory)
 
 
-@pytest.mark.parametrize("branch", [MemoryDirectory.entities(), MemoryDirectory.events(), MemoryDirectory.events(2026)])
-def test_tree_detects_file_in_branch_directory(tmp_path: Path, branch: MemoryDirectory) -> None:
+def test_tree_detects_file_in_branch_directory(tmp_path: Path) -> None:
+    branch = MemoryDirectory.entities()
     tree = MemoryTree(tmp_path / "memory")
     tree.initialize()
     path = tree.directory_path(branch)

@@ -85,7 +85,7 @@ def _answer_rules(dataset: BenchmarkDatasetName) -> str:
             "plans, and abstain when the question names a different role, entity, or item variant than the memories."
         )
     return (
-        "Respect explicit forgetting, completed-intention scope, relation evidence, and the lower authority of Conversation "
+        "Respect explicit forgetting, relation evidence, and the lower authority of Conversation "
         "Summary fallback compared with durable Memory."
     )
 

@@ -11,7 +11,6 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictBool, f
 
 from habitus.foundation.ids import canonical_path_identity
 from habitus.memory.conversation.layout import MAX_CONVERSATION_ID_UTF8_BYTES
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryKind
 
 _ResultT = TypeVar("_ResultT")
@@ -111,7 +110,6 @@ class RecallRequest(StrictSchema):
     started_on: date | None = None
     limit: PositiveLimit | None = None
     kinds: tuple[MemoryKind, ...] = ()
-    intention_scope: MemoryIntentionRecallScope = MemoryIntentionRecallScope.ACTIVE
 
     @field_validator("query")
     @classmethod
@@ -211,7 +209,6 @@ class MemoryReadResult(StrictSchema):
     revision: int | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
-    last_confirmed_at: datetime | None = None
     fields: dict[str, Any] | None = None
     text: str
     links: list[MemoryLinkResult] = []

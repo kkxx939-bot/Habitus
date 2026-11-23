@@ -87,7 +87,7 @@ FIELD_SETS: dict[type, tuple[str, ...]] = {
         "editor_segment_id",
         "editor_segment_digest",
     ),
-    MemoryPreparedNodeChange: ("action", "uri", "before_digest", "expected_after_digest", "confirms_intention"),
+    MemoryPreparedNodeChange: ("action", "uri", "before_digest", "expected_after_digest"),
     MemoryNodeChange: ("action", "uri", "before_revision", "after_revision", "before_digest", "after_digest"),
     MemoryChangeReceipt: (
         "source",

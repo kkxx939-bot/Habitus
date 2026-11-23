@@ -19,7 +19,6 @@ from habitus.memory.editor.page_id import EXISTING_PAGE_ID_MAX, MemoryPageIdMap
 from habitus.memory.editor.retrieval import (
     MemoryRelatedContext,
 )
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.retrieval import MemorySearchHit, MemorySemanticSearch
 from habitus.memory.snapshot import MemorySnapshotBatch, MemorySnapshotReader
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
@@ -138,7 +137,6 @@ class MemoryExtractionContext:
                 normalized_query,
                 roots=self.initial.search_roots,
                 kinds=(),
-                intention_scope=MemoryIntentionRecallScope.ALL,
                 limit=self.config.additional_search_limit,
             )
         except Exception as exc:

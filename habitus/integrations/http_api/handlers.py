@@ -93,7 +93,6 @@ from habitus.integrations.http_api.schemas import (
 )
 from habitus.memory.browse import MemoryLayerText
 from habitus.memory.conversation import ConversationAddress
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryKind, MemoryLevel
 from habitus.memory.uri import MemoryURI
 from habitus.memory.workflow import MemoryJob, MemoryJobBlockedError, MemoryJobStatus
@@ -224,7 +223,6 @@ class RuntimeHTTPHandlers:
         started_on: date | None = None,
         limit: int | None = None,
         kinds: tuple[MemoryKind, ...] = (),
-        intention_scope: MemoryIntentionRecallScope = MemoryIntentionRecallScope.ACTIVE,
     ) -> RecallResult:
         """返回 Agent 可用上下文和可溯源命中，不暴露记忆树内部文件布局。"""
 
@@ -238,7 +236,6 @@ class RuntimeHTTPHandlers:
             conversation=conversation,
             limit=limit,
             kinds=kinds,
-            intention_scope=intention_scope,
         )
         return RecallResult(
             query=result.query,
@@ -402,7 +399,6 @@ class RuntimeHTTPHandlers:
             revision=value.metadata.revision,
             created_at=value.metadata.created_at,
             updated_at=value.metadata.updated_at,
-            last_confirmed_at=value.metadata.last_confirmed_at,
             fields=dict(value.fields),
             text=value.markdown_body,
             links=[MemoryLinkResult.model_validate(link.to_dict()) for link in value.links],

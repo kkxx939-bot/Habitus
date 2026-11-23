@@ -34,7 +34,6 @@ from habitus.memory.conversation import (
     ConversationIngressRequest,
 )
 from habitus.memory.document import MemoryDocument
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryKind
 from habitus.memory.retrieval import MemorySearchResult
 from habitus.memory.uri import MemoryURI
@@ -658,7 +657,6 @@ class Runtime:
         limit: int | None = None,
         score_threshold: float | None = None,
         kinds: tuple[MemoryKind, ...] = (),
-        intention_scope: MemoryIntentionRecallScope = MemoryIntentionRecallScope.ACTIVE,
     ) -> MemorySearchResult:
         """不使用 Conversation 上下文，直接执行 Agent 记忆检索。"""
 
@@ -669,7 +667,6 @@ class Runtime:
             limit=limit,
             score_threshold=score_threshold,
             kinds=kinds,
-            intention_scope=intention_scope,
         )
 
     async def list_memory(self, uri: MemoryURI | str | None = None) -> MemoryListing:
@@ -693,7 +690,6 @@ class Runtime:
         limit: int | None = None,
         score_threshold: float | None = None,
         kinds: tuple[MemoryKind, ...] = (),
-        intention_scope: MemoryIntentionRecallScope = MemoryIntentionRecallScope.ACTIVE,
     ) -> MemorySearchResult:
         """执行 Memory 主召回，并在信息不足时按需补充历史 Summary。"""
 
@@ -705,7 +701,6 @@ class Runtime:
             limit=limit,
             score_threshold=score_threshold,
             kinds=kinds,
-            intention_scope=intention_scope,
         )
 
     async def maintain_conversation(

@@ -371,17 +371,14 @@ def test_prepared_node_change_accepts_coherent_action_for_every_memory_kind(
             MemoryKind.PREFERENCE: MemoryAddress.preference("主题"),
             MemoryKind.ENTITY: MemoryAddress.entity("分类", "实体"),
             MemoryKind.TOOL: MemoryAddress.tool("tool.name"),
-            MemoryKind.EVENT: MemoryAddress.event(date(2026, 7, 1), "事件"),
-            MemoryKind.INTENTION: MemoryAddress.intention("事项"),
         }[kind]
     )
-    confirms = kind is MemoryKind.INTENTION and action is MemoryNodeChangeAction.CREATE
     values = {
         MemoryNodeChangeAction.CREATE: (None, "a" * 64),
         MemoryNodeChangeAction.UPDATE: ("a" * 64, "b" * 64),
         MemoryNodeChangeAction.DELETE: ("a" * 64, None),
     }[action]
-    prepared = MemoryPreparedNodeChange(action, uri, *values, confirms_intention=confirms)
+    prepared = MemoryPreparedNodeChange(action, uri, *values)
     assert MemoryPreparedNodeChange.from_dict(prepared.to_dict()) == prepared
 
 

@@ -1,4 +1,4 @@
-"""MemoryCandidateBatch 的模型契约编解码：由六类 YAML 生成结构化输出 JSON Schema，并严格解析模型返回。"""
+"""MemoryCandidateBatch 的模型契约编解码：由四类 YAML 生成结构化输出 JSON Schema，并严格解析模型返回。"""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 
 def candidate_batch_json_schema(batch_type: type[MemoryCandidateBatch]) -> dict[str, object]:
-    """从当前六类 YAML 生成供 StructuredChatClient 使用的 JSON Schema。"""
+    """从当前四类 YAML 生成供 StructuredChatClient 使用的 JSON Schema。"""
 
     registry = MemorySchemaRegistry.load_default()
     properties: dict[str, object] = {}
@@ -75,7 +75,7 @@ def candidate_batch_json_schema(batch_type: type[MemoryCandidateBatch]) -> dict[
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "MemoryCandidateBatch",
         "description": (
-            "从完整 ConversationSegment 中提取的六类记忆候选、临时身份提议和关系候选。"
+            "从完整 ConversationSegment 中提取的四类记忆候选、临时身份提议和关系候选。"
             "记忆候选必须包含临时 page_id；只返回 Schema 声明的业务字段，"
             "不得返回 URI、存储路径、编辑动作或耐久系统元数据。"
         ),
@@ -105,27 +105,13 @@ def parse_candidate_batch(batch_type: type[MemoryCandidateBatch], value: object)
             if not isinstance(raw_item, Mapping):
                 raise MemoryCandidateError(f"{field_name} contains a non-object item")
             page_id = _required_page_id(raw_item, field_name)
-            confirmed: bool | None = None
-            control_fields = {"page_id"}
-            if kind is MemoryKind.INTENTION:
-                if "confirmed" not in raw_item or not isinstance(raw_item["confirmed"], bool):
-                    raise MemoryCandidateError("intention candidate requires boolean confirmed")
-                confirmed = raw_item["confirmed"]
-                control_fields.add("confirmed")
-            business_fields = {key: item_value for key, item_value in raw_item.items() if key not in control_fields}
+            business_fields = {key: item_value for key, item_value in raw_item.items() if key != "page_id"}
             try:
                 fields = registry.validate_new(kind, business_fields)
             except (TypeError, ValueError) as exc:
                 raise MemoryCandidateError(f"invalid {field_name} candidate: {exc}") from exc
             _reject_empty_present_strings(fields, field_name)
-            candidates.append(
-                MemoryCandidate(
-                    page_id=page_id,
-                    kind=kind,
-                    fields=fields,
-                    confirmed=confirmed,
-                )
-            )
+            candidates.append(MemoryCandidate(page_id=page_id, kind=kind, fields=fields))
         parsed[field_name] = tuple(candidates)
     raw_relations = value[_RELATION_OUTPUT_FIELD]
     if not isinstance(raw_relations, list | tuple):
@@ -140,8 +126,6 @@ def parse_candidate_batch(batch_type: type[MemoryCandidateBatch], value: object)
         preferences=parsed["preferences"],
         entities=parsed["entities"],
         tools=parsed["tools"],
-        events=parsed["events"],
-        intentions=parsed["intentions"],
         identity_proposals=identity_proposals,
         relations=relations,
     )
@@ -160,16 +144,6 @@ def _candidate_item_schema(schema: MemoryTypeSchema) -> dict[str, object]:
         **{field.name: _candidate_field_schema(field) for field in schema.fields},
     }
     required = ["page_id", *(field.name for field in schema.fields if field.required)]
-    if schema.kind is MemoryKind.INTENTION:
-        properties["confirmed"] = {
-            "type": "boolean",
-            "description": (
-                "仅表示当前完整 ConversationSegment 是否明确创建、更新或重新确认了此事项。"
-                "只是为 same_memory 保留目标、但当前对话没有确认时必须为 false；"
-                "系统据此维护 last_confirmed_at，模型不得输出时间戳。"
-            ),
-        }
-        required.append("confirmed")
     item: dict[str, object] = {
         "type": "object",
         "description": schema.description,
@@ -333,11 +307,6 @@ def _candidate_field_schema(field: MemoryFieldSchema) -> dict[str, object]:
     if field_type == "string":
         result["minLength"] = 1
         result["pattern"] = r"\S"
-    if field.field_type is MemoryFieldType.DATE:
-        result["format"] = "date"
-        result["pattern"] = r"^\d{4}-\d{2}-\d{2}$"
-    if field.allowed_values:
-        result["enum"] = list(field.allowed_values)
     return result
 
 

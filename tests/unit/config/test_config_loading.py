@@ -33,7 +33,7 @@ def test_example_yaml_declares_a_complete_cross_domain_configuration(tmp_path) -
     assert config.memory.recall_lifecycle.enabled
     assert config.memory.recall_lifecycle.ranking_alpha == 0.2
     assert config.memory.recall_lifecycle.profile_half_life_days == 180.0
-    assert config.memory.recall_lifecycle.event_half_life_days == 14.0
+    assert config.memory.recall_lifecycle.tool_half_life_days == 30.0
     assert config.memory.semantic_search.vector_score_threshold == 0.0
     assert config.memory.semantic_search.rerank_score_threshold == 0.2
     assert config.workflow.jobs.max_attempts == 5

@@ -146,7 +146,7 @@ class VectorBoundaryBenchmark:
 
 
 def expand_vector_dataset(dataset: VectorBenchmarkDataset, document_count: int) -> VectorBenchmarkDataset:
-    """保留质量锚点，并用确定性六类记忆背景记录把数据扩展到目标规模。"""
+    """保留质量锚点，并用确定性四类记忆背景记录把数据扩展到目标规模。"""
 
     if not isinstance(dataset, VectorBenchmarkDataset):
         raise TypeError("dataset must be VectorBenchmarkDataset")

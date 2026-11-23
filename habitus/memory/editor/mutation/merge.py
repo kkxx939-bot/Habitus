@@ -11,7 +11,6 @@ from habitus.memory.editor.mutation.model import (
 )
 from habitus.memory.schema import (
     MemoryMergeStrategy,
-    MemoryOperationMode,
     MemorySchemaRegistry,
     MemoryTypeSchema,
 )
@@ -50,10 +49,6 @@ class MemoryFieldMerger:
             current = schema.validate_payload(document.fields)
         except (TypeError, ValueError) as exc:
             raise MemoryFieldMergeError("old memory fields failed current Schema validation") from exc
-
-        if schema.operation_mode is MemoryOperationMode.ADD_ONLY:
-            # 只增记忆的旧节点只读：指向它的候选一律保留旧字段，按 NOOP 处理并留审计标记。
-            return MemoryFieldMergeResult(fields=current, changed_fields=(), read_only_target=True)
 
         merged = self._merge_upsert(schema, current=current, incoming=incoming)
         try:

@@ -17,7 +17,6 @@ from habitus.memory.conversation import ConversationLayout, ConversationLayoutEr
 from habitus.memory.document import MemoryStoredLink
 from habitus.memory.editor.candidate import MemoryIdentityProposalBasis
 from habitus.memory.editor.identity import MemoryNodeDisposition
-from habitus.memory.model import MemoryKind
 from habitus.memory.uri import MemoryURI
 from habitus.memory.workflow.jobs import MemoryJob
 from habitus.pre.conversation import ConversationSegment
@@ -284,24 +283,19 @@ class MemoryPreparedNodeChange:
     uri: MemoryURI
     before_digest: str | None
     expected_after_digest: str | None
-    confirms_intention: bool = False
 
     def __post_init__(self) -> None:
         action = MemoryNodeChangeAction(self.action)
-        address = self.uri.to_address()
+        self.uri.to_address()
         for name in ("before_digest", "expected_after_digest"):
             value = getattr(self, name)
             if value is not None:
                 require_sha256(value, name)
-        if self.confirms_intention and address.kind is not MemoryKind.INTENTION:
-            raise ValueError("only an Intention prepared change can refresh confirmation time")
         if action is MemoryNodeChangeAction.CREATE:
             if self.before_digest is not None:
                 raise ValueError("prepared create cannot contain before state")
             if self.expected_after_digest is None:
                 raise ValueError("prepared create requires expected after content")
-            if address.kind is MemoryKind.INTENTION and not self.confirms_intention:
-                raise ValueError("prepared Intention create must establish confirmation time")
         elif action is MemoryNodeChangeAction.UPDATE:
             if self.before_digest is None or self.expected_after_digest is None:
                 raise ValueError("prepared update requires before and expected after content")
@@ -310,8 +304,6 @@ class MemoryPreparedNodeChange:
                 raise ValueError("prepared delete requires before state")
             if self.expected_after_digest is not None:
                 raise ValueError("prepared delete cannot contain expected after content")
-            if self.confirms_intention:
-                raise ValueError("prepared delete cannot refresh Intention confirmation")
         object.__setattr__(self, "action", action)
 
     def to_dict(self) -> dict[str, object]:
@@ -320,7 +312,6 @@ class MemoryPreparedNodeChange:
             "uri": str(self.uri),
             "before_digest": self.before_digest,
             "expected_after_digest": self.expected_after_digest,
-            "confirms_intention": self.confirms_intention,
         }
 
     @classmethod
@@ -331,15 +322,11 @@ class MemoryPreparedNodeChange:
         uri = value["uri"]
         if not isinstance(uri, str):
             raise ValueError("prepared memory node change URI must be text")
-        confirms_intention = value["confirms_intention"]
-        if not isinstance(confirms_intention, bool):
-            raise TypeError("confirms_intention must be boolean")
         return cls(
             action=MemoryNodeChangeAction(value["action"]),
             uri=MemoryURI.parse(uri),
             before_digest=_optional_sha256(value["before_digest"], "before_digest"),
             expected_after_digest=_optional_sha256(value["expected_after_digest"], "expected_after_digest"),
-            confirms_intention=confirms_intention,
         )
 
 

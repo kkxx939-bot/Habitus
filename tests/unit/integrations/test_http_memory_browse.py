@@ -53,7 +53,7 @@ def test_listing_and_reading_return_uris_only_and_the_feature_is_advertised() ->
         overview = client.get("/api/v1/memory/document", params={"uri": "memory://preferences/.overview.md"}).json()["result"]
         assert overview == {
             "uri": str(layer.uri), "node": "layer", "level": "overview", "text": "## 偏好",
-            "kind": None, "revision": None, "created_at": None, "updated_at": None, "last_confirmed_at": None,
+            "kind": None, "revision": None, "created_at": None, "updated_at": None,
             "fields": None, "links": [], "backlinks": [],
         }
     runtime.list_memory.assert_awaited_once_with("memory://preferences")  # type: ignore[attr-defined]

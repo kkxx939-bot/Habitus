@@ -280,11 +280,6 @@ memory:
     max_encoded_bytes: 128000
     max_relations_per_document: 512
 
-  intention_review:
-    first_review_after_days: 30
-    second_review_after_days: 60
-    strong_review_after_days: 180
-
   tree:
     max_children_per_directory: 10000
 
@@ -331,14 +326,10 @@ memory:
     preference_half_life_days: 90.0
     entity_half_life_days: 60.0
     tool_half_life_days: 30.0
-    event_half_life_days: 14.0
-    intention_half_life_days: 30.0
     profile_retire_days: 720.0
     preference_retire_days: 365.0
     entity_retire_days: 270.0
     tool_retire_days: 180.0
-    event_retire_days: 180.0
-    intention_retire_days: 540.0
     retire_candidate_grace_days: 30.0
     cold2_probe_interval_days: 30.0
     cold2_probe_limit: 2

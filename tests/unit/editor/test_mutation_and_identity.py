@@ -11,7 +11,6 @@ from habitus.memory.editor import (
     MemoryFinalIdentityMap,
     MemoryMutationAction,
     MemoryMutationPlanner,
-    MemoryMutationPlanningError,
     MemoryMutationReadSet,
     MemoryNodeDisposition,
     MemoryPageIdMap,
@@ -72,72 +71,14 @@ def test_new_candidate_requires_explicit_missing_target_and_uses_page_id_100_or_
         )
 
 
-def test_candidate_rewriting_an_old_add_only_event_keeps_it_as_audited_noop() -> None:
-    """主链端到端扩 3 份 Job #12：复用旧 Event 的 page_id 改写 summary，旧的保留、记 NOOP，同批其余照常。"""
-
-    old_event = document(MemoryKind.EVENT)
-    old_preference = document(MemoryKind.PREFERENCE)
-    batch = target_batch(memory_snapshot(old_event), memory_snapshot(old_preference))
-    page_ids = MemoryPageIdMap.from_snapshots(batch)
-    event_uri = MemoryURI.from_address(old_event.address)
-    event_page_id = page_ids.page_id_for(event_uri)
-    preference_page_id = page_ids.page_id_for(MemoryURI.from_address(old_preference.address))
-    assert event_page_id is not None and preference_page_id is not None
-    rewritten = {**old_event.fields, "summary": "不同事件内容", "details": "补上的细节。"}
-    updated_preference = {**old_preference.fields, "content": "- 偏好用一句话回答"}
-
-    plan = MemoryMutationPlanner().plan(
-        MemoryCandidateBatch(
-            preferences=(MemoryCandidate(preference_page_id, MemoryKind.PREFERENCE, updated_preference),),
-            events=(MemoryCandidate(event_page_id, MemoryKind.EVENT, rewritten),),
-        ),
-        MemoryMutationReadSet(batch, batch),
-        page_ids,
-    )
-
-    by_kind = {mutation.match.candidate.kind: mutation for mutation in plan.mutations}
-    event = by_kind[MemoryKind.EVENT]
-    assert event.action is MemoryMutationAction.NOOP
-    assert dict(event.fields) == dict(old_event.fields)
-    assert event.read_only_target is True
-    assert by_kind[MemoryKind.PREFERENCE].action is MemoryMutationAction.UPDATE
-    assert by_kind[MemoryKind.PREFERENCE].read_only_target is False
-    assert plan.read_only_targets == (event_uri,)
-    assert plan.changed_mutations == (by_kind[MemoryKind.PREFERENCE],)
-
-    same = MemoryMutationPlanner().plan(
-        MemoryCandidateBatch(events=(MemoryCandidate(event_page_id, MemoryKind.EVENT, old_event.fields),)),
-        MemoryMutationReadSet(batch, target_batch(memory_snapshot(old_event))),
-        page_ids,
-    )
-    assert same.mutations[0].action is MemoryMutationAction.NOOP
-    assert same.read_only_targets == (event_uri,)
-
-
-def test_new_event_page_id_reusing_an_old_event_uri_still_fails_planning() -> None:
-    old_event = document(MemoryKind.EVENT)
-    batch = target_batch(memory_snapshot(old_event))
+def test_new_page_id_reusing_an_old_memory_uri_still_fails_planning() -> None:
+    old_entity = document(MemoryKind.ENTITY)
+    batch = target_batch(memory_snapshot(old_entity))
     with pytest.raises(Exception, match="reuse its existing page_id"):
         MemoryMutationPlanner().plan(
-            MemoryCandidateBatch(events=(MemoryCandidate(100, MemoryKind.EVENT, old_event.fields),)),
+            MemoryCandidateBatch(entities=(MemoryCandidate(100, MemoryKind.ENTITY, old_entity.fields),)),
             MemoryMutationReadSet(batch, batch),
             MemoryPageIdMap.from_snapshots(batch),
-        )
-
-
-def test_unconfirmed_intention_cannot_create_or_update_without_merge_preservation() -> None:
-    candidate = MemoryCandidate(
-        100,
-        MemoryKind.INTENTION,
-        memory_fields(MemoryKind.INTENTION),
-        confirmed=False,
-    )
-    missing = VersionedSnapshot.missing(str(MemoryURI.from_address(candidate.address)))
-    with pytest.raises(MemoryMutationPlanningError, match="unconfirmed"):
-        MemoryMutationPlanner().plan(
-            MemoryCandidateBatch(intentions=(candidate,)),
-            MemoryMutationReadSet(SnapshotBatch((), 0), target_batch(missing)),
-            MemoryPageIdMap(),
         )
 
 

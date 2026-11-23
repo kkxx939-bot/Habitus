@@ -3,17 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import fields, replace
-from datetime import timedelta
 
 import pytest
 
 from habitus.config.loader import ConfigError, construct_config
 from habitus.memory.document import MemoryLinkType, MemoryStoredLink
-from habitus.memory.intention import (
-    MemoryIntentionRecallScope,
-    MemoryIntentionReview,
-    MemoryIntentionReviewer,
-)
 from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind
 from habitus.memory.retrieval import (
     MemoryMatchedMemory,
@@ -29,7 +23,7 @@ from habitus.memory.retrieval import (
     MemoryTypedQuery,
 )
 from habitus.memory.uri import MemoryURI
-from tests.helpers import BASE_TIME, document
+from tests.helpers import document
 
 INTEGER_CONFIG_FIELDS = tuple(
     field.name for field in fields(MemorySearchServiceConfig) if field.name != "summary_fallback_enabled"
@@ -43,10 +37,7 @@ def _hit(kind: MemoryKind = MemoryKind.PREFERENCE, score: float = 0.9) -> tuple[
 
 def _matched(kind: MemoryKind = MemoryKind.PREFERENCE, score: float = 0.9) -> MemoryMatchedMemory:
     hit, item = _hit(kind, score)
-    review = None
-    if kind is MemoryKind.INTENTION:
-        review = MemoryIntentionReviewer().review(item, now=BASE_TIME)
-    return MemoryMatchedMemory(hit, item, ("查询",), intention_review=review)
+    return MemoryMatchedMemory(hit, item, ("查询",))
 
 
 @pytest.mark.parametrize("field", INTEGER_CONFIG_FIELDS)
@@ -375,11 +366,10 @@ def test_query_result_requires_unique_score_sorted_hits() -> None:
 
 
 @pytest.mark.parametrize("kind", tuple(MemoryKind))
-def test_matched_memory_binds_hit_document_query_and_intention_review(kind: MemoryKind) -> None:
+def test_matched_memory_binds_hit_document_and_query(kind: MemoryKind) -> None:
     value = _matched(kind)
     assert value.uri == value.hit.uri
     assert value.document.kind is kind
-    assert (value.intention_review is not None) is (kind is MemoryKind.INTENTION)
 
 
 @pytest.mark.parametrize("queries", [(), ("",), (" ",), ("q", "q")])
@@ -387,23 +377,6 @@ def test_matched_memory_requires_nonempty_unique_query_tuple(queries: tuple[str,
     hit, item = _hit()
     with pytest.raises((TypeError, ValueError)):
         MemoryMatchedMemory(hit, item, queries)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("kind", [kind for kind in MemoryKind if kind is not MemoryKind.INTENTION])
-def test_non_intention_matched_memory_rejects_review(kind: MemoryKind) -> None:
-    hit, item = _hit(kind)
-    review = MemoryIntentionReview("current", BASE_TIME, 0)
-    with pytest.raises(ValueError, match="only active"):
-        MemoryMatchedMemory(hit, item, ("查询",), intention_review=review)
-
-
-def test_active_intention_matched_memory_requires_matching_review() -> None:
-    hit, item = _hit(MemoryKind.INTENTION)
-    with pytest.raises(ValueError, match="requires"):
-        MemoryMatchedMemory(hit, item, ("查询",))
-    wrong = MemoryIntentionReview("current", BASE_TIME + timedelta(days=1), 0)
-    with pytest.raises(ValueError, match="does not match"):
-        MemoryMatchedMemory(hit, item, ("查询",), intention_review=wrong)
 
 
 @pytest.mark.parametrize("link_type", tuple(MemoryLinkType))
@@ -462,7 +435,6 @@ def _search_result(**overrides: object) -> MemorySearchResult:
         "query": query,
         "target_roots": (MemoryURI.root(),),
         "kinds": (MemoryKind.PREFERENCE,),
-        "intention_scope": MemoryIntentionRecallScope.ACTIVE,
         "plan": plan,
         "query_results": (MemoryQueryResult(typed, (memory.hit,)),),
         "memories": (memory,),

@@ -26,7 +26,6 @@ from habitus.benchmark.prompts import answer_prompt
 from habitus.benchmark.protocol import OPENVIKING_REFERENCE_REVISION
 from habitus.config import HabitusConfig
 from habitus.memory.conversation import ConversationAddress
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryKind
 from habitus.memory.uri import MemoryURI
 from habitus.model_client import ChatCallContext, ChatMessage, ChatRequest
@@ -320,13 +319,12 @@ class BenchmarkRunner:
         question: BenchmarkQuestion,
     ) -> BenchmarkAnswerRecord:
         retrieval_started = time.perf_counter()
-        intention_scope, kinds, expected_summary, expected_related = _retrieval_options(question)
+        kinds, expected_summary, expected_related = _retrieval_options(question)
         try:
             search = await runtime.search_memory(
                 question.question,
                 limit=self.top_k,
                 kinds=kinds,
-                intention_scope=intention_scope,
             )
             retrieval_latency_ms = (time.perf_counter() - retrieval_started) * 1_000
             answer_context = select_answer_context(
@@ -705,14 +703,7 @@ def _required_bool(value: object, label: str) -> bool:
 
 def _retrieval_options(
     question: BenchmarkQuestion,
-) -> tuple[MemoryIntentionRecallScope, tuple[MemoryKind, ...], bool | None, bool | None]:
-    raw_scope = question.metadata.get("intention_scope", MemoryIntentionRecallScope.ACTIVE.value)
-    if not isinstance(raw_scope, str):
-        raise BenchmarkRunError("question metadata intention_scope must be text")
-    try:
-        intention_scope = MemoryIntentionRecallScope(raw_scope)
-    except ValueError as exc:
-        raise BenchmarkRunError("question metadata intention_scope is unsupported") from exc
+) -> tuple[tuple[MemoryKind, ...], bool | None, bool | None]:
     raw_kinds = question.metadata.get("kinds", ())
     if not isinstance(raw_kinds, list | tuple) or any(not isinstance(item, str) for item in raw_kinds):
         raise BenchmarkRunError("question metadata kinds must be a string array")
@@ -723,7 +714,6 @@ def _retrieval_options(
     if len(kinds) != len(set(kinds)):
         raise BenchmarkRunError("question metadata kinds must be unique")
     return (
-        intention_scope,
         kinds,
         _metadata_optional_bool(question.metadata, "expect_summary_fallback"),
         _metadata_optional_bool(question.metadata, "expect_related_memory"),

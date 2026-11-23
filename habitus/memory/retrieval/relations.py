@@ -2,16 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from habitus.memory.document import MemoryDocument, MemoryStoredLink
-from habitus.memory.intention import (
-    MemoryIntentionRecallScope,
-    MemoryIntentionReview,
-    MemoryIntentionReviewer,
-    intention_matches_scope,
-)
-from habitus.memory.model import MemoryKind
 from habitus.memory.retrieval.model import (
     MemoryMatchedMemory,
     MemoryRelatedMemory,
@@ -22,19 +13,6 @@ from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.uri import MemoryURI
 
 
-def review_intention(
-    reviewer: MemoryIntentionReviewer,
-    document: MemoryDocument,
-    *,
-    now: datetime,
-) -> MemoryIntentionReview | None:
-    """只给 Intention 生成复核提醒，其他类型没有提醒。"""
-
-    if document.kind is not MemoryKind.INTENTION:
-        return None
-    return reviewer.review(document, now=now)
-
-
 class RelationExpander:
     """按系统维护的双向关系为直接命中补充有界一跳邻居，不递归、不修改关系。"""
 
@@ -43,19 +21,15 @@ class RelationExpander:
         *,
         snapshot_reader: MemorySnapshotReader,
         config: MemorySearchServiceConfig,
-        intention_reviewer: MemoryIntentionReviewer,
     ) -> None:
         self.snapshot_reader = snapshot_reader
         self.config = config
-        self.intention_reviewer = intention_reviewer
 
     def expand(
         self,
         memories: tuple[MemoryMatchedMemory, ...],
         *,
         roots: tuple[MemoryURI, ...],
-        intention_scope: MemoryIntentionRecallScope,
-        review_now: datetime,
     ) -> tuple[MemoryMatchedMemory, ...]:
         if not memories or self.config.max_relation_neighbors_total == 0:
             return memories
@@ -64,7 +38,6 @@ class RelationExpander:
         selected_relations = self._select(
             memories,
             roots=roots,
-            intention_scope=intention_scope,
             direct_documents=direct_documents,
             neighbor_documents=neighbor_documents,
         )
@@ -73,7 +46,6 @@ class RelationExpander:
             selected_relations,
             direct_documents=direct_documents,
             neighbor_documents=neighbor_documents,
-            review_now=review_now,
         )
 
     def _select(
@@ -81,7 +53,6 @@ class RelationExpander:
         memories: tuple[MemoryMatchedMemory, ...],
         *,
         roots: tuple[MemoryURI, ...],
-        intention_scope: MemoryIntentionRecallScope,
         direct_documents: dict[MemoryURI, MemoryDocument],
         neighbor_documents: dict[MemoryURI, MemoryDocument],
     ) -> dict[MemoryURI, list[MemoryStoredLink]]:
@@ -104,12 +75,6 @@ class RelationExpander:
                     document = self._read_neighbor(neighbor)
                     neighbor_documents[neighbor] = document
                 self._require_reciprocal(memory.document, document, relation)
-                if document.kind is MemoryKind.INTENTION and not intention_matches_scope(
-                    document.fields.get("status"),
-                    intention_scope,
-                ):
-                    # 不符合召回范围的关系不能先占用一跳配额。
-                    continue
                 if len(selected_relations[memory.uri]) >= self.config.max_relation_neighbors_per_match:
                     break
                 if len(assigned_relations) >= self.config.max_relation_neighbors_total:
@@ -136,7 +101,6 @@ class RelationExpander:
         *,
         direct_documents: dict[MemoryURI, MemoryDocument],
         neighbor_documents: dict[MemoryURI, MemoryDocument],
-        review_now: datetime,
     ) -> tuple[MemoryMatchedMemory, ...]:
         expanded: list[MemoryMatchedMemory] = []
         for memory in memories:
@@ -146,19 +110,12 @@ class RelationExpander:
                 document = direct_documents.get(neighbor_uri)
                 if document is None:
                     document = neighbor_documents[neighbor_uri]
-                related.append(
-                    MemoryRelatedMemory(
-                        relation=relation,
-                        document=document,
-                        intention_review=review_intention(self.intention_reviewer, document, now=review_now),
-                    )
-                )
+                related.append(MemoryRelatedMemory(relation=relation, document=document))
             expanded.append(
                 MemoryMatchedMemory(
                     hit=memory.hit,
                     document=memory.document,
                     matched_queries=memory.matched_queries,
-                    intention_review=memory.intention_review,
                     related=tuple(related),
                 )
             )
@@ -182,4 +139,4 @@ class RelationExpander:
             raise MemorySearchError("memory relation Links/Backlinks are inconsistent")
 
 
-__all__ = ["RelationExpander", "review_intention"]
+__all__ = ["RelationExpander"]

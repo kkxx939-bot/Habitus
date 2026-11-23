@@ -22,7 +22,6 @@ from habitus.memory.indexing.contracts import (
 )
 from habitus.memory.indexing.model import MemoryIndexSource, MemoryVectorConsistencyReport
 from habitus.memory.indexing.source import MemoryIndexSourceReader
-from habitus.memory.intention import MemoryIntentionRecallScope, allowed_memory_index_kinds
 from habitus.memory.model import MemoryKind, MemoryLevel
 from habitus.memory.semantic import MemorySemanticRefreshResult
 from habitus.memory.tree import MemoryTree
@@ -30,7 +29,7 @@ from habitus.memory.uri import MemoryURI, MemoryURINodeType
 from habitus.memory.vector_index import PersistentVectorIndex, VectorIndexMessages
 from habitus.model_client import Embedder, EmbeddingVector
 
-_SCHEMA_VERSION = "habitus_memory_vector_v2"
+_SCHEMA_VERSION = "habitus_memory_vector_v3"
 
 
 class PersistentMemoryVectorIndex(
@@ -124,7 +123,6 @@ class PersistentMemoryVectorIndex(
         roots: tuple[MemoryURI, ...],
         levels: tuple[MemoryLevel, ...],
         kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
         limit: int,
     ) -> tuple[MemoryVectorMatch, ...]:
         await self.ensure_ready()
@@ -139,7 +137,7 @@ class PersistentMemoryVectorIndex(
         if MemoryLevel.DETAIL in normalized_levels:
             if normalized_levels != (MemoryLevel.DETAIL,):
                 raise ValueError("L2 kind filtering cannot be mixed with L0/L1 in one vector query")
-            one_of["kind"] = allowed_memory_index_kinds(kinds, intention_scope)
+            one_of["kind"] = _kind_values(kinds)
         matches = await self.store.search(
             vector,
             filters=VectorStoreFilter(
@@ -156,7 +154,6 @@ class PersistentMemoryVectorIndex(
         *,
         parent: MemoryURI,
         kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
         limit: int,
     ) -> tuple[MemoryVectorMatch, ...]:
         await self.ensure_ready()
@@ -172,7 +169,7 @@ class PersistentMemoryVectorIndex(
                     equals={"directory_key": str(parsed)},
                     one_of={
                         "level": (MemoryLevel.DETAIL.value,),
-                        "kind": allowed_memory_index_kinds(kinds, intention_scope),
+                        "kind": _kind_values(kinds),
                     },
                 ),
                 limit=maximum,
@@ -327,6 +324,15 @@ class PersistentMemoryVectorIndex(
         if len(levels) != len(set(levels)):
             raise ValueError("memory vector levels must be unique")
         return levels
+
+
+def _kind_values(kinds: tuple[MemoryKind, ...]) -> tuple[str, ...]:
+    """把公开类型条件转换成 Top-K 前使用的 ``kind`` 过滤值；空元组表示全部类型。"""
+
+    normalized = tuple(MemoryKind(kind) for kind in kinds) or tuple(MemoryKind)
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("memory kinds must be unique")
+    return tuple(kind.value for kind in normalized)
 
 
 def memory_embedding_fingerprint(

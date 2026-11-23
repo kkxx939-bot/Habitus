@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from types import MappingProxyType
 
 import pytest
@@ -28,8 +28,6 @@ DYNAMIC_KINDS = (
     MemoryKind.PREFERENCE,
     MemoryKind.ENTITY,
     MemoryKind.TOOL,
-    MemoryKind.EVENT,
-    MemoryKind.INTENTION,
 )
 VALID_NAMES = (
     "a",
@@ -75,11 +73,7 @@ def _address(kind: MemoryKind, name: str) -> MemoryAddress:
         return MemoryAddress.preference(name)
     if kind is MemoryKind.ENTITY:
         return MemoryAddress.entity("通用分类", name)
-    if kind is MemoryKind.TOOL:
-        return MemoryAddress.tool(name)
-    if kind is MemoryKind.EVENT:
-        return MemoryAddress.event(date(2026, 7, 28), name)
-    return MemoryAddress.intention(name)
+    return MemoryAddress.tool(name)
 
 
 @pytest.mark.parametrize("kind", DYNAMIC_KINDS)
@@ -112,8 +106,7 @@ def test_entity_category_rejects_invalid_semantic_segment(category: object) -> N
 
 @pytest.mark.parametrize(
     ("kind", "extra_field"),
-    tuple((kind, "category") for kind in MemoryKind if kind is not MemoryKind.ENTITY)
-    + tuple((kind, "event_date") for kind in MemoryKind if kind is not MemoryKind.EVENT),
+    tuple((kind, "category") for kind in MemoryKind if kind is not MemoryKind.ENTITY),
 )
 def test_address_rejects_fields_not_owned_by_memory_kind(kind: MemoryKind, extra_field: str) -> None:
     kwargs: dict[str, object] = {"kind": kind}
@@ -121,9 +114,7 @@ def test_address_rejects_fields_not_owned_by_memory_kind(kind: MemoryKind, extra
         kwargs["name"] = "名称"
     if kind is MemoryKind.ENTITY:
         kwargs["category"] = "分类"
-    if kind is MemoryKind.EVENT:
-        kwargs["event_date"] = date(2026, 7, 28)
-    kwargs[extra_field] = "额外" if extra_field == "category" else date(2026, 7, 27)
+    kwargs[extra_field] = "额外"
     with pytest.raises(ValueError):
         MemoryAddress(**kwargs)  # type: ignore[arg-type]
 
@@ -136,11 +127,6 @@ def test_address_rejects_fields_not_owned_by_memory_kind(kind: MemoryKind, extra
         (("entities",), ()),
         (("entities", "项目"), ("entities",)),
         (("tools",), ()),
-        (("events",), ()),
-        (("events", "2026"), ("events",)),
-        (("events", "2026", "07"), ("events", "2026")),
-        (("events", "2026", "07", "28"), ("events", "2026", "07")),
-        (("intentions",), ()),
     ],
 )
 def test_memory_directory_parent_and_lineage_are_lossless(
@@ -152,71 +138,20 @@ def test_memory_directory_parent_and_lineage_are_lossless(
     assert len(directory.lineage()) == len(parts) + 1
 
 
-@pytest.mark.parametrize("year", [1, 9, 99, 999, 2024, 2026, 9999])
-@pytest.mark.parametrize("month", [1, 2, 6, 12])
-@pytest.mark.parametrize("day", [1, 10, 28])
-def test_event_directory_accepts_valid_calendar_components(year: int, month: int, day: int) -> None:
-    directory = MemoryDirectory.events(year, month, day)
-    assert directory.parts == ("events", f"{year:04d}", f"{month:02d}", f"{day:02d}")
-
-
 @pytest.mark.parametrize(
     "parts",
     [
         ("unknown",),
         ("preferences", "nested"),
         ("tools", "nested"),
-        ("intentions", "nested"),
         ("entities", "category", "nested"),
-        ("events", "2026", "07", "28", "nested"),
-        ("events", "26"),
-        ("events", "abcd"),
-        ("events", "0000"),
-        ("events", "10000"),
-        ("events", "2026", "00"),
-        ("events", "2026", "13"),
-        ("events", "2026", "7"),
-        ("events", "2026", "02", "29"),
-        ("events", "2024", "02", "30"),
-        ("events", "2026", "04", "31"),
-        ("events", "2026", "07", "1"),
+        ("events",),
+        ("intentions",),
     ],
 )
-def test_memory_directory_rejects_unknown_depth_format_and_invalid_calendar(parts: tuple[str, ...]) -> None:
+def test_memory_directory_rejects_unknown_root_and_depth(parts: tuple[str, ...]) -> None:
     with pytest.raises(ValueError):
         MemoryDirectory(parts)
-
-
-@pytest.mark.parametrize(
-    ("year", "month", "day"),
-    [
-        (None, 1, None),
-        (None, None, 1),
-        (2026, None, 1),
-        (0, 1, 1),
-        (10000, 1, 1),
-        (2026, 0, 1),
-        (2026, 13, 1),
-        (2026, 2, 29),
-        (2026, 1, 0),
-        (2026, 1, 32),
-    ],
-)
-def test_event_directory_factory_rejects_missing_parent_and_invalid_calendar(
-    year: int | None,
-    month: int | None,
-    day: int | None,
-) -> None:
-    with pytest.raises(ValueError):
-        MemoryDirectory.events(year, month, day)
-
-
-@pytest.mark.parametrize("position", ("year", "month"))
-def test_event_directory_factory_rejects_missing_parent_components(position: str) -> None:
-    kwargs: dict[str, int | None] = {"year": 2026, "month": 7, "day": 28}
-    kwargs[position] = None
-    with pytest.raises(ValueError):
-        MemoryDirectory.events(**kwargs)
 
 
 @pytest.mark.parametrize("level", [MemoryLevel.ABSTRACT, MemoryLevel.OVERVIEW])
@@ -228,11 +163,6 @@ def test_event_directory_factory_rejects_missing_parent_components(position: str
         MemoryDirectory.entities(),
         MemoryDirectory.entities("项目"),
         MemoryDirectory.tools(),
-        MemoryDirectory.events(),
-        MemoryDirectory.events(2026),
-        MemoryDirectory.events(2026, 7),
-        MemoryDirectory.events(2026, 7, 28),
-        MemoryDirectory.intentions(),
     ],
 )
 def test_every_valid_directory_supports_l0_l1_uri_round_trip(directory: MemoryDirectory, level: MemoryLevel) -> None:
@@ -273,11 +203,8 @@ def test_l2_level_has_no_sidecar_uri(level: object) -> None:
         "memory://profile.md/child",
         "memory://entities/category.md",
         "memory://entities/category/name",
-        "memory://events/2026/02/30/event.md",
-        "memory://events/26/07/28/event.md",
-        "memory://events/2026/7/28/event.md",
-        "memory://events/2026/07/8/event.md",
-        "memory://events/2026/07/28/event.txt",
+        "memory://events/2026/07/28/event.md",
+        "memory://intentions/intent.md",
         "memory://topics/topic.md",
         "memory://skills/skill.md",
         "memory://conversations/id.md",
@@ -319,9 +246,6 @@ def test_uri_normalizes_reserved_percent_encoding_and_keeps_unicode(
         MemoryDirectory.entities(),
         MemoryDirectory.entities("项目"),
         MemoryDirectory.tools(),
-        MemoryDirectory.events(),
-        MemoryDirectory.events(2026, 7, 28),
-        MemoryDirectory.intentions(),
     ],
 )
 def test_directory_uri_properties_and_wrong_conversions(directory: MemoryDirectory) -> None:
@@ -374,7 +298,7 @@ def test_uri_is_immutable_hashable_and_compares_only_normalized_identity() -> No
 @pytest.mark.parametrize("offset", [UTC, timezone(timedelta(hours=8)), timezone(timedelta(hours=-5))])
 def test_document_metadata_normalizes_timezones_and_preserves_revision(revision: int, offset: timezone) -> None:
     created = datetime(2026, 7, 28, 12, tzinfo=offset)
-    metadata = MemoryDocumentMetadata(revision, created, created + timedelta(seconds=1), None)
+    metadata = MemoryDocumentMetadata(revision, created, created + timedelta(seconds=1))
     assert metadata.revision == revision
     assert metadata.created_at.tzinfo is UTC
     assert metadata.updated_at.tzinfo is UTC
@@ -383,42 +307,37 @@ def test_document_metadata_normalizes_timezones_and_preserves_revision(revision:
 @pytest.mark.parametrize("revision", [0, -1])
 def test_document_metadata_rejects_invalid_revision(revision: int) -> None:
     with pytest.raises(ValueError):
-        MemoryDocumentMetadata(revision, BASE_TIME, BASE_TIME, None)
+        MemoryDocumentMetadata(revision, BASE_TIME, BASE_TIME)
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    tuple((field, datetime(2026, 7, 28)) for field in ("created_at", "updated_at", "last_confirmed_at")),
+    tuple((field, datetime(2026, 7, 28)) for field in ("created_at", "updated_at")),
 )
 def test_document_metadata_rejects_naive_timestamps(field: str, value: datetime) -> None:
     kwargs: dict[str, object] = {
         "revision": 1,
         "created_at": BASE_TIME,
         "updated_at": BASE_TIME,
-        "last_confirmed_at": BASE_TIME,
     }
     kwargs[field] = value
     with pytest.raises(ValueError):
         MemoryDocumentMetadata(**kwargs)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("confirmed", [True, False])
-def test_initial_metadata_sets_confirmation_only_when_explicit(confirmed: bool) -> None:
-    metadata = MemoryDocumentMetadata.initial(BASE_TIME, confirmed=confirmed)
+def test_initial_metadata_starts_at_revision_one() -> None:
+    metadata = MemoryDocumentMetadata.initial(BASE_TIME)
     assert metadata.revision == 1
     assert metadata.created_at == metadata.updated_at == BASE_TIME
-    assert (metadata.last_confirmed_at == BASE_TIME) is confirmed
 
 
-@pytest.mark.parametrize("refresh", [True, False])
 @pytest.mark.parametrize("seconds", [0, 1, 60, 86_400])
-def test_next_revision_is_monotonic_and_refreshes_confirmation_only_on_request(refresh: bool, seconds: int) -> None:
-    initial = MemoryDocumentMetadata.initial(BASE_TIME, confirmed=True)
-    updated = initial.next_revision(BASE_TIME + timedelta(seconds=seconds), refresh_confirmation=refresh)
+def test_next_revision_is_monotonic(seconds: int) -> None:
+    initial = MemoryDocumentMetadata.initial(BASE_TIME)
+    updated = initial.next_revision(BASE_TIME + timedelta(seconds=seconds))
     assert updated.revision == 2
     assert updated.created_at == initial.created_at
     assert updated.updated_at == BASE_TIME + timedelta(seconds=seconds)
-    assert updated.last_confirmed_at == (updated.updated_at if refresh else initial.last_confirmed_at)
 
 
 @pytest.mark.parametrize("link_type", tuple(MemoryLinkType))
@@ -426,8 +345,8 @@ def test_next_revision_is_monotonic_and_refreshes_confirmation_only_on_request(r
     ("left", "right"),
     [
         (MemoryAddress.preference("回答风格"), MemoryAddress.entity("项目", "Habitus")),
-        (MemoryAddress.tool("workspace.inspect"), MemoryAddress.event(date(2026, 7, 28), "检查项目")),
-        (MemoryAddress.intention("完成重构"), MemoryAddress.profile()),
+        (MemoryAddress.tool("workspace.inspect"), MemoryAddress.entity("项目", "检查项目")),
+        (MemoryAddress.preference("完成重构"), MemoryAddress.profile()),
     ],
 )
 def test_every_relation_type_round_trips_and_respects_direction(
@@ -522,7 +441,7 @@ def test_built_document_fields_are_immutable_snapshots(kind: MemoryKind) -> None
     item = CODEC.build(
         kind,
         payload,
-        metadata=MemoryDocumentMetadata.initial(BASE_TIME, confirmed=kind is MemoryKind.INTENTION),
+        metadata=MemoryDocumentMetadata.initial(BASE_TIME),
     )
     assert isinstance(item.fields, MappingProxyType)
     payload.clear()
@@ -567,17 +486,17 @@ def _replace_metadata(raw: str, transform: object) -> str:
 
 @pytest.mark.parametrize(
     "field",
-    ["memory_type", "revision", "created_at", "updated_at", "last_confirmed_at", "fields", "links", "backlinks"],
+    ["memory_type", "revision", "created_at", "updated_at", "fields", "links", "backlinks"],
 )
 def test_codec_rejects_missing_system_metadata_field(field: str) -> None:
-    source = document(MemoryKind.INTENTION)
+    source = document(MemoryKind.PREFERENCE)
     raw = CODEC.encode(source)
     corrupted = _replace_metadata(raw, lambda metadata: metadata.pop(field))
     with pytest.raises(MemoryDocumentIntegrityError):
         CODEC.decode(corrupted, expected_address=source.address)
 
 
-@pytest.mark.parametrize("field", ["uri", "owner", "confidence", "page_id", "evidence", "unknown"])
+@pytest.mark.parametrize("field", ["uri", "owner", "confidence", "page_id", "evidence", "last_confirmed_at", "unknown"])
 def test_codec_rejects_extra_system_metadata_field(field: str) -> None:
     source = document(MemoryKind.PREFERENCE)
     raw = CODEC.encode(source)
@@ -597,14 +516,13 @@ def test_codec_rejects_extra_system_metadata_field(field: str) -> None:
         ("created_at", "not-time"),
         ("updated_at", None),
         ("updated_at", "2026-13-01T00:00:00Z"),
-        ("last_confirmed_at", 1),
         ("fields", []),
         ("links", {}),
         ("backlinks", "links"),
     ],
 )
 def test_codec_rejects_invalid_system_metadata_types(field: str, value: object) -> None:
-    source = document(MemoryKind.INTENTION)
+    source = document(MemoryKind.PREFERENCE)
     raw = CODEC.encode(source)
     corrupted = _replace_metadata(raw, lambda metadata: metadata.__setitem__(field, value))
     with pytest.raises(MemoryDocumentIntegrityError):

@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
 from habitus.model_client import EmbeddingVector
@@ -61,7 +60,6 @@ class MemoryVectorIndex(Protocol):
         roots: tuple[MemoryURI, ...],
         levels: tuple[MemoryLevel, ...],
         kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
         limit: int,
     ) -> Sequence[MemoryVectorMatch]: ...
 
@@ -71,7 +69,6 @@ class MemoryVectorIndex(Protocol):
         *,
         parent: MemoryURI,
         kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
         limit: int,
     ) -> Sequence[MemoryVectorMatch]: ...
 

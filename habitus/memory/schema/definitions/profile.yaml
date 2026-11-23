@@ -4,7 +4,6 @@ description: >-
   稳定客观状态。不保存沟通方式、输出格式、工作流程、工具选择、喜欢或不喜欢；这些“用户如何选择”
   的内容统一进入 preferences。也不保存短期情绪、一次性事件、计划或模型推测。
 path_template: profile.md
-operation_mode: upsert
 markdown_template: |
   # Profile
 

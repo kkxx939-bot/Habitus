@@ -220,15 +220,13 @@ def test_memory_internal_layers_keep_their_dependency_direction() -> None:
     assert ast.get_docstring(package_root)
 
 
-def test_memory_schema_contains_exactly_the_six_confirmed_l2_kinds() -> None:
+def test_memory_schema_contains_exactly_the_four_confirmed_l2_kinds() -> None:
     definitions = SRC / "memory" / "schema" / "definitions"
     assert {path.stem for path in definitions.glob("*.yaml")} == {
         "profile",
         "preferences",
         "entities",
         "tools",
-        "events",
-        "intentions",
     }
 
 

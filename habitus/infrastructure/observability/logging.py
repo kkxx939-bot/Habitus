@@ -140,7 +140,6 @@ def _safe_attributes(attributes: object) -> dict[str, str | int | float | bool]:
         "worker_state",
         "job_status",
         "retrieval_ended_at_limit",
-        "read_only_noop_count",
         "source_rejected_count",
         "source_rejected_reasons",
         "queue_staged",

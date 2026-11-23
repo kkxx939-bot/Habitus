@@ -100,7 +100,6 @@ class MemoryJobExecutor:
             extraction = products.editor_plan.extraction
             if extraction is not None:
                 observed["retrieval_ended_at_limit"] = extraction.retrieval_ended_at_limit
-                observed["read_only_noop_count"] = len(extraction.mutations.read_only_targets)
                 observed["source_rejected_count"] = len(extraction.source_rejections)
                 if extraction.source_rejections:
                     reasons = "; ".join(item.describe() for item in extraction.source_rejections)

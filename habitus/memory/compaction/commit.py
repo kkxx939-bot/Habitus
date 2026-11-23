@@ -26,7 +26,6 @@ from habitus.memory.editor import (
     MemoryRelationReadSet,
     MemoryRelationReadSetLoader,
 )
-from habitus.memory.model import MemoryKind
 from habitus.memory.snapshot import MemorySnapshot, MemorySnapshotBatch, MemorySnapshotReader
 from habitus.memory.uri import MemoryURI
 
@@ -55,12 +54,7 @@ class MemoryLifecycleCommitter:
             raise ValueError("lifecycle field replacement requires an existing L2 document")
         parsed = MemoryURI.parse(snapshot.identity)
         source = snapshot.value
-        candidate = MemoryCandidate(
-            page_id=1,
-            kind=source.kind,
-            fields=fields,
-            confirmed=False if source.kind is MemoryKind.INTENTION else None,
-        )
+        candidate = MemoryCandidate(page_id=1, kind=source.kind, fields=fields)
         if candidate.address != source.address:
             raise ValueError("lifecycle field replacement cannot change memory identity")
         changed_fields = tuple(
@@ -82,7 +76,6 @@ class MemoryLifecycleCommitter:
                     MemoryMutationAction.UPDATE,
                     candidate.fields,
                     changed_fields,
-                    confirms_intention=False,
                 ),
             ),
         )

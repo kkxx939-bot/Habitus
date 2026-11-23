@@ -22,7 +22,6 @@ from habitus.config.scene import SceneConfig
 from habitus.config.storage import StorageConfig
 from habitus.config.temporal import TemporalConfig
 from habitus.config.workflow import MemoryWorkflowLifecycleConfig, WorkerConfig, WorkflowConfig
-from habitus.memory.intention import MemoryIntentionReviewConfig
 from habitus.memory.recall import (
     MemoryRecallLifecycleConfig,
 )
@@ -41,7 +40,6 @@ __all__ = [
     "HTTPAPIConfig",
     "HabitusConfig",
     "MemoryConfig",
-    "MemoryIntentionReviewConfig",
     "MemoryRecallLifecycleConfig",
     "MemorySearchServiceConfig",
     "MemoryWorkflowLifecycleConfig",

@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
 from enum import Enum
 from pathlib import PurePosixPath
 from string import Formatter
@@ -19,8 +18,6 @@ _CANONICAL_PATH_TEMPLATES = {
     MemoryKind.PREFERENCE: "preferences/{topic}.md",
     MemoryKind.ENTITY: "entities/{category}/{name}.md",
     MemoryKind.TOOL: "tools/{tool_name}.md",
-    MemoryKind.EVENT: "events/{event_date:%Y}/{event_date:%m}/{event_date:%d}/{event_name}.md",
-    MemoryKind.INTENTION: "intentions/{intent_name}.md",
 }
 
 
@@ -33,7 +30,6 @@ class MemoryFieldType(str, Enum):
     INTEGER = "integer"
     NUMBER = "number"
     BOOLEAN = "boolean"
-    DATE = "date"
 
 
 class MemoryFieldRole(str, Enum):
@@ -47,11 +43,6 @@ class MemoryMergeStrategy(str, Enum):
     REPLACE = "replace"
 
 
-class MemoryOperationMode(str, Enum):
-    UPSERT = "upsert"
-    ADD_ONLY = "add_only"
-
-
 def _template_fields(template: str, label: str) -> frozenset[str]:
     fields: set[str] = set()
     try:
@@ -61,10 +52,8 @@ def _template_fields(template: str, label: str) -> frozenset[str]:
                 continue
             if not _FIELD_NAME.fullmatch(field_name):
                 raise MemorySchemaError(f"{label} contains an invalid field placeholder")
-            if conversion or (format_spec and field_name != "event_date"):
+            if conversion or format_spec:
                 raise MemorySchemaError(f"{label} contains an unsupported field formatter")
-            if format_spec and format_spec not in {"%Y", "%m", "%d"}:
-                raise MemorySchemaError(f"{label} contains an unsupported date formatter")
             fields.add(field_name)
     except ValueError as exc:
         raise MemorySchemaError(f"{label} is not a valid format template") from exc
@@ -79,7 +68,6 @@ class MemoryFieldSchema:
     required: bool
     merge_strategy: MemoryMergeStrategy
     description: str
-    allowed_values: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not _FIELD_NAME.fullmatch(self.name):
@@ -87,16 +75,8 @@ class MemoryFieldSchema:
         object.__setattr__(self, "field_type", MemoryFieldType(self.field_type))
         object.__setattr__(self, "role", MemoryFieldRole(self.role))
         object.__setattr__(self, "merge_strategy", MemoryMergeStrategy(self.merge_strategy))
-        allowed_values = tuple(self.allowed_values)
-        object.__setattr__(self, "allowed_values", allowed_values)
         if not self.description.strip():
             raise MemorySchemaError("memory schema field description must be non-empty")
-        if any(not value.strip() for value in allowed_values):
-            raise MemorySchemaError("memory schema allowed_values must contain non-empty strings")
-        if len(allowed_values) != len(set(allowed_values)):
-            raise MemorySchemaError("memory schema allowed_values must be unique")
-        if allowed_values and self.field_type is not MemoryFieldType.STRING:
-            raise MemorySchemaError("memory schema allowed_values currently supports string fields only")
         if self.role is MemoryFieldRole.ADDRESS and (
             not self.required or self.merge_strategy is not MemoryMergeStrategy.IMMUTABLE
         ):
@@ -109,7 +89,6 @@ class MemoryTypeSchema:
     description: str
     path_template: str
     markdown_template: str
-    operation_mode: MemoryOperationMode
     fields: tuple[MemoryFieldSchema, ...]
     min_non_empty_content_fields: int = 0
     omit_empty_sections: bool = False
@@ -117,7 +96,6 @@ class MemoryTypeSchema:
     def __post_init__(self) -> None:
         kind = MemoryKind(self.kind)
         object.__setattr__(self, "kind", kind)
-        object.__setattr__(self, "operation_mode", MemoryOperationMode(self.operation_mode))
         object.__setattr__(self, "fields", tuple(self.fields))
         if self.min_non_empty_content_fields < 0:
             raise MemorySchemaError("memory min_non_empty_content_fields must be a non-negative integer")
@@ -176,10 +154,7 @@ class MemoryTypeSchema:
                 if field.required:
                     raise MemorySchemaError(f"memory payload is missing required field: {field.name}")
                 continue
-            value = self._validate_value(field, payload[field.name])
-            if field.allowed_values and value not in field.allowed_values:
-                raise MemorySchemaError(f"memory field {field.name} must be one of {list(field.allowed_values)}")
-            normalized[field.name] = value
+            normalized[field.name] = self._validate_value(field, payload[field.name])
         present_content_fields = sum(
             1
             for field in self.content_fields
@@ -247,14 +222,7 @@ class MemoryTypeSchema:
                 return MemoryAddress.preference(str(payload["topic"]))
             if self.kind is MemoryKind.ENTITY:
                 return MemoryAddress.entity(str(payload["category"]), str(payload["name"]))
-            if self.kind is MemoryKind.TOOL:
-                return MemoryAddress.tool(str(payload["tool_name"]))
-            if self.kind is MemoryKind.EVENT:
-                event_date = payload["event_date"]
-                if not isinstance(event_date, date):  # pragma: no cover - 字段校验保证。
-                    raise MemorySchemaError("event_date is not normalized")
-                return MemoryAddress.event(event_date, str(payload["event_name"]))
-            return MemoryAddress.intention(str(payload["intent_name"]))
+            return MemoryAddress.tool(str(payload["tool_name"]))
         except (KeyError, TypeError, ValueError) as exc:
             raise MemorySchemaError("memory payload contains an invalid tree address") from exc
 
@@ -274,27 +242,14 @@ class MemoryTypeSchema:
             if isinstance(value, bool) or not isinstance(value, int | float):
                 raise MemorySchemaError(f"memory field {field.name} must be a number")
             return value
-        if field.field_type is MemoryFieldType.BOOLEAN:
-            if not isinstance(value, bool):
-                raise MemorySchemaError(f"memory field {field.name} must be a boolean")
-            return value
-        if isinstance(value, datetime):
-            raise MemorySchemaError(f"memory field {field.name} must be a calendar date")
-        if isinstance(value, date):
-            return value
-        if isinstance(value, str):
-            try:
-                return date.fromisoformat(value)
-            except ValueError as exc:
-                raise MemorySchemaError(f"memory field {field.name} must use YYYY-MM-DD") from exc
-        raise MemorySchemaError(f"memory field {field.name} must be a date")
+        if not isinstance(value, bool):
+            raise MemorySchemaError(f"memory field {field.name} must be a boolean")
+        return value
 
     @staticmethod
     def _render_value(value: Any) -> str:
         if value is None:
             return ""
-        if isinstance(value, date):
-            return value.isoformat()
         if isinstance(value, bool):
             return "true" if value else "false"
         return str(value)
@@ -313,7 +268,6 @@ __all__ = [
     "MemoryFieldSchema",
     "MemoryFieldType",
     "MemoryMergeStrategy",
-    "MemoryOperationMode",
     "MemorySchemaError",
     "MemoryTypeSchema",
 ]

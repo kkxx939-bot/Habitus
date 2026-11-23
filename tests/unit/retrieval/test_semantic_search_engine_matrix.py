@@ -9,7 +9,6 @@ from collections.abc import Sequence
 import pytest
 
 from habitus.memory.indexing import MemoryVectorMatch
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.retrieval.search import (
     MemorySearchMode,
@@ -89,8 +88,6 @@ def detail_match(
         address = MemoryAddress.entity("项目", name)
     elif kind is MemoryKind.TOOL:
         address = MemoryAddress.tool(name)
-    elif kind is MemoryKind.INTENTION:
-        address = MemoryAddress.intention(name)
     else:
         address = MemoryAddress.preference(name)
     return MemoryVectorMatch(
@@ -138,7 +135,6 @@ def search(current: MemorySemanticSearchEngine, **overrides: object):
         "query": "回答风格",
         "roots": (MemoryURI.root(),),
         "kinds": (),
-        "intention_scope": MemoryIntentionRecallScope.ACTIVE,
         "limit": 5,
         **overrides,
     }

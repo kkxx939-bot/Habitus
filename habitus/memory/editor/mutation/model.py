@@ -11,7 +11,6 @@ from typing import Any
 from habitus.infrastructure.editor.snapshot import VersionedSnapshot
 from habitus.memory.document import MemoryDocument
 from habitus.memory.editor.candidate import MemoryCandidate
-from habitus.memory.model import MemoryKind
 from habitus.memory.snapshot import MemorySnapshotBatch
 from habitus.memory.uri import MemoryURI
 
@@ -84,8 +83,6 @@ class MemoryFieldMergeResult:
 
     fields: Mapping[str, Any]
     changed_fields: tuple[str, ...]
-    read_only_target: bool = False
-    """候选指向只增记忆的旧节点：旧字段原样保留，候选字段不生效。"""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
@@ -93,8 +90,6 @@ class MemoryFieldMergeResult:
             raise TypeError("changed_fields must be a tuple of non-empty strings")
         if len(self.changed_fields) != len(set(self.changed_fields)):
             raise ValueError("changed_fields cannot contain duplicates")
-        if self.read_only_target and self.changed_fields:
-            raise ValueError("read-only target merge cannot change fields")
 
 
 @dataclass(frozen=True)
@@ -105,9 +100,6 @@ class MemoryMutation:
     action: MemoryMutationAction
     fields: Mapping[str, Any]
     changed_fields: tuple[str, ...]
-    confirms_intention: bool = False
-    read_only_target: bool = False
-    """候选指向只增记忆的旧节点，被保留为 NOOP；供审计统计。"""
 
     def __post_init__(self) -> None:
         action = MemoryMutationAction(self.action)
@@ -117,10 +109,6 @@ class MemoryMutation:
             raise TypeError("mutation changed_fields must contain non-empty strings")
         if len(self.changed_fields) != len(set(self.changed_fields)):
             raise ValueError("mutation changed_fields cannot contain duplicates")
-        if self.confirms_intention and self.match.candidate.kind is not MemoryKind.INTENTION:
-            raise ValueError("only an Intention mutation can refresh confirmation time")
-        if self.read_only_target and action is not MemoryMutationAction.NOOP:
-            raise ValueError("read-only target mutation must be a noop")
         if action is MemoryMutationAction.CREATE:
             if self.match.status is not MemoryNodeMatchStatus.NEW:
                 raise ValueError("create mutation requires a new-node match")
@@ -161,20 +149,10 @@ class MemoryMutationPlan:
             raise ValueError("memory mutation plan does not cover its exact target snapshots")
 
     @property
-    def read_only_targets(self) -> tuple[MemoryURI, ...]:
-        """返回本批候选指向、因只读而保留为 NOOP 的旧节点 URI。"""
-
-        return tuple(mutation.uri for mutation in self.mutations if mutation.read_only_target)
-
-    @property
     def changed_mutations(self) -> tuple[MemoryMutation, ...]:
-        """排除不需要推进 revision 或刷新确认时间的幂等节点。"""
+        """排除不需要推进 revision 的幂等节点。"""
 
-        return tuple(
-            mutation
-            for mutation in self.mutations
-            if mutation.action is not MemoryMutationAction.NOOP or mutation.confirms_intention
-        )
+        return tuple(mutation for mutation in self.mutations if mutation.action is not MemoryMutationAction.NOOP)
 
 
 __all__ = [

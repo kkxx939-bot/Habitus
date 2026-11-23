@@ -34,15 +34,11 @@ FIELD_FOR_KIND = {
     MemoryKind.PREFERENCE: "preferences",
     MemoryKind.ENTITY: "entities",
     MemoryKind.TOOL: "tools",
-    MemoryKind.EVENT: "events",
-    MemoryKind.INTENTION: "intentions",
 }
 ALL_FIELDS = (*FIELD_FOR_KIND.values(), "identity_proposals", "relations")
 KINDS_WITH_OPTIONAL_STRING_FIELDS = (
     MemoryKind.ENTITY,
     MemoryKind.TOOL,
-    MemoryKind.EVENT,
-    MemoryKind.INTENTION,
 )
 
 
@@ -51,12 +47,7 @@ def _empty_output() -> dict[str, object]:
 
 
 def _raw_candidate(kind: MemoryKind, page_id: object = 100) -> dict[str, object]:
-    result = {"page_id": page_id, **memory_fields(kind)}
-    if kind is MemoryKind.EVENT:
-        result["event_date"] = "2026-07-01"
-    if kind is MemoryKind.INTENTION:
-        result["confirmed"] = True
-    return result
+    return {"page_id": page_id, **memory_fields(kind)}
 
 
 @pytest.mark.parametrize("value", [1, 2, 98, 99, 100, 101, 2**31, 2**63])
@@ -99,35 +90,11 @@ def test_candidate_accepts_every_kind_and_page_range(kind: MemoryKind, page_id: 
         page_id,
         kind,
         memory_fields(kind),
-        confirmed=True if kind is MemoryKind.INTENTION else None,
     )
     assert candidate.page_id == page_id
     assert candidate.address.kind is kind
     assert isinstance(candidate.fields, MappingProxyType)
     assert candidate.to_dict()["page_id"] == page_id
-
-
-@pytest.mark.parametrize("kind", tuple(MemoryKind))
-@pytest.mark.parametrize("confirmed", [True, False])
-def test_confirmed_control_field_is_owned_only_by_intention(kind: MemoryKind, confirmed: bool) -> None:
-    if kind is MemoryKind.INTENTION:
-        assert MemoryCandidate(100, kind, memory_fields(kind), confirmed=confirmed).confirmed is confirmed
-    else:
-        with pytest.raises(MemoryCandidateError, match="only Intention"):
-            MemoryCandidate(100, kind, memory_fields(kind), confirmed=confirmed)
-
-
-def test_intention_candidate_requires_explicit_boolean_confirmation() -> None:
-    with pytest.raises(MemoryCandidateError, match="boolean"):
-        MemoryCandidate(100, MemoryKind.INTENTION, memory_fields(MemoryKind.INTENTION), confirmed=None)
-
-
-@pytest.mark.parametrize("confirmed", [None, 0, 1, "true", [], {}])
-def test_model_validate_requires_boolean_intention_confirmation(confirmed: object) -> None:
-    output = _empty_output()
-    output["intentions"] = [{**_raw_candidate(MemoryKind.INTENTION), "confirmed": confirmed}]
-    with pytest.raises(MemoryCandidateError, match="boolean"):
-        MemoryCandidateBatch.model_validate(output)
 
 
 @pytest.mark.parametrize("kind", tuple(MemoryKind))
@@ -137,7 +104,6 @@ def test_candidate_rejects_unknown_business_or_system_field(kind: MemoryKind) ->
             100,
             kind,
             {**memory_fields(kind), "revision": 1},
-            confirmed=True if kind is MemoryKind.INTENTION else None,
         )
 
 
@@ -145,7 +111,7 @@ def test_candidate_rejects_unknown_business_or_system_field(kind: MemoryKind) ->
 def test_candidate_rejects_whitespace_in_every_present_optional_string(kind: MemoryKind) -> None:
     fields = memory_fields(kind)
     schema = MemoryCandidateBatch.model_json_schema()["properties"][FIELD_FOR_KIND[kind]]["items"]  # type: ignore[index]
-    optional = set(schema["properties"]) - set(schema["required"]) - {"confirmed"}  # type: ignore[index]
+    optional = set(schema["properties"]) - set(schema["required"])  # type: ignore[index]
     field = sorted(optional)[0]
     fields[field] = " "
     with pytest.raises(MemoryCandidateError, match="empty string"):
@@ -153,7 +119,6 @@ def test_candidate_rejects_whitespace_in_every_present_optional_string(kind: Mem
             100,
             kind,
             fields,
-            confirmed=True if kind is MemoryKind.INTENTION else None,
         )
 
 
@@ -287,7 +252,6 @@ def test_batch_constructor_rejects_candidate_in_wrong_kind_bucket(field: str) ->
         100,
         wrong,
         memory_fields(wrong),
-        confirmed=True if wrong is MemoryKind.INTENTION else None,
     )
     with pytest.raises(MemoryCandidateError, match="wrong type"):
         MemoryCandidateBatch(**{field: (candidate,)})
@@ -295,8 +259,8 @@ def test_batch_constructor_rejects_candidate_in_wrong_kind_bucket(field: str) ->
 
 @pytest.mark.parametrize("kind", tuple(MemoryKind))
 def test_batch_rejects_duplicate_address_even_with_different_page_id(kind: MemoryKind) -> None:
-    first = MemoryCandidate(100, kind, memory_fields(kind), confirmed=True if kind is MemoryKind.INTENTION else None)
-    second = MemoryCandidate(101, kind, memory_fields(kind), confirmed=True if kind is MemoryKind.INTENTION else None)
+    first = MemoryCandidate(100, kind, memory_fields(kind))
+    second = MemoryCandidate(101, kind, memory_fields(kind))
     with pytest.raises(MemoryCandidateError, match="duplicate address"):
         MemoryCandidateBatch(**{FIELD_FOR_KIND[kind]: (first, second)})
 
@@ -306,12 +270,8 @@ def test_batch_rejects_duplicate_page_id_across_all_kind_combinations(
     left_kind: MemoryKind,
     right_kind: MemoryKind,
 ) -> None:
-    left = MemoryCandidate(
-        100, left_kind, memory_fields(left_kind), confirmed=True if left_kind is MemoryKind.INTENTION else None
-    )
-    right = MemoryCandidate(
-        100, right_kind, memory_fields(right_kind), confirmed=True if right_kind is MemoryKind.INTENTION else None
-    )
+    left = MemoryCandidate(100, left_kind, memory_fields(left_kind))
+    right = MemoryCandidate(100, right_kind, memory_fields(right_kind))
     with pytest.raises(MemoryCandidateError, match="duplicate page_id"):
         MemoryCandidateBatch(
             **{
@@ -330,7 +290,8 @@ def test_model_validate_requires_every_top_level_array(missing: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "unknown", ["uri", "revision", "operations", "deletes", "links", "backlinks", "skills", "topics"]
+    "unknown",
+    ["uri", "revision", "operations", "deletes", "links", "backlinks", "skills", "topics", "events", "intentions"],
 )
 def test_model_validate_rejects_unknown_top_level_output(unknown: str) -> None:
     output = _empty_output()
@@ -449,8 +410,6 @@ def test_candidate_json_schema_exactly_covers_yaml_fields_and_control_fields() -
     for kind, field_name in FIELD_FOR_KIND.items():
         item = schema["properties"][field_name]["items"]
         expected = {"page_id", *(memory_fields(kind).keys())}
-        if kind is MemoryKind.INTENTION:
-            expected.add("confirmed")
         assert expected <= set(item["properties"])
         assert item["additionalProperties"] is False
 

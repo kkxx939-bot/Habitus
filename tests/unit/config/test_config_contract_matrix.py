@@ -11,7 +11,6 @@ from habitus.config import (
     ConversationConfig,
     ConversationLifecycleConfig,
     MemoryConfig,
-    MemoryIntentionReviewConfig,
     MemoryRecallLifecycleConfig,
     MemorySearchServiceConfig,
     StructuredOutputConfig,
@@ -84,7 +83,6 @@ CONFIG_INSTANCES = (
     MemoryTransactionJournalConfig(),
     MemoryRetrievalConfig(),
     MemoryVectorIndexConfig(),
-    MemoryIntentionReviewConfig(),
     MemoryRecallLifecycleConfig(),
     MemorySearchServiceConfig(),
     MemorySemanticConfig(),
@@ -268,44 +266,3 @@ def test_construct_config_wraps_domain_validation_with_config_path(
 ) -> None:
     with pytest.raises(ConfigError, match="config.test"):
         construct_config(model_type, {field: value}, "config.test")
-
-
-@pytest.mark.parametrize(
-    ("first", "second", "strong"),
-    [
-        (1, 2, 3),
-        (30, 60, 180),
-        (1, 18_250, 36_500),
-    ],
-)
-def test_intention_review_thresholds_accept_strictly_increasing_operational_ranges(
-    first: int,
-    second: int,
-    strong: int,
-) -> None:
-    config = MemoryIntentionReviewConfig(first, second, strong)
-    assert (config.first_review_after_days, config.second_review_after_days, config.strong_review_after_days) == (
-        first,
-        second,
-        strong,
-    )
-
-
-@pytest.mark.parametrize(
-    ("first", "second", "strong"),
-    [
-        (0, 60, 180),
-        (30, 30, 180),
-        (60, 30, 180),
-        (30, 180, 180),
-        (30, 181, 180),
-        (30, 60, 36_501),
-    ],
-)
-def test_intention_review_thresholds_reject_non_increasing_or_out_of_range_values(
-    first: int,
-    second: int,
-    strong: int,
-) -> None:
-    with pytest.raises(ValueError):
-        MemoryIntentionReviewConfig(first, second, strong)

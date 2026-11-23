@@ -191,7 +191,6 @@ class MemorySnapshotReader:
             "revision": document.metadata.revision,
             "created_at": document.metadata.created_at,
             "updated_at": document.metadata.updated_at,
-            "last_confirmed_at": document.metadata.last_confirmed_at,
             "fields": document.fields,
             "markdown_body": document.markdown_body,
             "links": [link.to_dict() for link in document.links],

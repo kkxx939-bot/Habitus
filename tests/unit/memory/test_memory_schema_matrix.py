@@ -1,9 +1,8 @@
-"""六类长期记忆 Schema 声明、字段、路径、渲染和注册表完整性矩阵。"""
+"""四类长期记忆 Schema 声明、字段、路径、渲染和注册表完整性矩阵。"""
 
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, date, datetime
 
 import pytest
 
@@ -14,7 +13,6 @@ from habitus.memory.schema import (
     MemoryFieldSchema,
     MemoryFieldType,
     MemoryMergeStrategy,
-    MemoryOperationMode,
     MemorySchemaError,
     MemorySchemaRegistry,
     MemoryTypeSchema,
@@ -40,7 +38,7 @@ def _field(**overrides: object) -> MemoryFieldSchema:
     return MemoryFieldSchema(**values)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("name", ["a", "content", "event_date", "field_1", "a1_b2"])
+@pytest.mark.parametrize("name", ["a", "content", "tool_name", "field_1", "a1_b2"])
 def test_field_schema_accepts_lowercase_snake_case_name(name: str) -> None:
     assert _field(name=name).name == name
 
@@ -103,25 +101,6 @@ def test_field_schema_rejects_empty_or_non_text_description(description: str) ->
         _field(description=description)
 
 
-@pytest.mark.parametrize("allowed", [(), ("open",), ("open", "closed"), ["open", "closed"]])
-def test_string_field_accepts_unique_non_empty_allowed_values(allowed: object) -> None:
-    assert _field(allowed_values=allowed).allowed_values == tuple(allowed)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("allowed", [("",), (" ",), ("open", "open")])
-def test_field_schema_rejects_invalid_allowed_values(allowed: tuple[str, ...]) -> None:
-    with pytest.raises(MemorySchemaError):
-        _field(allowed_values=allowed)
-
-
-@pytest.mark.parametrize(
-    "field_type", [MemoryFieldType.INTEGER, MemoryFieldType.NUMBER, MemoryFieldType.BOOLEAN, MemoryFieldType.DATE]
-)
-def test_non_string_field_rejects_allowed_values(field_type: MemoryFieldType) -> None:
-    with pytest.raises(MemorySchemaError, match="string fields"):
-        _field(field_type=field_type, allowed_values=("value",))
-
-
 @pytest.mark.parametrize(
     ("required", "strategy"),
     [
@@ -136,20 +115,14 @@ def test_address_fields_must_be_required_and_immutable(required: bool, strategy:
         _field(role=MemoryFieldRole.ADDRESS, required=required, merge_strategy=strategy)
 
 
-def test_default_schemas_follow_confirmed_tree_and_operation_modes() -> None:
+def test_default_schemas_follow_confirmed_tree() -> None:
     expected = {
-        MemoryKind.PROFILE: ("profile.md", MemoryOperationMode.UPSERT),
-        MemoryKind.PREFERENCE: ("preferences/{topic}.md", MemoryOperationMode.UPSERT),
-        MemoryKind.ENTITY: ("entities/{category}/{name}.md", MemoryOperationMode.UPSERT),
-        MemoryKind.TOOL: ("tools/{tool_name}.md", MemoryOperationMode.UPSERT),
-        MemoryKind.EVENT: (
-            "events/{event_date:%Y}/{event_date:%m}/{event_date:%d}/{event_name}.md",
-            MemoryOperationMode.ADD_ONLY,
-        ),
-        MemoryKind.INTENTION: ("intentions/{intent_name}.md", MemoryOperationMode.UPSERT),
+        MemoryKind.PROFILE: "profile.md",
+        MemoryKind.PREFERENCE: "preferences/{topic}.md",
+        MemoryKind.ENTITY: "entities/{category}/{name}.md",
+        MemoryKind.TOOL: "tools/{tool_name}.md",
     }
-    for schema in SCHEMAS:
-        assert (schema.path_template, schema.operation_mode) == expected[schema.kind]
+    assert {schema.kind: schema.path_template for schema in SCHEMAS} == expected
 
 
 @pytest.mark.parametrize("schema", SCHEMAS, ids=lambda item: item.kind.value)
@@ -206,11 +179,10 @@ def test_every_required_memory_field_rejects_null(kind: MemoryKind, field: str) 
 STRING_FIELDS = tuple(
     (kind, field.name, field.required) for kind, field in FIELDS if field.field_type is MemoryFieldType.STRING
 )
-DATE_FIELDS = tuple((kind, field.name) for kind, field in FIELDS if field.field_type is MemoryFieldType.DATE)
 
 
 @pytest.mark.parametrize(("kind", "field", "required"), STRING_FIELDS)
-@pytest.mark.parametrize("invalid", [1, True, [], {}, date(2026, 7, 1)])
+@pytest.mark.parametrize("invalid", [1, True, [], {}])
 def test_every_string_memory_field_rejects_non_string_value(
     kind: MemoryKind,
     field: str,
@@ -244,34 +216,6 @@ def test_required_string_fields_reject_whitespace_but_optional_string_fields_may
         assert REGISTRY.validate(kind, payload)[field] == " "
 
 
-@pytest.mark.parametrize(("kind", "field"), DATE_FIELDS)
-@pytest.mark.parametrize("value", [date(2026, 7, 1), "2026-07-01"])
-def test_date_memory_fields_accept_date_or_iso_string(kind: MemoryKind, field: str, value: object) -> None:
-    assert REGISTRY.validate(kind, {**memory_fields(kind), field: value})[field] == date(2026, 7, 1)
-
-
-@pytest.mark.parametrize(("kind", "field"), DATE_FIELDS)
-@pytest.mark.parametrize("invalid", [datetime(2026, 7, 1, tzinfo=UTC), "2026/07/01", "", 1, True, None])
-def test_date_memory_fields_reject_datetime_invalid_string_and_non_date(
-    kind: MemoryKind,
-    field: str,
-    invalid: object,
-) -> None:
-    with pytest.raises(MemorySchemaError):
-        REGISTRY.validate(kind, {**memory_fields(kind), field: invalid})
-
-
-@pytest.mark.parametrize("status", ["open", "waiting", "blocked", "completed"])
-def test_intention_accepts_only_declared_status_values(status: str) -> None:
-    assert REGISTRY.validate(MemoryKind.INTENTION, {"intent_name": "事项", "status": status})["status"] == status
-
-
-@pytest.mark.parametrize("status", ["cancelled", "done", "active", "", "OPEN", 1, None])
-def test_intention_rejects_unknown_or_non_string_status(status: object) -> None:
-    with pytest.raises(MemorySchemaError):
-        REGISTRY.validate(MemoryKind.INTENTION, {"intent_name": "事项", "status": status})
-
-
 @pytest.mark.parametrize(
     "field", ["purpose", "when_to_use", "invocation", "constraints", "failure_recovery", "verification"]
 )
@@ -303,12 +247,8 @@ def test_every_memory_kind_builds_exact_confirmed_address(kind: MemoryKind) -> N
         expected = MemoryAddress.preference(str(payload["topic"]))
     elif kind is MemoryKind.ENTITY:
         expected = MemoryAddress.entity(str(payload["category"]), str(payload["name"]))
-    elif kind is MemoryKind.TOOL:
-        expected = MemoryAddress.tool(str(payload["tool_name"]))
-    elif kind is MemoryKind.EVENT:
-        expected = MemoryAddress.event(payload["event_date"], str(payload["event_name"]))
     else:
-        expected = MemoryAddress.intention(str(payload["intent_name"]))
+        expected = MemoryAddress.tool(str(payload["tool_name"]))
     assert actual == expected
 
 
@@ -318,8 +258,7 @@ def test_every_memory_kind_renders_all_present_fields_and_no_system_metadata(kin
     markdown = REGISTRY.render_markdown(kind, payload)
     assert markdown.endswith("\n")
     for value in payload.values():
-        rendered = value.isoformat() if isinstance(value, date) else str(value)
-        assert rendered in markdown
+        assert str(value) in markdown
     for forbidden in ("revision", "created_at", "updated_at", "HABITUS_MEMORY_FIELDS"):
         assert forbidden not in markdown
 
@@ -330,9 +269,6 @@ def test_every_memory_kind_renders_all_present_fields_and_no_system_metadata(kin
         (MemoryKind.ENTITY, "details", "## Details"),
         (MemoryKind.TOOL, "purpose", "## Purpose"),
         (MemoryKind.TOOL, "failure_recovery", "## Failure and Recovery"),
-        (MemoryKind.INTENTION, "next_step", "## Next Step"),
-        (MemoryKind.INTENTION, "blockers", "## Blockers or Constraints"),
-        (MemoryKind.INTENTION, "target_time", "## Target Time"),
     ],
 )
 def test_omit_empty_sections_removes_absent_optional_semantics(
@@ -464,7 +400,6 @@ memory_type: profile
 description: description
 path_template: profile.md
 markdown_template: "{content}"
-operation_mode: upsert
 """
     with pytest.raises(MemorySchemaError, match="fields must be a list"):
         registry_module._load_schema(base + "fields: {}\n", "invalid.yaml")
@@ -478,7 +413,6 @@ memory_type: profile
 description: description
 path_template: profile.md
 markdown_template: "{content}"
-operation_mode: upsert
 fields:
   - name: content
     type: string
@@ -509,7 +443,6 @@ memory_type: profile
 description: description
 path_template: profile.md
 markdown_template: "{content}"
-operation_mode: upsert
 fields:
   - name: content
     type: string
@@ -527,7 +460,6 @@ memory_type: profile
 description: TYPE_DESCRIPTION
 path_template: profile.md
 markdown_template: MARKDOWN
-operation_mode: upsert
 min_non_empty_content_fields: MINIMUM
 omit_empty_sections: OMIT
 fields:
@@ -537,7 +469,6 @@ fields:
     required: true
     merge: patch
     description: FIELD_DESCRIPTION
-    allowed_values: ALLOWED
 """
 _TYPED_SCHEMA_DEFAULTS = {
     "TYPE_DESCRIPTION": "description",
@@ -545,7 +476,6 @@ _TYPED_SCHEMA_DEFAULTS = {
     "MINIMUM": "0",
     "OMIT": "false",
     "FIELD_DESCRIPTION": "description",
-    "ALLOWED": "[]",
 }
 
 
@@ -574,8 +504,6 @@ def _typed_schema_source(**overrides: str) -> str:
         ("OMIT", "[]", "memory omit_empty_sections must be boolean"),
         ("FIELD_DESCRIPTION", "1", "memory field description must be a non-empty string"),
         ("FIELD_DESCRIPTION", "null", "memory field description must be a non-empty string"),
-        ("ALLOWED", '"open"', "memory field allowed_values must be a list of strings"),
-        ("ALLOWED", "[1]", "memory field allowed_values must be a list of strings"),
     ],
 )
 def test_schema_loader_rejects_wrongly_typed_scalars_before_building_the_schema(
@@ -604,7 +532,6 @@ def test_schema_field_maps_and_role_views_are_complete(kind: MemoryKind) -> None
         (1.5, "1.5"),
         (True, "true"),
         (False, "false"),
-        (date(2026, 7, 1), "2026-07-01"),
     ],
 )
 def test_memory_value_rendering_is_deterministic(value: object, rendered: str) -> None:

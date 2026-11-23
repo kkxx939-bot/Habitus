@@ -20,7 +20,6 @@ _METADATA_KEYS = {
     "revision",
     "created_at",
     "updated_at",
-    "last_confirmed_at",
     "fields",
     "links",
     "backlinks",
@@ -100,11 +99,6 @@ class MemoryDocumentCodec:
             "revision": canonical.metadata.revision,
             "created_at": self._timestamp(canonical.metadata.created_at),
             "updated_at": self._timestamp(canonical.metadata.updated_at),
-            "last_confirmed_at": (
-                None
-                if canonical.metadata.last_confirmed_at is None
-                else self._timestamp(canonical.metadata.last_confirmed_at)
-            ),
             "fields": fields,
             "links": [link.to_dict() for link in canonical.links],
             "backlinks": [link.to_dict() for link in canonical.backlinks],
@@ -143,7 +137,6 @@ class MemoryDocumentCodec:
         raw_revision = metadata["revision"]
         raw_created_at = metadata["created_at"]
         raw_updated_at = metadata["updated_at"]
-        raw_last_confirmed_at = metadata["last_confirmed_at"]
         raw_fields = metadata["fields"]
         raw_links = metadata["links"]
         raw_backlinks = metadata["backlinks"]
@@ -161,11 +154,6 @@ class MemoryDocumentCodec:
                 revision=self._parse_revision(raw_revision),
                 created_at=self._parse_timestamp(raw_created_at, "created_at"),
                 updated_at=self._parse_timestamp(raw_updated_at, "updated_at"),
-                last_confirmed_at=(
-                    None
-                    if raw_last_confirmed_at is None
-                    else self._parse_timestamp(raw_last_confirmed_at, "last_confirmed_at")
-                ),
             )
             document = self.build(
                 MemoryKind(raw_kind),

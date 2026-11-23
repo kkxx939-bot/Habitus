@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import tzinfo
 from typing import TYPE_CHECKING
 
 from habitus.memory.document import MemoryStoredLink
@@ -15,7 +14,6 @@ from habitus.memory.editor.candidate import (
     MemoryRelationAction,
 )
 from habitus.memory.editor.page_id import EXISTING_PAGE_ID_MAX, MemoryPageIdMap
-from habitus.memory.model import MemoryKind
 from habitus.memory.snapshot import MemorySnapshotBatch
 from habitus.memory.uri import MemoryURI
 from habitus.pre.conversation.messages import (
@@ -31,7 +29,7 @@ _MISSING = object()
 
 
 class MemoryCandidateContextValidator:
-    """对一批候选执行来源校验；违规按六类检查的固定顺序逐条产出，文字与顺序即修补轮与剔除的依据。"""
+    """对一批候选执行来源校验；违规按各项检查的固定顺序逐条产出，文字与顺序即修补轮与剔除的依据。"""
 
     def __init__(self, batch: MemoryCandidateBatch) -> None:
         self.batch = batch
@@ -41,10 +39,8 @@ class MemoryCandidateContextValidator:
         segment: ConversationSegment,
         old_memories: MemorySnapshotBatch,
         page_ids: MemoryPageIdMap,
-        *,
-        zone: tzinfo,
     ) -> tuple[MemoryCandidateViolation, ...]:
-        """逐条列出通不过来源校验的候选、关系与身份提议；日期按主体所在地 ``zone`` 的本地日算。
+        """逐条列出通不过来源校验的候选、关系与身份提议。
 
         page_id 表与本批完整旧快照不一致是系统自身的错，不落到哪一条上，直接明确失败。
         """
@@ -58,8 +54,6 @@ class MemoryCandidateContextValidator:
             *self._identity_relation_violations(),
             *self._relation_removal_violations(old_memories, page_ids),
             *self._tool_source_violations(segment, old_memories),
-            *self._event_violations(segment, zone),
-            *self._completed_intention_violations(old_memories),
         )
 
     def _page_reference_violations(self, page_ids: MemoryPageIdMap) -> Iterator[MemoryCandidateViolation]:
@@ -205,37 +199,6 @@ class MemoryCandidateContextValidator:
                 yield MemoryCandidateViolation(
                     candidate, "tool failure_recovery requires a failure followed by a successful result"
                 )
-
-    def _completed_intention_violations(self, old_memories: MemorySnapshotBatch) -> Iterator[MemoryCandidateViolation]:
-        for candidate in self.batch.intentions:
-            if candidate.fields.get("status") != "completed":
-                continue
-            if candidate.confirmed is not True:
-                yield MemoryCandidateViolation(
-                    candidate, "completed intention requires explicit confirmation in this conversation"
-                )
-                continue
-            uri = str(MemoryURI.from_address(candidate.address))
-            snapshot = old_memories.get(uri)
-            if snapshot is None or not snapshot.exists or snapshot.value is None:
-                yield MemoryCandidateViolation(
-                    candidate, "completed intention must target an existing intention read in this batch"
-                )
-            elif snapshot.value is None:
-                yield MemoryCandidateViolation(candidate, "completed intention snapshot is not a memory document")
-            elif snapshot.value.kind is not MemoryKind.INTENTION:
-                yield MemoryCandidateViolation(candidate, "completed intention snapshot has the wrong memory type")
-
-    def _event_violations(self, segment: ConversationSegment, zone: tzinfo) -> Iterator[MemoryCandidateViolation]:
-        """只校验模型语义结果中可确定验证的 Event 日期边界：不晚于片段最后一条消息在主体所在地的那一天。"""
-
-        latest = segment.ended_at.astimezone(zone).date()
-        for candidate in self.batch.events:
-            event_date = candidate.address.event_date
-            # Event 地址构造时已保证 event_date 存在（``MemoryAddress.__post_init__``），这里只为类型收窄。
-            assert event_date is not None
-            if event_date > latest:
-                yield MemoryCandidateViolation(candidate, "future event date cannot represent an occurred Event")
 
 
 def _old_field_value(candidate: MemoryCandidate, old_memories: MemorySnapshotBatch, field_name: str) -> object:

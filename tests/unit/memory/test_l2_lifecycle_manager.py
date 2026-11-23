@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -806,16 +806,6 @@ def test_one_poison_l2_node_does_not_starve_later_scan_candidates(
             "summary",
             "Habitus 是用户在重构的记忆系统。",
         ),
-        (
-            MemoryKind.INTENTION,
-            {
-                "intent_name": "完成记忆系统重构",
-                "status": "open",
-                "next_step": "补齐测试体系，先写生命周期测试，再写检索测试，最后跑 ci",
-            },
-            "next_step",
-            "补齐测试体系",
-        ),
     ],
 )
 def test_compaction_of_l2_without_optional_fields_commits_and_stays_usable(
@@ -957,7 +947,11 @@ def test_compaction_write_back_does_not_reset_retirement_clock(
     assert value.tree.list_addresses() == ()
 
 
-_KEEP_EVENT = {"operations": [{"field": "summary", "operation": "keep"}]}
+_KEEP_SUMMARY = {"operations": [{"field": "summary", "operation": "keep"}]}
+
+
+_COLD_ENTITY_CONFIG = MemoryRecallLifecycleConfig(entity_half_life_days=14.0, entity_retire_days=180.0)
+"""实体用与原事件样本相同的半衰期与退休天数，保持各测试的关键时刻不变。"""
 
 
 def _run_until_deleted(value, recall, current, uri, *, start, limit_days, hourly_near):
@@ -982,15 +976,15 @@ def _run_until_deleted(value, recall, current, uri, *, start, limit_days, hourly
     return seen
 
 
-def test_cold_event_answered_keep_is_asked_once_and_still_retires_on_schedule(tmp_path) -> None:
-    responses = [dict(_KEEP_EVENT) for _ in range(10)]
-    config = MemoryRecallLifecycleConfig()
+def test_cold_entity_answered_keep_is_asked_once_and_still_retires_on_schedule(tmp_path) -> None:
+    responses = [dict(_KEEP_SUMMARY) for _ in range(10)]
+    config = _COLD_ENTITY_CONFIG
     value, recall, current, _refreshed = manager(tmp_path, responses, recall_config=config)
-    event = document(MemoryKind.EVENT, timestamp=NOW)
+    event = document(MemoryKind.ENTITY, timestamp=NOW)
     value.tree.write(event)
     uri = MemoryURI.from_address(event.address)
 
-    retire = timedelta(days=config.event_retire_days)
+    retire = timedelta(days=config.entity_retire_days)
     grace = timedelta(days=config.retire_candidate_grace_days)
     seen = _run_until_deleted(
         value,
@@ -1008,9 +1002,9 @@ def test_cold_event_answered_keep_is_asked_once_and_still_retires_on_schedule(tm
 
 
 def test_keep_verdict_is_not_reasked_until_the_memory_is_used_and_cools_again(tmp_path) -> None:
-    responses = [dict(_KEEP_EVENT) for _ in range(10)]
-    value, _recall, current, _refreshed = manager(tmp_path, responses, recall_config=MemoryRecallLifecycleConfig())
-    event = document(MemoryKind.EVENT, timestamp=NOW - timedelta(days=40))
+    responses = [dict(_KEEP_SUMMARY) for _ in range(10)]
+    value, _recall, current, _refreshed = manager(tmp_path, responses, recall_config=_COLD_ENTITY_CONFIG)
+    event = document(MemoryKind.ENTITY, timestamp=NOW - timedelta(days=40))
     value.tree.write(event)
     for hour in range(5):
         current[0] = NOW + timedelta(hours=hour)
@@ -1035,9 +1029,9 @@ def test_retirement_does_not_wait_for_a_compaction_model_that_keeps_failing(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = MemoryRecallLifecycleConfig()
+    config = _COLD_ENTITY_CONFIG
     value, recall, current, _refreshed = manager(tmp_path, [], recall_config=config)
-    event = document(MemoryKind.EVENT, timestamp=NOW)
+    event = document(MemoryKind.ENTITY, timestamp=NOW)
     value.tree.write(event)
     uri = MemoryURI.from_address(event.address)
     calls = []
@@ -1048,7 +1042,7 @@ def test_retirement_does_not_wait_for_a_compaction_model_that_keeps_failing(
 
     monkeypatch.setattr(value.field_compactor, "compact", unavailable)
 
-    retire = timedelta(days=config.event_retire_days)
+    retire = timedelta(days=config.entity_retire_days)
     grace = timedelta(days=config.retire_candidate_grace_days)
     seen = _run_until_deleted(
         value,
@@ -1068,16 +1062,16 @@ def test_retirement_does_not_wait_for_a_compaction_model_that_keeps_failing(
 
 
 def test_compaction_quota_counts_model_attempts_not_successes(tmp_path) -> None:
-    responses = [dict(_KEEP_EVENT) for _ in range(20)]
-    value, _recall, current, _refreshed = manager(tmp_path, responses, recall_config=MemoryRecallLifecycleConfig())
+    responses = [dict(_KEEP_SUMMARY) for _ in range(20)]
+    value, _recall, current, _refreshed = manager(tmp_path, responses, recall_config=_COLD_ENTITY_CONFIG)
     for index in range(10):
         value.tree.write(
             document(
-                MemoryKind.EVENT,
+                MemoryKind.ENTITY,
                 fields={
-                    "event_name": f"事件{index}",
-                    "event_date": date(2026, 6, 1),
-                    "summary": f"第 {index} 件事的经过",
+                    "category": "项目",
+                    "name": f"项目{index}",
+                    "summary": f"第 {index} 个项目的经过",
                 },
                 timestamp=NOW - timedelta(days=40),
             )

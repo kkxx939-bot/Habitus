@@ -8,13 +8,11 @@ from pathlib import Path
 import pytest
 
 from habitus.memory.document import MemoryLinkType, MemoryStoredLink
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryKind
 from habitus.memory.retrieval import (
     MemoryQueryPlan,
     MemorySearchError,
     MemorySearchHit,
-    MemorySearchServiceConfig,
     MemoryTypedQuery,
 )
 from habitus.memory.uri import MemoryURI
@@ -22,17 +20,9 @@ from tests.helpers import codec, document
 from tests.unit.retrieval.test_search_service import SemanticSearch, SummarySearch, service
 
 
-def linked_documents(*, second_kind: MemoryKind = MemoryKind.PREFERENCE, completed: bool = False):
+def linked_documents():
     first = document(MemoryKind.PROFILE)
-    if second_kind is MemoryKind.INTENTION:
-        fields = {
-            "intent_name": "补齐记忆测试",
-            "status": "completed" if completed else "open",
-            "next_step": "复核覆盖",
-        }
-        second = document(MemoryKind.INTENTION, fields=fields)
-    else:
-        second = document(second_kind)
+    second = document(MemoryKind.PREFERENCE)
     first_uri = MemoryURI.from_address(first.address)
     second_uri = MemoryURI.from_address(second.address)
     relation = MemoryStoredLink(first_uri, second_uri, MemoryLinkType.BELONGS_TO)
@@ -126,96 +116,6 @@ def test_inconsistent_or_missing_backlink_fails_closed_instead_of_returning_part
         asyncio.run(instance.find("用户是谁"))
 
 
-def test_completed_intention_is_excluded_only_as_active_relation_neighbor(tmp_path: Path) -> None:
-    profile, intention, _relation = linked_documents(
-        second_kind=MemoryKind.INTENTION,
-        completed=True,
-    )
-    profile_uri = MemoryURI.from_address(profile.address)
-
-    class ScopeSearch(SemanticSearch):
-        async def search(self, query, **kwargs):
-            self.calls.append((query, kwargs))
-            if kwargs["intention_scope"] is MemoryIntentionRecallScope.COMPLETED:
-                return ()
-            return (MemorySearchHit(profile_uri, 0.9),)
-
-    instance = service(tmp_path, semantic=ScopeSearch(), summaries=SummarySearch())
-    instance.tree.write(profile)
-    instance.tree.write(intention)
-
-    active = asyncio.run(instance.find("用户是谁"))
-    completed = asyncio.run(
-        instance.find(
-            "历史完成事项",
-            intention_scope=MemoryIntentionRecallScope.COMPLETED,
-        )
-    )
-
-    assert active.memories[0].related == ()
-    assert completed.intention_scope is MemoryIntentionRecallScope.COMPLETED
-
-
-def test_filtered_completed_intention_does_not_consume_one_hop_quota(tmp_path: Path) -> None:
-    profile = document(MemoryKind.PROFILE)
-    completed = document(
-        MemoryKind.INTENTION,
-        fields={
-            "intent_name": "已经完成的事项",
-            "status": "completed",
-            "next_step": "无需继续",
-        },
-    )
-    preference = document(MemoryKind.PREFERENCE)
-    profile_uri = MemoryURI.from_address(profile.address)
-    completed_uri = MemoryURI.from_address(completed.address)
-    preference_uri = MemoryURI.from_address(preference.address)
-    completed_link = MemoryStoredLink(
-        profile_uri,
-        completed_uri,
-        MemoryLinkType.BELONGS_TO,
-    )
-    preference_link = MemoryStoredLink(
-        profile_uri,
-        preference_uri,
-        MemoryLinkType.BELONGS_TO,
-    )
-    document_codec = codec()
-    profile = document_codec.build(
-        profile.kind,
-        profile.fields,
-        metadata=profile.metadata,
-        links=(completed_link, preference_link),
-    )
-    completed = document_codec.build(
-        completed.kind,
-        completed.fields,
-        metadata=completed.metadata,
-        backlinks=(completed_link,),
-    )
-    preference = document_codec.build(
-        preference.kind,
-        preference.fields,
-        metadata=preference.metadata,
-        backlinks=(preference_link,),
-    )
-    instance = service(
-        tmp_path,
-        semantic=SemanticSearch((MemorySearchHit(profile_uri, 0.9),)),
-        summaries=SummarySearch(),
-        config=MemorySearchServiceConfig(
-            max_relation_neighbors_per_match=1,
-            max_relation_neighbors_total=1,
-        ),
-    )
-    for value in (profile, completed, preference):
-        instance.tree.write(value)
-
-    result = asyncio.run(instance.find("用户是谁", limit=1))
-
-    assert tuple(item.document.kind for item in result.memories[0].related) == (MemoryKind.PREFERENCE,)
-
-
 def test_multi_query_failure_aborts_whole_result_instead_of_returning_partial_memory(tmp_path: Path) -> None:
     profile = document(MemoryKind.PROFILE)
     uri = MemoryURI.from_address(profile.address)
@@ -245,7 +145,6 @@ def test_multi_query_failure_aborts_whole_result_instead_of_returning_partial_me
                 2,
                 None,
                 (),
-                MemoryIntentionRecallScope.ACTIVE,
                 assess_for_summary=False,
             )
         )

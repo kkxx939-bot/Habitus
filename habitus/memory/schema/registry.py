@@ -1,4 +1,4 @@
-"""加载并严格校验随包发布的六类长期记忆 Schema。"""
+"""加载并严格校验随包发布的四类长期记忆 Schema。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from habitus.memory.schema.model import (
     MemoryFieldSchema,
     MemoryFieldType,
     MemoryMergeStrategy,
-    MemoryOperationMode,
     MemorySchemaError,
     MemoryTypeSchema,
 )
@@ -25,15 +24,12 @@ _SCHEMA_FILES = {
     MemoryKind.PREFERENCE: "preferences.yaml",
     MemoryKind.ENTITY: "entities.yaml",
     MemoryKind.TOOL: "tools.yaml",
-    MemoryKind.EVENT: "events.yaml",
-    MemoryKind.INTENTION: "intentions.yaml",
 }
 _TYPE_KEYS = {
     "memory_type",
     "description",
     "path_template",
     "markdown_template",
-    "operation_mode",
     "fields",
     "min_non_empty_content_fields",
     "omit_empty_sections",
@@ -43,7 +39,6 @@ _REQUIRED_TYPE_KEYS = {
     "description",
     "path_template",
     "markdown_template",
-    "operation_mode",
     "fields",
 }
 _FIELD_KEYS = {
@@ -53,13 +48,12 @@ _FIELD_KEYS = {
     "required",
     "merge",
     "description",
-    "allowed_values",
 }
 _REQUIRED_FIELD_KEYS = {"name", "type", "role", "required", "merge", "description"}
 
 
 class MemorySchemaRegistry:
-    """固定六类记忆类型的声明注册表，不约束动态 topic/category/name。"""
+    """固定四类记忆类型的声明注册表，不约束动态 topic/category/name。"""
 
     def __init__(self, schemas: tuple[MemoryTypeSchema, ...]) -> None:
         by_kind: dict[MemoryKind, MemoryTypeSchema] = {}
@@ -125,7 +119,6 @@ def _load_schema(source: str, filename: str) -> MemoryTypeSchema:
         description=_string(payload["description"], "memory type description"),
         path_template=_string(payload["path_template"], "memory path template"),
         markdown_template=_string(payload["markdown_template"], "memory markdown template"),
-        operation_mode=MemoryOperationMode(str(payload["operation_mode"])),
         fields=fields,
         min_non_empty_content_fields=_non_negative_integer(
             payload.get("min_non_empty_content_fields", 0),
@@ -151,10 +144,6 @@ def _load_field(raw: Any, filename: str) -> MemoryFieldSchema:
         required=_boolean(payload["required"], "memory schema field required"),
         merge_strategy=MemoryMergeStrategy(str(payload["merge"])),
         description=_string(payload["description"], "memory field description"),
-        allowed_values=_string_tuple(
-            payload.get("allowed_values", []),
-            "memory field allowed_values",
-        ),
     )
 
 
@@ -180,12 +169,6 @@ def _boolean(value: Any, label: str) -> bool:
     if not isinstance(value, bool):
         raise MemorySchemaError(f"{label} must be boolean")
     return value
-
-
-def _string_tuple(value: Any, label: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise MemorySchemaError(f"{label} must be a list of strings")
-    return tuple(value)
 
 
 def _reject_unknown(payload: Mapping[str, Any], allowed: set[str], label: str) -> None:

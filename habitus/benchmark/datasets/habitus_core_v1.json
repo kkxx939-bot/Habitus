@@ -54,7 +54,7 @@
         "answer": "4K；2026 年 1 月 5 日签下云帆品牌项目时由 1080p 改为 4K。",
         "question_type": "memory_correction",
         "evidence_texts": ["从今天签下云帆品牌项目后，我的默认交付规格改为 4K，不再默认 1080p。"],
-        "metadata": {"scenarios": ["memory_update", "memory_correction", "event", "temporal_reasoning"], "kinds": ["preference", "event"]}
+        "metadata": {"scenarios": ["memory_update", "memory_correction", "temporal_reasoning"], "kinds": ["preference", "entity"]}
       }
     ]
   },
@@ -98,73 +98,6 @@
         "question_type": "tool_failure_recovery",
         "evidence_texts": ["folder=root is not writable", "改用 deliveries 目录后上传成功。"],
         "metadata": {"scenarios": ["tool_failure_recovery"], "kinds": ["tool"]}
-      }
-    ]
-  },
-  {
-    "sample_id": "intention-states",
-    "sessions": [
-      {
-        "session_id": "open",
-        "started_at": "2026-03-01T09:00:00+08:00",
-        "messages": [
-          {"role": "prompt", "content": "下周需要完成自动字幕脚本，目前还没开始。"},
-          {"role": "completion", "content": "记录为待推进事项：下周完成自动字幕脚本。"}
-        ]
-      },
-      {
-        "session_id": "waiting",
-        "started_at": "2026-03-02T09:00:00+08:00",
-        "messages": [
-          {"role": "prompt", "content": "客户片头方案已经提交，现在要等待客户确认后才能继续。"},
-          {"role": "completion", "content": "记录为等待状态：客户确认片头方案后继续。"}
-        ]
-      },
-      {
-        "session_id": "blocked",
-        "started_at": "2026-03-03T09:00:00+08:00",
-        "messages": [
-          {"role": "prompt", "content": "素材归档被 NAS 写权限阻塞，权限恢复前无法完成。"},
-          {"role": "completion", "content": "记录为阻塞状态：等待 NAS 写权限恢复后完成素材归档。"}
-        ]
-      },
-      {
-        "session_id": "completed",
-        "started_at": "2026-03-04T18:00:00+08:00",
-        "messages": [
-          {"role": "prompt", "content": "之前要发给客户的报价单今天已经发送完成。"},
-          {"role": "completion", "content": "已将发送客户报价单更新为完成。"}
-        ]
-      }
-    ],
-    "questions": [
-      {
-        "question": "当前尚未开始、需要下周推进的事项是什么？",
-        "answer": "完成自动字幕脚本。",
-        "question_type": "intention_open",
-        "evidence_texts": ["下周需要完成自动字幕脚本，目前还没开始。"],
-        "metadata": {"scenarios": ["intention_open"], "kinds": ["intention"], "intention_scope": "active"}
-      },
-      {
-        "question": "哪个事项正在等待客户触发？",
-        "answer": "等待客户确认片头方案后继续。",
-        "question_type": "intention_waiting",
-        "evidence_texts": ["等待客户确认后才能继续。"],
-        "metadata": {"scenarios": ["intention_waiting"], "kinds": ["intention"], "intention_scope": "active"}
-      },
-      {
-        "question": "哪个事项因 NAS 权限而无法继续？",
-        "answer": "素材归档。",
-        "question_type": "intention_blocked",
-        "evidence_texts": ["素材归档被 NAS 写权限阻塞，权限恢复前无法完成。"],
-        "metadata": {"scenarios": ["intention_blocked"], "kinds": ["intention"], "intention_scope": "active"}
-      },
-      {
-        "question": "历史上已经完成的客户事项是什么？",
-        "answer": "发送客户报价单。",
-        "question_type": "completed_intention_history",
-        "evidence_texts": ["之前要发给客户的报价单今天已经发送完成。"],
-        "metadata": {"scenarios": ["intention_completed", "completed_intention_history"], "kinds": ["intention"], "intention_scope": "completed"}
       }
     ]
   },
@@ -298,7 +231,7 @@
         "answer": "深圳。",
         "question_type": "cross_conversation_order",
         "evidence_texts": ["我已经搬到深圳长期办公，广州的信息被这条新状态替代。"],
-        "metadata": {"scenarios": ["cross_conversation_order", "memory_update", "temporal_reasoning"], "kinds": ["profile", "event"]}
+        "metadata": {"scenarios": ["cross_conversation_order", "memory_update", "temporal_reasoning"], "kinds": ["profile"]}
       }
     ]
   },

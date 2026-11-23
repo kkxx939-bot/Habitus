@@ -19,7 +19,6 @@ from habitus.memory.editor import (
     MemoryTransactionJournalConfig,
 )
 from habitus.memory.indexing import MemoryVectorIndexConfig
-from habitus.memory.intention import MemoryIntentionReviewConfig
 from habitus.memory.recall import (
     MemoryRecallLifecycleConfig,
 )
@@ -36,7 +35,6 @@ class MemoryConfig:
     """记忆领域全部强类型子配置的聚合。"""
 
     document: MemoryDocumentConfig = field(default_factory=MemoryDocumentConfig)
-    intention_review: MemoryIntentionReviewConfig = field(default_factory=MemoryIntentionReviewConfig)
     tree: MemoryTreeConfig = field(default_factory=MemoryTreeConfig)
     snapshot: SnapshotReadConfig = field(default_factory=SnapshotReadConfig)
     search_service: MemorySearchServiceConfig = field(default_factory=MemorySearchServiceConfig)
@@ -60,11 +58,6 @@ class MemoryConfig:
                 MemoryDocumentConfig,
                 data.get("document", {}),
                 "config.memory.document",
-            ),
-            intention_review=construct_config(
-                MemoryIntentionReviewConfig,
-                data.get("intention_review", {}),
-                "config.memory.intention_review",
             ),
             tree=construct_config(
                 MemoryTreeConfig,

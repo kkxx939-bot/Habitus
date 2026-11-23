@@ -5,7 +5,6 @@ from habitus.memory.schema.model import (
     MemoryFieldSchema,
     MemoryFieldType,
     MemoryMergeStrategy,
-    MemoryOperationMode,
     MemorySchemaError,
     MemoryTypeSchema,
 )
@@ -16,7 +15,6 @@ __all__ = [
     "MemoryFieldSchema",
     "MemoryFieldType",
     "MemoryMergeStrategy",
-    "MemoryOperationMode",
     "MemorySchemaError",
     "MemorySchemaRegistry",
     "MemoryTypeSchema",

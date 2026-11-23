@@ -1,6 +1,4 @@
-"""六类记忆地址、目录层级和 memory:// URI 的严格映射测试。"""
-
-from datetime import date
+"""四类记忆地址、目录层级和 memory:// URI 的严格映射测试。"""
 
 import pytest
 
@@ -15,8 +13,6 @@ from habitus.memory.uri import MemoryURI, MemoryURIError, MemoryURINodeType
         (MemoryAddress.preference("回答风格"), "memory://preferences/回答风格.md"),
         (MemoryAddress.entity("项目", "Habitus"), "memory://entities/项目/habitus.md"),
         (MemoryAddress.tool("workspace.inspect"), "memory://tools/workspace.inspect.md"),
-        (MemoryAddress.event(date(2026, 7, 1), "确认记忆树"), "memory://events/2026/07/01/确认记忆树.md"),
-        (MemoryAddress.intention("完成重构"), "memory://intentions/完成重构.md"),
     ],
 )
 def test_address_uri_round_trip_for_every_memory_kind(address: MemoryAddress, expected: str) -> None:
@@ -37,23 +33,19 @@ def test_address_fields_are_kind_specific() -> None:
         MemoryAddress(MemoryKind.PROFILE, name="extra")
     with pytest.raises(ValueError, match="category"):
         MemoryAddress(MemoryKind.PREFERENCE, name="topic", category="wrong")
-    with pytest.raises(ValueError, match="requires event_date"):
-        MemoryAddress(MemoryKind.EVENT, name="event")
 
 
 def test_directory_validation_and_lineage_follow_confirmed_tree_only() -> None:
-    directory = MemoryDirectory.events(2026, 7, 1)
+    directory = MemoryDirectory.entities("项目")
     assert directory.lineage() == (
-        MemoryDirectory(("events", "2026", "07", "01")),
-        MemoryDirectory(("events", "2026", "07")),
-        MemoryDirectory(("events", "2026")),
-        MemoryDirectory.events(),
+        MemoryDirectory(("entities", "项目")),
+        MemoryDirectory.entities(),
         MemoryDirectory.root(),
     )
     with pytest.raises(ValueError, match="outside"):
         MemoryDirectory(("topics",))
-    with pytest.raises(ValueError, match="calendar"):
-        MemoryDirectory(("events", "2026", "02", "30"))
+    with pytest.raises(ValueError, match="outside"):
+        MemoryDirectory(("events",))
 
 
 def test_directory_and_semantic_layer_uri_round_trip() -> None:
@@ -77,6 +69,8 @@ def test_directory_and_semantic_layer_uri_round_trip() -> None:
         "memory://preferences/topic.md/",
         " memory://profile.md",
         "memory://../profile.md",
+        "memory://events/2026/07/01/确认记忆树.md",
+        "memory://intentions/完成重构.md",
     ],
 )
 def test_uri_rejects_short_legacy_noncanonical_and_tree_escape_forms(uri: str) -> None:

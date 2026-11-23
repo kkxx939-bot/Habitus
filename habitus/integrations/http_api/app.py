@@ -228,7 +228,6 @@ def _register_memory_read_routes(router: APIRouter, handlers: RuntimeHTTPHandler
             started_on=body.started_on,
             limit=body.limit,
             kinds=body.kinds,
-            intention_scope=body.intention_scope,
         )
         return _success(request, result)
 

@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -42,15 +41,11 @@ NAME_FIELDS = [
     ("entities", "category"),
     ("entities", "name"),
     ("tools", "tool_name"),
-    ("events", "event_name"),
-    ("intentions", "intent_name"),
 ]
 KIND_OF = {
     "preferences": MemoryKind.PREFERENCE,
     "entities": MemoryKind.ENTITY,
     "tools": MemoryKind.TOOL,
-    "events": MemoryKind.EVENT,
-    "intentions": MemoryKind.INTENTION,
 }
 
 
@@ -64,12 +59,7 @@ def test_the_limit_leaves_room_for_the_md_suffix_and_the_atomic_temporary_name()
 def _item(output: str, name_field: str, value: str) -> dict[str, Any]:
     fields = dict(memory_fields(KIND_OF[output]))
     fields[name_field] = value
-    event_date = fields.get("event_date")
-    if isinstance(event_date, date):
-        fields["event_date"] = event_date.isoformat()
     item: dict[str, Any] = {"page_id": 100, **fields}
-    if output == "intentions":
-        item["confirmed"] = True
     return item
 
 
@@ -79,8 +69,6 @@ def _payload(output: str, item: dict[str, Any]) -> dict[str, Any]:
         "preferences": [],
         "entities": [],
         "tools": [],
-        "events": [],
-        "intentions": [],
         "identity_proposals": [],
         "relations": [],
     }
@@ -223,17 +211,11 @@ def test_an_overlong_model_name_goes_back_to_the_model_and_the_correction_succee
 
 
 def test_a_model_that_never_shortens_the_name_fails_as_retryable_structured_output_not_oserror() -> None:
-    overlong = _payload("events", _item("events", "event_name", _name(300)))
+    overlong = _payload("tools", _item("tools", "tool_name", _name(300)))
     provider = _ScriptedChat([overlong])
     with pytest.raises(ModelStructuredOutputError) as failed:
         _structured(provider, retries=1).complete_model("抽取记忆", model_class=MemoryCandidateBatch)
     assert len(provider.requests) == 2
     assert not isinstance(failed.value, OSError)
-    assert f"event_name must be at most {LIMIT} UTF-8 bytes, got 300" in str(failed.value.__cause__)
+    assert f"tool_name must be at most {LIMIT} UTF-8 bytes, got 300" in str(failed.value.__cause__)
     assert memory_job_failure_kind(failed.value) is MemoryJobFailureKind.RETRYABLE
-
-
-def test_event_directory_dates_are_not_part_of_the_name_budget() -> None:
-    item = _item("events", "event_name", _name(LIMIT))
-    item["event_date"] = date(2026, 12, 31).isoformat()
-    MemoryCandidateBatch.model_validate(_payload("events", item))

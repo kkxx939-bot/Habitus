@@ -78,14 +78,11 @@ def memory_logical_content_digest(
     fields: Mapping[str, Any],
     links: tuple[MemoryStoredLink, ...],
     backlinks: tuple[MemoryStoredLink, ...],
-    confirms_intention: bool,
 ) -> str:
     """计算不受提交时间和 revision 影响的最终节点内容摘要。"""
 
     uri.to_address()
     resolved_kind = MemoryKind(kind)
-    if confirms_intention and resolved_kind is not MemoryKind.INTENTION:
-        raise ValueError("only Intention logical content can refresh confirmation time")
     return canonical_digest(
         {
             "uri": str(uri),
@@ -93,7 +90,6 @@ def memory_logical_content_digest(
             "fields": fields,
             "links": [link.to_dict() for link in links],
             "backlinks": [link.to_dict() for link in backlinks],
-            "confirms_intention": confirms_intention,
         }
     )
 
@@ -108,7 +104,6 @@ class MemoryCommitLogicalWrite:
     fields: Mapping[str, Any]
     links: tuple[MemoryStoredLink, ...]
     backlinks: tuple[MemoryStoredLink, ...]
-    confirms_intention: bool
 
     def __post_init__(self) -> None:
         if self.before.identity != str(self.uri):
@@ -124,8 +119,6 @@ class MemoryCommitLogicalWrite:
             raise ValueError("logical write forward link has the wrong source URI")
         if any(link.to_uri != self.uri for link in self.backlinks):
             raise ValueError("logical write backlink has the wrong target URI")
-        if self.confirms_intention and kind is not MemoryKind.INTENTION:
-            raise ValueError("only an Intention logical write can refresh confirmation time")
         if self.before.exists:
             if not isinstance(self.before.value, MemoryDocument):
                 raise TypeError("existing logical write snapshot must contain a MemoryDocument")
@@ -140,7 +133,6 @@ class MemoryCommitLogicalWrite:
             fields=self.fields,
             links=self.links,
             backlinks=self.backlinks,
-            confirms_intention=self.confirms_intention,
         )
 
 
@@ -239,9 +231,6 @@ class MemoryCommitPlan:
 
             if not before.exists and (mutation is None or mutation.action is not MemoryMutationAction.CREATE):
                 raise MemoryCommitError("missing write target requires a CREATE mutation")
-            confirms_intention = kind is MemoryKind.INTENTION and (
-                not before.exists or (mutation is not None and mutation.confirms_intention)
-            )
             writes.append(
                 MemoryCommitLogicalWrite(
                     before=before,
@@ -250,7 +239,6 @@ class MemoryCommitPlan:
                     fields=fields,
                     links=links,
                     backlinks=backlinks,
-                    confirms_intention=confirms_intention,
                 )
             )
         return tuple(writes)
@@ -325,20 +313,11 @@ class MemoryCommitWrite:
                 raise ValueError("existing commit write must advance one revision")
             if self.after.metadata.created_at != self.before.value.metadata.created_at:
                 raise ValueError("existing commit write cannot change created_at")
-            before_confirmation = self.before.value.metadata.last_confirmed_at
-            after_confirmation = self.after.metadata.last_confirmed_at
-            if after_confirmation != before_confirmation and after_confirmation != self.after.metadata.updated_at:
-                raise ValueError("existing Intention confirmation must refresh to the commit timestamp")
         else:
             if self.after.metadata.revision != 1:
                 raise ValueError("new commit write must start at revision 1")
             if self.after.metadata.created_at != self.after.metadata.updated_at:
                 raise ValueError("new commit write timestamps must start equal")
-            if (
-                self.after.kind is MemoryKind.INTENTION
-                and self.after.metadata.last_confirmed_at != self.after.metadata.created_at
-            ):
-                raise ValueError("new Intention confirmation must start at its creation timestamp")
 
     @property
     def uri(self) -> MemoryURI:
@@ -554,15 +533,9 @@ class MemoryCommitTransaction:
         for logical in plan.logical_writes():
             if logical.before.exists:
                 assert isinstance(logical.before.value, MemoryDocument)
-                metadata = logical.before.value.metadata.next_revision(
-                    timestamp,
-                    refresh_confirmation=logical.confirms_intention,
-                )
+                metadata = logical.before.value.metadata.next_revision(timestamp)
             else:
-                metadata = MemoryDocumentMetadata.initial(
-                    timestamp,
-                    confirmed=logical.kind is MemoryKind.INTENTION,
-                )
+                metadata = MemoryDocumentMetadata.initial(timestamp)
             after = self.tree.document_codec.build(
                 logical.kind,
                 logical.fields,

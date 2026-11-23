@@ -10,10 +10,9 @@ from habitus.memory.editor.retrieval.model import (
     MemoryRetrievalError,
 )
 from habitus.memory.editor.retrieval.query import ConversationSegmentQueryBuilder
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind
 from habitus.memory.retrieval import MemorySearchHit, MemorySemanticSearch
-from habitus.memory.schema import MemoryOperationMode, MemorySchemaRegistry
+from habitus.memory.schema import MemorySchemaRegistry
 from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
 from habitus.pre.conversation import ConversationMessageRole, ConversationSegment
@@ -72,9 +71,6 @@ class MemoryRelatedRetriever:
         fixed: set[MemoryURI] = set()
         roots: set[MemoryURI] = set()
         for schema in self.schema_registry.all():
-            # Event 虽只追加，仍是 Intention 状态判断的必要时间线。
-            if schema.operation_mode is MemoryOperationMode.ADD_ONLY and schema.kind is not MemoryKind.EVENT:
-                continue
             if schema.kind is MemoryKind.PROFILE:
                 fixed.add(MemoryURI.from_address(MemoryAddress.profile()))
                 continue
@@ -120,7 +116,6 @@ class MemoryRelatedRetriever:
                 query,
                 roots=roots,
                 kinds=(),
-                intention_scope=MemoryIntentionRecallScope.ALL,
                 limit=self.config.search_limit,
             )
         except Exception as exc:

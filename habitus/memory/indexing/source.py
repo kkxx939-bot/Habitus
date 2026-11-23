@@ -8,8 +8,7 @@ from contextlib import contextmanager
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.memory.indexing.config import MemoryVectorIndexConfig
 from habitus.memory.indexing.model import MemoryIndexSource
-from habitus.memory.intention import memory_index_kind
-from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
+from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryLevel
 from habitus.memory.tree import MemoryDocumentLockKeyspace, MemoryTree
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
 
@@ -119,16 +118,12 @@ class MemoryIndexSourceReader:
         document = self.tree.read(address)
         uri = MemoryURI.from_address(address)
         content = self._bounded(f"[{address.kind.value}] {uri.decoded_path}\n{document.markdown_body.strip()}")
-        intention_status = document.fields.get("status") if address.kind is MemoryKind.INTENTION else None
         return MemoryIndexSource(
             uri=uri,
             level=MemoryLevel.DETAIL,
             directory=MemoryDirectory.for_address(address),
             content=content,
-            index_kind=memory_index_kind(
-                address.kind,
-                intention_status=intention_status,
-            ),
+            index_kind=address.kind.value,
             revision=document.metadata.revision,
         )
 

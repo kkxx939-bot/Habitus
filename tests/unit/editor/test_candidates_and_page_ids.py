@@ -1,6 +1,4 @@
-"""六类候选、会话证据约束和一次解析周期 page_id 测试。"""
-
-from datetime import UTC
+"""四类候选、会话证据约束和一次解析周期 page_id 测试。"""
 
 import pytest
 
@@ -27,18 +25,13 @@ def empty_output() -> dict[str, object]:
         "preferences": [],
         "entities": [],
         "tools": [],
-        "events": [],
-        "intentions": [],
         "identity_proposals": [],
         "relations": [],
     }
 
 
 def candidate_item(kind: MemoryKind, page_id: int, **controls: object) -> dict[str, object]:
-    item = {"page_id": page_id, **memory_fields(kind), **controls}
-    if kind is MemoryKind.EVENT:
-        item["event_date"] = "2026-07-01"
-    return item
+    return {"page_id": page_id, **memory_fields(kind), **controls}
 
 
 def test_candidate_schema_requires_every_partition_and_rejects_unknown_or_coerced_fields() -> None:
@@ -61,26 +54,22 @@ def test_candidate_schema_requires_every_partition_and_rejects_unknown_or_coerce
         MemoryCandidateBatch.model_validate(invalid_page)
 
 
-def test_all_six_memory_kinds_parse_with_their_own_schema_and_intention_confirmation() -> None:
+def test_all_four_memory_kinds_parse_with_their_own_schema() -> None:
     output = empty_output()
     mapping = {
         "profile": MemoryKind.PROFILE,
         "preferences": MemoryKind.PREFERENCE,
         "entities": MemoryKind.ENTITY,
         "tools": MemoryKind.TOOL,
-        "events": MemoryKind.EVENT,
-        "intentions": MemoryKind.INTENTION,
     }
     for offset, (field, kind) in enumerate(mapping.items()):
-        controls = {"confirmed": True} if kind is MemoryKind.INTENTION else {}
-        output[field] = [candidate_item(kind, 100 + offset, **controls)]
+        output[field] = [candidate_item(kind, 100 + offset)]
     batch = MemoryCandidateBatch.model_validate(output)
     assert tuple(item.kind for item in batch.iter_candidates()) == tuple(mapping.values())
 
-    missing_confirmation = empty_output()
-    missing_confirmation["intentions"] = [candidate_item(MemoryKind.INTENTION, 100)]
-    with pytest.raises(MemoryCandidateError, match="confirmed"):
-        MemoryCandidateBatch.model_validate(missing_confirmation)
+    for removed in ("events", "intentions"):
+        with pytest.raises(MemoryCandidateError, match="unknown fields"):
+            MemoryCandidateBatch.model_validate({**empty_output(), removed: []})
 
 
 def test_page_ids_are_deterministic_and_existing_ids_cannot_be_redirected() -> None:
@@ -105,13 +94,13 @@ def test_tool_candidate_requires_exact_successful_tool_name_from_conversation() 
     batch = MemoryCandidateBatch.model_validate(output)
     empty_old = SnapshotBatch((), 0)
 
-    batch.validate_context(segment(messages=tool_turn()), empty_old, MemoryPageIdMap(), zone=UTC)
+    batch.validate_context(segment(messages=tool_turn()), empty_old, MemoryPageIdMap())
     wrong_name = empty_output()
     wrong_name["tools"] = [{**candidate_item(MemoryKind.TOOL, 100), "tool_name": "translated.inspect"}]
     with pytest.raises(MemoryCandidateError, match="successful tool_call"):
         MemoryCandidateBatch.model_validate(wrong_name).validate_context(
             segment(messages=tool_turn()), empty_old, MemoryPageIdMap()
-        , zone=UTC)
+        )
 
 
 def test_tool_failure_recovery_requires_failure_before_later_success() -> None:
@@ -150,48 +139,13 @@ def test_tool_failure_recovery_requires_failure_before_later_success() -> None:
     MemoryCandidateBatch.model_validate(output).validate_context(
         ConversationSegment("conversation-1", "segment-1", messages),
         SnapshotBatch((), 0),
-        MemoryPageIdMap(), zone=UTC,
+        MemoryPageIdMap(),
     )
 
     no_failure = segment(messages=tool_turn())
     with pytest.raises(MemoryCandidateError, match="failure followed"):
         MemoryCandidateBatch.model_validate(output).validate_context(
             no_failure, SnapshotBatch((), 0), MemoryPageIdMap()
-        , zone=UTC)
-
-
-def test_completed_intention_must_reuse_existing_page_and_be_explicitly_confirmed() -> None:
-    old = document(MemoryKind.INTENTION)
-    old_batch = snapshot_batch(old)
-    page_ids = MemoryPageIdMap.from_snapshots(old_batch)
-    output = empty_output()
-    output["intentions"] = [
-        {
-            "page_id": 1,
-            "intent_name": old.fields["intent_name"],
-            "status": "completed",
-            "confirmed": True,
-        }
-    ]
-    MemoryCandidateBatch.model_validate(output).validate_context(segment(), old_batch, page_ids, zone=UTC)
-
-    output["intentions"][0]["confirmed"] = False
-    with pytest.raises(MemoryCandidateError, match="explicit confirmation"):
-        MemoryCandidateBatch.model_validate(output).validate_context(segment(), old_batch, page_ids, zone=UTC)
-
-
-def test_event_candidate_uses_schema_date_and_rejects_only_future_date_invariant() -> None:
-    output = empty_output()
-    output["events"] = [candidate_item(MemoryKind.EVENT, 100)]
-    batch = MemoryCandidateBatch.model_validate(output)
-    batch.validate_context(segment(), SnapshotBatch((), 0), MemoryPageIdMap(), zone=UTC)
-
-    output["events"][0]["event_date"] = "2099-01-01"
-    with pytest.raises(MemoryCandidateError, match="future event date"):
-        MemoryCandidateBatch.model_validate(output).validate_context(
-            segment(),
-            SnapshotBatch((), 0),
-            MemoryPageIdMap(), zone=UTC,
         )
 
 
@@ -219,11 +173,11 @@ def test_tool_failure_recovery_carried_over_verbatim_keeps_its_old_source() -> N
             "constraints": "调用结束后工作目录会重置；依赖特定目录的命令应在同一次调用内显式 `cd`。",
         }
     ]
-    MemoryCandidateBatch.model_validate(output).validate_context(only_successes, old_batch, page_ids, zone=UTC)
+    MemoryCandidateBatch.model_validate(output).validate_context(only_successes, old_batch, page_ids)
 
     output["tools"][0]["failure_recovery"] = old_recovery + "另：本段新写的一句恢复办法。"
     with pytest.raises(MemoryCandidateError, match="failure followed"):
-        MemoryCandidateBatch.model_validate(output).validate_context(only_successes, old_batch, page_ids, zone=UTC)
+        MemoryCandidateBatch.model_validate(output).validate_context(only_successes, old_batch, page_ids)
 
     old_without_recovery = {name: value for name, value in old_fields.items() if name != "failure_recovery"}
     fresh_batch = snapshot_batch(document(MemoryKind.TOOL, fields=old_without_recovery))
@@ -231,46 +185,6 @@ def test_tool_failure_recovery_carried_over_verbatim_keeps_its_old_source() -> N
     with pytest.raises(MemoryCandidateError, match="failure followed"):
         MemoryCandidateBatch.model_validate(output).validate_context(
             only_successes, fresh_batch, MemoryPageIdMap.from_snapshots(fresh_batch)
-        , zone=UTC)
-
-
-def test_event_date_is_checked_against_the_subjects_local_day() -> None:
-    """他在 UTC+8 早上 07:30 说"我今天早上跑了 5 公里"：消息存 2026-10-25T23:30Z，本地已是 10-26（M6）。"""
-
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-
-    from habitus.pre.conversation import ConversationMessage, ConversationMessageRole
-
-    morning = (
-        ConversationMessage(
-            message_id="m-0",
-            sequence=0,
-            role=ConversationMessageRole.PROMPT,
-            occurred_at=datetime(2026, 10, 25, 23, 30, tzinfo=UTC),
-            content="我今天早上跑了 5 公里",
-        ),
-        ConversationMessage(
-            message_id="m-1",
-            sequence=1,
-            role=ConversationMessageRole.COMPLETION,
-            occurred_at=datetime(2026, 10, 25, 23, 30, 5, tzinfo=UTC),
-            content="记下了。",
-        ),
-    )
-    shanghai = ZoneInfo("Asia/Shanghai")
-    output = empty_output()
-    output["events"] = [candidate_item(MemoryKind.EVENT, 100)]
-    output["events"][0]["event_date"] = "2026-10-26"
-    batch = MemoryCandidateBatch.model_validate(output)
-    batch.validate_context(segment(messages=morning), SnapshotBatch((), 0), MemoryPageIdMap(), zone=shanghai)
-    with pytest.raises(MemoryCandidateError, match="future event date"):
-        batch.validate_context(segment(messages=morning), SnapshotBatch((), 0), MemoryPageIdMap(), zone=UTC)
-
-    output["events"][0]["event_date"] = "2026-10-27"
-    with pytest.raises(MemoryCandidateError, match="future event date"):
-        MemoryCandidateBatch.model_validate(output).validate_context(
-            segment(messages=morning), SnapshotBatch((), 0), MemoryPageIdMap(), zone=shanghai
         )
 
 
@@ -335,8 +249,7 @@ def test_context_violations_keep_their_fixed_check_order_and_wording() -> None:
 
     output = empty_output()
     output["tools"] = [candidate_item(MemoryKind.TOOL, 101)]
-    output["events"] = [{**candidate_item(MemoryKind.EVENT, 102), "event_date": "2999-01-01"}]
-    output["intentions"] = [{**candidate_item(MemoryKind.INTENTION, 103, confirmed=True), "status": "completed"}]
+    output["preferences"] = [candidate_item(MemoryKind.PREFERENCE, 102)]
     output["relations"] = [
         {"action": "remove", "from_page_id": 101, "to_page_id": 102, "link_type": "caused_by"},
         {"action": "add", "from_page_id": 101, "to_page_id": 500, "link_type": "caused_by"},
@@ -348,7 +261,7 @@ def test_context_violations_keep_their_fixed_check_order_and_wording() -> None:
     batch = MemoryCandidateBatch.model_validate(output)
     empty_old = SnapshotBatch((), 0)
 
-    violations = batch.context_violations(segment(), empty_old, MemoryPageIdMap(), zone=UTC)
+    violations = batch.context_violations(segment(), empty_old, MemoryPageIdMap())
 
     assert [violation.describe() for violation in violations] == [
         "relations add 101->500 caused_by: relation candidate references an unknown to_page_id",
@@ -357,9 +270,7 @@ def test_context_violations_keep_their_fixed_check_order_and_wording() -> None:
         "relations add 1->101 caused_by: identity proposal source cannot also be referenced by a relation candidate",
         "relations remove 101->102 caused_by: relation remove must reference two existing memory page_ids",
         "tools page_id=101: tool candidate requires a matching successful tool_call/tool_result pair",
-        "events page_id=102: future event date cannot represent an occurred Event",
-        "intentions page_id=103: completed intention must target an existing intention read in this batch",
     ]
     with pytest.raises(MemoryCandidateError) as raised:
-        batch.validate_context(segment(), empty_old, MemoryPageIdMap(), zone=UTC)
+        batch.validate_context(segment(), empty_old, MemoryPageIdMap())
     assert str(raised.value) == "relation candidate references an unknown to_page_id"

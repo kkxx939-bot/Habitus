@@ -10,11 +10,6 @@ from enum import Enum
 from habitus.foundation.validation import is_int, is_str_list
 from habitus.memory.conversation.indexing import ConversationSummaryMatch
 from habitus.memory.document import MemoryDocument, MemoryStoredLink
-from habitus.memory.intention import (
-    MemoryIntentionRecallScope,
-    MemoryIntentionReview,
-    intention_matches_scope,
-)
 from habitus.memory.model import MemoryKind
 from habitus.memory.recall import MemoryTemperature
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
@@ -356,13 +351,11 @@ class MemoryRelatedMemory:
 
     relation: MemoryStoredLink
     document: MemoryDocument
-    intention_review: MemoryIntentionReview | None = None
 
     def __post_init__(self) -> None:
         uri = MemoryURI.from_address(self.document.address)
         if uri not in {self.relation.from_uri, self.relation.to_uri}:
             raise ValueError("related memory document is not a relation endpoint")
-        _validate_intention_review(self.document, self.intention_review)
 
 
 @dataclass(frozen=True)
@@ -372,7 +365,6 @@ class MemoryMatchedMemory:
     hit: MemorySearchHit
     document: MemoryDocument
     matched_queries: tuple[str, ...]
-    intention_review: MemoryIntentionReview | None = None
     related: tuple[MemoryRelatedMemory, ...] = ()
 
     def __post_init__(self) -> None:
@@ -384,7 +376,6 @@ class MemoryMatchedMemory:
             raise TypeError("matched memory queries must be non-empty strings")
         if len(set(self.matched_queries)) != len(self.matched_queries):
             raise ValueError("matched memory queries must be unique")
-        _validate_intention_review(self.document, self.intention_review)
         identities = tuple(item.relation.identity for item in self.related)
         if identities != tuple(sorted(identities)) or len(set(identities)) != len(identities):
             raise ValueError("matched memory relations must be unique and sorted")
@@ -423,7 +414,6 @@ class MemorySearchResult:
     query: str
     target_roots: tuple[MemoryURI, ...]
     kinds: tuple[MemoryKind, ...]
-    intention_scope: MemoryIntentionRecallScope
     plan: MemoryQueryPlan
     query_results: tuple[MemoryQueryResult, ...]
     memories: tuple[MemoryMatchedMemory, ...]
@@ -444,10 +434,6 @@ class MemorySearchResult:
         if len(normalized_kinds) != len(set(normalized_kinds)):
             raise ValueError("search result kinds must be unique")
         object.__setattr__(self, "kinds", normalized_kinds)
-        scope = MemoryIntentionRecallScope(self.intention_scope)
-        object.__setattr__(self, "intention_scope", scope)
-        if scope is MemoryIntentionRecallScope.COMPLETED and normalized_kinds != (MemoryKind.INTENTION,):
-            raise ValueError("completed Intention search must target only Intention memory")
         if self.plan.original_query != self.query:
             raise ValueError("search result query plan does not match the original query")
         stages = tuple(item.stage for item in self.degradations)
@@ -461,11 +447,6 @@ class MemorySearchResult:
         for memory in self.memories:
             if normalized_kinds and memory.document.kind not in normalized_kinds:
                 raise ValueError("direct search result is outside its requested memory kinds")
-            if memory.document.kind is MemoryKind.INTENTION and not intention_matches_scope(
-                memory.document.fields.get("status"),
-                scope,
-            ):
-                raise ValueError("direct Intention result is outside its requested recall scope")
         fallback_expected = tuple(
             sorted(
                 self.summary_fallbacks,
@@ -511,23 +492,6 @@ def _finite_score(value: object, label: str) -> float:
     if not math.isfinite(score):
         raise ValueError(f"{label} must be finite")
     return score
-
-
-def _validate_intention_review(
-    document: MemoryDocument,
-    review: MemoryIntentionReview | None,
-) -> None:
-    """确保复核提示只附着在活动 Intention，不变成通用记忆字段。"""
-
-    active = document.kind is MemoryKind.INTENTION and document.fields.get("status") != "completed"
-    if not active:
-        if review is not None:
-            raise ValueError("only active Intention memory accepts a review reminder")
-        return
-    if review is None:
-        raise ValueError("active Intention memory requires a review reminder")
-    if review.last_confirmed_at != document.metadata.last_confirmed_at:
-        raise ValueError("Intention review reminder does not match document confirmation metadata")
 
 
 __all__ = [

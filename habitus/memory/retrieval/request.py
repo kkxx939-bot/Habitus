@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryKind
 from habitus.memory.retrieval.model import MemorySearchServiceConfig
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
@@ -20,7 +19,6 @@ class MemorySearchRequest:
     limit: int
     score_threshold: float | None
     kinds: tuple[MemoryKind, ...]
-    intention_scope: MemoryIntentionRecallScope
 
 
 class MemorySearchRequestNormalizer:
@@ -37,7 +35,6 @@ class MemorySearchRequestNormalizer:
         limit: int | None,
         score_threshold: float | None,
         kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
     ) -> MemorySearchRequest:
         """依次校验查询、根目录、上限、阈值和过滤条件，顺序决定多处非法时先报哪一处。"""
 
@@ -45,8 +42,7 @@ class MemorySearchRequestNormalizer:
         roots = self.roots(target_uris)
         maximum = self.limit(limit)
         threshold = self.threshold(score_threshold)
-        allowed_kinds, allowed_intention_scope = self.recall_filters(kinds, intention_scope)
-        return MemorySearchRequest(normalized, roots, maximum, threshold, allowed_kinds, allowed_intention_scope)
+        return MemorySearchRequest(normalized, roots, maximum, threshold, self.kinds(kinds))
 
     def query(self, value: str) -> str:
         if not value.strip():
@@ -100,24 +96,6 @@ class MemorySearchRequestNormalizer:
         if len(normalized) != len(set(normalized)):
             raise ValueError("memory search kinds must be unique")
         return normalized
-
-    @classmethod
-    def recall_filters(
-        cls,
-        kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
-    ) -> tuple[tuple[MemoryKind, ...], MemoryIntentionRecallScope]:
-        """规范直接候选过滤，并给历史 completed Intention 提供显式入口。"""
-
-        normalized_kinds = cls.kinds(kinds)
-        scope = MemoryIntentionRecallScope(intention_scope)
-        if scope is MemoryIntentionRecallScope.ALL:
-            raise ValueError("ALL Intention recall is reserved for Memory Editor old-memory reads")
-        if scope is not MemoryIntentionRecallScope.COMPLETED:
-            return normalized_kinds, scope
-        if normalized_kinds and normalized_kinds != (MemoryKind.INTENTION,):
-            raise ValueError("completed Intention search cannot include other memory kinds")
-        return (MemoryKind.INTENTION,), scope
 
 
 __all__ = ["MemorySearchRequest", "MemorySearchRequestNormalizer"]

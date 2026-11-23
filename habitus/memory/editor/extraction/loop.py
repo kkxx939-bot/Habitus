@@ -65,11 +65,10 @@ class MemoryExtractionLoop:
     ) -> None:
         self.client = client
         self.retriever = retriever
-        self.zone = zone
         self.config = config or MemoryExtractionConfig()
         self.mutation_reader = mutation_reader or MemoryMutationReadSetLoader(retriever.snapshot_reader)
         self.mutation_planner = mutation_planner or MemoryMutationPlanner(retriever.schema_registry)
-        self.prompt_builder = MemoryExtractionPromptBuilder(self.config, retriever.schema_registry, zone=zone)
+        self.prompt_builder = MemoryExtractionPromptBuilder(self.config, zone=zone)
 
     def turn_fits_whole(self, whole: ConversationSegment) -> bool:
         """整轮拼起来能不能一次抽取：对话材料（不带旧记忆的检索判定与候选两种请求，按真实请求投影估）放得进
@@ -138,13 +137,11 @@ class MemoryExtractionLoop:
         )
         try:
             candidates = candidate_response.value
-            violations = candidates.context_violations(segment, old_memories, page_ids, zone=self.zone)
+            violations = candidates.context_violations(segment, old_memories, page_ids)
             if violations:
                 candidates = await self._repaired_candidates(candidate_request, candidate_response, violations)
-            candidates, rejections = candidates.without_context_violations(
-                segment, old_memories, page_ids, zone=self.zone
-            )
-            candidates.validate_context(segment, old_memories, page_ids, zone=self.zone)
+            candidates, rejections = candidates.without_context_violations(segment, old_memories, page_ids)
+            candidates.validate_context(segment, old_memories, page_ids)
         except MemoryCandidateError as exc:
             raise MemoryExtractionPermanentError("memory candidate batch failed source-context validation") from exc
 

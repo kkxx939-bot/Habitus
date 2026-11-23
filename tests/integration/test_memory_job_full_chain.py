@@ -118,8 +118,6 @@ class DispatchingChatProvider:
                 "preferences": self.preferences,
                 "entities": [],
                 "tools": [],
-                "events": [],
-                "intentions": [],
                 "identity_proposals": [],
                 "relations": [],
             },
@@ -458,133 +456,10 @@ def _empty_candidates() -> dict[str, list[object]]:
             "preferences",
             "entities",
             "tools",
-            "events",
-            "intentions",
             "identity_proposals",
             "relations",
         )
     }
-
-
-def _job12_first_session(_visible: dict[str, object]) -> dict[str, object]:
-    batch = _empty_candidates()
-    batch["preferences"] = [{"page_id": 100, "topic": "源码审查", "content": "- 审查项目代码时只看源码。"}]
-    batch["entities"] = [
-        {"page_id": 101, "category": "软件项目", "name": "Habitus", "summary": "Habitus 是一个长期记忆软件项目。"}
-    ]
-    batch["events"] = [
-        {
-            "page_id": 102,
-            "event_date": "2026-07-01",
-            "event_name": "完成 Habitus memory 源码审查",
-            "summary": "2026-07-01，助手完成了对 Habitus memory 子系统的源码审查。",
-        }
-    ]
-    return batch
-
-
-def _job12_rewrite(visible: dict[str, object]) -> dict[str, object]:
-    """对话 029 的形态：改写旧 Event、更新偏好与 Habitus、新建 OpenViking 并加 derived_from。"""
-
-    page_of = {item["uri"]: item["page_id"] for item in visible["existing_page_ids"]}
-    habitus = page_of["memory://entities/软件项目/habitus.md"]
-    batch = _empty_candidates()
-    batch["preferences"] = [
-        {
-            "page_id": page_of["memory://preferences/源码审查.md"],
-            "topic": "源码审查",
-            "content": "- 审查项目代码时只看源码。\n- 回答项目来源关系时先查本机源码。",
-        }
-    ]
-    batch["entities"] = [
-        {
-            "page_id": habitus,
-            "category": "软件项目",
-            "name": "Habitus",
-            "summary": "Habitus 是一个长期记忆软件项目，其 memory 子系统参考 OpenViking 实现。",
-        },
-        {
-            "page_id": 200,
-            "category": "软件项目",
-            "name": "OpenViking",
-            "summary": "OpenViking 是一个会话记忆软件项目。",
-        },
-    ]
-    batch["events"] = [
-        {
-            "page_id": page_of["memory://events/2026/07/01/完成%20habitus%20memory%20源码审查.md"],
-            "event_date": "2026-07-01",
-            "event_name": "完成 Habitus memory 源码审查",
-            "summary": "2026-07-01，助手完成了 Habitus memory 与 OpenViking 的对比审查。",
-            "details": "审查未将注释或 TODO 视为功能证据。",
-        }
-    ]
-    batch["relations"] = [{"action": "add", "from_page_id": habitus, "to_page_id": 200, "link_type": "derived_from"}]
-    return batch
-
-
-def test_candidate_rewriting_an_old_event_keeps_it_and_still_commits_the_rest_of_the_batch(
-    tmp_path: Path,
-) -> None:
-    """主链端到端扩 3 份 Job #12：旧 Event 以只读给模型；模型仍改写它时保留旧的、记 NOOP，同批其余照常写入。"""
-
-    config = runtime_config(tmp_path, max_attempts=1)
-    providers, vectors, chats, _vector_backends = dependencies()
-    observer = RecordingObserver()
-    runtime = build_runtime(
-        config,
-        providers=providers,
-        vector_stores=vectors,
-        path_lock=PathLock(ProcessLocalLockStore()),
-        observer=observer,
-    )
-    runtime.initialize()
-    chats[0].candidate_script.extend([_job12_first_session, _job12_rewrite])
-    for conversation_id, day in (("conversation-review", date(2026, 7, 1)), ("conversation-compare", date(2026, 7, 2))):
-        address = ConversationAddress(conversation_id, day)
-        runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
-            address,
-            ConversationBatch(conversation_id, closed_turn(prompt="审查 Habitus memory 源码")),
-            after_turn=True,
-        )
-        runtime.components.workflow.enqueuer.flush(address)
-    first = asyncio.run(runtime.run_next())
-    assert first.job is not None and first.job.status is MemoryJobStatus.COMMITTED
-    memory_root = tmp_path / "data" / "memory"
-    event_path = memory_root / "events" / "2026" / "07" / "01" / "完成 habitus memory 源码审查.md"
-    event_before = event_path.read_bytes()
-
-    second = asyncio.run(runtime.run_next())
-
-    assert second.job is not None and second.job.status is MemoryJobStatus.COMMITTED
-    assert chats[0].candidate_script == []
-    assert second.change_receipt is not None
-    assert sorted(str(item.uri) for item in second.change_receipt.node_changes) == [
-        "memory://entities/软件项目/habitus.md",
-        "memory://entities/软件项目/openviking.md",
-        "memory://preferences/源码审查.md",
-    ]
-    assert event_path.read_bytes() == event_before
-    habitus_text = (memory_root / "entities" / "软件项目" / "habitus.md").read_text(encoding="utf-8")
-    assert "参考 OpenViking" in habitus_text and "derived_from" in habitus_text
-    assert "先查本机源码" in (memory_root / "preferences" / "源码审查.md").read_text(encoding="utf-8")
-    plans = [event for event in observer.events if (event.category, event.operation) == ("workflow", "memory_plan")]
-    assert [(event.context.memory_sequence, event.attributes["read_only_noop_count"]) for event in plans] == [
-        (first.job.memory_sequence, 0),
-        (second.job.memory_sequence, 1),
-    ]
-
-    request = chats[0].candidate_requests[1]
-    visible = json.loads(str(request.messages[-1].content).split("\n", 1)[1])
-    read_only = {item["uri"]: item["read_only"] for item in visible["old_memory_snapshots"] if item["state"] == "found"}
-    assert read_only == {
-        "memory://entities/软件项目/habitus.md": False,
-        "memory://events/2026/07/01/完成%20habitus%20memory%20源码审查.md": True,
-        "memory://preferences/源码审查.md": False,
-    }
-    assert {item["uri"]: item["read_only"] for item in visible["existing_page_ids"]} == read_only
-    system = "".join(str(item.content) for item in request.messages if item.role == "system")
-    assert "read_only 为 true 的旧节点" in system and "另记一条新 Event" in system
 
 
 def test_retrieval_search_failure_still_fails_job_instead_of_ending_at_limit(
@@ -820,21 +695,12 @@ _GOOD_PREFERENCE = {"page_id": 150, "topic": "回答风格", "content": "- 偏�
 
 
 def _seed_session(_visible: dict[str, object]) -> dict[str, object]:
-    """第一场会话种下实体、Event、Intention 与 tool，供下一场会话的候选引用。"""
+    """第一场会话种下实体与 tool，供下一场会话的候选引用。"""
 
     batch = _empty_candidates()
     batch["entities"] = [
         {"page_id": 100, "category": "软件项目", "name": "Habitus", "summary": "Habitus 是长期记忆项目。"}
     ]
-    batch["events"] = [
-        {
-            "page_id": 101,
-            "event_date": "2026-07-01",
-            "event_name": "完成 Habitus 审查",
-            "summary": "2026-07-01 完成审查。",
-        }
-    ]
-    batch["intentions"] = [{"page_id": 102, "intent_name": "写周报", "status": "open", "confirmed": True}]
     batch["tools"] = [{"page_id": 103, "tool_name": "workspace.inspect", "purpose": "检查工作区状态。"}]
     return batch
 
@@ -892,21 +758,16 @@ def _plan_events(observer: RecordingObserver) -> list[ObservationEvent]:
 def test_failing_candidate_after_repair_is_dropped_and_the_rest_of_the_batch_and_later_jobs_commit(
     tmp_path: Path,
 ) -> None:
-    """裁定 82：合格偏好 + 一条另记新 Event 却沿用同日同名的候选，修补后仍不合格 → 只丢那一条，Job 照常提交，
+    """裁定 82：合格偏好 + 一条用新编号沿用已有实体地址的候选，修补后仍不合格 → 只丢那一条，Job 照常提交，
     回执记剔除 1 条及原因，另一场会话的下一个 Job 随后提交。"""
 
     runtime, chats, _backends, observer = _seeded_runtime(tmp_path)
-    same_day_same_name = _with_good_preference(
-        events=lambda _visible: [
-            {
-                "page_id": 160,
-                "event_date": "2026-07-01",
-                "event_name": "完成 Habitus 审查",
-                "summary": "2026-07-01 补充对比结论。",
-            }
+    same_entity_new_page = _with_good_preference(
+        entities=lambda _visible: [
+            {"page_id": 160, "category": "软件项目", "name": "Habitus", "summary": "Habitus 补充对比结论。"}
         ]
     )
-    chats[0].candidate_script.append(same_day_same_name)
+    chats[0].candidate_script.append(same_entity_new_page)
     _enqueue(runtime, "conversation-x", date(2026, 7, 1), closed_turn())
     _enqueue(runtime, "conversation-y", date(2026, 7, 2), closed_turn(prompt="另一场会话：我喜欢中文回答"))
     calls_before = chats[0].response_names.count("memory_candidate_batch")
@@ -917,12 +778,12 @@ def test_failing_candidate_after_repair_is_dropped_and_the_rest_of_the_batch_and
     assert chats[0].response_names.count("memory_candidate_batch") - calls_before == 2
     memory_root = tmp_path / "data" / "memory"
     assert (memory_root / "preferences" / "回答风格.md").exists()
-    assert "补充对比结论" not in next((memory_root / "events").rglob("*.md")).read_text(encoding="utf-8")
+    assert "补充对比结论" not in (memory_root / "entities" / "软件项目" / "habitus.md").read_text(encoding="utf-8")
     plan = _plan_events(observer)[-1]
     assert plan.context.memory_sequence == second.job.memory_sequence
     assert plan.attributes["source_rejected_count"] == 1
     assert plan.attributes["source_rejected_reasons"] == (
-        "events page_id=160: candidate for an existing memory URI must reuse its existing page_id"
+        "entities page_id=160: candidate for an existing memory URI must reuse its existing page_id"
     )
 
     third = asyncio.run(runtime.run_next())
@@ -936,18 +797,11 @@ def test_failing_candidate_repaired_by_the_model_is_written_with_the_rest_of_the
 
     runtime, chats, _backends, observer = _seeded_runtime(tmp_path)
     renamed = _with_good_preference(
-        events=lambda _visible: [
-            {"page_id": 160, "event_date": "2026-07-01", "event_name": "完成 Habitus 审查", "summary": "补充。"}
-        ]
+        entities=lambda _visible: [{"page_id": 160, "category": "软件项目", "name": "Habitus", "summary": "补充。"}]
     )
     repaired = _with_good_preference(
-        events=lambda _visible: [
-            {
-                "page_id": 160,
-                "event_date": "2026-07-01",
-                "event_name": "补充 Habitus 对比结论",
-                "summary": "2026-07-01 补充对比结论。",
-            }
+        entities=lambda _visible: [
+            {"page_id": 160, "category": "软件项目", "name": "OpenViking", "summary": "OpenViking 是会话记忆项目。"}
         ]
     )
     chats[0].candidate_script.extend([renamed, repaired])
@@ -961,7 +815,7 @@ def test_failing_candidate_repaired_by_the_model_is_written_with_the_rest_of_the
     assert chats[0].candidate_script == []
     assert result.change_receipt is not None
     assert sorted(str(item.uri) for item in result.change_receipt.node_changes) == [
-        "memory://events/2026/07/01/补充%20habitus%20对比结论.md",
+        "memory://entities/软件项目/openviking.md",
         "memory://preferences/回答风格.md",
     ]
     assert _plan_events(observer)[-1].attributes["source_rejected_count"] == 0
@@ -1012,22 +866,12 @@ def test_failing_candidate_repaired_by_the_model_is_written_with_the_rest_of_the
                 ]
             },
         ),
-        # completed 一个这批没读到的 Intention
-        (
-            closed_turn,
-            {
-                "intentions": lambda _visible: [
-                    {"page_id": 160, "intent_name": "写月报", "status": "completed", "confirmed": True}
-                ]
-            },
-        ),
     ],
     ids=[
         "renamed-identity",
         "existing-uri-new-page-id",
         "tool-name-spelling",
         "new-failure-recovery",
-        "unread-completed",
     ],
 )
 def test_normal_model_variation_in_source_checks_no_longer_fails_the_job(
@@ -1035,7 +879,7 @@ def test_normal_model_variation_in_source_checks_no_longer_fails_the_job(
     messages: Callable[..., tuple[object, ...]],
     bad: dict[str, Callable[[dict[str, object]], list[object]]],
 ) -> None:
-    """测试工程师 B 列的 5 类模型正常波动：修补后仍不过只丢那一条，Job 不再 FAILED。"""
+    """测试工程师 B 列的模型正常波动：修补后仍不过只丢那一条，Job 不再 FAILED。"""
 
     runtime, chats, _backends, observer = _seeded_runtime(tmp_path)
     chats[0].candidate_script.append(_with_good_preference(**bad))

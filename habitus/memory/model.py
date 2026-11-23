@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
 from enum import Enum
 
 from habitus.foundation.ids import canonical_path_identity, require_safe_path_segment
@@ -14,8 +13,6 @@ class MemoryKind(str, Enum):
     PREFERENCE = "preference"
     ENTITY = "entity"
     TOOL = "tool"
-    EVENT = "event"
-    INTENTION = "intention"
 
 
 class MemoryLevel(int, Enum):
@@ -46,7 +43,7 @@ class MemoryLevel(int, Enum):
         return None
 
 
-# 新写入的记忆名字（topic、category、name、tool_name、event_name、intent_name）的 UTF-8 字节上限。
+# 新写入的记忆名字（topic、category、name、tool_name）的 UTF-8 字节上限。
 # 由记忆名派生的最长单段文件名是原子写的临时名 ``.{name}.md.{32 位 hex}.tmp``，比名字多 1 + 3 + 1 + 32 + 4 = 41 字节；
 # category 只当目录名，目录内只有固定名的侧车，派生开销更小。单段上限 255 − 41 = 214，取整到不大于 214、
 # 且不大于行为侧 200（behavior/model.py 的 _MAX_IDENTITY_NAME_UTF8_BYTES）的 200。落盘文件名是归一身份，
@@ -89,7 +86,6 @@ class MemoryAddress:
     kind: MemoryKind
     name: str = field(default="", compare=False)
     category: str = field(default="", compare=False)
-    event_date: date | None = None
     _identity_name: str = field(init=False, repr=False, default="")
     _identity_category: str = field(init=False, repr=False, default="")
 
@@ -97,8 +93,8 @@ class MemoryAddress:
         kind = MemoryKind(self.kind)
         object.__setattr__(self, "kind", kind)
         if kind is MemoryKind.PROFILE:
-            if self.name or self.category or self.event_date is not None:
-                raise ValueError("profile memory does not accept name, category, or event_date")
+            if self.name or self.category:
+                raise ValueError("profile memory does not accept name or category")
             return
 
         name = _semantic_name(self.name, f"{kind.value} name")
@@ -118,12 +114,6 @@ class MemoryAddress:
             )
         elif self.category:
             raise ValueError(f"{kind.value} memory does not accept category")
-
-        if kind is MemoryKind.EVENT:
-            if self.event_date is None:
-                raise ValueError("event memory requires event_date")
-        elif self.event_date is not None:
-            raise ValueError(f"{kind.value} memory does not accept event_date")
 
     @property
     def identity_name(self) -> str:
@@ -149,14 +139,6 @@ class MemoryAddress:
     def tool(cls, tool_name: str) -> MemoryAddress:
         return cls(MemoryKind.TOOL, name=tool_name)
 
-    @classmethod
-    def event(cls, event_date: date, event_name: str) -> MemoryAddress:
-        return cls(MemoryKind.EVENT, name=event_name, event_date=event_date)
-
-    @classmethod
-    def intention(cls, intent_name: str) -> MemoryAddress:
-        return cls(MemoryKind.INTENTION, name=intent_name)
-
 
 @dataclass(frozen=True)
 class MemoryDirectory:
@@ -171,61 +153,33 @@ class MemoryDirectory:
         if not parts:
             return
         root = parts[0]
-        if root not in {"preferences", "entities", "tools", "events", "intentions"}:
+        if root not in {"preferences", "entities", "tools"}:
             raise ValueError("memory directory is outside the confirmed tree")
-        if root in {"preferences", "tools", "intentions"}:
+        if root in {"preferences", "tools"}:
             if len(parts) != 1:
                 raise ValueError(f"{root} memory directory cannot contain subdirectories")
             object.__setattr__(self, "_identity_parts", parts)
             return
-        if root == "entities":
-            if len(parts) > 2:
-                raise ValueError("entity memory directory is deeper than category level")
-            if len(parts) == 2:
-                object.__setattr__(
-                    self,
-                    "_identity_parts",
-                    (
-                        root,
-                        canonical_path_identity(
-                            _semantic_name(parts[1], "entity category"),
-                            "entity category",
-                        ),
+        if len(parts) > 2:
+            raise ValueError("entity memory directory is deeper than category level")
+        if len(parts) == 2:
+            object.__setattr__(
+                self,
+                "_identity_parts",
+                (
+                    root,
+                    canonical_path_identity(
+                        _semantic_name(parts[1], "entity category"),
+                        "entity category",
                     ),
-                )
-            else:
-                object.__setattr__(self, "_identity_parts", parts)
-            return
-        self._validate_event_parts(parts)
-        object.__setattr__(self, "_identity_parts", parts)
+                ),
+            )
+        else:
+            object.__setattr__(self, "_identity_parts", parts)
 
     @property
     def identity_parts(self) -> tuple[str, ...]:
         return self._identity_parts
-
-    @staticmethod
-    def _validate_event_parts(parts: tuple[str, ...]) -> None:
-        if len(parts) > 4:
-            raise ValueError("event memory directory is deeper than day level")
-        values = parts[1:]
-        widths = (4, 2, 2)
-        labels = ("year", "month", "day")
-        for value, width, label in zip(values, widths, labels, strict=False):
-            if len(value) != width or not value.isdigit():
-                raise ValueError(f"event {label} directory has an invalid format")
-        if values:
-            year = int(values[0])
-            if not 1 <= year <= 9999:
-                raise ValueError("event year directory is outside the calendar range")
-        if len(values) >= 2:
-            month = int(values[1])
-            if not 1 <= month <= 12:
-                raise ValueError("event month directory is outside the calendar range")
-        if len(values) == 3:
-            try:
-                date(int(values[0]), int(values[1]), int(values[2]))
-            except ValueError as exc:
-                raise ValueError("event day directory is not a valid calendar date") from exc
 
     @classmethod
     def root(cls) -> MemoryDirectory:
@@ -246,32 +200,6 @@ class MemoryDirectory:
         return cls(("tools",))
 
     @classmethod
-    def events(
-        cls,
-        year: int | None = None,
-        month: int | None = None,
-        day: int | None = None,
-    ) -> MemoryDirectory:
-        if year is None:
-            if month is not None or day is not None:
-                raise ValueError("event month or day requires a year")
-            return cls(("events",))
-        parts = ["events", f"{year:04d}"]
-        if month is None:
-            if day is not None:
-                raise ValueError("event day requires a month")
-            return cls(tuple(parts))
-        parts.append(f"{month:02d}")
-        if day is None:
-            return cls(tuple(parts))
-        parts.append(f"{day:02d}")
-        return cls(tuple(parts))
-
-    @classmethod
-    def intentions(cls) -> MemoryDirectory:
-        return cls(("intentions",))
-
-    @classmethod
     def for_address(cls, address: MemoryAddress) -> MemoryDirectory:
         if address.kind is MemoryKind.PROFILE:
             return cls.root()
@@ -279,16 +207,7 @@ class MemoryDirectory:
             return cls.preferences()
         if address.kind is MemoryKind.ENTITY:
             return cls.entities(address.category)
-        if address.kind is MemoryKind.TOOL:
-            return cls.tools()
-        if address.kind is MemoryKind.EVENT:
-            assert address.event_date is not None
-            return cls.events(
-                address.event_date.year,
-                address.event_date.month,
-                address.event_date.day,
-            )
-        return cls.intentions()
+        return cls.tools()
 
     def parent(self) -> MemoryDirectory | None:
         """返回上级目录；根目录没有上级。"""

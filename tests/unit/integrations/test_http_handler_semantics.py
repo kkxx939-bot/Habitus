@@ -312,9 +312,9 @@ def test_public_job_failure_is_truncated_to_500_characters() -> None:
 
 
 def test_recall_request_refuses_duplicate_kinds() -> None:
-    assert RecallRequest.model_validate({"query": "q", "kinds": ["event", "tool"]}).kinds == (
-        MemoryKind.EVENT,
+    assert RecallRequest.model_validate({"query": "q", "kinds": ["entity", "tool"]}).kinds == (
+        MemoryKind.ENTITY,
         MemoryKind.TOOL,
     )
     with pytest.raises(ValidationError, match="kinds must not contain duplicates"):
-        RecallRequest.model_validate({"query": "q", "kinds": ["event", "event"]})
+        RecallRequest.model_validate({"query": "q", "kinds": ["entity", "entity"]})

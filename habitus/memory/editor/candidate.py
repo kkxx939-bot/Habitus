@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import tzinfo
 from enum import Enum
 from typing import Any, ClassVar
 
@@ -32,8 +31,6 @@ _KIND_TO_OUTPUT_FIELD = {
     MemoryKind.PREFERENCE: "preferences",
     MemoryKind.ENTITY: "entities",
     MemoryKind.TOOL: "tools",
-    MemoryKind.EVENT: "events",
-    MemoryKind.INTENTION: "intentions",
 }
 _OUTPUT_FIELD_TO_KIND = {value: key for key, value in _KIND_TO_OUTPUT_FIELD.items()}
 _MEMORY_OUTPUT_FIELDS = tuple(_OUTPUT_FIELD_TO_KIND)
@@ -174,7 +171,6 @@ class MemoryCandidate:
     page_id: int
     kind: MemoryKind
     fields: Mapping[str, Any]
-    confirmed: bool | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -188,11 +184,6 @@ class MemoryCandidate:
             fields = MemorySchemaRegistry.load_default().validate(kind, self.fields)
         except (TypeError, ValueError) as exc:
             raise MemoryCandidateError(f"invalid {kind.value} candidate: {exc}") from exc
-        if kind is MemoryKind.INTENTION:
-            if self.confirmed is None:
-                raise MemoryCandidateError("Intention candidate requires a boolean confirmed field")
-        elif self.confirmed is not None:
-            raise MemoryCandidateError("only Intention candidate accepts the confirmed control field")
         _reject_empty_present_strings(fields, _KIND_TO_OUTPUT_FIELD[kind])
         object.__setattr__(self, "fields", immutable_snapshot(fields))
 
@@ -205,10 +196,7 @@ class MemoryCandidate:
     def to_dict(self) -> dict[str, Any]:
         """返回临时编号和严格业务字段。"""
 
-        result = {"page_id": self.page_id, **canonicalize(self.fields)}
-        if self.kind is MemoryKind.INTENTION:
-            result["confirmed"] = self.confirmed
-        return result
+        return {"page_id": self.page_id, **canonicalize(self.fields)}
 
 
 @dataclass(frozen=True)
@@ -251,8 +239,6 @@ class MemoryCandidateBatch:
     preferences: tuple[MemoryCandidate, ...] = ()
     entities: tuple[MemoryCandidate, ...] = ()
     tools: tuple[MemoryCandidate, ...] = ()
-    events: tuple[MemoryCandidate, ...] = ()
-    intentions: tuple[MemoryCandidate, ...] = ()
     identity_proposals: tuple[MemoryIdentityProposal, ...] = ()
     relations: tuple[MemoryRelationCandidate, ...] = ()
 
@@ -303,7 +289,7 @@ class MemoryCandidateBatch:
 
     @classmethod
     def model_json_schema(cls) -> dict[str, object]:
-        """从当前六类 YAML 生成供 StructuredChatClient 使用的 JSON Schema。"""
+        """从当前四类 YAML 生成供 StructuredChatClient 使用的 JSON Schema。"""
 
         # 编解码与来源校验模块要用本模块的值对象，放到调用时导入以免循环导入。
         from habitus.memory.editor.candidate_codec import candidate_batch_json_schema
@@ -324,12 +310,10 @@ class MemoryCandidateBatch:
         segment: ConversationSegment,
         old_memories: MemorySnapshotBatch,
         page_ids: MemoryPageIdMap,
-        *,
-        zone: tzinfo,
     ) -> MemoryCandidateBatch:
         """绑定原始会话和旧记忆，执行无法由静态 JSON Schema 表达的约束；有一条不过就明确失败。"""
 
-        violations = self.context_violations(segment, old_memories, page_ids, zone=zone)
+        violations = self.context_violations(segment, old_memories, page_ids)
         if violations:
             raise MemoryCandidateError(violations[0].reason)
         return self
@@ -339,10 +323,8 @@ class MemoryCandidateBatch:
         segment: ConversationSegment,
         old_memories: MemorySnapshotBatch,
         page_ids: MemoryPageIdMap,
-        *,
-        zone: tzinfo,
     ) -> tuple[MemoryCandidateViolation, ...]:
-        """逐条列出通不过来源校验的候选、关系与身份提议；日期按主体所在地 ``zone`` 的本地日算。
+        """逐条列出通不过来源校验的候选、关系与身份提议。
 
         page_id 表与本批完整旧快照不一致是系统自身的错，不落到哪一条上，直接明确失败。
         """
@@ -350,22 +332,20 @@ class MemoryCandidateBatch:
         # 编解码与来源校验模块要用本模块的值对象，放到调用时导入以免循环导入。
         from habitus.memory.editor.candidate_context_validator import MemoryCandidateContextValidator
 
-        return MemoryCandidateContextValidator(self).violations(segment, old_memories, page_ids, zone=zone)
+        return MemoryCandidateContextValidator(self).violations(segment, old_memories, page_ids)
 
     def without_context_violations(
         self,
         segment: ConversationSegment,
         old_memories: MemorySnapshotBatch,
         page_ids: MemoryPageIdMap,
-        *,
-        zone: tzinfo,
     ) -> tuple[MemoryCandidateBatch, tuple[MemoryCandidateViolation, ...]]:
         """剔除通不过来源校验的条目，连同引用被剔候选的关系与身份提议；返回剩下的批次与剔掉的每一条及原因。"""
 
         batch = self
         dropped: list[MemoryCandidateViolation] = []
         while True:
-            violations = batch.context_violations(segment, old_memories, page_ids, zone=zone)
+            violations = batch.context_violations(segment, old_memories, page_ids)
             if not violations:
                 return batch, tuple(dropped)
             removed: dict[object, MemoryCandidateViolation] = {}

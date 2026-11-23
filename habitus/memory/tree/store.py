@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from datetime import date
 from pathlib import Path
 from typing import Protocol, TypeVar, cast
 
@@ -55,7 +54,7 @@ class _VisibilityJournal(Protocol):
 class MemoryTree:
     """安全持久化结构化 L2 文档和可重建的目录语义层。"""
 
-    _STATIC_DIRECTORIES = ("preferences", "entities", "tools", "events", "intentions")
+    _STATIC_DIRECTORIES = ("preferences", "entities", "tools")
 
     def __init__(
         self,
@@ -114,9 +113,22 @@ class MemoryTree:
         return resolved
 
     def initialize(self) -> Path:
-        """只创建静态目录；没有真实内容时不创建空的 profile.md。"""
+        """先检查根目录只含当前树的条目，再创建静态目录；没有真实内容时不创建空的 profile.md。
+
+        旧记忆树（含已退出记忆类型的目录）不兼容也不迁移，启动时在这里就明确报错，
+        不等到第一条记忆任务刷新目录概览时才失败。
+        """
 
         self._ensure_directory(self.root)
+        for child in self._content_children(self.root):
+            if child.name == "profile.md" and child.is_file():
+                continue
+            if child.name in self._STATIC_DIRECTORIES and child.is_dir():
+                continue
+            raise MemoryTreeIntegrityError(
+                f"memory root contains an unsupported entry {child.name!r}; "
+                "the old memory tree layout is not supported, start from an empty memory root"
+            )
         for name in self._STATIC_DIRECTORIES:
             self._ensure_directory(self.root / name)
         return self.root
@@ -382,11 +394,6 @@ class MemoryTree:
             addresses = tuple(MemoryAddress.entity(parts[1], name) for name in self._markdown_names(path))
         elif parts == ("tools",):
             addresses = tuple(MemoryAddress.tool(name) for name in self._markdown_names(path))
-        elif parts[0] == "events" and len(parts) == 4:
-            event_date = date(int(parts[1]), int(parts[2]), int(parts[3]))
-            addresses = tuple(MemoryAddress.event(event_date, name) for name in self._markdown_names(path))
-        elif parts == ("intentions",):
-            addresses = tuple(MemoryAddress.intention(name) for name in self._markdown_names(path))
         else:
             if any(child.is_file() for child in self._content_children(path)):
                 raise MemoryTreeIntegrityError("memory branch directory cannot contain L2 files")
@@ -421,8 +428,6 @@ class MemoryTree:
             children = tuple(MemoryDirectory((name,)) for name in self._STATIC_DIRECTORIES)
         elif parts == ("entities",):
             children = tuple(MemoryDirectory.entities(child.name) for child in self._directories(path))
-        elif parts and parts[0] == "events" and len(parts) < 4:
-            children = tuple(MemoryDirectory((*parts, child.name)) for child in self._directories(path))
         else:
             if any(child.is_dir() for child in self._content_children(path)):
                 raise MemoryTreeIntegrityError("memory leaf directory cannot contain subdirectories")
@@ -487,18 +492,7 @@ class MemoryTree:
                 address.identity_category,
                 f"{address.identity_name}.md",
             )
-        if address.kind is MemoryKind.TOOL:
-            return Path("tools", f"{address.identity_name}.md")
-        if address.kind is MemoryKind.EVENT:
-            assert address.event_date is not None
-            return Path(
-                "events",
-                f"{address.event_date.year:04d}",
-                f"{address.event_date.month:02d}",
-                f"{address.event_date.day:02d}",
-                f"{address.identity_name}.md",
-            )
-        return Path("intentions", f"{address.identity_name}.md")
+        return Path("tools", f"{address.identity_name}.md")
 
     def _iter_kind(self, kind: MemoryKind) -> Iterator[MemoryAddress]:
         if kind is MemoryKind.PROFILE:
@@ -513,30 +507,7 @@ class MemoryTree:
                 for name in self._markdown_names(category_path):
                     yield MemoryAddress.entity(category_path.name, name)
             return
-        if kind is MemoryKind.TOOL:
-            yield from (MemoryAddress.tool(name) for name in self._markdown_names(self.root / "tools"))
-            return
-        if kind is MemoryKind.EVENT:
-            yield from self._iter_events()
-            return
-        yield from (MemoryAddress.intention(name) for name in self._markdown_names(self.root / "intentions"))
-
-    def _iter_events(self) -> Iterator[MemoryAddress]:
-        for year_path in self._directories(self.root / "events"):
-            if len(year_path.name) != 4 or not year_path.name.isdigit():
-                raise MemoryTreeIntegrityError("event year directory must use YYYY")
-            for month_path in self._directories(year_path):
-                if len(month_path.name) != 2 or not month_path.name.isdigit():
-                    raise MemoryTreeIntegrityError("event month directory must use MM")
-                for day_path in self._directories(month_path):
-                    if len(day_path.name) != 2 or not day_path.name.isdigit():
-                        raise MemoryTreeIntegrityError("event day directory must use DD")
-                    try:
-                        event_date = date(int(year_path.name), int(month_path.name), int(day_path.name))
-                    except ValueError as exc:
-                        raise MemoryTreeIntegrityError("event directory contains an invalid calendar date") from exc
-                    for name in self._markdown_names(day_path):
-                        yield MemoryAddress.event(event_date, name)
+        yield from (MemoryAddress.tool(name) for name in self._markdown_names(self.root / "tools"))
 
     def _markdown_names(self, directory: Path) -> tuple[str, ...]:
         names: list[str] = []
@@ -660,12 +631,9 @@ class MemoryTree:
             raise MemoryTreeIntegrityError("memory file cannot be written safely") from exc
 
     def _prune_dynamic_directories(self, address: MemoryAddress, parent: Path) -> None:
-        stop = {
-            MemoryKind.ENTITY: self.root / "entities",
-            MemoryKind.EVENT: self.root / "events",
-        }.get(address.kind)
-        if stop is None:
+        if address.kind is not MemoryKind.ENTITY:
             return
+        stop = self.root / "entities"
         current = parent
         while current != stop:
             if self._content_children(current):

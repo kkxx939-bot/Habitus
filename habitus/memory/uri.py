@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import date
 from enum import Enum
 from urllib.parse import unquote
 
@@ -102,19 +101,8 @@ class MemoryURI:
                 address.identity_category,
                 f"{address.identity_name}.md",
             )
-        elif address.kind is MemoryKind.TOOL:
-            segments = ("tools", f"{address.identity_name}.md")
-        elif address.kind is MemoryKind.EVENT:
-            assert address.event_date is not None
-            segments = (
-                "events",
-                f"{address.event_date.year:04d}",
-                f"{address.event_date.month:02d}",
-                f"{address.event_date.day:02d}",
-                f"{address.identity_name}.md",
-            )
         else:
-            segments = ("intentions", f"{address.identity_name}.md")
+            segments = ("tools", f"{address.identity_name}.md")
         return cls._from_segments(segments)
 
     @classmethod
@@ -335,24 +323,13 @@ def _canonical_segments(
             address.identity_category,
             f"{address.identity_name}.md",
         )
-    if address.kind is MemoryKind.TOOL:
-        return ("tools", f"{address.identity_name}.md")
-    if address.kind is MemoryKind.EVENT:
-        assert address.event_date is not None
-        return (
-            "events",
-            f"{address.event_date.year:04d}",
-            f"{address.event_date.month:02d}",
-            f"{address.event_date.day:02d}",
-            f"{address.identity_name}.md",
-        )
-    return ("intentions", f"{address.identity_name}.md")
+    return ("tools", f"{address.identity_name}.md")
 
 
 def _directory(segments: tuple[str, ...]) -> MemoryDirectory | None:
     if not segments:
         return MemoryDirectory.root()
-    if segments[0] not in {"preferences", "entities", "tools", "events", "intentions"}:
+    if segments[0] not in {"preferences", "entities", "tools"}:
         return None
     try:
         return MemoryDirectory(segments)
@@ -370,18 +347,6 @@ def _address(segments: tuple[str, ...]) -> MemoryAddress | None:
             return MemoryAddress.entity(segments[1], _markdown_stem(segments[2]))
         if len(segments) == 2 and segments[0] == "tools":
             return MemoryAddress.tool(_markdown_stem(segments[1]))
-        if len(segments) == 5 and segments[0] == "events":
-            if (
-                len(segments[1]) != 4
-                or len(segments[2]) != 2
-                or len(segments[3]) != 2
-                or not all(part.isdigit() for part in segments[1:4])
-            ):
-                return None
-            event_date = date(int(segments[1]), int(segments[2]), int(segments[3]))
-            return MemoryAddress.event(event_date, _markdown_stem(segments[4]))
-        if len(segments) == 2 and segments[0] == "intentions":
-            return MemoryAddress.intention(_markdown_stem(segments[1]))
     except (TypeError, ValueError):
         return None
     return None

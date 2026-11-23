@@ -13,7 +13,6 @@ from habitus.memory.indexing import (
     PersistentMemoryVectorIndex,
     memory_embedding_fingerprint,
 )
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryKind, MemoryLevel
 from habitus.memory.tree import MemoryTree
 from habitus.memory.uri import MemoryURI
@@ -233,7 +232,7 @@ def test_incremental_sync_updates_changed_l2_and_advances_global_job_checkpoint(
         asyncio.run(vector_index.synchronize(changed_uris=(), semantic_results=(), checkpoint=1))
 
 
-def test_l2_search_applies_kind_and_scope_filters_before_top_k(tmp_path: Path) -> None:
+def test_l2_search_applies_kind_filter_before_top_k(tmp_path: Path) -> None:
     tree, _embedder, store, vector_index = index(tmp_path)
     tree.write(document(MemoryKind.PROFILE))
     tree.write(document(MemoryKind.PREFERENCE))
@@ -244,7 +243,6 @@ def test_l2_search_applies_kind_and_scope_filters_before_top_k(tmp_path: Path) -
             roots=(MemoryURI.root(),),
             levels=(MemoryLevel.DETAIL,),
             kinds=(MemoryKind.PREFERENCE,),
-            intention_scope=MemoryIntentionRecallScope.ACTIVE,
             limit=5,
         )
     )
@@ -262,7 +260,6 @@ def test_l2_kind_filter_cannot_be_mixed_with_directory_levels(tmp_path: Path) ->
                 roots=(MemoryURI.root(),),
                 levels=(MemoryLevel.DETAIL, MemoryLevel.ABSTRACT),
                 kinds=(),
-                intention_scope=MemoryIntentionRecallScope.ACTIVE,
                 limit=5,
             )
         )
@@ -332,7 +329,6 @@ def test_write_and_recall_through_an_openai_compatible_service_use_their_own_pre
             roots=(MemoryURI.root(),),
             levels=(MemoryLevel.DETAIL,),
             kinds=(MemoryKind.PREFERENCE,),
-            intention_scope=MemoryIntentionRecallScope.ACTIVE,
             limit=5,
         )
         return written, matches

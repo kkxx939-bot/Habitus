@@ -25,45 +25,23 @@ class MemoryDocumentMetadata:
     revision: int
     created_at: datetime
     updated_at: datetime
-    last_confirmed_at: datetime | None
 
     def __post_init__(self) -> None:
         if self.revision <= 0:
             raise ValueError("memory document revision must be a positive integer")
         created_at = _utc_timestamp(self.created_at, "created_at")
         updated_at = _utc_timestamp(self.updated_at, "updated_at")
-        last_confirmed_at = (
-            None if self.last_confirmed_at is None else _utc_timestamp(self.last_confirmed_at, "last_confirmed_at")
-        )
         if updated_at < created_at:
             raise ValueError("memory document updated_at cannot precede created_at")
-        if last_confirmed_at is not None and last_confirmed_at > updated_at:
-            raise ValueError("memory document last_confirmed_at cannot follow updated_at")
         object.__setattr__(self, "created_at", created_at)
         object.__setattr__(self, "updated_at", updated_at)
-        object.__setattr__(self, "last_confirmed_at", last_confirmed_at)
 
     @classmethod
-    def initial(
-        cls,
-        timestamp: datetime,
-        *,
-        confirmed: bool = False,
-    ) -> MemoryDocumentMetadata:
+    def initial(cls, timestamp: datetime) -> MemoryDocumentMetadata:
         normalized = _utc_timestamp(timestamp, "timestamp")
-        return cls(
-            revision=1,
-            created_at=normalized,
-            updated_at=normalized,
-            last_confirmed_at=normalized if confirmed else None,
-        )
+        return cls(revision=1, created_at=normalized, updated_at=normalized)
 
-    def next_revision(
-        self,
-        timestamp: datetime,
-        *,
-        refresh_confirmation: bool = False,
-    ) -> MemoryDocumentMetadata:
+    def next_revision(self, timestamp: datetime) -> MemoryDocumentMetadata:
         """构造下一版本元数据；实际旧版本校验仍由 Memory Editor 负责。"""
 
         normalized = _utc_timestamp(timestamp, "timestamp")
@@ -73,7 +51,6 @@ class MemoryDocumentMetadata:
             revision=self.revision + 1,
             created_at=self.created_at,
             updated_at=normalized,
-            last_confirmed_at=(normalized if refresh_confirmation else self.last_confirmed_at),
         )
 
 
@@ -94,11 +71,6 @@ class MemoryDocument:
         object.__setattr__(self, "kind", kind)
         if self.address.kind is not kind:
             raise ValueError("memory document address does not match its kind")
-        if kind is MemoryKind.INTENTION:
-            if self.metadata.last_confirmed_at is None:
-                raise ValueError("Intention memory requires last_confirmed_at")
-        elif self.metadata.last_confirmed_at is not None:
-            raise ValueError("only Intention memory accepts last_confirmed_at")
         object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
         if not self.markdown_body.strip():
             raise ValueError("memory document Markdown body must be non-empty")

@@ -96,7 +96,7 @@ def test_memory_dynamically_degrades_hot_warm_cold1_cold2_and_reheats_on_use(tmp
 def test_memory_kinds_use_distinct_half_lives_without_fixed_hot_expiry() -> None:
     config = MemoryRecallLifecycleConfig()
     profile = candidate(MemoryKind.PROFILE, updated_at=NOW - timedelta(days=60))
-    event = candidate(MemoryKind.EVENT, updated_at=NOW - timedelta(days=60))
+    tool = candidate(MemoryKind.TOOL, updated_at=NOW - timedelta(days=60))
 
     profile_heat = memory_hotness(
         MemoryRecallState.initial(profile.uri, 1, profile.target.document_created_at),
@@ -104,15 +104,15 @@ def test_memory_kinds_use_distinct_half_lives_without_fixed_hot_expiry() -> None
         now=NOW,
         half_life_days=config.half_life_days(profile.kind),
     )
-    event_heat = memory_hotness(
-        MemoryRecallState.initial(event.uri, 1, event.target.document_created_at),
-        updated_at=event.updated_at,
+    tool_heat = memory_hotness(
+        MemoryRecallState.initial(tool.uri, 1, tool.target.document_created_at),
+        updated_at=tool.updated_at,
         now=NOW,
-        half_life_days=config.half_life_days(event.kind),
+        half_life_days=config.half_life_days(tool.kind),
     )
     assert profile_heat == pytest.approx(0.5 * 2 ** (-60 / 180))
-    assert event_heat == pytest.approx(0.5 * 2 ** (-60 / 14))
-    assert profile_heat > event_heat
+    assert tool_heat == pytest.approx(0.5 * 2 ** (-60 / 30))
+    assert profile_heat > tool_heat
 
 
 @pytest.mark.parametrize(
@@ -426,7 +426,7 @@ def test_disabled_lifecycle_neither_reads_nor_writes_store() -> None:
         {"cold2_threshold": 0.2, "cold1_threshold": 0.2},
         {"cold1_threshold": 0.61, "hot_threshold": 0.6},
         {"hot_threshold": 2 / 3},
-        {"event_half_life_days": 0},
+        {"tool_half_life_days": 0},
         {"profile_retire_days": 0},
         {"cold2_probe_limit": 0},
         {"retire_candidate_grace_days": 0},

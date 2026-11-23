@@ -1,7 +1,7 @@
-"""六类 Schema、规范 Markdown 文档和物理记忆树组合测试。"""
+"""四类 Schema、规范 Markdown 文档和物理记忆树组合测试。"""
 
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import timedelta
 
 import pytest
 
@@ -21,7 +21,7 @@ from habitus.memory.uri import MemoryURI
 from tests.helpers import BASE_TIME, document, memory_fields
 
 
-def test_default_registry_contains_exactly_six_declared_memory_kinds() -> None:
+def test_default_registry_contains_exactly_four_declared_memory_kinds() -> None:
     registry = MemorySchemaRegistry.load_default()
     assert tuple(schema.kind for schema in registry.all()) == tuple(MemoryKind)
     with pytest.raises(MemorySchemaError, match="unknown"):
@@ -84,29 +84,13 @@ def test_tool_requires_real_name_shape_and_at_least_one_non_empty_knowledge_fiel
     )
 
 
-def test_event_date_is_actual_date_type_and_intention_status_is_controlled() -> None:
-    registry = MemorySchemaRegistry.load_default()
-    event = registry.validate(
-        MemoryKind.EVENT,
-        {"event_date": "2026-07-01", "event_name": "确认方案", "summary": "用户确认方案。"},
-    )
-    assert event["event_date"] == date(2026, 7, 1)
-    with pytest.raises(MemorySchemaError):
-        registry.validate(
-            MemoryKind.INTENTION,
-            {"intent_name": "完成重构", "status": "cancelled"},
-        )
-
-
-def test_metadata_revision_and_confirmation_rules_are_monotonic() -> None:
-    initial = MemoryDocumentMetadata.initial(BASE_TIME, confirmed=True)
-    advanced = initial.next_revision(BASE_TIME + timedelta(days=1), refresh_confirmation=False)
-    reconfirmed = advanced.next_revision(BASE_TIME + timedelta(days=2), refresh_confirmation=True)
+def test_metadata_revision_rules_are_monotonic() -> None:
+    initial = MemoryDocumentMetadata.initial(BASE_TIME)
+    advanced = initial.next_revision(BASE_TIME + timedelta(days=1))
 
     assert advanced.revision == 2
     assert advanced.created_at == initial.created_at
-    assert advanced.last_confirmed_at == BASE_TIME
-    assert reconfirmed.last_confirmed_at == BASE_TIME + timedelta(days=2)
+    assert advanced.updated_at == BASE_TIME + timedelta(days=1)
     with pytest.raises(ValueError, match="backwards"):
         initial.next_revision(BASE_TIME - timedelta(seconds=1))
 
@@ -138,14 +122,7 @@ def test_codec_rejects_body_tampering_path_mismatch_duplicate_marker_and_loose_j
         codec.decode(raw.replace('"revision": 1', '"revision": NaN'), expected_address=original.address)
 
 
-def test_document_requires_intention_confirmation_and_relation_direction() -> None:
-    with pytest.raises(ValueError, match="last_confirmed_at"):
-        MemoryDocumentCodec(MemorySchemaRegistry.load_default()).build(
-            MemoryKind.INTENTION,
-            memory_fields(MemoryKind.INTENTION),
-            metadata=MemoryDocumentMetadata.initial(BASE_TIME),
-        )
-
+def test_document_requires_relation_direction() -> None:
     source = document(MemoryKind.PREFERENCE)
     target = document(MemoryKind.ENTITY)
     wrong_source = MemoryStoredLink(
@@ -181,7 +158,7 @@ def test_document_limits_apply_to_body_encoded_file_and_both_relation_directions
 def test_tree_initialization_creates_only_confirmed_static_directories(tmp_path) -> None:
     tree = MemoryTree(tmp_path / "memory")
     root = tree.initialize()
-    assert sorted(path.name for path in root.iterdir()) == ["entities", "events", "intentions", "preferences", "tools"]
+    assert sorted(path.name for path in root.iterdir()) == ["entities", "preferences", "tools"]
     assert not (root / "profile.md").exists()
 
 

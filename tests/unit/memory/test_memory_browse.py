@@ -17,7 +17,7 @@ from tests.helpers import codec, document
 def _tree(tmp_path: Path) -> MemoryTree:
     tree = MemoryTree(tmp_path / "memory", document_codec=codec())
     tree.initialize()
-    for kind in (MemoryKind.PROFILE, MemoryKind.PREFERENCE, MemoryKind.ENTITY, MemoryKind.EVENT):
+    for kind in (MemoryKind.PROFILE, MemoryKind.PREFERENCE, MemoryKind.ENTITY, MemoryKind.TOOL):
         tree.write(document(kind))
     tree.write_layers(MemoryDirectory.preferences(), abstract="偏好：回答简洁。", overview="## 偏好\n- 回答风格：简洁")
     return tree
@@ -27,7 +27,7 @@ def test_the_root_lists_the_fixed_branches_and_the_profile(tmp_path: Path) -> No
     listing = MemoryBrowser(_tree(tmp_path)).list()
     assert str(listing.uri) == "memory://"
     assert [str(item) for item in listing.directories] == sorted(
-        f"memory://{name}" for name in ("entities", "events", "intentions", "preferences", "tools")
+        f"memory://{name}" for name in ("entities", "preferences", "tools")
     )
     assert [str(item) for item in listing.documents] == ["memory://profile.md"]
     assert listing.abstract is None
@@ -39,7 +39,6 @@ def test_a_directory_lists_its_documents_with_its_abstract_and_nested_branches(t
     assert [str(item) for item in preferences.documents] == ["memory://preferences/回答风格.md"]
     assert preferences.abstract == "偏好：回答简洁。"
     assert [str(item) for item in browser.list("memory://entities").directories] == ["memory://entities/项目"]
-    assert [str(item) for item in browser.list("memory://events/2026/07").directories] == ["memory://events/2026/07/01"]
 
 
 def test_reading_gives_the_document_or_the_layer_text(tmp_path: Path) -> None:

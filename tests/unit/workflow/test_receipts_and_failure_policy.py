@@ -175,7 +175,6 @@ BAD_RECEIPT_FIELDS: list[tuple[tuple[str | int, ...], object, type[Exception], s
     (("source", "editor_segment_id"), 1, ValueError, "segment_id must be text"),
     (("source", "editor_segment_digest"), 1, ValueError, "editor_segment_digest must be a SHA-256 hex digest"),
     (("prepared_node_changes", 0, "expected_after_digest"), 1, ValueError, "expected_after_digest must be a SHA"),
-    (("prepared_node_changes", 0, "confirms_intention"), "yes", TypeError, "confirms_intention must be boolean"),
     (("node_changes", 0, "after_revision"), "1", ValueError, "after_revision must be null or a positive integer"),
     (("node_changes", 0, "after_revision"), True, ValueError, "after_revision must be null or a positive integer"),
     (("node_changes", 0, "after_digest"), ["a"], ValueError, "after_digest must be a SHA-256 hex digest"),

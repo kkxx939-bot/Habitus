@@ -75,8 +75,6 @@ class ScriptedChat(OpenAICompatibleChatProvider):
                 "preferences": [],
                 "entities": [],
                 "tools": [],
-                "events": [],
-                "intentions": [],
                 "identity_proposals": [],
                 "relations": [],
             },

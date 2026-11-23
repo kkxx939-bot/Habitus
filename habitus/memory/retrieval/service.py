@@ -12,13 +12,6 @@ from typing import Protocol
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.conversation.indexing import ConversationSummaryMatch
-from habitus.memory.document import MemoryDocument
-from habitus.memory.intention import (
-    MemoryIntentionRecallScope,
-    MemoryIntentionReview,
-    MemoryIntentionReviewer,
-    intention_matches_scope,
-)
 from habitus.memory.model import MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.recall import (
     MemoryRecallCandidate,
@@ -49,7 +42,7 @@ from habitus.memory.retrieval.model import (
     MemoryTypedQuery,
 )
 from habitus.memory.retrieval.planner import MemorySearchQueryPlanner
-from habitus.memory.retrieval.relations import RelationExpander, review_intention
+from habitus.memory.retrieval.relations import RelationExpander
 from habitus.memory.retrieval.request import MemorySearchRequestNormalizer
 from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.uri import MemoryURI
@@ -64,7 +57,6 @@ class MemorySemanticSearch(Protocol):
         *,
         roots: tuple[MemoryURI, ...],
         kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
         limit: int,
     ) -> Sequence[MemorySearchHit]: ...
 
@@ -157,7 +149,6 @@ class SearchService:
         conversation_context: ConversationSearchContextReader,
         assembler: MemoryContextAssembler | None = None,
         config: MemorySearchServiceConfig | None = None,
-        intention_reviewer: MemoryIntentionReviewer | None = None,
         cold_probe_expander: MemoryColdProbeExpander | None = None,
         summary_fallback_expander: ConversationSummaryFallbackExpander | None = None,
         summary_use_recorder: ConversationSummaryUseRecorder | None = None,
@@ -186,7 +177,6 @@ class SearchService:
         self.conversation_context = conversation_context
         self.assembler = resolved_assembler
         self.config = resolved_config
-        self.intention_reviewer = intention_reviewer or MemoryIntentionReviewer()
         self.cold_probe_expander = cold_probe_expander
         self.summary_fallback_expander = summary_fallback_expander
         self.summary_use_recorder = summary_use_recorder
@@ -196,7 +186,6 @@ class SearchService:
         self.relation_expander = RelationExpander(
             snapshot_reader=snapshot_reader,
             config=resolved_config,
-            intention_reviewer=self.intention_reviewer,
         )
 
     async def find(
@@ -207,7 +196,6 @@ class SearchService:
         limit: int | None = None,
         score_threshold: float | None = None,
         kinds: tuple[MemoryKind, ...] = (),
-        intention_scope: MemoryIntentionRecallScope = MemoryIntentionRecallScope.ACTIVE,
     ) -> MemorySearchResult:
         """不调用查询规划模型，直接执行一次完整语义检索。"""
 
@@ -217,7 +205,6 @@ class SearchService:
             limit=limit,
             score_threshold=score_threshold,
             kinds=kinds,
-            intention_scope=intention_scope,
         )
         plan = self.query_planner.direct(request.query)
         return await self._execute(
@@ -226,7 +213,6 @@ class SearchService:
             request.limit,
             request.score_threshold,
             request.kinds,
-            request.intention_scope,
             assess_for_summary=False,
             degradations=(),
         )
@@ -240,7 +226,6 @@ class SearchService:
         limit: int | None = None,
         score_threshold: float | None = None,
         kinds: tuple[MemoryKind, ...] = (),
-        intention_scope: MemoryIntentionRecallScope = MemoryIntentionRecallScope.ACTIVE,
     ) -> MemorySearchResult:
         """完成 Memory 主召回，并仅在 Grader 判定不足时补查历史 Summary。"""
 
@@ -250,7 +235,6 @@ class SearchService:
             limit=limit,
             score_threshold=score_threshold,
             kinds=kinds,
-            intention_scope=intention_scope,
         )
         degradations: tuple[MemorySearchDegradation, ...] = ()
         if conversation is None:
@@ -277,7 +261,6 @@ class SearchService:
             request.limit,
             request.score_threshold,
             request.kinds,
-            request.intention_scope,
             assess_for_summary=True,
             degradations=degradations,
         )
@@ -289,37 +272,33 @@ class SearchService:
         limit: int,
         score_threshold: float | None,
         kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
         *,
         assess_for_summary: bool,
         degradations: tuple[MemorySearchDegradation, ...] = (),
     ) -> MemorySearchResult:
         started = time.monotonic()
         applied_degradations = list(degradations)
-        query_results = await self._execute_queries(plan, roots, limit, score_threshold, kinds, intention_scope)
+        query_results = await self._execute_queries(plan, roots, limit, score_threshold, kinds)
         hits, matched_queries = self._aggregate(query_results)
-        review_now = self._timestamp()
+        now = self._timestamp()
         direct = self._select_direct(
             hits,
             matched_queries,
             limit=limit,
-            review_now=review_now,
+            now=now,
             kinds=kinds,
-            intention_scope=intention_scope,
             degradations=applied_degradations,
         )
         direct_targets = {memory.uri: _recall_target(memory) for memory in direct}
         expanded = self.relation_expander.expand(
             self._expand_cold_for_budget(direct),
             roots=roots,
-            intention_scope=intention_scope,
-            review_now=review_now,
         )
         assembly, assessment, summary_fallback_attempted = await self._assemble_final_context(
             plan,
             expanded,
             targets=direct_targets,
-            used_at=review_now,
+            used_at=now,
             assess_for_summary=assess_for_summary,
             degradations=applied_degradations,
         )
@@ -327,7 +306,6 @@ class SearchService:
             query=plan.original_query,
             target_roots=roots,
             kinds=kinds,
-            intention_scope=intention_scope,
             plan=plan,
             query_results=query_results,
             memories=assembly.memories,
@@ -348,7 +326,6 @@ class SearchService:
         limit: int,
         score_threshold: float | None,
         kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
     ) -> tuple[MemoryQueryResult, ...]:
         """并发执行查询计划里的每条查询，每条按候选倍数放宽到有界上限。"""
 
@@ -365,7 +342,6 @@ class SearchService:
                         limit=candidate_limit,
                         score_threshold=score_threshold,
                         kinds=kinds,
-                        intention_scope=intention_scope,
                     )
                     for query in plan.queries
                 )
@@ -378,9 +354,8 @@ class SearchService:
         matched_queries: dict[MemoryURI, tuple[str, ...]],
         *,
         limit: int,
-        review_now: datetime,
+        now: datetime,
         kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
         degradations: list[MemorySearchDegradation],
     ) -> tuple[MemoryMatchedMemory, ...]:
         """读取有界数量的完整 L2，再按召回生命周期排序截到 ``limit``；生命周期失败时退回语义顺序。"""
@@ -392,15 +367,13 @@ class SearchService:
         direct_candidates = self._read_direct(
             hits[:read_limit],
             matched_queries,
-            review_now=review_now,
             kinds=kinds,
-            intention_scope=intention_scope,
         )
         try:
             return self._rank_recall_lifecycle(
                 direct_candidates,
                 limit=limit,
-                now=review_now,
+                now=now,
             )
         except MemoryRecallLifecycleError as exc:
             append_degradation(
@@ -524,14 +497,12 @@ class SearchService:
         limit: int,
         score_threshold: float | None,
         kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
     ) -> MemoryQueryResult:
         try:
             raw_hits = await self.semantic_search.search(
                 query.query,
                 roots=roots,
                 kinds=kinds,
-                intention_scope=intention_scope,
                 limit=limit,
             )
         except Exception as exc:
@@ -583,9 +554,7 @@ class SearchService:
         hits: tuple[MemorySearchHit, ...],
         matched_queries: dict[MemoryURI, tuple[str, ...]],
         *,
-        review_now: datetime,
         kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
     ) -> tuple[MemoryMatchedMemory, ...]:
         if not hits:
             return ()
@@ -601,17 +570,11 @@ class SearchService:
             document = snapshot.value
             if kinds and document.kind not in kinds:
                 raise MemorySearchError("semantic index kind does not match the complete L2 document")
-            if document.kind is MemoryKind.INTENTION and not intention_matches_scope(
-                document.fields.get("status"),
-                intention_scope,
-            ):
-                raise MemorySearchError("semantic index returned an Intention outside the requested scope")
             selected.append(
                 MemoryMatchedMemory(
                     hit=hit,
                     document=document,
                     matched_queries=matched_queries[hit.uri],
-                    intention_review=self._intention_review(document, now=review_now),
                 )
             )
         return tuple(selected)
@@ -702,14 +665,6 @@ class SearchService:
             assembly.memories,
             summary_fallbacks=tuple(retained),
         )
-
-    def _intention_review(
-        self,
-        document: MemoryDocument,
-        *,
-        now: datetime,
-    ) -> MemoryIntentionReview | None:
-        return review_intention(self.intention_reviewer, document, now=now)
 
     def _timestamp(self) -> datetime:
         timestamp = self.clock()

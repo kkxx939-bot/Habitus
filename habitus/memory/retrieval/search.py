@@ -11,7 +11,6 @@ from enum import Enum
 
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 from habitus.memory.indexing import MemoryVectorIndex, MemoryVectorMatch
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryKind, MemoryLevel
 from habitus.memory.retrieval.model import MemorySearchHit
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
@@ -97,7 +96,6 @@ class MemorySemanticSearchEngine:
         *,
         roots: tuple[MemoryURI, ...],
         kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
         limit: int,
     ) -> tuple[MemorySearchHit, ...]:
         """完成向量主召回、可选层级补召回及独立重排。"""
@@ -105,7 +103,6 @@ class MemorySemanticSearchEngine:
         normalized_query = self._query(query)
         normalized_roots = self._roots(roots)
         normalized_kinds = self._kinds(kinds)
-        normalized_intention_scope = MemoryIntentionRecallScope(intention_scope)
         maximum = self._limit(limit)
 
         query_vector = await self.embedder.embed_query(normalized_query)
@@ -119,7 +116,6 @@ class MemorySemanticSearchEngine:
             roots=normalized_roots,
             levels=(MemoryLevel.DETAIL,),
             kinds=normalized_kinds,
-            intention_scope=normalized_intention_scope,
             limit=vector_limit,
         )
         candidates: dict[MemoryURI, _Candidate] = {}
@@ -131,7 +127,6 @@ class MemorySemanticSearchEngine:
                 query_vector,
                 normalized_roots,
                 normalized_kinds,
-                normalized_intention_scope,
             )
             for candidate in hierarchical:
                 self._merge(candidates, candidate)
@@ -155,7 +150,6 @@ class MemorySemanticSearchEngine:
         query_vector: EmbeddingVector,
         roots: tuple[MemoryURI, ...],
         kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
     ) -> tuple[_Candidate, ...]:
         directory_matches = self._matches(
             await self.index.search(
@@ -163,7 +157,6 @@ class MemorySemanticSearchEngine:
                 roots=roots,
                 levels=(MemoryLevel.ABSTRACT, MemoryLevel.OVERVIEW),
                 kinds=(),
-                intention_scope=MemoryIntentionRecallScope.ALL,
                 limit=self.config.directory_candidates,
             )
         )
@@ -188,7 +181,6 @@ class MemorySemanticSearchEngine:
                     query_vector,
                     parent=directory_uri,
                     kinds=kinds,
-                    intention_scope=intention_scope,
                     limit=self.config.child_candidates,
                 )
             )

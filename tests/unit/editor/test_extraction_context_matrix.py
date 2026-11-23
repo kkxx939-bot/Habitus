@@ -19,7 +19,6 @@ from habitus.memory.editor import (
     MemoryRetrievalDecision,
     MemoryRetrievalStatus,
 )
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind
 from habitus.memory.retrieval import MemorySearchHit
 from habitus.memory.snapshot import MemorySnapshotReader
@@ -214,7 +213,7 @@ def test_execute_rejects_finish_because_finish_has_no_tool_action(tmp_path: Path
         asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.FINISH), iteration=1))
 
 
-def test_additional_search_uses_all_intentions_and_configured_scope(tmp_path: Path) -> None:
+def test_additional_search_uses_configured_scope_and_limit(tmp_path: Path) -> None:
     target = document(MemoryKind.PREFERENCE)
     uri = MemoryURI.from_address(target.address)
     hit = MemorySearchHit(uri, 0.75)
@@ -238,7 +237,6 @@ def test_additional_search_uses_all_intentions_and_configured_scope(tmp_path: Pa
             {
                 "roots": (MemoryURI.from_directory(MemoryDirectory.preferences()),),
                 "kinds": (),
-                "intention_scope": MemoryIntentionRecallScope.ALL,
                 "limit": 7,
             },
         )

@@ -25,7 +25,6 @@ from habitus.memory.workflow.receipt import (
     MemoryChangeReceiptProjector,
     MemoryChangeReceiptState,
     MemoryNodeChangeAction,
-    MemoryPreparedNodeChange,
 )
 from tests.helpers import BASE_TIME, codec, document
 from tests.integration.test_change_receipt_chain import editor_plan, source, update_editor_plan
@@ -166,38 +165,6 @@ def test_finalize_rejects_relation_delta_different_from_prepared_plan(tmp_path: 
     tampered = replace(prepared, added_relations=())
     with pytest.raises(MemoryChangeReceiptError, match="added relations differ"):
         projector.finalize(tampered, tampered.source, journal)
-
-
-def test_confirmation_cannot_change_without_prepared_intention_confirmation() -> None:
-    before = document(MemoryKind.INTENTION)
-    after = document(MemoryKind.INTENTION, revision=2, timestamp=BASE_TIME.replace(day=2))
-    uri = MemoryURI.from_address(before.address)
-    expected = MemoryPreparedNodeChange(
-        MemoryNodeChangeAction.UPDATE,
-        uri,
-        "a" * 64,
-        "b" * 64,
-        confirms_intention=False,
-    )
-    with pytest.raises(MemoryChangeReceiptError, match="outside the prepared plan"):
-        MemoryChangeReceiptProjector._verify_confirmation(before, after, expected)
-
-
-def test_prepared_intention_confirmation_must_be_applied_at_commit_time() -> None:
-    before = document(MemoryKind.INTENTION)
-    after = replace(
-        document(MemoryKind.INTENTION, revision=2),
-        metadata=replace(document(MemoryKind.INTENTION, revision=2).metadata, updated_at=BASE_TIME.replace(day=2)),
-    )
-    expected = MemoryPreparedNodeChange(
-        MemoryNodeChangeAction.UPDATE,
-        MemoryURI.from_address(before.address),
-        "a" * 64,
-        "b" * 64,
-        confirms_intention=True,
-    )
-    with pytest.raises(MemoryChangeReceiptError, match="did not apply"):
-        MemoryChangeReceiptProjector._verify_confirmation(before, after, expected)
 
 
 def test_document_digest_is_none_for_missing_document_and_stable_for_same_document() -> None:

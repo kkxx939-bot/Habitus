@@ -35,14 +35,10 @@ class MemoryRecallLifecycleConfig:
     preference_half_life_days: float = 90.0
     entity_half_life_days: float = 60.0
     tool_half_life_days: float = 30.0
-    event_half_life_days: float = 14.0
-    intention_half_life_days: float = 30.0
     profile_retire_days: float = 720.0
     preference_retire_days: float = 365.0
     entity_retire_days: float = 270.0
     tool_retire_days: float = 180.0
-    event_retire_days: float = 180.0
-    intention_retire_days: float = 540.0
     retire_candidate_grace_days: float = 30.0
     cold2_probe_interval_days: float = 30.0
     cold2_probe_limit: int = 2
@@ -61,14 +57,10 @@ class MemoryRecallLifecycleConfig:
             "preference_half_life_days",
             "entity_half_life_days",
             "tool_half_life_days",
-            "event_half_life_days",
-            "intention_half_life_days",
             "profile_retire_days",
             "preference_retire_days",
             "entity_retire_days",
             "tool_retire_days",
-            "event_retire_days",
-            "intention_retire_days",
             "retire_candidate_grace_days",
             "cold2_probe_interval_days",
             "sqlite_timeout_seconds",
@@ -94,14 +86,10 @@ class MemoryRecallLifecycleConfig:
             "preference_half_life_days",
             "entity_half_life_days",
             "tool_half_life_days",
-            "event_half_life_days",
-            "intention_half_life_days",
             "profile_retire_days",
             "preference_retire_days",
             "entity_retire_days",
             "tool_retire_days",
-            "event_retire_days",
-            "intention_retire_days",
         ):
             if not 0.001 <= getattr(self, name) <= 36_500.0:
                 raise ValueError(f"memory recall lifecycle {name} must be between 0.001 and 36500")
@@ -129,8 +117,6 @@ class MemoryRecallLifecycleConfig:
             MemoryKind.PREFERENCE: self.preference_half_life_days,
             MemoryKind.ENTITY: self.entity_half_life_days,
             MemoryKind.TOOL: self.tool_half_life_days,
-            MemoryKind.EVENT: self.event_half_life_days,
-            MemoryKind.INTENTION: self.intention_half_life_days,
         }[normalized]
 
     def retire_days(self, kind: MemoryKind) -> float:
@@ -140,8 +126,6 @@ class MemoryRecallLifecycleConfig:
             MemoryKind.PREFERENCE: self.preference_retire_days,
             MemoryKind.ENTITY: self.entity_retire_days,
             MemoryKind.TOOL: self.tool_retire_days,
-            MemoryKind.EVENT: self.event_retire_days,
-            MemoryKind.INTENTION: self.intention_retire_days,
         }[normalized]
 
 

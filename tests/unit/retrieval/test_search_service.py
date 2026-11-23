@@ -1,4 +1,4 @@
-"""Memory 主召回、关系补充、Intention 过滤与 Summary 条件后备测试。"""
+"""Memory 主召回、关系补充与 Summary 条件后备测试。"""
 
 import asyncio
 import json
@@ -24,7 +24,6 @@ from habitus.memory.conversation import (
 )
 from habitus.memory.conversation.indexing import ConversationSummaryMatch
 from habitus.memory.conversation.indexing.model import summary_reference
-from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.recall import (
     MemoryRecallLifecycle,
@@ -48,7 +47,6 @@ from habitus.memory.retrieval import (
     MemoryVectorMatch,
     SearchService,
 )
-from habitus.memory.retrieval.request import MemorySearchRequestNormalizer
 from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.tree import MemoryTree
 from habitus.memory.uri import MemoryURI
@@ -738,20 +736,6 @@ def test_actual_use_write_failure_keeps_detailed_memory_and_marks_degradation(tm
     assert result.retrieval_assessment.decision.value == "sufficient"
     assert result.memories[0].hit.lifecycle_temperature.value == "warm"
     assert tuple(item.stage.value for item in result.degradations) == ("recall_lifecycle",)
-
-
-def test_completed_intention_has_explicit_entry_and_cannot_mix_other_kinds() -> None:
-    assert MemorySearchRequestNormalizer.recall_filters((), MemoryIntentionRecallScope.COMPLETED) == (
-        (MemoryKind.INTENTION,),
-        MemoryIntentionRecallScope.COMPLETED,
-    )
-    with pytest.raises(ValueError, match="cannot include"):
-        MemorySearchRequestNormalizer.recall_filters(
-            (MemoryKind.PROFILE, MemoryKind.INTENTION),
-            MemoryIntentionRecallScope.COMPLETED,
-        )
-    with pytest.raises(ValueError, match="reserved"):
-        MemorySearchRequestNormalizer.recall_filters((), MemoryIntentionRecallScope.ALL)
 
 
 def test_aggregate_deduplicates_same_uri_and_records_each_matching_query_once() -> None:

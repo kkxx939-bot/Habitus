@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, SnapshotState, VersionedSnapshot
 from habitus.memory.document import MemoryDocument, MemoryDocumentCodec, MemoryDocumentMetadata
@@ -137,12 +137,6 @@ def memory_fields(kind: MemoryKind) -> dict[str, object]:
         MemoryKind.PREFERENCE: {"topic": "回答风格", "content": "- 偏好简洁直接的回答"},
         MemoryKind.ENTITY: {"category": "项目", "name": "Habitus", "summary": "Habitus 是用户正在重构的记忆系统。"},
         MemoryKind.TOOL: {"tool_name": "workspace.inspect", "verification": "返回工作区状态后检查退出状态。"},
-        MemoryKind.EVENT: {
-            "event_date": date(2026, 7, 1),
-            "event_name": "确认记忆树",
-            "summary": "用户确认了六类长期记忆树。",
-        },
-        MemoryKind.INTENTION: {"intent_name": "完成记忆系统重构", "status": "open", "next_step": "补齐测试体系"},
     }[kind]
 
 
@@ -153,12 +147,10 @@ def document(
     revision: int = 1,
     timestamp: datetime = BASE_TIME,
 ) -> MemoryDocument:
-    confirmed = kind is MemoryKind.INTENTION
     metadata = MemoryDocumentMetadata(
         revision=revision,
         created_at=timestamp,
         updated_at=timestamp + timedelta(seconds=revision - 1),
-        last_confirmed_at=timestamp if confirmed else None,
     )
     return codec().build(kind, memory_fields(kind) if fields is None else fields, metadata=metadata)
 

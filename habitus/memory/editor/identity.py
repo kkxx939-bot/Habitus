@@ -270,7 +270,6 @@ class MemoryIdentityPlanner:
         {
             MemoryKind.PREFERENCE,
             MemoryKind.ENTITY,
-            MemoryKind.INTENTION,
         }
     )
 

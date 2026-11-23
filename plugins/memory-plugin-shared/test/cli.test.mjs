@@ -389,7 +389,7 @@ const MEMORY_ROUTES = {
   [tree("memory://entities/项目")]: { uri: "memory://entities/项目", directories: [], documents: ["memory://entities/项目/habitus.md"], abstract: null },
   [documentAt("memory://preferences/回答风格.md")]: {
     uri: "memory://preferences/回答风格.md", node: "document", kind: "preference", revision: 2,
-    created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-20T00:00:00Z", last_confirmed_at: null,
+    created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-20T00:00:00Z",
     fields: { topic: "回答风格", content: "- 偏好简洁直接的回答" }, text: "",
     links: [{ from_uri: "memory://preferences/回答风格.md", to_uri: "memory://entities/项目/habitus.md", link_type: "related" }], backlinks: [],
   },

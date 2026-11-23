@@ -18,7 +18,7 @@
   "habitus/benchmark/recovery_boundary.py": 3,
   "habitus/benchmark/reliability.py": 2,
   "habitus/benchmark/report.py": 4,
-  "habitus/benchmark/runner.py": 14,
+  "habitus/benchmark/runner.py": 13,
   "habitus/benchmark/runtime_boundary.py": 6,
   "habitus/benchmark/vector.py": 19,
   "habitus/benchmark/vector_boundary.py": 9,
