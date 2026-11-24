@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
+from habitus.behavior.kinds.ids import ClassId, Lane
 from habitus.behavior.model import BehaviorAddress, BehaviorKind
 from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.tree.writer import BehaviorDocumentWriter, BehaviorPublishConflictError
@@ -19,12 +20,16 @@ from habitus.memory.editor.retrieval.search import memory_content_search
 from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.uri import MemoryURI
 from habitus.runtime import build_runtime
+from habitus.runtime.foresight import foresight_ledger
 from habitus.runtime.foresight_tree_rows import tree_day
 from habitus.runtime.runtime_lifecycle import TwoTreeLayoutError
+from habitus.runtime.scene import habit_cards
+from habitus.scene.habits import HabitNumbers
 from habitus.scene.views.index import DayIndex
 from habitus.series.reader import admitted, read_series
 from tests.helpers import document
 from tests.lock_store import ProcessLocalLockStore
+from tests.unit.behavior.kinds_fixtures import named_words
 from tests.unit.behavior.tree_payloads import DAY, gap_payload, local, occurrence_payload
 from tests.unit.runtime.test_behavior_pipeline import (
     PICK_BODY,
@@ -32,6 +37,7 @@ from tests.unit.runtime.test_behavior_pipeline import (
     physical_delivery,
     scripted_dependencies,
 )
+from tests.unit.runtime.test_foresight_outlet import awaiting, expectation
 
 CST = timezone(timedelta(hours=8))
 
@@ -107,7 +113,8 @@ def test_tree_lookups_parse_scheme_bearing_sources_strictly_and_skip_the_rest() 
     assert tree_day("2026-08-16") is None
     old = "behavior:" + "//occurrences/2026/08/16/洗了手--20260816T193018000000%2B0800.md"
     gap = "habitus://gaps/session/2026/08/16/没读懂--20260816T193018000000%2B0800.md"  # 空白不是出处
-    for bad in (old, "habitus://occurrences/2026/08/16/洗了手--20260816T193018000000%2B0800.md", "habitus://x.md", gap):
+    habit, reminder = "habitus://habits/session/s-k0001.md", "habitus://reminders/session/2026/08/16/e1.md"  # 只做记录，裁定 113
+    for bad in (old, "habitus://occurrences/2026/08/16/洗了手--20260816T193018000000%2B0800.md", "habitus://x.md", gap, habit, reminder):
         with pytest.raises(BehaviorURIError):
             tree_day(bad)
 
@@ -124,9 +131,26 @@ def test_cards_ignore_the_occurrence_and_gap_directories_at_the_root(tmp_path) -
     asyncio.run(runtime.deliver_physical(physical_delivery()))
     report = asyncio.run(branches.physical.reduction_runner.run_once())
     assert (report.published_occurrences, report.published_gaps) == (1, 1)
+    # 根下再放一张习惯卡片、一条提醒记录（裁定 113）：记忆这半边同样看不到它们
+    config = behavior_enabled_config(tmp_path)
+    habit_cards(config, "physical").sync(
+        named_words(("喝水",), lane=Lane.PHYSICAL).with_active({ClassId(Lane.PHYSICAL, 1): DAY}),
+        {"p-k0001": HabitNumbers(DAY, DAY, 1, 0, 0, 0, 0, None)},
+        now=datetime.now(UTC),
+    )
+    awaiting(foresight_ledger(config, "session"), expectation())
     memory = runtime.components.memory
     tree = memory.tree
-    assert {path.name for path in tree.root.iterdir()} >= {"occurrences", "gaps", "preferences", "entities", "tools"}
+    assert {path.name for path in tree.root.iterdir()} >= {
+        "occurrences",
+        "gaps",
+        "habits",
+        "reminders",
+        "preferences",
+        "entities",
+        "tools",
+    }
+    assert list((tree.root / "habits").rglob("*.md")) and list((tree.root / "reminders").rglob("*.md"))
 
     card = document(MemoryKind.PREFERENCE)
     tree.initialize()
@@ -145,8 +169,11 @@ def test_cards_ignore_the_occurrence_and_gap_directories_at_the_root(tmp_path) -
     catalog = memory.search.catalog.read(kinds=tuple(MemoryKind), now=datetime.now(UTC), on_recall_failure=lambda error: None)
     assert [item.uri for item in (*catalog.cards, *catalog.cold, *catalog.hidden)] == [MemoryURI.from_address(card.address)]
     assert catalog.notes == ()
-    with pytest.raises(ValueError):
-        MemoryURI("habitus://occurrences/physical")  # 浏览、提取的读口都只认卡片地址
+    for directory in ("habitus://occurrences/physical", "habitus://habits/physical", "habitus://reminders/session"):
+        with pytest.raises(ValueError):
+            MemoryURI(directory)  # 浏览、提取的读口都只认卡片地址
+    for scoped in (MemoryDirectory.root(), None):
+        assert all("habits" not in str(hit.uri) for hit in memory_content_search(tree, None, keywords=("喝水", "周报"), directory=scoped, limit=10))
     # 清单的范围是显式限定的，不靠根概览刚好没列：根概览里就算出现事件目录，清单也不往里走、不失败
     listed = Overview.parse("记忆根", root_overview)
     widened = Overview("记忆根", listed.cards, (*listed.children, OverviewChild("occurrences", 1)), listed.omitted_cards)
@@ -164,6 +191,19 @@ def test_without_the_behavior_side_the_tree_has_no_occurrence_or_gap_directories
     runtime.initialize()
     names = {path.name for path in config.tree_root.iterdir()}
     assert names == {"preferences", "entities", "tools"}
+
+
+def test_without_the_semantic_layer_or_foresight_there_are_no_habit_or_reminder_directories(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """习惯卡片只在语义树开着时写、提醒记录只在预测开着时写，目录都是第一次写时才建（裁定 113）：行为侧开着、两者关着时
+    树里没有 ``habits``、``reminders``。"""
+
+    config = behavior_enabled_config(tmp_path)
+    runtime = build_runtime(config, providers=scripted_dependencies([PICK_BODY]), path_lock=PathLock(ProcessLocalLockStore()))
+    assert runtime.components.pipelines == () and not config.foresight.enabled
+    runtime.initialize()
+    asyncio.run(runtime.deliver_physical(physical_delivery()))
+    asyncio.run(runtime.components.behavior.physical.reduction_runner.run_once())  # type: ignore[union-attr]
+    assert {path.name for path in config.tree_root.iterdir()} == {"preferences", "entities", "tools", "occurrences", "gaps"}
 
 
 def test_turning_the_behavior_side_off_keeps_its_directories_untouched_and_unread(tmp_path) -> None:  # type: ignore[no-untyped-def]

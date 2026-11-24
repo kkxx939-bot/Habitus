@@ -29,7 +29,8 @@
  7      机会表（含各类的日历）                              是          今天没有这一代
  8      单元历史 → 压实（同上，跟在机会表后面）              否          表照用、压实跳过
  9      当天的日子预期（从零点起看）                        是          今天没有这一代
- 10     完成标记 ``generation/<今天>.json``                  是          —
+ 10     习惯卡片（只做记录，裁定 113；锁外）                否          卡片停在上一次，下一代再对
+ 11     完成标记 ``generation/<今天>.json``                  是          —
 =====  ==================================================  ==========  ==================================================
 
 只有必须成的那几步失败才算"今天没有这一代"（不写完成标记，下一眼从头再做：各步本来可重做）；其余失败大声报出（step 的结局、
@@ -72,6 +73,7 @@ from habitus.runtime.generation_result import (
     DEGRADED,
     DONE,
     FAILED,
+    HABITS,
     HELD,
     LABELS,
     MARK,
@@ -98,6 +100,7 @@ from habitus.runtime.generation_summary import flatten, reason_code
 from habitus.runtime.generation_trace import GENERATION_SPAN, STEP_SPAN_PREFIX
 from habitus.runtime.generation_vocabulary import Counted, VocabularyCounter
 from habitus.runtime.generation_watermark import TickWatermark
+from habitus.runtime.habit_cards import HabitCards
 from habitus.runtime.scene_lock import SceneWriteLock
 from habitus.runtime.scene_night import NightReport, SceneNightlyRun
 from habitus.series import EventSeries
@@ -129,6 +132,7 @@ class Generation:
         generating: Callable[[bool], None] | None = None,
         closed_at: Callable[[date], datetime | None] | None = None,
         unreduced_gaps: Callable[[date], int] | None = None,
+        habits: HabitCards | None = None,
         lane: str = "",
     ) -> None:
         if scene.behavior_tree is not behavior_tree:
@@ -162,6 +166,7 @@ class Generation:
         self.scene_lock, self.generating = scene_lock, generating
         #: 某一天什么时候定的稿（归约的定稿日账：量"从昨天定稿到今天这一代写出"）；截止日之前还没归约的空判断条数。
         self.closed_at, self.unreduced_gaps = closed_at, unreduced_gaps
+        self.habits = habits  # 这一支的习惯卡片（只做记录，裁定 113）；没接是 None
         self.clock: Callable[[], datetime] = clock if clock is not None else lambda: datetime.now(UTC)
 
     def today(self) -> date:
@@ -252,13 +257,14 @@ class Generation:
         # 数词表在"没东西可算"之前：序列里一条记录都没有，候选照样按日子退出、删掉（从没被选中过的从写出它那天算）
         words: list[Counted] = []
         await self._step(result, ACTIVE, lambda report: steps.active_step(self, report, series, day, result, words))
+        scene: list[NightReport] = []
         if result.nothing is None:
-            scene: list[NightReport] = []
             await self._step(result, SCENE, lambda report: steps.scene_step(self, report, series, words, result, scene))
             await self._step(
                 result, OPPORTUNITIES, lambda report: steps.opportunities_step(self, report, series, scene, result)
             )
             await self._step(result, DAYS, lambda report: steps.days_step(self, report))
+        await self._step(result, HABITS, lambda report: steps.habits_step(self, report, series, scene, result))
         await self._step(result, MARK, lambda report: steps.mark_step(self, report, result))
 
     async def _step(

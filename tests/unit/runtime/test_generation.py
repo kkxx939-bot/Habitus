@@ -33,6 +33,7 @@ from habitus.runtime.generation_result import (
     FALLBACK_RELATIONS,
     FALLBACK_SETTLEMENT,
     FALLBACK_UNSTAMPED,
+    HABITS,
     MARK,
     NO_RECORDS,
     OPPORTUNITIES,
@@ -199,6 +200,7 @@ def test_a_generation_runs_its_steps_in_the_ruled_order_and_writes_its_mark(tmp_
         SCENE,
         OPPORTUNITIES,
         DAYS,
+        HABITS,
         MARK,
     ]
     assert result.complete and run.marks.finished(TODAY) is True

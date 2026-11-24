@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from habitus.behavior.kinds.store import BehaviorKindStore
@@ -35,7 +35,7 @@ from habitus.foundation.tracing import TraceSink
 from habitus.infrastructure.store.contracts import LockStore
 from habitus.model_client import StructuredChatClient
 from habitus.pre.conversation import QuestionTool
-from habitus.runtime.behavior import BehaviorRuntimeComponents
+from habitus.runtime.behavior import BehaviorRuntimeComponents, behavior_domain_configs
 from habitus.runtime.conditions import local_calendar
 from habitus.runtime.foresight_compaction import LedgerCompaction
 from habitus.runtime.foresight_days import DayExpectationStage
@@ -48,13 +48,14 @@ from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_outlet import ReminderOutlet
 from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
 from habitus.runtime.foresight_outlet_ledgers import OUTLET_DIRECTORY, BranchOutlet
-from habitus.runtime.foresight_outlet_store import OutletStore
 from habitus.runtime.foresight_reminded import RemindedLookup
+from habitus.runtime.foresight_reminder_records import RecordingLedgerStore, RecordingOutletStore
 from habitus.runtime.foresight_responses import BranchReminders, ReminderResponses
 from habitus.runtime.foresight_settlement import SettlementStage
 from habitus.runtime.foresight_tick import ForesightTick
 from habitus.runtime.generation_lease import Lease
 from habitus.runtime.generation_watermark import TickTrack, TickWatermarkStore
+from habitus.runtime.reminder_records import ReminderRecords
 from habitus.runtime.scene_vocabulary import kind_hierarchy, kind_label, kind_resolution
 from habitus.runtime.session_lane import BehaviorSessionConsumer
 from habitus.runtime.unsealed import UnsealedFromJudgements
@@ -133,15 +134,34 @@ class ForesightRuntimeComponents:
             raise ValueError("foresight must settle against the reduction's own closed days")
 
 
-def foresight_ledger(config: HabitusConfig, lane: str) -> ForesightLedgerStore:
-    """一支的账本（``<foresight_root>/<lane>``）。组合根先建两支的账本，再建共用的出口、各支的预测层。"""
+def foresight_ledger(
+    config: HabitusConfig, lane: str, kind_store: BehaviorKindStore | None = None
+) -> RecordingLedgerStore:
+    """一支的账本（``<foresight_root>/<lane>``）。组合根先建两支的账本，再建共用的出口、各支的预测层。
 
-    return ForesightLedgerStore(config.foresight_root / lane, limits=config.foresight.store)
+    账本写完之后顺手更新这一支的提醒记录（``habitus/reminders/<支>/``，裁定 113；只做记录，预测不读）：目录子项与单个文件的
+    上限沿用事件与空白那一组，词名按这一支的词表（``kind_store``，没给就写编号）。"""
+
+    domain = behavior_domain_configs(config.behavior)
+    records = ReminderRecords(
+        config.tree_root,
+        lane=lane,
+        max_children=domain.tree.max_children_per_directory,
+        max_bytes=domain.document.max_encoded_bytes,
+        clock=lambda: datetime.now(UTC),
+    )
+    return RecordingLedgerStore(
+        config.foresight_root / lane,
+        records=records,
+        kind_name=kind_label(kind_store) if kind_store is not None else lambda _token: None,
+        zone=config.locale.zone(),
+        limits=config.foresight.store,
+    )
 
 
 def build_outlet(
     config: HabitusConfig,
-    ledgers: Mapping[str, ForesightLedgerStore],
+    ledgers: Mapping[str, RecordingLedgerStore],
     *,
     kind_stores: Mapping[str, BehaviorKindStore] | None = None,
     question_tools: Sequence[QuestionTool] | None = None,
@@ -153,8 +173,11 @@ def build_outlet(
     foresight = config.foresight
     return ReminderOutlet(
         {
-            lane: OutletStore(config.foresight_root / lane / OUTLET_DIRECTORY, limits=foresight.store)
-            for lane in ledgers
+            # 写取走记录时顺手把取走那一段交给那一支的提醒记录（与账本共用同一份记录与锁）
+            lane: RecordingOutletStore(
+                config.foresight_root / lane / OUTLET_DIRECTORY, ledger=ledger, limits=foresight.store
+            )
+            for lane, ledger in ledgers.items()
         },
         ledgers,
         liveness=timedelta(hours=foresight.outlet_liveness_hours),

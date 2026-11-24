@@ -15,6 +15,7 @@ from habitus.runtime.generation_result import (
     FALLBACK_ACTIVE,
     FALLBACK_CALENDAR,
     FALLBACK_COMPACTION,
+    FALLBACK_HABITS,
     FALLBACK_HISTORY,
     FALLBACK_RELATIONS,
     FALLBACK_SCENE,
@@ -44,7 +45,9 @@ from habitus.runtime.generation_summary import (
     settlement_summary,
 )
 from habitus.runtime.generation_vocabulary import Counted
+from habitus.runtime.habit_cards import HabitSync
 from habitus.runtime.scene_night import NightReport
+from habitus.scene.habits import habit_numbers
 from habitus.series import EventSeries, GapKind
 
 if TYPE_CHECKING:
@@ -297,6 +300,29 @@ async def days_step(gen: Generation, report: dict[str, object]) -> None:
     report.update(day_summary(built))
     if built.skipped is not None:
         raise Degrade(built.skipped)
+
+
+async def habits_step(
+    gen: Generation, report: dict[str, object], series: EventSeries, scene: list[NightReport], result: GenerationResult
+) -> None:
+    """习惯卡片（裁定 113，只做记录、预测不读）尽力而为：按词表此刻的状态对一遍这一支的卡片，数取这一代语义树一步算出的复现
+    （没有就只对停用与删除、不清数）。写的是 habitus 树，不在语义树写锁里；整代在这一支的预测根租约里，同一支不会有两个在写。"""
+
+    if gen.habits is None:
+        raise Skip("没接习惯卡片")
+    habits = gen.habits
+    materials = scene[0].materials if scene else None
+
+    def sync() -> HabitSync:
+        numbers = None if materials is None else habit_numbers(series, materials.recurrences)
+        return habits.sync(gen.vocabulary.store.read(), numbers, now=gen.clock())
+
+    try:
+        synced = await asyncio.to_thread(sync)
+    except BaseException:
+        result.fallbacks[FALLBACK_HABITS] += 1
+        raise
+    report.update({"written": synced.written, "deleted": synced.deleted, "waiting": synced.waiting})
 
 
 async def mark_step(gen: Generation, report: dict[str, object], result: GenerationResult) -> None:

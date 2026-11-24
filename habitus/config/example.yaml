@@ -370,9 +370,9 @@ workflow:
 #   observation_max_files: 100000      # 观测存储最多多少份交付（保护闸；观测在发布后即释放，常态远低于它）
 #   fusion_max_receipt_files: 100000   # 回执最多多少份（保护闸；按覆盖窗口过期）
 #   fusion_max_judgement_files: 1000000  # 判断最多多少份（保护闸；发布即释放）
-#   tree_max_children_per_directory: 10000  # 事件与空白的单个目录最多多少个子项（保护闸）
+#   tree_max_children_per_directory: 10000  # 事件与空白、习惯卡片与提醒记录的单个目录最多多少个子项（保护闸）
 #   document_max_markdown_body_chars: 24000  # 一篇事件或空白的正文最多多少字（保护闸）
-#   document_max_encoded_bytes: 512000  # 一篇事件或空白编码后最多多少字节（保护闸；归约发布前的干跑同样查）
+#   document_max_encoded_bytes: 512000  # 一篇事件或空白、一张习惯卡片或一条提醒记录编码后最多多少字节（保护闸；归约发布前的干跑同样查）
 #   write_lock_ttl_seconds: 30         # 事件与空白的文档写锁的租约（秒，1–3600）
 
 # 语义关联层。缺省未启用；置 enabled: true 即启用（行为侧必须也启用）。

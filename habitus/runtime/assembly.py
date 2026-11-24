@@ -463,7 +463,7 @@ def build_runtime(
     ledgers = (
         {}
         if evidence is None
-        else {branch.lane.value: foresight_ledger(config, branch.lane.value) for branch in branches}
+        else {branch.lane.value: foresight_ledger(config, branch.lane.value, branch.kind_store) for branch in branches}
     )
     outlet = (
         None

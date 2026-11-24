@@ -31,7 +31,7 @@ from habitus.config import HabitusConfig
 from habitus.foundation.observability import Observer
 from habitus.infrastructure.store.contracts import LockStore
 from habitus.model_client import StructuredChatClient
-from habitus.runtime.behavior import BehaviorRuntimeComponents, retry_stage_of
+from habitus.runtime.behavior import BehaviorRuntimeComponents, behavior_domain_configs, retry_stage_of
 from habitus.runtime.conditions import SharedCalendar, local_calendar
 from habitus.runtime.evidence import evidence_of
 from habitus.runtime.foresight import ForesightRuntimeComponents, build_foresight_nightly
@@ -44,6 +44,7 @@ from habitus.runtime.generation_report import GenerationReports
 from habitus.runtime.generation_runner import GenerationRunner, GenerationSettings
 from habitus.runtime.generation_trace import ModelCallTracer, SpanBackend, TraceFiles
 from habitus.runtime.generation_vocabulary import VocabularyCounter
+from habitus.runtime.habit_cards import HabitCards
 from habitus.runtime.lifecycle_retry import retry_ledger
 from habitus.runtime.model_queue import ModelQueue, ModelQueueState, QueueJournal, QueueSettings
 from habitus.runtime.model_queue_worker import ModelQueueWorker
@@ -139,7 +140,6 @@ def build_generation(
     """一支的换代的串法（``runtime.generation``；没有模型调用）：读这一支的树、脏日、词表在用状态，与这一支的队列共用一面
     （``queue``）；预测层接着时触发还要看这一支的预测拍水位过了余量（``foresight.generation_margin_slots`` 槽）。"""
 
-    marker = None if foresight is None else foresight.watermark
     return Generation(
         behavior_tree=behavior_tree,
         series=SeriesReader(
@@ -171,13 +171,27 @@ def build_generation(
         days=None if foresight is None else foresight.days,
         models_down=None if queue is None else queue.down,
         queue_owed=None if queue is None else queue.owed_now,
-        watermark=None if marker is None else marker.read,
+        watermark=None if foresight is None or foresight.watermark is None else foresight.watermark.read,
         margin=timedelta(minutes=config.foresight.generation_margin_slots * config.temporal.slot_minutes),
         scene_lock=scene_lock,
         generating=None if queue is None else queue.set_generating,
         closed_at=closed_at,
         unreduced_gaps=unreduced_gaps,
+        habits=habit_cards(config, kind_store.lane.value),
         lane=kind_store.lane.value,  # 是哪一支：记在 span 与报告上
+    )
+
+
+def habit_cards(config: HabitusConfig, lane: str) -> HabitCards:
+    """一支的习惯卡片（``habitus/habits/<支>/``，裁定 113）：只做记录，目录子项与单个文件的上限沿用事件与空白那一组
+    （``behavior.tree_max_children_per_directory``、``behavior.document_max_encoded_bytes``），不另设。"""
+
+    domain = behavior_domain_configs(config.behavior)
+    return HabitCards(
+        config.tree_root,
+        lane=lane,
+        max_children=domain.tree.max_children_per_directory,
+        max_bytes=domain.document.max_encoded_bytes,
     )
 
 
@@ -439,6 +453,7 @@ __all__ = [
     "generation_marks",
     "generation_settings",
     "generation_traces",
+    "habit_cards",
     "model_queue_lease_key",
     "model_queue_settings",
     "model_tracer",

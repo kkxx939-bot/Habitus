@@ -15,9 +15,11 @@ from habitus.runtime.generation_summary import UNREACHABLE, reason_code
 
 CALENDAR, RETRY, SETTLE = "calendar", "retry", "settle"
 SERIES, ACTIVE, SCENE, OPPORTUNITIES, DAYS, MARK = "series", "active", "scene", "opportunities", "days", "mark"
+HABITS = "habits"
 #: 换代的各步，按先后。"数在用的词"在读序列之后、语义树之前（裁定 101 第 7 条：要按日子数就得先有序列；
 #: 数出来的集合显式交给这一代的语义树）。单元历史与压实在机会表那一步里、跟在表后面（各自一个 ``foresight.*`` 子 span）。
-STEPS = (CALENDAR, RETRY, SETTLE, SERIES, ACTIVE, SCENE, OPPORTUNITIES, DAYS, MARK)
+#: 习惯卡片（裁定 113）只做记录、预测不读：排在必须成的几步之后、完成标记之前，这一代要写成了才更新卡片。
+STEPS = (CALENDAR, RETRY, SETTLE, SERIES, ACTIVE, SCENE, OPPORTUNITIES, DAYS, HABITS, MARK)
 #: 必须成的几步：失败 = 今天没有这一代。
 MUST = frozenset({SERIES, OPPORTUNITIES, DAYS, MARK})
 LABELS = {
@@ -29,6 +31,7 @@ LABELS = {
     SCENE: "语义树",
     OPPORTUNITIES: "机会表",
     DAYS: "日子预期",
+    HABITS: "习惯卡片",
     MARK: "完成标记",
 }
 
@@ -56,6 +59,7 @@ FALLBACK_UNSTAMPED = "unstamped_records"  # 换代时序列里还没封好（那
 FALLBACK_CALENDAR = "calendar_stale"  # 放假数据重读失败，照用上一次的
 FALLBACK_SCENE = "scene_step_failed"  # 语义树那一步里没做成的段数（同步词表、关系判定）
 FALLBACK_ACTIVE = "active_count_failed"  # 数在用的词没做成：语义树按盘上已有的在用状态
+FALLBACK_HABITS = "habit_cards_failed"  # 习惯卡片没对成：卡片停在上一次，下一代再对
 FALLBACKS = (
     FALLBACK_RELATIONS,
     FALLBACK_SETTLEMENT,
@@ -65,6 +69,7 @@ FALLBACKS = (
     FALLBACK_CALENDAR,
     FALLBACK_SCENE,
     FALLBACK_ACTIVE,
+    FALLBACK_HABITS,
 )
 
 #: 线上任何一处调模型碰到它就是模型整个调不通：触点抛的 ``ModelUnreachable``，以及模型客户端原样抛出的"整个用不了"。
@@ -225,6 +230,7 @@ __all__ = [
     "FAILED",
     "FALLBACKS",
     "ACTIVE",
+    "HABITS",
     "HELD",
     "LABELS",
     "LOCK_BUSY",

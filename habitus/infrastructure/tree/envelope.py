@@ -1,6 +1,6 @@
 """树上 L2 文件的外壳：正文 + 文件末尾唯一一个 ``HABITUS_FIELDS`` 注释（严格 JSON）。
 
-记忆卡片和事件、空白用同一个注释名和同一个类型键 ``type``；注释里还有哪些键由各领域给（卡片多 ``links``、``backlinks``）。
+记忆卡片、事件与空白、习惯与提醒记录用同一个注释名和同一个类型键 ``type``；注释里还有哪些键由各领域给（卡片多 ``links``、``backlinks``）。
 这里只做切分与严格解析：唯一注释、拒重复键、拒非法常量、``--`` 转义、时刻与版本的读法。字段对不对、正文是不是由字段渲染出来、
 重新编码是否逐字节相等，由各领域的编解码器在这之上判。
 """
@@ -16,7 +16,8 @@ from habitus.foundation.validation import is_int
 
 MARKER = "\n<!-- HABITUS_FIELDS\n"
 FOOTER = "\n-->\n"
-#: 注释顶层的类型键：值是文档的种类（``profile``、``preference``、``entity``、``tool``、``occurrence``、``gap``）。
+#: 注释顶层的类型键：值是文档的种类（``profile``、``preference``、``entity``、``tool``、``occurrence``、``gap``、``habit``、
+#: ``reminder``）。
 TYPE_KEY = "type"
 
 

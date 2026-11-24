@@ -1,7 +1,8 @@
 """一棵 habitus 树的顶层布局：树根在存储根下的位置，以及根下允许出现的条目。
 
 只列名字，不认识名字背后的领域类型：四类卡片（``profile.md``、``preferences``、``entities``、``tools``）由记忆读写，
-事件与空白（``occurrences``、``gaps``，下面再按支分 ``session`` / ``physical``）由行为读写。两边各自校验自己那部分的结构；
+事件与空白（``occurrences``、``gaps``，下面再按支分 ``session`` / ``physical``）由行为读写；习惯与提醒记录（``habits``、
+``reminders``，同样按支分）由系统在换代与提醒的账写完之后写，只做记录（裁定 113）。各自校验自己那部分的结构；
 根目录只许出现这里列出的条目，多出来的就是旧盘面或手放的东西，读写时明确报错。
 """
 
@@ -18,6 +19,8 @@ ENTITIES_DIRECTORY = "entities"
 TOOLS_DIRECTORY = "tools"
 OCCURRENCES_DIRECTORY = "occurrences"
 GAPS_DIRECTORY = "gaps"
+HABITS_DIRECTORY = "habits"
+REMINDERS_DIRECTORY = "reminders"
 
 #: 目录 L0 / L1 的侧车文件名；只有卡片目录生成它们，事件与空白的目录不生成（裁定 112）。
 ABSTRACT_FILENAME = ".abstract.md"
@@ -26,7 +29,15 @@ SIDECAR_FILENAMES = frozenset({ABSTRACT_FILENAME, OVERVIEW_FILENAME})
 
 ROOT_FILES = frozenset({PROFILE_FILE})
 ROOT_DIRECTORIES = frozenset(
-    {PREFERENCES_DIRECTORY, ENTITIES_DIRECTORY, TOOLS_DIRECTORY, OCCURRENCES_DIRECTORY, GAPS_DIRECTORY}
+    {
+        PREFERENCES_DIRECTORY,
+        ENTITIES_DIRECTORY,
+        TOOLS_DIRECTORY,
+        OCCURRENCES_DIRECTORY,
+        GAPS_DIRECTORY,
+        HABITS_DIRECTORY,
+        REMINDERS_DIRECTORY,
+    }
 )
 
 
@@ -40,10 +51,12 @@ __all__ = [
     "ABSTRACT_FILENAME",
     "ENTITIES_DIRECTORY",
     "GAPS_DIRECTORY",
+    "HABITS_DIRECTORY",
     "OCCURRENCES_DIRECTORY",
     "OVERVIEW_FILENAME",
     "PREFERENCES_DIRECTORY",
     "PROFILE_FILE",
+    "REMINDERS_DIRECTORY",
     "ROOT_DIRECTORIES",
     "ROOT_FILES",
     "SIDECAR_FILENAMES",
