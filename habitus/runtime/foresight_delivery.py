@@ -39,7 +39,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 
 from habitus.foresight import Evidence, Seen, Standing, Tolerance, climb
@@ -240,7 +240,7 @@ class DeliveryStage:
             self._record(tally, item, awaiting_outcome(self.claimed, item, pending, materials, now))
         for unit in units:
             for member in unit.members:
-                self._subsume(tally, member, unit.basis.expectation_id, unit.level)
+                self._subsume(tally, member, unit.basis.expectation_id, unit.level, unit)
         for item, cited, level in found.joins:
             self._subsume(tally, item, cited, level)
         dues = (*found.closing, *handed)
@@ -253,12 +253,10 @@ class DeliveryStage:
             self._record(
                 tally,
                 item,
-                self._closing(item, pending, standings[item.expectation_id], verdict, materials, tally, inputs),
+                self._closing(item, pending, closing_units[item.expectation_id], verdict, materials, tally, inputs),
             )
         for unit in units:
-            self._record(
-                tally, unit.basis, self._opening(unit.basis, standings[unit.basis.expectation_id], materials, tally)
-            )
+            self._record(tally, unit.basis, self._opening(unit, materials, tally))
         changes = self._record_levels(cached, every, now)
         open_requests = self._publish(found, tally, materials, now)
         return DeliveryReport(
@@ -304,26 +302,26 @@ class DeliveryStage:
 
     # ── 一条预期的决定（原因的先后在 ``foresight.delivery``，这里只取材料）────────────────
 
-    def _opening(
-        self, item: Expectation, standing: Standing, materials: JudgeMaterials | None, tally: Tally
-    ) -> Delivery:
-        return on_opening(item, standing, now=tally.now, facts=self._circumstances(item, materials))
+    def _opening(self, unit: Unit, materials: JudgeMaterials | None, tally: Tally) -> Delivery:
+        item = unit.basis
+        delivery = on_opening(item, unit.standing, now=tally.now, facts=self._circumstances(item, materials))
+        return replace(delivery, loss_readings=unit.readings_for(item))  # 单元这一拍的读数（裁定 114，只给尺子看）
 
     def _closing(
         self,
         item: Expectation,
         pending: Delivery,
-        standing: Standing,
+        unit: Unit,
         verdict: Verdict | None,
         materials: JudgeMaterials | None,
         tally: Tally,
         inputs: Mapping[str, Sequence[UnitInput]],
     ) -> Delivery:
         spoken_today, spoken_kinds = tally.spoken_for(item.expectation_id)
-        return on_closing(
+        delivery = on_closing(
             item,
             pending,
-            standing,
+            unit.standing,
             now=tally.now,
             facts=self._circumstances(item, materials),
             kept=verdict.kept if verdict is not None else None,
@@ -334,6 +332,7 @@ class DeliveryStage:
             daily_cap=self.daily_cap,
             text=lambda: self._text(item, verdict, materials, tally.now, inputs),
         )
+        return replace(delivery, loss_readings=unit.readings_for(item))  # 时窗末重算的那一次（裁定 114）
 
     @staticmethod
     async def _reread(
@@ -404,14 +403,13 @@ class DeliveryStage:
             rows_on=rows_on,
         )
 
-    def _subsume(self, tally: Tally, item: Expectation, basis_id: str, level: int) -> None:
-        """同一刻同一个行为的另一个输入：单元替它一并决定，记「单元已选」并引依据。"""
+    def _subsume(self, tally: Tally, item: Expectation, basis_id: str, level: int, unit: Unit | None = None) -> None:
+        """同一刻同一个行为的另一个输入：单元替它一并决定，记「单元已选」并引依据。这一拍算了单元（``unit``）的带上读数；
+        并进已决定过的单元的没有算，不带（"没量到"，裁定 114）。"""
 
-        self._record(
-            tally,
-            item,
-            Delivery(item.expectation_id, tally.now, level, False, UNIT, 0.0, evidence=(f"{UNIT_CITE}{basis_id}",)),
-        )
+        cited = (f"{UNIT_CITE}{basis_id}",)
+        delivery = Delivery(item.expectation_id, tally.now, level, False, UNIT, 0.0, evidence=cited)
+        self._record(tally, item, replace(delivery, loss_readings=None if unit is None else unit.readings_for(item)))
 
     def _record(self, tally: Tally, item: Expectation, delivery: Delivery | None) -> None:
         if delivery is None or not self.ledger.record_delivery(item.day, delivery):

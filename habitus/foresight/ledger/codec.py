@@ -14,6 +14,7 @@ from habitus.foresight.ledger.model import (
     Delivery,
     Expectation,
     Omission,
+    Readings,
     Response,
     Ruling,
     Settlement,
@@ -21,6 +22,7 @@ from habitus.foresight.ledger.model import (
     UnitLevel,
     UnitSetting,
 )
+from habitus.foresight.reliability import Reliability
 
 #: v9（裁定 64）：递送多了「待取」「宿主没取」两种原因、「说了」带 ``via`` / ``turn``（谁说的、在哪一轮）、「待取」可带话。
 #: v8 及更早一律按不支持拒（项目没上线，不留读回的双轨）。
@@ -113,7 +115,34 @@ def encode_delivery(item: Delivery) -> dict[str, Any]:
         "evidence": list(item.evidence),
         "via": item.via,
         "turn": item.turn,
+        "loss_readings": None if item.loss_readings is None else _encode_readings(item.loss_readings),
     }
+
+
+def _encode_readings(item: Readings) -> dict[str, Any]:
+    def one(value: Reliability) -> dict[str, float]:
+        return {"k": value.k, "n": value.n, "mean": value.mean, "lower": value.lower, "upper": value.upper}
+
+    return {"unit": one(item.unit), "layer": item.layer, "account": one(item.account)}
+
+
+def _decode_readings(raw: object) -> Readings | None:
+    """递送上的读数（裁定 114）：没有这个键或为 null 都是"没量到"——这是同一个状态，不是给旧格式留的读法。"""
+
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ForesightError("delivery readings must be an object or null")
+
+    def one(value: object) -> Reliability:
+        if not isinstance(value, Mapping):
+            raise ForesightError("a delivery reading must be an object")
+        numbers = [value[key] for key in ("k", "n", "mean", "lower", "upper")]
+        if any(isinstance(number, bool) or not isinstance(number, int | float) for number in numbers):
+            raise ForesightError("a delivery reading holds numbers only")
+        return Reliability(*(float(number) for number in numbers))
+
+    return Readings(one(raw["unit"]), _text(raw, "layer"), one(raw["account"]))
 
 
 def decode_delivery(raw: Mapping[str, Any]) -> Delivery:
@@ -130,6 +159,7 @@ def decode_delivery(raw: Mapping[str, Any]) -> Delivery:
             evidence=tuple(str(item) for item in raw.get("evidence", [])),
             via=None if raw.get("via") is None else str(raw["via"]),
             turn=None if raw.get("turn") is None else str(raw["turn"]),
+            loss_readings=_decode_readings(raw.get("loss_readings")),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ForesightError(f"delivery record is malformed: {exc}") from exc

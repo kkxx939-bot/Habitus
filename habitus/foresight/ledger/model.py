@@ -28,6 +28,7 @@ from datetime import date, datetime
 from hashlib import sha256
 
 from habitus.foresight.errors import ForesightError
+from habitus.foresight.reliability import Reliability
 
 #: 预期从哪种触发来（``19-预测层方案.md`` 第三节；钟面随预测树删了，裁定 59）。
 SOURCES = ("事件", "日子", "没做完", "约定", "情境")
@@ -255,11 +256,26 @@ class Expectation:
 
 
 @dataclass(frozen=True)
+class Readings:
+    """单元替这一条算出来的两个读数（裁定 114）：这一刻这个行为的单元读数（``unit``，开不开口看它）与落在哪一层（``layer``，
+    ``units.Level`` 的值），以及这条预期自己那本账的读数（``account``）。只给 loss 尺子看：除了算分与把分写进报告，没有任何
+    计算读回它（架构测试守着）；不是权重，权重照旧每代从账本与关系表现算（裁定 56 第 2 条）。"""
+
+    unit: Reliability
+    layer: str
+    account: Reliability
+
+    def __post_init__(self) -> None:
+        _text(self.layer, "readings layer")
+
+
+@dataclass(frozen=True)
 class Delivery:
     """对一条预期的递送决定。``p_speak`` 是这条被说出的概率（这一版不扣发，确定性规则下是 0 或 1）。
     ``evidence`` 是模型指的那几条历史记录。「说了」上 ``via`` 是哪个宿主说的（``codex`` / ``claude-code`` / ``macos-notification``…）、
     ``turn`` 是宿主侧那一轮的身份（提问那次调用的 call_id；推式宿主可空）——账本得记"谁说的、在哪一轮"（裁定 64 第 6 条）。
-    没说出口的递送没有宿主，两者都为空。"""
+    没说出口的递送没有宿主，两者都为空。``loss_readings`` 是单元在这一拍替它算出的读数（时窗开、时窗末、成员接手那一拍才有；
+    并进已决定过的单元、等宿主、出口追加的都没有：没有就是"没量到"，裁定 114）。"""
 
     expectation_id: str
     decided_at: datetime
@@ -271,6 +287,7 @@ class Delivery:
     evidence: tuple[str, ...] = ()
     via: str | None = None
     turn: str | None = None
+    loss_readings: Readings | None = None
 
     def __post_init__(self) -> None:
         _text(self.expectation_id, "delivery expectation_id")
@@ -553,6 +570,7 @@ __all__ = [
     "Expectation",
     "Omission",
     "Response",
+    "Readings",
     "Ruling",
     "Settlement",
     "UnitLevel",

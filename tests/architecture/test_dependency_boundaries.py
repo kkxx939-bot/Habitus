@@ -1454,3 +1454,23 @@ def test_habits_and_reminder_records_are_written_only_and_never_read_by_predicti
             if constant in path.read_text(encoding="utf-8")
         )
         assert users == expected, constant
+
+
+def test_loss_readings_are_read_back_only_by_the_codec_and_the_scorer() -> None:
+    """loss 尺子只量（裁定 114）：递送上存下的读数（``Delivery.loss_readings``）只有编解码与算分读回——预测拍、建预期、单元、阶梯、
+    结算的判法、语义树、归约都不读，存的是给尺子看的记录、不是权重（裁定 56 第 2 条）。读回只能是取属性 ``.loss_readings``、拿
+    ``"loss_readings"`` 这个名字（``getattr``、字典键）或按类模式匹配（``case Delivery(loss_readings=x)``）；写进递送用关键字
+    参数，不算读。"""
+
+    readers = sorted(
+        path.relative_to(SRC).as_posix()
+        for path in SRC.rglob("*.py")
+        if "__pycache__" not in path.parts
+        and any(
+            (isinstance(node, ast.Attribute) and node.attr == "loss_readings")
+            or (isinstance(node, ast.Constant) and node.value == "loss_readings")
+            or (isinstance(node, ast.MatchClass) and "loss_readings" in node.kwd_attrs)
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        )
+    )
+    assert readers == ["foresight/ledger/codec.py", "foresight/loss.py"]

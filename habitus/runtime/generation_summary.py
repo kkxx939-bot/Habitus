@@ -7,18 +7,21 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import date
 from typing import cast
 
 from habitus.behavior.retry import RetryReport, RetryStage
+from habitus.foresight.loss import LossGroup
 from habitus.runtime.foresight_days import DayReport
+from habitus.runtime.foresight_loss import LedgerLoss
 from habitus.runtime.foresight_nightly import OpportunityReport
 from habitus.runtime.foresight_settlement import SettlementReport
 from habitus.runtime.scene_night import NightReport
 
 #: 只进本地每代报告、不进 span 属性（OTLP 与本地 trace）的报告键：信号是给人看的句子，带概念名、关系两端名、迁移原因这类
-#: 用户派生文字（codex R3）。
-LOCAL_ONLY_KEYS = frozenset({"signals"})
+#: 用户派生文字（codex R3）；loss 按行为的明细（裁定 114）以行为编号为键，摊开会让每个词成一个属性名。
+LOCAL_ONLY_KEYS = frozenset({"signals", "by_kind"})
 #: 失败原因里"模型调不通"后面跟的是异常文字（可能带供应商返回的内容）：span 上只留这个原因码，全文在每代报告里。
 #: ``runtime.generation`` 记"模型调不通"用的就是这一句。
 UNREACHABLE = "模型调不通"
@@ -64,6 +67,44 @@ def settlement_summary(report: SettlementReport, *, due: int) -> dict[str, objec
         "omissions": report.omissions,
         "feedback": report.feedback,
         "pending_days": [day.isoformat() for day in report.pending_days],
+        "loss": None if report.loss is None else loss_summary(report.loss),
+    }
+
+
+def loss_summary(found: LedgerLoss) -> dict[str, object]:
+    """loss 那一节（裁定 114）：总的、按来路、说出口与没说出口、按行为（只留本地），每组带刻数与分量；旁边放尺子看不到的——
+    漏报、没量到的预期与刻、结果不知道的刻。小数留 6 位。"""
+
+    loss = found.loss
+    if loss is None:
+        return {"days": found.days, "failed": found.failed}
+
+    def groups(items: Mapping[str, LossGroup]) -> dict[str, object]:
+        return {name: _loss_group(item) for name, item in items.items()}
+
+    return {
+        "days": found.days,
+        "omissions": found.omissions,
+        "expectations": loss.expectations,
+        "unmeasured_expectations": loss.unmeasured_expectations,
+        "moments": loss.moments,
+        "unknown_moments": loss.unknown_moments,
+        "unmeasured_moments": loss.unmeasured_moments,
+        "total": None if loss.total is None else _loss_group(loss.total),
+        "by_source": groups(loss.by_source),
+        "by_spoken": groups(loss.by_spoken),
+        "by_kind": groups(loss.by_kind),
+    }
+
+
+def _loss_group(item: LossGroup) -> dict[str, object]:
+    return {
+        "moments": item.moments,
+        "weight": round(item.weight, 6),
+        **{
+            name: {"log_loss": round(score.log_loss, 6), "brier": round(score.brier, 6)}
+            for name, score in (("unit", item.unit), ("account", item.account), ("raw", item.raw))
+        },
     }
 
 
@@ -155,6 +196,7 @@ __all__ = [
     "reason_code",
     "day_summary",
     "kept_errors",
+    "loss_summary",
     "opportunity_summary",
     "pending_by_branch",
     "retry_summary",

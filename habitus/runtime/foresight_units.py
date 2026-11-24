@@ -20,7 +20,7 @@ from datetime import date, datetime
 from habitus.foresight import Evidence, Standing
 from habitus.foresight.edges import PastMoment
 from habitus.foresight.history import UnitHistory
-from habitus.foresight.ledger import Expectation
+from habitus.foresight.ledger import Expectation, Readings
 from habitus.foresight.opportunities import OpportunityTable, TreeReading
 from habitus.foresight.reliability import Reliability
 from habitus.foresight.units import (
@@ -56,6 +56,12 @@ class Unit:
     @property
     def kind_token(self) -> str:
         return self.basis.kind_token
+
+    def readings_for(self, item: Expectation) -> Readings:
+        """这一拍单元替 ``item``（它的一个输入）算出的两个读数，随这一拍写的那条递送落盘（裁定 114，只给 loss 尺子看）。"""
+
+        own = next(entry.standing for entry in self.inputs if entry.expectation.expectation_id == item.expectation_id)
+        return Readings(self.reading.reading, self.reading.level.value, own.prediction)
 
 
 @dataclass(frozen=True)

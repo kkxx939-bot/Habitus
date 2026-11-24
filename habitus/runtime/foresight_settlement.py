@@ -67,6 +67,7 @@ from habitus.foundation.observability import (
 )
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
+from habitus.runtime.foresight_loss import LedgerLoss, measure_loss
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement_diagnosis import SettlementDiagnosis
 from habitus.runtime.foresight_tree_rows import basis_row, day_cache, hierarchy_of, rows_between
@@ -146,6 +147,8 @@ class SettlementReport:
     pending_days: tuple[date, ...]
     #: 这一拍新写的提醒反馈条数（只给观测）。
     feedback: int = 0
+    #: 结完之后从账上现算的 loss（裁定 114，只量、不当门）。
+    loss: LedgerLoss | None = None
 
 
 class SettlementStage:
@@ -264,9 +267,8 @@ class SettlementStage:
         for day in days:
             if day not in pending and day not in waiting_rulings and not self.ledger.unsettled_expectations(day):
                 self.ledger.mark_final(day, at=now)
-        return SettlementReport(
-            sum(outcomes.values()), outcomes, rulings, found, tuple(pending), feedback=feedback_written
-        )
+        report = SettlementReport(sum(outcomes.values()), outcomes, rulings, found, tuple(pending), feedback_written)
+        return replace(report, loss=measure_loss(self.ledger, now=now))  # 结完之后从账上现算（裁定 114，只量）
 
     def _rule(
         self,
