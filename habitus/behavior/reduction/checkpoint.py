@@ -67,7 +67,7 @@ class CheckpointStore:
         if not isinstance(documents, list):
             return 0, set()
         days = document_days(documents)
-        raw_days = checkpoint.get("refresh_days")
+        raw_days = checkpoint.get("touched_days")
         if isinstance(raw_days, list):
             days |= {date.fromisoformat(str(item)) for item in raw_days}
         replayed = sum(1 for item in documents if isinstance(item, Mapping) and item.get("kind") != "ledger-only")

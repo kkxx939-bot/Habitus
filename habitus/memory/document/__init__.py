@@ -3,7 +3,7 @@
 from habitus.memory.document.codec import MemoryDocumentCodec, MemoryDocumentIntegrityError
 from habitus.memory.document.config import MemoryDocumentConfig, MemoryDocumentLimitError
 from habitus.memory.document.link import MemoryLinkType, MemoryStoredLink
-from habitus.memory.document.model import MemoryDocument, MemoryDocumentMetadata
+from habitus.memory.document.model import MemoryDocument
 
 __all__ = [
     "MemoryDocument",
@@ -11,7 +11,6 @@ __all__ = [
     "MemoryDocumentConfig",
     "MemoryDocumentIntegrityError",
     "MemoryDocumentLimitError",
-    "MemoryDocumentMetadata",
     "MemoryLinkType",
     "MemoryStoredLink",
 ]

@@ -107,7 +107,7 @@ TODAY = NOW.date()
 def scene_on(root: Path, site, *, catalog=None, advice: bool = False):  # type: ignore[no-untyped-def]
     """在 ``root`` 这份盘上重新开一套语义树对象（存储、替身模型都是新的）：相当于进程重起后看到的那一份。"""
 
-    scene, provider = nightly(root, ConceptHitStore(root / "scene"), site, catalog=catalog)
+    scene, provider = nightly(root, ConceptHitStore(root / "scene", lane="session"), site, catalog=catalog)
     advisor = None
     if advice:
         client, advisor = answering_client()
@@ -407,7 +407,7 @@ def test_a1_6_a_queue_killed_in_the_middle_of_an_item_is_resumed_from_disk(tmp_p
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(queue.drain())
         assert disk(root) != expected  # 真的停在了半路
-        reopened, _provider = nightly(root, ConceptHitStore(root / "scene"), site, catalog=scene.syncing.catalog)
+        reopened, _provider = nightly(root, ConceptHitStore(root / "scene", lane="session"), site, catalog=scene.syncing.catalog)
         report = asyncio.run(queue_on(root, reopened, site).drain())
         assert report.clear and (SYNC, DONE) in done(report)
         assert disk(root) == expected

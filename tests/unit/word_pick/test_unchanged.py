@@ -55,7 +55,7 @@ def canonical(value: object) -> str:
 
 # ── S1：描述这一轮逐字不变 ─────────────────────────────────────────────────────
 
-#: 基线上量出来的（改动后必须逐项相同）。
+#: 基线上量出来的（改动后必须逐项相同）。封口那一组去掉日完成章摘要后在 4b3ab8d 上重量过一遍，与合并后的代码相同。
 DESCRIBE_SYSTEM_PROMPT_SHA = "eeabe7b2cdb43526039e0faba1939a97372eb38691de2784875e0244dc7e5c16"
 DESCRIBE_TURN_MATERIAL_SHA = "02e0d583ce4347d4ab8b141d9b3a140cfdbef4ab07be35f6eeb053672fc39bfd"
 DESCRIBE_SCHEMA_SHA = "56b151a5f58629c68b6fc106aa438c0cf286c929024d95084a41169b77e55deb"
@@ -212,7 +212,7 @@ def test_s5_calendar_situations_seal_hits_and_relation_statistics_are_unchanged(
     series = read_series(site.behavior_tree, cutoff=CUTOFF)
     days = sorted({record.day for record in series.records})
     concepts = _concepts(days)
-    store = ConceptHitStore(tmp_path / "scene")
+    store = ConceptHitStore(tmp_path / "scene", lane="session")
     sealed_at = datetime(2026, 4, 1, 0, 30, tzinfo=UTC)
     hits = {}
     seals = []
@@ -223,7 +223,7 @@ def test_s5_calendar_situations_seal_hits_and_relation_statistics_are_unchanged(
         seals.append(
             (
                 day.isoformat(),
-                plan.digest,
+                # 日完成章的摘要值把这天每条记录的地址算进去，地址换成 habitus:// 之后它本来就变（裁定 112），不比
                 sorted(hit.concept for hit in outcome.hits),
                 sorted(outcome.checked),
                 [(item.kind_token, item.classified, item.lane, list(item.situation_hits)) for item in plan.records],
@@ -253,7 +253,7 @@ def test_s5_calendar_situations_seal_hits_and_relation_statistics_are_unchanged(
     assert len(readings) == SNAPSHOT_RELATION_COUNT
 
 
-#: 基线上量出来的（改动后必须逐项相同）。
-SNAPSHOT_SEALS = "c1550b0911c06304dc5997de5a203630fa766d071eeee5377d8d82eeb3829104"
+#: 基线上量出来的（改动后必须逐项相同）。封口那一组去掉日完成章摘要后在 4b3ab8d 上重量过一遍，与合并后的代码相同。
+SNAPSHOT_SEALS = "38029f789059331335361913c82f24fb8fdc1311b7a5100eeee702783779f251"
 SNAPSHOT_RELATIONS = "c5b3b1579b270a51245b37603dc4ec4e010ac3a8677160340fd1c0fe7ba374ad"
 SNAPSHOT_RELATION_COUNT = 137

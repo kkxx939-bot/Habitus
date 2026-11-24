@@ -1,4 +1,4 @@
-"""词表的文件存储（插件交付：全是文件，不建表）。树根下两个文件：
+"""词表的文件存储（插件交付：全是文件，不建表）。这一支在树外的根 ``behavior/<lane>/`` 下两个文件（不是 habitus 树上的节点，裁定 112）：
 
 - ``kinds.state.json``  词表状态——真相：这个用户自己长的、还活着的节点，"已删"的记号，在用的词与从哪一天起，退出过在用的词
   哪天退出的，在用状态的修订号（在用集合每变一次加一，下游记的"词表版本"），和一个每次写都加一的写入序号；
@@ -25,7 +25,6 @@ from habitus.behavior.kinds.ids import ClassId, KindIdError, Lane
 from habitus.behavior.kinds.model import BehaviorKindError, DeletedWord, Vocabulary, Word, WordOrigin
 from habitus.behavior.kinds.render import render_catalog
 from habitus.behavior.kinds.words import initial_words
-from habitus.behavior.model import KINDS_REGISTRY_FILENAME
 from habitus.infrastructure.store.contracts.lock import LockStore
 from habitus.infrastructure.store.contracts.path_lock import PathLock
 from habitus.infrastructure.store.filesystem import (
@@ -36,6 +35,7 @@ from habitus.infrastructure.store.filesystem import (
 
 STATE_SCHEMA_VERSION = "behavior_kinds_state_v2"
 STATE_FILENAME = "kinds.state.json"
+CATALOG_FILENAME = "kinds.md"
 #: 旧词表留在盘上的文件：在就报错，不悄悄忽略（不迁移）。
 LEGACY_FILENAMES = (
     "kinds.changes.jsonl",
@@ -78,7 +78,7 @@ class BehaviorKindStore:
         self.lane = Lane(lane)
         self.config = config or BehaviorKindConfig()
         self.state_path = self.root / STATE_FILENAME
-        self.catalog_path = self.root / KINDS_REGISTRY_FILENAME
+        self.catalog_path = self.root / CATALOG_FILENAME
         self.lock_store = lock_store
         self.lock_ttl_seconds = lock_ttl_seconds
         self._path_lock = PathLock(lock_store)

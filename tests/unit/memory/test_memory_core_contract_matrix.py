@@ -9,10 +9,10 @@ from types import MappingProxyType
 
 import pytest
 
+from habitus.infrastructure.tree.metadata import DocumentMetadata
 from habitus.memory.document import (
     MemoryDocumentCodec,
     MemoryDocumentIntegrityError,
-    MemoryDocumentMetadata,
     MemoryLinkType,
     MemoryStoredLink,
 )
@@ -184,30 +184,30 @@ def test_l2_level_has_no_sidecar_uri(level: object) -> None:
     [
         "",
         "memory:/profile.md",
-        "memory:///profile.md",
+        "habitus:///profile.md",
         "MEMORY://profile.md",
-        " memory://profile.md",
-        "memory://profile.md ",
-        "memory://profile.md/",
-        "memory://preferences//x.md",
-        "memory://preferences/%",
-        "memory://preferences/%0.md",
-        "memory://preferences/%GG.md",
-        "memory://preferences/%FF.md",
-        "memory://preferences/%2F.md",
-        "memory://preferences/%5C.md",
-        "memory://preferences/%00.md",
-        "memory://preferences/.md",
-        "memory://preferences/x.txt",
-        "memory://profile.MD",
-        "memory://profile.md/child",
-        "memory://entities/category.md",
-        "memory://entities/category/name",
-        "memory://events/2026/07/28/event.md",
-        "memory://intentions/intent.md",
-        "memory://topics/topic.md",
-        "memory://skills/skill.md",
-        "memory://conversations/id.md",
+        " habitus://profile.md",
+        "habitus://profile.md ",
+        "habitus://profile.md/",
+        "habitus://preferences//x.md",
+        "habitus://preferences/%",
+        "habitus://preferences/%0.md",
+        "habitus://preferences/%GG.md",
+        "habitus://preferences/%FF.md",
+        "habitus://preferences/%2F.md",
+        "habitus://preferences/%5C.md",
+        "habitus://preferences/%00.md",
+        "habitus://preferences/.md",
+        "habitus://preferences/x.txt",
+        "habitus://profile.MD",
+        "habitus://profile.md/child",
+        "habitus://entities/category.md",
+        "habitus://entities/category/name",
+        "habitus://events/2026/07/28/event.md",
+        "habitus://intentions/intent.md",
+        "habitus://topics/topic.md",
+        "habitus://skills/skill.md",
+        "habitus://conversations/id.md",
     ],
 )
 def test_uri_rejects_noncanonical_encoding_unknown_tree_and_invalid_node(uri: str) -> None:
@@ -219,12 +219,12 @@ def test_uri_rejects_noncanonical_encoding_unknown_tree_and_invalid_node(uri: st
 @pytest.mark.parametrize(
     ("raw", "canonical", "decoded"),
     [
-        ("memory://preferences/a%20b.md", "memory://preferences/a%20b.md", "preferences/a b.md"),
-        ("memory://preferences/a%23b.md", "memory://preferences/a%23b.md", "preferences/a#b.md"),
-        ("memory://preferences/a%25b.md", "memory://preferences/a%25b.md", "preferences/a%b.md"),
-        ("memory://preferences/a%2bb.md", "memory://preferences/a%2Bb.md", "preferences/a+b.md"),
-        ("memory://preferences/a%40b.md", "memory://preferences/a%40b.md", "preferences/a@b.md"),
-        ("memory://preferences/中文.md", "memory://preferences/中文.md", "preferences/中文.md"),
+        ("habitus://preferences/a%20b.md", "habitus://preferences/a%20b.md", "preferences/a b.md"),
+        ("habitus://preferences/a%23b.md", "habitus://preferences/a%23b.md", "preferences/a#b.md"),
+        ("habitus://preferences/a%25b.md", "habitus://preferences/a%25b.md", "preferences/a%b.md"),
+        ("habitus://preferences/a%2bb.md", "habitus://preferences/a%2Bb.md", "preferences/a+b.md"),
+        ("habitus://preferences/a%40b.md", "habitus://preferences/a%40b.md", "preferences/a@b.md"),
+        ("habitus://preferences/中文.md", "habitus://preferences/中文.md", "preferences/中文.md"),
     ],
 )
 def test_uri_normalizes_reserved_percent_encoding_and_keeps_unicode(
@@ -282,23 +282,23 @@ def test_uri_build_and_join_reject_unsafe_or_non_text_parts(part: object) -> Non
 
 
 def test_uri_is_immutable_hashable_and_compares_only_normalized_identity() -> None:
-    uri = MemoryURI("memory://preferences/a%2bb.md")
-    same = MemoryURI("memory://preferences/a%2Bb.md")
+    uri = MemoryURI("habitus://preferences/a%2bb.md")
+    same = MemoryURI("habitus://preferences/a%2Bb.md")
     assert uri == same
     assert uri == str(same)
-    assert uri != "memory://preferences/other.md"
+    assert uri != "habitus://preferences/other.md"
     assert uri != object()
     assert len({uri, same}) == 1
-    assert repr(uri) == "MemoryURI('memory://preferences/a%2Bb.md')"
+    assert repr(uri) == "MemoryURI('habitus://preferences/a%2Bb.md')"
     with pytest.raises(AttributeError):
-        uri._uri = "memory://profile.md"  # type: ignore[misc]
+        uri._uri = "habitus://profile.md"  # type: ignore[misc]
 
 
 @pytest.mark.parametrize("revision", [1, 2, 10, 2**31 - 1])
 @pytest.mark.parametrize("offset", [UTC, timezone(timedelta(hours=8)), timezone(timedelta(hours=-5))])
 def test_document_metadata_normalizes_timezones_and_preserves_revision(revision: int, offset: timezone) -> None:
     created = datetime(2026, 7, 28, 12, tzinfo=offset)
-    metadata = MemoryDocumentMetadata(revision, created, created + timedelta(seconds=1))
+    metadata = DocumentMetadata(revision, created, created + timedelta(seconds=1))
     assert metadata.revision == revision
     assert metadata.created_at.tzinfo is UTC
     assert metadata.updated_at.tzinfo is UTC
@@ -307,7 +307,7 @@ def test_document_metadata_normalizes_timezones_and_preserves_revision(revision:
 @pytest.mark.parametrize("revision", [0, -1])
 def test_document_metadata_rejects_invalid_revision(revision: int) -> None:
     with pytest.raises(ValueError):
-        MemoryDocumentMetadata(revision, BASE_TIME, BASE_TIME)
+        DocumentMetadata(revision, BASE_TIME, BASE_TIME)
 
 
 @pytest.mark.parametrize(
@@ -322,18 +322,18 @@ def test_document_metadata_rejects_naive_timestamps(field: str, value: datetime)
     }
     kwargs[field] = value
     with pytest.raises(ValueError):
-        MemoryDocumentMetadata(**kwargs)  # type: ignore[arg-type]
+        DocumentMetadata(**kwargs)  # type: ignore[arg-type]
 
 
 def test_initial_metadata_starts_at_revision_one() -> None:
-    metadata = MemoryDocumentMetadata.initial(BASE_TIME)
+    metadata = DocumentMetadata.initial(BASE_TIME)
     assert metadata.revision == 1
     assert metadata.created_at == metadata.updated_at == BASE_TIME
 
 
 @pytest.mark.parametrize("seconds", [0, 1, 60, 86_400])
 def test_next_revision_is_monotonic(seconds: int) -> None:
-    initial = MemoryDocumentMetadata.initial(BASE_TIME)
+    initial = DocumentMetadata.initial(BASE_TIME)
     updated = initial.next_revision(BASE_TIME + timedelta(seconds=seconds))
     assert updated.revision == 2
     assert updated.created_at == initial.created_at
@@ -401,17 +401,17 @@ def test_relation_endpoints_must_be_l2_documents(endpoint: MemoryURI, position: 
         [],
         "link",
         {},
-        {"from_uri": "memory://profile.md"},
+        {"from_uri": "habitus://profile.md"},
         {
-            "from_uri": "memory://profile.md",
-            "to_uri": "memory://preferences/a.md",
+            "from_uri": "habitus://profile.md",
+            "to_uri": "habitus://preferences/a.md",
             "link_type": "related_to",
             "extra": 1,
         },
-        {"from_uri": 1, "to_uri": "memory://preferences/a.md", "link_type": "related_to"},
-        {"from_uri": "memory://profile.md", "to_uri": 1, "link_type": "related_to"},
-        {"from_uri": "memory://profile.md", "to_uri": "memory://preferences/a.md", "link_type": 1},
-        {"from_uri": "memory://profile.md", "to_uri": "memory://preferences/a.md", "link_type": "unknown"},
+        {"from_uri": 1, "to_uri": "habitus://preferences/a.md", "link_type": "related_to"},
+        {"from_uri": "habitus://profile.md", "to_uri": 1, "link_type": "related_to"},
+        {"from_uri": "habitus://profile.md", "to_uri": "habitus://preferences/a.md", "link_type": 1},
+        {"from_uri": "habitus://profile.md", "to_uri": "habitus://preferences/a.md", "link_type": "unknown"},
     ],
 )
 def test_stored_link_parser_rejects_invalid_shapes_and_values(value: object) -> None:
@@ -441,7 +441,7 @@ def test_built_document_fields_are_immutable_snapshots(kind: MemoryKind) -> None
     item = CODEC.build(
         kind,
         payload,
-        metadata=MemoryDocumentMetadata.initial(BASE_TIME),
+        metadata=DocumentMetadata.initial(BASE_TIME),
     )
     assert isinstance(item.fields, MappingProxyType)
     payload.clear()
@@ -477,7 +477,7 @@ def test_codec_canonical_round_trip_for_every_kind_and_revision(kind: MemoryKind
 
 
 def _replace_metadata(raw: str, transform: object) -> str:
-    marker = "\n<!-- HABITUS_MEMORY_FIELDS\n"
+    marker = "\n<!-- HABITUS_FIELDS\n"
     body, metadata_source = raw.split(marker, 1)
     metadata = json.loads(metadata_source[: -len("\n-->\n")])
     transform(metadata)  # type: ignore[operator]
@@ -486,7 +486,7 @@ def _replace_metadata(raw: str, transform: object) -> str:
 
 @pytest.mark.parametrize(
     "field",
-    ["memory_type", "revision", "created_at", "updated_at", "fields", "links", "backlinks"],
+    ["type", "revision", "created_at", "updated_at", "fields", "links", "backlinks"],
 )
 def test_codec_rejects_missing_system_metadata_field(field: str) -> None:
     source = document(MemoryKind.PREFERENCE)
@@ -508,8 +508,8 @@ def test_codec_rejects_extra_system_metadata_field(field: str) -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("memory_type", 1),
-        ("memory_type", "topic"),
+        ("type", 1),
+        ("type", "topic"),
         ("revision", 0),
         ("revision", True),
         ("created_at", 1),
@@ -531,14 +531,14 @@ def test_codec_rejects_invalid_system_metadata_types(field: str, value: object) 
 
 @pytest.mark.parametrize("value", ["1", True, 1.0, None, [1]])
 def test_codec_decoder_rejects_non_integer_revision_before_building_metadata(value: object) -> None:
-    """注释里 revision 类型错时在解码器就被拒（W16：类型检查在边界，不靠 ``MemoryDocumentMetadata``）。"""
+    """注释里 revision 类型错时在解码器就被拒（W16：类型检查在边界，不靠 ``DocumentMetadata``）。"""
 
     source = document(MemoryKind.PREFERENCE)
     corrupted = _replace_metadata(CODEC.encode(source), lambda metadata: metadata.__setitem__("revision", value))
     with pytest.raises(MemoryDocumentIntegrityError, match="do not satisfy their Schema") as raised:
         CODEC.decode(corrupted, expected_address=source.address)
     assert isinstance(raised.value.__cause__, ValueError)
-    assert "memory document revision must be a positive integer" in str(raised.value.__cause__)
+    assert "document revision must be a positive integer" in str(raised.value.__cause__)
 
 
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
@@ -566,7 +566,7 @@ def test_codec_rejects_duplicate_json_keys_even_when_values_match() -> None:
 @pytest.mark.parametrize(
     "transform",
     [
-        lambda raw: raw.replace("\n<!-- HABITUS_MEMORY_FIELDS\n", "", 1),
+        lambda raw: raw.replace("\n<!-- HABITUS_FIELDS\n", "", 1),
         lambda raw: raw + raw,
         lambda raw: raw[: -len("\n-->\n")],
         lambda raw: raw.replace("\n-->\n", "\n-- >\n"),

@@ -103,7 +103,7 @@ def test_a_set_aside_chain_is_restored_judged_recovered_by_the_ledger_and_withdr
     assert store.read(record_id("first")) is None  # 没归约就撤下：不让它白天落进已经跑过批的那一天
     assert failed.restore(item)
     failed.ledger.append(
-        BehaviorReductionEntry("c" * 64, "occurrence", "behavior://x", (record_id("first"),), NOW.isoformat(), "v")
+        BehaviorReductionEntry("c" * 64, "occurrence", "occ:x", (record_id("first"),), NOW.isoformat(), "v")
     )
     assert failed.recovered(item)
     failed.withdraw(item)

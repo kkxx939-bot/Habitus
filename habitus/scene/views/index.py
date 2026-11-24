@@ -16,7 +16,6 @@ from habitus.behavior.document import BehaviorDocument
 from habitus.behavior.model import BehaviorKind
 from habitus.behavior.schema.vocabulary import GAP_KINDS
 from habitus.behavior.tree import BehaviorTree
-from habitus.behavior.uri import BehaviorURI
 from habitus.conditions import DayTypeCalendar, LocalCalendar
 from habitus.scene.views.model import FlowRow, ObservationGap
 from habitus.series.model import GapKind, KindResolution, SeriesGap, standing_parts
@@ -62,14 +61,15 @@ class DayIndex:
         # 日历算好传进来，索引自己不认识日历——它只是把这个事实带给视图。
         self.day_note = day_note
         self.occurrences: dict[str, BehaviorDocument] = {}
+        self._uri_of = behavior_tree.uri_for
         documents = behavior_tree.read_day(BehaviorKind.OCCURRENCE, day)
-        #: 这一天一条记录都没有（算不算数的都没有）：这棵树那条 lane 那天没来过东西（会话 lane 没开会话、物理 lane 上游一点数据都
+        #: 这一天一条记录都没有（算不算数的都没有）：这一支的视图那天没来过东西（会话 lane 没开会话、物理 lane 上游一点数据都
         #: 没送来，裁定 89 第 2 条）。
         self.silent = not documents
         for document in documents:
             if not admits(document):
                 continue
-            self.occurrences[str(BehaviorURI.from_address(document.address))] = document
+            self.occurrences[str(self._uri_of(document.address))] = document
         self.ordered: tuple[str, ...] = tuple(
             sorted(self.occurrences, key=lambda uri: (self.occurrences[uri].address.started_at.astimezone(UTC), uri))
         )
@@ -112,7 +112,7 @@ class DayIndex:
                     raise ValueError(f"unknown gap kind on the behaviour tree: {kind!r}")
                 # 与事件序列同一个读法（``series.model.standing_parts``）：按天切开，这一天那段只由这一天的行为判
                 gap = SeriesGap(
-                    uri=str(BehaviorURI.from_address(document.address)),
+                    uri=str(self._uri_of(document.address)),
                     started_at=document.address.started_at,
                     ended_at=datetime.fromisoformat(str(document.fields["ended_at"])),
                     kind=GapKind(kind),

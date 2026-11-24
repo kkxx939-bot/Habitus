@@ -4,41 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 from habitus.behavior.model import BehaviorAddress, BehaviorKind
 from habitus.foundation.integrity import immutable_snapshot
-
-
-def utc_timestamp(value: datetime, field_name: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"behavior document {field_name} must include a timezone")
-    return value.astimezone(UTC)
-
-
-@dataclass(frozen=True)
-class BehaviorDocumentMetadata:
-    """完全由系统控制、不能由融合模型填写的版本字段。"""
-
-    revision: int
-    created_at: datetime
-    updated_at: datetime
-
-    def __post_init__(self) -> None:
-        if self.revision <= 0:
-            raise ValueError("behavior document revision must be a positive integer")
-        created_at = utc_timestamp(self.created_at, "created_at")
-        updated_at = utc_timestamp(self.updated_at, "updated_at")
-        if updated_at < created_at:
-            raise ValueError("behavior document updated_at cannot precede created_at")
-        object.__setattr__(self, "created_at", created_at)
-        object.__setattr__(self, "updated_at", updated_at)
-
-    @classmethod
-    def initial(cls, timestamp: datetime) -> BehaviorDocumentMetadata:
-        normalized = utc_timestamp(timestamp, "timestamp")
-        return cls(revision=1, created_at=normalized, updated_at=normalized)
+from habitus.infrastructure.tree.metadata import DocumentMetadata
 
 
 @dataclass(frozen=True)
@@ -47,7 +17,7 @@ class BehaviorDocument:
 
     kind: BehaviorKind
     address: BehaviorAddress
-    metadata: BehaviorDocumentMetadata
+    metadata: DocumentMetadata
     fields: Mapping[str, Any]
     markdown_body: str
 
@@ -63,4 +33,4 @@ class BehaviorDocument:
             raise ValueError("behavior document Markdown body must end with a newline")
 
 
-__all__ = ["BehaviorDocument", "BehaviorDocumentMetadata", "utc_timestamp"]
+__all__ = ["BehaviorDocument"]

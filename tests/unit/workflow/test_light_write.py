@@ -173,8 +173,8 @@ def test_a_file_changed_before_writing_raises_conflict_writes_nothing_and_the_jo
 
     with pytest.raises(MemoryCommitConflictError):
         site.writer.commit(stale)
-    assert site.preferences() == ("memory://preferences/甲话题.md",)
-    current = site.reader.read("memory://preferences/甲话题.md")
+    assert site.preferences() == ("habitus://preferences/甲话题.md",)
+    current = site.reader.read("habitus://preferences/甲话题.md")
     assert current.value is not None and current.value.fields["content"] == "- 别人刚改的说法"
 
     async def always_conflicts(_lease):
@@ -207,7 +207,7 @@ def test_a_write_that_stops_at_the_second_of_three_files_keeps_the_first_and_a_r
     with pytest.raises(MemoryJobExecutionError) as failed:
         site.run_next()
     assert isinstance(failed.value.__cause__, MemoryCommitError)
-    assert site.preferences() == ("memory://preferences/丙话题.md",)  # 按地址排序写，第一个已经落盘
+    assert site.preferences() == ("habitus://preferences/丙话题.md",)  # 按地址排序写，第一个已经落盘
     assert calls[0] == 2
     job = failed.value.job
     assert job is not None and job.status is MemoryJobStatus.QUEUED and not job.cards_written
@@ -215,8 +215,8 @@ def test_a_write_that_stops_at_the_second_of_three_files_keeps_the_first_and_a_r
     site.clock.advance(1)
     result = site.run_next()
     assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
-    assert site.preferences() == tuple(sorted(f"memory://preferences/{topic}.md" for topic in THREE))
-    first = site.reader.read("memory://preferences/丙话题.md")
+    assert site.preferences() == tuple(sorted(f"habitus://preferences/{topic}.md" for topic in THREE))
+    first = site.reader.read("habitus://preferences/丙话题.md")
     assert first.revision == 1  # 已经写成的那张这次是 NOOP，没有再写一遍
 
 
@@ -228,8 +228,8 @@ def test_a_merge_whose_target_fails_to_write_keeps_its_source(
 
     site = Site(tmp_path)
     site.writer.commit(preference_plan(site.reader, {"回答风格": "- 简洁", "输出格式": "- 先给结论"}))
-    source_uri = MemoryURI.parse("memory://preferences/回答风格.md")
-    target_uri = MemoryURI.parse("memory://preferences/输出格式.md")
+    source_uri = MemoryURI.parse("habitus://preferences/回答风格.md")
+    target_uri = MemoryURI.parse("habitus://preferences/输出格式.md")
     old = site.reader.read_many((source_uri, target_uri))
     pages = MemoryPageIdMap.from_snapshots(old)
     source_page = pages.page_id_for(source_uri)
@@ -291,7 +291,7 @@ def test_a_failure_after_cards_written_resumes_only_the_later_steps_without_extr
         site.run_next()
     job = failed.value.job
     assert job is not None and job.status is MemoryJobStatus.QUEUED
-    assert job.cards_written and job.changed_uris == ("memory://preferences/回答风格.md",)
+    assert job.cards_written and job.changed_uris == ("habitus://preferences/回答风格.md",)
     assert not site.tree.layer_exists(MemoryDirectory.preferences(), MemoryLevel.OVERVIEW)
 
     site.clock.advance(1)
@@ -317,11 +317,11 @@ def test_a_crash_half_way_through_writing_cards_redoes_the_whole_job_without_dup
         site.run_next()
     stuck = site.store.oldest_unfinished()
     assert stuck is not None and stuck.status is MemoryJobStatus.RUNNING and not stuck.cards_written
-    assert site.preferences() == ("memory://preferences/丙话题.md",)
+    assert site.preferences() == ("habitus://preferences/丙话题.md",)
 
     site.clock.advance(4)  # 租约 3 秒，过期后才能接管
     result = site.run_next()
     assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
     assert result.job.claim_generation == 2
     assert not result.recovered and site.extractions == 2
-    assert site.preferences() == tuple(sorted(f"memory://preferences/{topic}.md" for topic in THREE))
+    assert site.preferences() == tuple(sorted(f"habitus://preferences/{topic}.md" for topic in THREE))

@@ -22,14 +22,11 @@ from habitus.behavior.observation import (
 )
 from habitus.behavior.reduction import BehaviorReductionLedger, BehaviorReductionRunner  # noqa: F401
 from habitus.behavior.reduction.failed import FailedChains
-from habitus.behavior.reduction.refresh import RefreshRetries
 from habitus.behavior.retry import RetryBacklogStore, RetryKind
 from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.tree.dirty_days import DirtyDayLog
 from habitus.behavior.uri import BehaviorURI
 from habitus.foundation.integrity import canonical_digest
-from habitus.foundation.lifecycle import BackoffPolicy
-from habitus.infrastructure.lifecycle import RetryLedger
 from habitus.infrastructure.store.contracts import PathLock
 from tests.lock_store import ProcessLocalLockStore
 from tests.unit.behavior.kinds_fixtures import NameMatchingProvider, kind_components
@@ -59,7 +56,6 @@ class Harness:
         self,
         tmp_path,
         known_kinds: tuple[str, ...] = ("洗手",),
-        semantic_refresher=None,
         seal_on_arrival: bool = False,
     ) -> None:
         self.now = at(7200)  # 默认拨到 lookback(1h) 之外
@@ -67,7 +63,7 @@ class Harness:
         self.judgements = BehaviorJudgementStore(tmp_path / "judgements")
         self.lock_store = ProcessLocalLockStore()
         self.receipts = BehaviorFusionReceiptStore(tmp_path / "receipts", lock_store=self.lock_store)
-        self.tree = BehaviorTree(tmp_path / "tree")
+        self.tree = BehaviorTree(tmp_path / "tree", lane="session")
         # 判断上没带选词结果的在归约里选：known_kinds 是这份测试词表（按顺序编号 s-k0001…）
         self.provider = NameMatchingProvider()
         self.kinds = kind_components(names=known_kinds, provider=self.provider)
@@ -80,16 +76,6 @@ class Harness:
             lock_store=self.lock_store,
             kinds=self.kinds,
             ledger=self.ledger,
-            semantic_refresher=semantic_refresher,
-            refresh_retries=RefreshRetries(
-                RetryLedger(
-                    tmp_path / "lifecycle",
-                    owner="behavior-semantic-test",
-                    policy=BackoffPolicy(base_seconds=60.0, cap_seconds=3600.0),
-                    max_attempts=3,
-                    clock=lambda: self.now,
-                )
-            ),
             failed_chains=FailedChains(
                 self.judgements,
                 ledger=self.ledger,
@@ -194,7 +180,7 @@ def test_full_pipeline_reduces_a_chain_and_a_gap_into_the_tree(tmp_path) -> None
     assert document.fields["summary"] == "在水池边洗手；冲水擦干结束"
     assert document.fields["onset_available_at"] == at(64).isoformat(timespec="microseconds")
     ledger_by_uri = {entry.uri: entry for entry in harness.ledger.load()}
-    assert document.fields["chain_digest"] == ledger_by_uri[str(BehaviorURI.from_address(occurrences[0]))].chain_digest
+    assert document.fields["chain_digest"] == ledger_by_uri[str(BehaviorURI.from_address(occurrences[0], "session"))].chain_digest
 
     gap_document = harness.tree.read(gaps[0])
     assert gap_document.fields["started_at"] == gap_document.fields["ended_at"]
@@ -574,36 +560,6 @@ def test_concurrent_sweeps_are_serialised_by_the_root_lock(tmp_path) -> None:
     assert report.published_occurrences == 1
 
 
-def test_sweep_refreshes_day_summaries_after_publishing(tmp_path) -> None:
-    """归约落盘后在同一把 sweep 锁内刷新 L0/L1；树没变的下一轮零模型调用。"""
-
-    from habitus.behavior.model import BehaviorDirectory, BehaviorLevel
-    from habitus.behavior.semantic import BehaviorSemanticRefresher
-    from tests.unit.behavior.test_semantic_layers import ScriptedOverviewGenerator
-
-    generator = ScriptedOverviewGenerator()
-    tree = BehaviorTree(tmp_path / "tree")
-    harness = Harness(
-        tmp_path,
-        semantic_refresher=BehaviorSemanticRefresher(tree, generator),
-    )
-    source = harness.deliver(OBS_A, OBS_B, OBS_C)
-    seed_wash(harness, source)
-
-    report = asyncio.run(harness.runner.run_once())
-
-    assert report.published_occurrences == 1
-    assert not any("semantic refresh failed" in note for note in report.dropped_edges)
-    day_dir = BehaviorDirectory.occurrences(2026, 8, 16)
-    assert harness.tree.layer_exists(day_dir, BehaviorLevel.OVERVIEW)
-    assert harness.tree.layer_exists(BehaviorDirectory.occurrences(2026), BehaviorLevel.ABSTRACT)
-    calls = len(generator.snapshots)
-
-    second = asyncio.run(harness.runner.run_once())
-    assert second.published_documents == 0
-    assert len(generator.snapshots) == calls  # 树没变——digest 短路，零模型调用
-
-
 def test_a_day_is_closed_only_after_its_chains_seal_and_its_local_day_ends(tmp_path) -> None:
     """定稿日是派生层（语义树、预测层的结算）处理历史的前提：树变了的日子先记为开放，链都封口且封口视界
     过了那天的本地结束才记为定稿；之后的补发不改变这个事实。"""
@@ -629,84 +585,6 @@ def test_a_day_is_closed_only_after_its_chains_seal_and_its_local_day_ends(tmp_p
     seed_wash(harness, later)
     asyncio.run(harness.runner.run_once())
     assert harness.runner.closed_days() == (date(2026, 8, 16),)
-
-
-def test_failed_semantic_refresh_is_retried_from_the_pending_set(tmp_path) -> None:
-    """刷新失败降级为带日期的信号；那一天留在待刷新集合里，下轮补刷；检查点不被扣住。"""
-
-    from habitus.behavior.semantic import BehaviorSemanticRefresher
-    from tests.unit.behavior.test_semantic_layers import ScriptedOverviewGenerator
-
-    class FlakyGenerator(ScriptedOverviewGenerator):
-        def __init__(self) -> None:
-            super().__init__()
-            self.fail = True
-
-        async def generate(self, snapshot):
-            if self.fail:
-                raise RuntimeError("llm down")
-            return await super().generate(snapshot)
-
-    generator = FlakyGenerator()
-    tree = BehaviorTree(tmp_path / "tree")
-    harness = Harness(tmp_path, semantic_refresher=BehaviorSemanticRefresher(tree, generator))
-    source = harness.deliver(OBS_A, OBS_B, OBS_C)
-    seed_wash(harness, source)
-
-    report = asyncio.run(harness.runner.run_once())
-
-    assert report.published_occurrences == 1  # 归约不被刷新失败阻塞
-    assert any("semantic refresh failed for [2026-08-16]" in n for n in report.dropped_edges)
-    # 检查点发布完即清（不再被刷新失败扣住——那会让 merge 之后的重放撞出永久冲突）；
-    # 待刷新的日子记在独立的小文件里，下轮逐日重试。
-    assert not (tmp_path / "reduction" / "staged.json").exists()
-    import json as _json
-
-    assert _json.loads((tmp_path / "reduction" / "refresh_pending.json").read_text()) == ["2026-08-16"]
-
-    generator.fail = False
-    waiting = asyncio.run(harness.runner.run_once())  # 退避期内：这一天留在集合里，这一轮不试
-    assert not any("semantic refresh failed" in n for n in waiting.dropped_edges)
-    assert _json.loads((tmp_path / "reduction" / "refresh_pending.json").read_text()) == ["2026-08-16"]
-    harness.now = harness.now + timedelta(seconds=61)
-    second = asyncio.run(harness.runner.run_once())
-
-    assert second.replayed_documents == 0  # 没有检查点可重放；补刷来自待刷新集合
-    from habitus.behavior.model import BehaviorDirectory, BehaviorLevel
-
-    assert harness.tree.layer_exists(BehaviorDirectory.occurrences(2026, 8, 16), BehaviorLevel.OVERVIEW)
-    assert not (tmp_path / "reduction" / "refresh_pending.json").exists()
-
-
-def test_an_oversized_overview_is_given_up_after_one_model_call(tmp_path) -> None:
-    """超限是确定性失败：第一次就放弃、移出待刷新集合，之后几轮不再调模型（2.4.1）。"""
-
-    from habitus.behavior.semantic import BehaviorOverviewLimitError, BehaviorSemanticRefresher
-    from tests.unit.behavior.test_semantic_layers import ScriptedOverviewGenerator
-
-    class TooLong(ScriptedOverviewGenerator):
-        def __init__(self) -> None:
-            super().__init__()
-            self.calls = 0
-
-        async def generate(self, snapshot):
-            self.calls += 1
-            raise BehaviorOverviewLimitError("rendered behavior overview exceeds its configured character bound")
-
-    generator = TooLong()
-    harness = Harness(
-        tmp_path, semantic_refresher=BehaviorSemanticRefresher(BehaviorTree(tmp_path / "tree"), generator)
-    )
-    seed_wash(harness, harness.deliver(OBS_A, OBS_B, OBS_C))
-
-    first = asyncio.run(harness.runner.run_once())
-    assert any("semantic refresh given up for [2026-08-16]" in n for n in first.dropped_edges)
-    assert not (tmp_path / "reduction" / "refresh_pending.json").exists()
-    calls = generator.calls
-    for _ in range(3):
-        harness.now = harness.now + timedelta(hours=2)
-        asyncio.run(harness.runner.run_once())
-    assert generator.calls == calls
 
 
 def test_run_once_works_with_the_production_sqlite_lock_store(tmp_path) -> None:
@@ -1091,62 +969,6 @@ def test_a_judgement_with_a_blank_name_is_isolated_in_its_first_round(tmp_path) 
     report = asyncio.run(harness.runner.run_once())
     assert any("isolated" in note for note in report.dropped_edges), report.dropped_edges
     assert harness.judgements.read(record_id("blank")) is None
-
-
-def _given_up_refresher(tmp_path):  # type: ignore[no-untyped-def]
-    from habitus.behavior.semantic import BehaviorOverviewLimitError, BehaviorSemanticRefresher
-    from tests.unit.behavior.test_semantic_layers import ScriptedOverviewGenerator
-
-    class TooLong(ScriptedOverviewGenerator):
-        def __init__(self) -> None:
-            super().__init__()
-            self.calls = 0
-
-        async def generate(self, snapshot):  # type: ignore[no-untyped-def]
-            self.calls += 1
-            raise BehaviorOverviewLimitError("too long")
-
-    generator = TooLong()
-    return generator, BehaviorSemanticRefresher(BehaviorTree(tmp_path / "tree"), generator)
-
-
-def test_a_day_whose_overview_was_given_up_gets_another_chance_once_its_content_changes(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """R27：某天的概览超限放弃之后，那一天又落了新记录：重试账清掉、重新给一次机会。"""
-
-    generator, refresher = _given_up_refresher(tmp_path)
-    harness = Harness(tmp_path, semantic_refresher=refresher)
-    source = harness.deliver(OBS_A, OBS_B, OBS_C)
-    seed_wash(harness, source)
-    asyncio.run(harness.runner.run_once())
-    assert generator.calls == 1
-    harness.judgements.put_payload(
-        judgement_record(
-            "second",
-            behavior="洗手",
-            started_at=at(900),
-            last_observed_at=at(910),
-            evidence_ready_at=at(912),
-            observation_ids=(OBS_C.observation_id,),
-            source_refs=(source,),
-            summary="又洗了一次手",
-        )
-    )
-    harness.now = harness.now + timedelta(hours=2)
-    asyncio.run(harness.runner.run_once())
-    assert generator.calls == 2
-
-
-def test_a_day_whose_overview_was_given_up_does_not_stay_pending(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """R28：放弃了的那一天（内容没变）又被别处标成待刷新：不调模型、也不留在待刷新集合里。"""
-
-    _generator, refresher = _given_up_refresher(tmp_path)
-    harness = Harness(tmp_path, semantic_refresher=refresher)
-    seed_wash(harness, harness.deliver(OBS_A, OBS_B, OBS_C))
-    asyncio.run(harness.runner.run_once())
-    harness.runner.refresh_pending.write({date(2026, 8, 16)}, _NoLease())
-    harness.now = harness.now + timedelta(hours=2)
-    asyncio.run(harness.runner.run_once())
-    assert not (tmp_path / "reduction" / "refresh_pending.json").exists()
 
 
 def test_the_publish_loop_renews_the_sweep_lease_as_it_writes(tmp_path) -> None:  # type: ignore[no-untyped-def]

@@ -315,6 +315,7 @@ def test_d2_a_step_a_state_file_is_refused_and_names_the_file(site: GrowSite) ->
         "revision": 1,
         "active": [{"id": WEEKLY, "since": "2026-04-15"}],
     }
+    site.state_path.parent.mkdir(parents=True, exist_ok=True)  # 词表文件在这一支树外的根下，这时可能还没建（裁定 112）
     site.state_path.write_text(json.dumps(old, ensure_ascii=False, sort_keys=True, indent=1) + "\n", encoding="utf-8")
     with pytest.raises(Exception) as caught:
         site.session.kind_store.read()

@@ -359,7 +359,7 @@ def expectation(
         formed_at=formed,
         source=source,
         trigger=trigger,
-        trigger_instance=f"behavior://{identity}.md",
+        trigger_instance=f"occ:{identity}.md",
         window=(formed + timedelta(minutes=window[0]), formed + timedelta(minutes=window[1])),
         deadline=formed + timedelta(minutes=deadline_minutes),
         basis=(),

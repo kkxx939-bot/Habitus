@@ -93,11 +93,11 @@ class RuntimeShutdownTimeoutError(TimeoutError):
 class RuntimeInitialization:
     """一次成功初始化的可审计结果。"""
 
-    memory_root: Path
+    tree_root: Path
 
     def __post_init__(self) -> None:
-        if not self.memory_root.is_absolute():
-            raise ValueError("memory_root must be an absolute Path")
+        if not self.tree_root.is_absolute():
+            raise ValueError("tree_root must be an absolute Path")
 
 
 @dataclass(frozen=True)
@@ -219,8 +219,8 @@ class Runtime:
         *,
         conversation_adapters: ConversationAdapterRegistry | None = None,
     ) -> None:
-        if components.memory.tree.root != config.memory_root:
-            raise ValueError("runtime components are bound to another memory root")
+        if components.memory.tree.root != config.tree_root:
+            raise ValueError("runtime components are bound to another habitus tree")
         if components.conversation.journal.layout.root != config.conversation_root:
             raise ValueError("runtime components are bound to another conversation root")
         if components.workflow.jobs.root != config.workflow_root:
@@ -261,7 +261,7 @@ class Runtime:
             return self._initialization
         try:
             self._ensure_storage_root()
-            initialization = RuntimeInitialization(memory_root=self._lifecycle.initialize_stores())
+            initialization = RuntimeInitialization(tree_root=self._lifecycle.initialize_stores())
             self._initialization = initialization
             self._state = RuntimeState.READY
         except Exception as exc:
@@ -614,7 +614,7 @@ class Runtime:
         return await self._failed_jobs.abandon(failed_job, reason=reason)
 
     async def list_memory(self, uri: MemoryURI | str | None = None) -> MemoryListing:
-        """浏览记忆树：列一个目录（省略是根）的子目录与文档，只给 ``memory://`` 地址（方案 36 第 2 步）。"""
+        """浏览记忆树：列一个目录（省略是根）的子目录与文档，只给 ``habitus://`` 地址（方案 36 第 2 步）。"""
 
         self._require_initialized("memory browse")
         return await asyncio.to_thread(self.components.memory.browser.list, uri)

@@ -42,12 +42,12 @@ def test_sqlite_lock_persists_exclusion_across_independent_store_instances(tmp_p
     first_store = SQLiteLockStore(path, owner="worker-a")
     second_store = SQLiteLockStore(path, owner="worker-b")
 
-    first = first_store.acquire("memory://profile.md", ttl_seconds=30)
+    first = first_store.acquire("habitus://profile.md", ttl_seconds=30)
     with pytest.raises(TimeoutError, match="already held"):
-        second_store.acquire("memory://profile.md", ttl_seconds=30)
+        second_store.acquire("habitus://profile.md", ttl_seconds=30)
 
     first_store.release(first)
-    second = second_store.acquire("memory://profile.md", ttl_seconds=30)
+    second = second_store.acquire("habitus://profile.md", ttl_seconds=30)
     assert second.fence == first.fence + 1
     with pytest.raises(LockLostError):
         first_store.assert_owned(first)

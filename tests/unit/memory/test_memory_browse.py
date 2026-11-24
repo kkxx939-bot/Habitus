@@ -1,4 +1,4 @@
-"""记忆树的公开浏览（方案 36 第 2 步 ``habitus memory``）：只给 ``memory://`` 地址，列目录、读文档与语义层。"""
+"""记忆树的公开浏览（方案 36 第 2 步 ``habitus memory``）：只给 ``habitus://`` 地址，列目录、读文档与语义层。"""
 
 from __future__ import annotations
 
@@ -25,25 +25,25 @@ def _tree(tmp_path: Path) -> MemoryTree:
 
 def test_the_root_lists_the_fixed_branches_and_the_profile(tmp_path: Path) -> None:
     listing = MemoryBrowser(_tree(tmp_path)).list()
-    assert str(listing.uri) == "memory://"
+    assert str(listing.uri) == "habitus://"
     assert [str(item) for item in listing.directories] == sorted(
-        f"memory://{name}" for name in ("entities", "preferences", "tools")
+        f"habitus://{name}" for name in ("entities", "preferences", "tools")
     )
-    assert [str(item) for item in listing.documents] == ["memory://profile.md"]
+    assert [str(item) for item in listing.documents] == ["habitus://profile.md"]
     assert listing.abstract is None
 
 
 def test_a_directory_lists_its_documents_with_its_abstract_and_nested_branches(tmp_path: Path) -> None:
     browser = MemoryBrowser(_tree(tmp_path))
-    preferences = browser.list("memory://preferences")
-    assert [str(item) for item in preferences.documents] == ["memory://preferences/回答风格.md"]
+    preferences = browser.list("habitus://preferences")
+    assert [str(item) for item in preferences.documents] == ["habitus://preferences/回答风格.md"]
     assert preferences.abstract == "偏好：回答简洁。"
-    assert [str(item) for item in browser.list("memory://entities").directories] == ["memory://entities/项目"]
+    assert [str(item) for item in browser.list("habitus://entities").directories] == ["habitus://entities/项目"]
 
 
 def test_reading_gives_the_document_or_the_layer_text(tmp_path: Path) -> None:
     browser = MemoryBrowser(_tree(tmp_path))
-    value = browser.read("memory://preferences/回答风格.md")
+    value = browser.read("habitus://preferences/回答风格.md")
     assert isinstance(value, MemoryDocument)
     assert value.fields["content"] == "- 偏好简洁直接的回答"
     layer = browser.read(MemoryURI.from_layer(MemoryDirectory.preferences(), MemoryLevel.OVERVIEW))
@@ -54,14 +54,14 @@ def test_reading_gives_the_document_or_the_layer_text(tmp_path: Path) -> None:
 def test_missing_nodes_and_wrong_node_types_are_told_apart(tmp_path: Path) -> None:
     browser = MemoryBrowser(_tree(tmp_path))
     with pytest.raises(MemoryBrowseNotFoundError):
-        browser.read("memory://preferences/没有这条.md")
+        browser.read("habitus://preferences/没有这条.md")
     with pytest.raises(MemoryBrowseNotFoundError):
-        browser.list("memory://entities/没有这类")
+        browser.list("habitus://entities/没有这类")
     with pytest.raises(MemoryBrowseNotFoundError):
         browser.read(MemoryURI.from_layer(MemoryDirectory.tools(), MemoryLevel.ABSTRACT))
     with pytest.raises(ValueError, match="directory URI"):
-        browser.list("memory://profile.md")
+        browser.list("habitus://profile.md")
     with pytest.raises(ValueError, match="document or semantic layer"):
-        browser.read("memory://preferences")
+        browser.read("habitus://preferences")
     with pytest.raises(ValueError):
         browser.read("file:///etc/passwd")

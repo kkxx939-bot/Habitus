@@ -827,12 +827,12 @@ def test_a_rest_of_day_window_and_deadline_stop_at_the_end_of_that_day() -> None
             ended = at(day, 14)
             found.append(
                 Opportunity(
-                    f"behavior://a{index}.md",
-                    (f"behavior://a{index}.md",),
+                    f"occ:a{index}.md",
+                    (f"occ:a{index}.md",),
                     day,
                     ended,
                     True,
-                    f"behavior://c{index}.md",
+                    f"occ:c{index}.md",
                     ended + timedelta(hours=hours),
                 )
             )
@@ -854,7 +854,7 @@ def test_a_rest_of_day_window_and_deadline_stop_at_the_end_of_that_day() -> None
         )
         table = OpportunityTable("session", today, today, 15, 3, (rest,), ())
         now = at(today, 22, 0)
-        rows = (Seen(at(today, 20, 45), at(today, 21, 0), DISCUSS, "behavior://today.md"),)
+        rows = (Seen(at(today, 20, 45), at(today, 21, 0), DISCUSS, "occ:today.md"),)
         line = timeline_of(rows, lane="session", slot_minutes=15, horizon=today + timedelta(days=1))
         moment = Moment(at=now, slot=(22 * 60) // 15, calendar={})
         return event_drafts(

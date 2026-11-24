@@ -5,12 +5,12 @@ from datetime import timedelta
 
 import pytest
 
+from habitus.infrastructure.tree.metadata import DocumentMetadata
 from habitus.memory.document import (
     MemoryDocumentCodec,
     MemoryDocumentConfig,
     MemoryDocumentIntegrityError,
     MemoryDocumentLimitError,
-    MemoryDocumentMetadata,
     MemoryLinkType,
     MemoryStoredLink,
 )
@@ -39,7 +39,7 @@ def test_each_schema_validates_fields_builds_address_and_renders_human_markdown(
 
     assert address.kind is kind
     assert markdown.endswith("\n")
-    assert "HABITUS_MEMORY_FIELDS" not in markdown
+    assert "HABITUS_FIELDS" not in markdown
 
 
 @pytest.mark.parametrize("kind", tuple(MemoryKind))
@@ -85,7 +85,7 @@ def test_tool_requires_real_name_shape_and_at_least_one_non_empty_knowledge_fiel
 
 
 def test_metadata_revision_rules_are_monotonic() -> None:
-    initial = MemoryDocumentMetadata.initial(BASE_TIME)
+    initial = DocumentMetadata.initial(BASE_TIME)
     advanced = initial.next_revision(BASE_TIME + timedelta(days=1))
 
     assert advanced.revision == 2
@@ -103,7 +103,7 @@ def test_codec_round_trip_is_canonical_for_every_memory_kind(kind: MemoryKind) -
     restored = codec.decode(raw, expected_address=original.address)
 
     assert restored == original
-    assert raw.count("HABITUS_MEMORY_FIELDS") == 1
+    assert raw.count("HABITUS_FIELDS") == 1
     assert raw.endswith("-->\n")
 
 

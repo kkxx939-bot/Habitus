@@ -1,4 +1,4 @@
-"""四类记忆地址、目录层级和 memory:// URI 的严格映射测试。"""
+"""四类记忆地址、目录层级和 habitus:// URI 的严格映射测试。"""
 
 import pytest
 
@@ -9,10 +9,10 @@ from habitus.memory.uri import MemoryURI, MemoryURIError, MemoryURINodeType
 @pytest.mark.parametrize(
     ("address", "expected"),
     [
-        (MemoryAddress.profile(), "memory://profile.md"),
-        (MemoryAddress.preference("回答风格"), "memory://preferences/回答风格.md"),
-        (MemoryAddress.entity("项目", "Habitus"), "memory://entities/项目/habitus.md"),
-        (MemoryAddress.tool("workspace.inspect"), "memory://tools/workspace.inspect.md"),
+        (MemoryAddress.profile(), "habitus://profile.md"),
+        (MemoryAddress.preference("回答风格"), "habitus://preferences/回答风格.md"),
+        (MemoryAddress.entity("项目", "Habitus"), "habitus://entities/项目/habitus.md"),
+        (MemoryAddress.tool("workspace.inspect"), "habitus://tools/workspace.inspect.md"),
     ],
 )
 def test_address_uri_round_trip_for_every_memory_kind(address: MemoryAddress, expected: str) -> None:
@@ -64,13 +64,13 @@ def test_directory_and_semantic_layer_uri_round_trip() -> None:
         "preferences/topic.md",
         "viking://preferences/topic.md",
         "memoryos://preferences/topic.md",
-        "memory://preferences/topic",
-        "memory://preferences//topic.md",
-        "memory://preferences/topic.md/",
-        " memory://profile.md",
-        "memory://../profile.md",
-        "memory://events/2026/07/01/确认记忆树.md",
-        "memory://intentions/完成重构.md",
+        "habitus://preferences/topic",
+        "habitus://preferences//topic.md",
+        "habitus://preferences/topic.md/",
+        " habitus://profile.md",
+        "habitus://../profile.md",
+        "habitus://events/2026/07/01/确认记忆树.md",
+        "habitus://intentions/完成重构.md",
     ],
 )
 def test_uri_rejects_short_legacy_noncanonical_and_tree_escape_forms(uri: str) -> None:
@@ -80,16 +80,16 @@ def test_uri_rejects_short_legacy_noncanonical_and_tree_escape_forms(uri: str) -
 
 
 def test_uri_preserves_unicode_and_canonicalizes_reserved_percent_encoding() -> None:
-    uri = MemoryURI("memory://preferences/视频%20输出.md")
-    assert str(uri) == "memory://preferences/视频%20输出.md"
+    uri = MemoryURI("habitus://preferences/视频%20输出.md")
+    assert str(uri) == "habitus://preferences/视频%20输出.md"
     assert uri.decoded_path == "preferences/视频 输出.md"
     assert MemoryURI.parse(uri) is uri
 
 
 def test_uri_join_requires_directory_and_prefix_matches_complete_segments() -> None:
     preferences = MemoryURI.from_directory(MemoryDirectory.preferences())
-    assert preferences.join("回答风格.md") == "memory://preferences/回答风格.md"
+    assert preferences.join("回答风格.md") == "habitus://preferences/回答风格.md"
     with pytest.raises(MemoryURIError, match="directory"):
         preferences.join("回答风格.md").join("child")
-    assert MemoryURI("memory://entities/项目/Habitus.md").matches_prefix("memory://entities/项目")
-    assert not MemoryURI("memory://entities/项目甲/Habitus.md").matches_prefix("memory://entities/项目")
+    assert MemoryURI("habitus://entities/项目/Habitus.md").matches_prefix("habitus://entities/项目")
+    assert not MemoryURI("habitus://entities/项目甲/Habitus.md").matches_prefix("habitus://entities/项目")

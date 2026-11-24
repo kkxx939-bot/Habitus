@@ -37,7 +37,6 @@ from datetime import UTC, date, datetime, timedelta
 from datetime import time as clock_time
 
 from habitus.behavior.schema.vocabulary import UNSEEN_GAPS
-from habitus.behavior.uri import BehaviorURI
 from habitus.conditions import day_note
 from habitus.foresight import Batch, Seen, UnsealedReader, UnsealedRow
 from habitus.foresight.delivery import done_since
@@ -59,6 +58,7 @@ from habitus.runtime.foresight_forming import (
 )
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
+from habitus.runtime.foresight_tree_rows import tree_day
 from habitus.runtime.generation_lease import Lease, LeaseBusyError
 from habitus.runtime.generation_marks import GenerationMarkError
 from habitus.runtime.generation_watermark import TickTrack, TickWatermark
@@ -384,10 +384,9 @@ def _rows_for(
         if uri in recent:
             found[uri] = recent[uri]
             continue
-        try:
-            day = BehaviorURI.parse(uri).to_address().occurred_on
-        except (TypeError, ValueError):
-            # 不是行为树 URI 的出处（``unsealed:<开始时刻>``）只在最近几天的 ``seen`` 里有，过了就取不到行
+        day = tree_day(uri)
+        if day is None:
+            # 不是树上的出处（``unsealed:<开始时刻>``）只在最近几天的 ``seen`` 里有，过了就取不到行
             continue
         sealed = cache.day(day).by_uri.get(uri)
         if sealed is not None:

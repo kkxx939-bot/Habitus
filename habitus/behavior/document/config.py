@@ -30,9 +30,5 @@ class BehaviorDocumentConfig:
         if len(payload) > self.max_encoded_bytes:
             raise BehaviorDocumentLimitError("encoded behavior document exceeds its configured limit")
 
-    def validate_semantic_layer(self, payload: bytes) -> None:
-        if len(payload) > self.max_encoded_bytes:
-            raise BehaviorDocumentLimitError("behavior semantic layer exceeds its configured byte limit")
-
 
 __all__ = ["BehaviorDocumentConfig", "BehaviorDocumentLimitError"]

@@ -19,8 +19,7 @@ from habitus.behavior import (
     BehaviorURI,
     BehaviorURIError,
 )
-from habitus.behavior.document import BehaviorDocumentMetadata
-from habitus.behavior.model import behavior_static_directories
+from habitus.infrastructure.tree.metadata import DocumentMetadata
 from tests.unit.behavior.tree_payloads import (
     DAY,
     OBS_A,
@@ -40,13 +39,17 @@ NOW = local(23, 0).astimezone(UTC)
 
 def test_tree_has_exactly_two_kinds_and_flat_prefixes() -> None:
     assert [kind.value for kind in BehaviorKind] == ["occurrence", "gap"]
-    assert behavior_static_directories() == (("gaps",), ("occurrences",))
+    assert [BehaviorDirectory.occurrences().identity_parts, BehaviorDirectory.gaps().identity_parts] == [
+        ("occurrences",),
+        ("gaps",),
+    ]
 
 
 def test_occurrence_address_uri_roundtrip_preserves_offset() -> None:
     address = BehaviorAddress.occurrence(DAY, "洗了手", local(19, 30, 18))
-    uri = BehaviorURI.from_address(address)
-    assert uri.segments[:4] == ("occurrences", "2026", "08", "16")
+    uri = BehaviorURI.from_address(address, "session")
+    assert uri.segments[:5] == ("occurrences", "session", "2026", "08", "16")
+    assert uri.lane == "session"
     assert "+0800" in uri.segments[-1]
     parsed = BehaviorURI.parse(str(uri))
     restored = parsed.to_address()
@@ -56,8 +59,8 @@ def test_occurrence_address_uri_roundtrip_preserves_offset() -> None:
 
 def test_gap_address_uses_gap_kind_as_leaf_name() -> None:
     address = BehaviorAddress.gap(DAY, "没读懂", local(20, 10))
-    uri = BehaviorURI.from_address(address)
-    assert uri.segments[0] == "gaps"
+    uri = BehaviorURI.from_address(address, "session")
+    assert uri.segments[:2] == ("gaps", "session")
     assert uri.segments[-1].startswith("没读懂--")
     assert BehaviorURI.parse(str(uri)).to_address() == address
 
@@ -70,9 +73,9 @@ def test_address_rejects_mismatched_local_day() -> None:
 
 def test_old_tree_paths_no_longer_parse() -> None:
     with pytest.raises(BehaviorURIError):
-        BehaviorURI("behavior://behaviors/events/2026/08/16")
+        BehaviorURI("habitus://behaviors/events/2026/08/16")
     with pytest.raises(BehaviorURIError):
-        BehaviorURI("behavior://episodes/2026/08/16")
+        BehaviorURI("habitus://episodes/2026/08/16")
 
 
 def test_directory_factories_map_to_new_prefixes() -> None:
@@ -191,7 +194,7 @@ def test_unknown_and_missing_fields_are_rejected() -> None:
 
 
 def test_codec_roundtrip_preserves_local_offsets() -> None:
-    metadata = BehaviorDocumentMetadata.initial(NOW)
+    metadata = DocumentMetadata.initial(NOW)
     document = CODEC.build(BehaviorKind.OCCURRENCE, occurrence_payload(), metadata=metadata)
     # 钉死存储字段本身（不是正文子串）：结构块里的时间必须原样带本地偏移
     assert document.fields["started_at"] == "2026-08-16T19:30:18.000000+08:00"
@@ -205,10 +208,10 @@ def test_codec_roundtrip_preserves_local_offsets() -> None:
 
 @pytest.mark.parametrize("bad", ["true", '"1"', "1.0", "null"])
 def test_codec_decode_rejects_a_non_integer_revision(bad: str) -> None:
-    """W16：文档注释里 ``revision`` 类型错在解码器就被拒，报错与 ``BehaviorDocumentMetadata`` 那条检查同一句。"""
+    """W16：文档注释里 ``revision`` 类型错在解码器就被拒，报错与 ``DocumentMetadata`` 那条检查同一句。"""
 
     document = CODEC.build(
-        BehaviorKind.OCCURRENCE, occurrence_payload(), metadata=BehaviorDocumentMetadata.initial(NOW)
+        BehaviorKind.OCCURRENCE, occurrence_payload(), metadata=DocumentMetadata.initial(NOW)
     )
     raw = CODEC.encode(document)
     assert raw.count('"revision": 1,') == 1
@@ -344,35 +347,39 @@ def test_identity_roundtrip_with_separator_in_name_and_negative_offset() -> None
     from datetime import datetime, timedelta
 
     tricky = BehaviorAddress.occurrence(DAY, "热身--拉伸", local(19, 30, 18))
-    restored = BehaviorURI.parse(str(BehaviorURI.from_address(tricky))).to_address()
+    restored = BehaviorURI.parse(str(BehaviorURI.from_address(tricky, "session"))).to_address()
     assert restored == tricky
     assert restored.name == "热身--拉伸"
 
     caracas = timezone(timedelta(hours=-4, minutes=-30))
     started = datetime(2026, 8, 16, 22, 30, tzinfo=caracas)
     negative = BehaviorAddress.occurrence(started.date(), "洗手", started)
-    uri = BehaviorURI.from_address(negative)
+    uri = BehaviorURI.from_address(negative, "session")
     assert "-0430" in uri.segments[-1]
     parsed = BehaviorURI.parse(str(uri)).to_address()
     assert parsed == negative
     assert parsed.started_at.utcoffset() == timedelta(hours=-4, minutes=-30)
 
 
-def test_kinds_registry_lives_in_the_address_space() -> None:
-    """behavior://kinds.md：树根唯一的登记表节点——可解析、可往返、不冒充文档。"""
+def test_the_vocabulary_is_not_a_node_of_the_tree() -> None:
+    """词表文件挪出了树（裁定 112）：地址空间里没有它的节点，日期目录里的 kinds.md 也不是合法文档地址。"""
 
-    from habitus.behavior.uri import BehaviorURINodeType
+    with pytest.raises(BehaviorURIError):
+        BehaviorURI("habitus://kinds.md")
+    with pytest.raises(BehaviorURIError):
+        BehaviorURI("habitus://occurrences/session/2026/08/16/kinds.md")
 
-    uri = BehaviorURI.kinds()
-    assert str(uri) == "behavior://kinds.md"
-    parsed = BehaviorURI.parse("behavior://kinds.md")
-    assert parsed == uri
-    assert parsed.node_type is BehaviorURINodeType.REGISTRY
+
+def test_a_behavior_uri_names_its_lane_and_rejects_unknown_ones() -> None:
+    address = BehaviorAddress.occurrence(DAY, "洗了手", local(19, 30, 18))
+    session = BehaviorURI.from_address(address, "session")
+    physical = BehaviorURI.from_address(address, "physical")
+    assert session != physical and session.to_address() == physical.to_address()
+    assert str(physical).startswith("habitus://occurrences/physical/2026/08/16/")
     with pytest.raises(BehaviorURIError):
-        parsed.to_address()
-    # 日期目录里的 kinds.md 不是登记表也不是合法文档地址
+        BehaviorURI.from_address(address, "elsewhere")
     with pytest.raises(BehaviorURIError):
-        BehaviorURI("behavior://occurrences/2026/08/16/kinds.md")
+        BehaviorURI("habitus://occurrences/2026/08/16")
 
 
 def test_pagination_cursor_order_matches_enumeration_order(tmp_path) -> None:
@@ -388,7 +395,7 @@ def test_pagination_cursor_order_matches_enumeration_order(tmp_path) -> None:
     from tests.lock_store import ProcessLocalLockStore
 
     cst = _tz(_td(hours=8))
-    tree = BehaviorTree(tmp_path / "behavior-tree")
+    tree = BehaviorTree(tmp_path / "behavior-tree", lane="session")
     writer = BehaviorDocumentWriter(tree, ProcessLocalLockStore(), clock=lambda: local(23, 0))
     for name, started in (
         ("x", _dt(2026, 8, 16, 1, 1, 1, tzinfo=cst)),
@@ -433,7 +440,7 @@ def test_paging_resumes_from_the_cursor_day_instead_of_walking_from_the_start(tm
     from tests.lock_store import ProcessLocalLockStore
 
     cst = _tz(_td(hours=8))
-    tree = BehaviorTree(tmp_path / "behavior-tree")
+    tree = BehaviorTree(tmp_path / "behavior-tree", lane="session")
     writer = BehaviorDocumentWriter(tree, ProcessLocalLockStore(), clock=lambda: _dt(2027, 1, 5, 23, 0, tzinfo=cst))
     for index, day in enumerate((_date(2026, 11, 30), _date(2026, 12, 1), _date(2027, 1, 2))):
         for minute in (1, 2):
@@ -459,14 +466,12 @@ def test_paging_resumes_from_the_cursor_day_instead_of_walking_from_the_start(tm
         cursor = page[-1]
     assert paged == list(full) and len(full) == 6
     listed: list[str] = []
-    original = tree._markdown_names
+    original = tree._files.markdown_names
 
     def counting(directory):  # type: ignore[no-untyped-def]
         listed.append(Path(directory).as_posix())
         return original(directory)
 
-    tree._markdown_names = counting  # type: ignore[method-assign]
+    tree._files.markdown_names = counting  # type: ignore[method-assign]
     assert tree.list_addresses(BehaviorKind.OCCURRENCE, limit=10, after=full[-2]) == (full[-1],)
     assert listed and all("2027/01/02" in path for path in listed)  # 游标之前的两天连目录都没进
-    assert tree.days_in(BehaviorKind.OCCURRENCE, 2026) == (_date(2026, 11, 30), _date(2026, 12, 1))
-    assert tree.days_in(BehaviorKind.OCCURRENCE, 2026, 12) == (_date(2026, 12, 1),)

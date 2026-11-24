@@ -43,7 +43,7 @@ def expectation(
         formed_at=formed,
         source="事件",
         trigger="session|flight|hotel|chain",
-        trigger_instance="behavior://flight.md",
+        trigger_instance="occ:flight.md",
         window=(formed + timedelta(minutes=window_minutes[0]), formed + timedelta(minutes=window_minutes[1])),
         deadline=formed + timedelta(hours=deadline_hours),
         basis=(),
@@ -153,7 +153,7 @@ def test_a_catch_up_is_only_before_the_next_chance_of_the_same_account(tmp_path)
     ledger.record_expectation(
         replace(
             expectation("hotel-next", HOTEL, morning, window_minutes=(60, 120), deadline_hours=5),
-            trigger_instance="behavior://flight-2.md",
+            trigger_instance="occ:flight-2.md",
         )
     )
     publish(site.behavior_tree, DAY + timedelta(days=1), "订酒店", 9, 0, kind="订酒店")
@@ -211,7 +211,7 @@ def _two_days(tmp_path, closed: list[date]):  # type: ignore[no-untyped-def]
         "nextday", CARD, at(DAY + timedelta(days=1), 9, 0), window_minutes=(0, 30), deadline_hours=3
     )
     for item in (hotel, card, following):
-        ledger.record_expectation(replace(item, trigger_instance=f"behavior://{item.expectation_id}.md"))
+        ledger.record_expectation(replace(item, trigger_instance=f"occ:{item.expectation_id}.md"))
     ledger.record_delivery(DAY, Delivery("hotel", at(DAY, 14, 12), 1, True, "说了", 1.0, "要订酒店吗"))
     publish(site.behavior_tree, DAY, "订酒店", 14, 30, kind="订酒店")
     return ledger, settlement, recorder
@@ -614,7 +614,7 @@ def test_resettle_back_to_overdue_reopens_a_final_day_so_a_catch_up_can_still_be
     a_session(site, DAY, later)
     hotel = expectation("hotel", HOTEL, at(DAY, 14, 7), window_minutes=(4, 51), deadline_hours=3)
     ledger.record_expectation(hotel)
-    ledger.record_settlement(Settlement("hotel", HOTEL, DAY, at(DAY, 23, 0), "准时", "behavior://ghost.md"))
+    ledger.record_settlement(Settlement("hotel", HOTEL, DAY, at(DAY, 23, 0), "准时", "occ:ghost.md"))
     ledger.append_fact(Fact(hotel.account, hotel.formed_at, True, 1.0, "准时", "hotel"))
     ledger.mark_final(DAY, at=at(DAY, 23, 0))
     assert settlement.resettle([DAY]) == 1
@@ -777,7 +777,7 @@ def test_a_spoken_miss_lands_one_unit_weight_bad_on_the_units_feedback(tmp_path)
         root = tmp_path / identity
         site2, ledger2, settlement2 = _resettle_stage(root, (DAY,), now=at(DAY + timedelta(days=1), 4, 0))
         a_session(site2, DAY)  # 回了话的那天当然开过会话
-        item = replace(spoken, expectation_id=identity, trigger_instance=f"behavior://{identity}.md")
+        item = replace(spoken, expectation_id=identity, trigger_instance=f"occ:{identity}.md")
         ledger2.record_expectation(item)
         ledger2.record_delivery(DAY, Delivery(identity, at(DAY, 14, 15), 1, True, "说了", 1.0, "要订酒店吗"))
         ledger2.record_response(DAY, Response(identity, at(DAY, 14, 40), polarity, "conv#1-3"))
@@ -1043,7 +1043,7 @@ def test_the_diagnosis_reads_the_unit_history_snapshot_once_not_once_per_miss(tm
                 expectation(
                     f"h{offset}-{number}", HOTEL, at(day, 9 + number, 0), window_minutes=(4, 51), deadline_hours=3
                 ),
-                trigger_instance=f"behavior://flight-{offset}-{number}.md",
+                trigger_instance=f"occ:flight-{offset}-{number}.md",
             )
             ledger.record_expectation(item)
             ledger.record_settlement(Settlement(item.expectation_id, HOTEL, day, at(day, 23, 0), "过期待决"))

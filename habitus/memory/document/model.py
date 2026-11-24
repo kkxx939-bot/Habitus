@@ -4,54 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from types import MappingProxyType
 from typing import Any
 
-from habitus.foundation.timestamps import require_aware_utc
+from habitus.infrastructure.tree.metadata import DocumentMetadata
 from habitus.memory.document.link import MemoryStoredLink, normalize_stored_links
 from habitus.memory.model import MemoryAddress, MemoryKind
 from habitus.memory.uri import MemoryURI
-
-
-def _utc_timestamp(value: datetime, field_name: str) -> datetime:
-    return require_aware_utc(value, f"memory document {field_name} must include a timezone")
-
-
-@dataclass(frozen=True)
-class MemoryDocumentMetadata:
-    """不由 LLM 或内容 Schema 控制的文档系统字段。"""
-
-    revision: int
-    created_at: datetime
-    updated_at: datetime
-
-    def __post_init__(self) -> None:
-        if self.revision <= 0:
-            raise ValueError("memory document revision must be a positive integer")
-        created_at = _utc_timestamp(self.created_at, "created_at")
-        updated_at = _utc_timestamp(self.updated_at, "updated_at")
-        if updated_at < created_at:
-            raise ValueError("memory document updated_at cannot precede created_at")
-        object.__setattr__(self, "created_at", created_at)
-        object.__setattr__(self, "updated_at", updated_at)
-
-    @classmethod
-    def initial(cls, timestamp: datetime) -> MemoryDocumentMetadata:
-        normalized = _utc_timestamp(timestamp, "timestamp")
-        return cls(revision=1, created_at=normalized, updated_at=normalized)
-
-    def next_revision(self, timestamp: datetime) -> MemoryDocumentMetadata:
-        """构造下一版本元数据；实际旧版本校验仍由 Memory Editor 负责。"""
-
-        normalized = _utc_timestamp(timestamp, "timestamp")
-        if normalized < self.updated_at:
-            raise ValueError("next memory revision timestamp cannot move backwards")
-        return MemoryDocumentMetadata(
-            revision=self.revision + 1,
-            created_at=self.created_at,
-            updated_at=normalized,
-        )
 
 
 @dataclass(frozen=True)
@@ -60,7 +19,7 @@ class MemoryDocument:
 
     kind: MemoryKind
     address: MemoryAddress
-    metadata: MemoryDocumentMetadata
+    metadata: DocumentMetadata
     fields: Mapping[str, Any]
     markdown_body: str
     links: tuple[MemoryStoredLink, ...] = ()
@@ -90,4 +49,4 @@ class MemoryDocument:
         object.__setattr__(self, "backlinks", backlinks)
 
 
-__all__ = ["MemoryDocument", "MemoryDocumentMetadata"]
+__all__ = ["MemoryDocument"]

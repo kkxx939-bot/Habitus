@@ -1,24 +1,13 @@
-"""严格限定于已确认目录结构的 Markdown 记忆树。"""
+"""habitus 树里四类卡片那一部分的读写：档案、偏好、实体、工具（文件操作见 ``infrastructure/tree``）。"""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
 
-from habitus.foundation.ids import canonical_path_identity
-from habitus.infrastructure.store.filesystem import (
-    DurableDirectoryEntry,
-    DurablePathIntegrityError,
-    atomic_replace_bytes,
-    atomic_temporary_destination,
-    durable_rmdir,
-    durable_unlink,
-    ensure_real_directory,
-    list_real_directory,
-    read_regular_bytes,
-    real_directory_exists,
-    regular_file_exists,
-)
+from habitus.infrastructure.store.filesystem import DurableDirectoryEntry
+from habitus.infrastructure.tree.files import TreeFiles
+from habitus.infrastructure.tree.layout import ROOT_DIRECTORIES, ROOT_FILES
 from habitus.memory.document import (
     MemoryDocument,
     MemoryDocumentCodec,
@@ -26,7 +15,7 @@ from habitus.memory.document import (
     MemoryDocumentIntegrityError,
     MemoryDocumentLimitError,
 )
-from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
+from habitus.memory.model import MEMORY_DIRECTORIES, MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.tree.config import MemoryTreeConfig
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
 
@@ -36,9 +25,9 @@ class MemoryTreeIntegrityError(ValueError):
 
 
 class MemoryTree:
-    """安全持久化结构化 L2 文档和可重建的目录语义层。"""
+    """安全持久化结构化 L2 文档和可重建的目录语义层。树根下还有事件与空白的目录：根目录检查认它们，枚举和概览不走进去。"""
 
-    _STATIC_DIRECTORIES = ("preferences", "entities", "tools")
+    _STATIC_DIRECTORIES = MEMORY_DIRECTORIES
 
     def __init__(
         self,
@@ -48,17 +37,20 @@ class MemoryTree:
         document_config: MemoryDocumentConfig | None = None,
         tree_config: MemoryTreeConfig | None = None,
     ) -> None:
-        requested = Path(root).expanduser().absolute()
-        if requested.is_symlink() or requested.is_junction():
-            raise MemoryTreeIntegrityError("memory tree root cannot be a symbolic link")
-        self.root = requested.resolve(strict=False)
+        self.tree_config = tree_config or MemoryTreeConfig()
+        self._files = TreeFiles(
+            root,
+            max_children=self.tree_config.max_children_per_directory,
+            error=MemoryTreeIntegrityError,
+            conflict=MemoryTreeIntegrityError,
+        )
+        self.root = self._files.root
         if document_codec is None:
             from habitus.memory.schema import MemorySchemaRegistry
 
             document_codec = MemoryDocumentCodec(MemorySchemaRegistry.load_default())
         self._document_codec = document_codec
         self.document_config = document_config or MemoryDocumentConfig()
-        self.tree_config = tree_config or MemoryTreeConfig()
 
     @property
     def document_codec(self) -> MemoryDocumentCodec:
@@ -71,26 +63,18 @@ class MemoryTree:
 
         resolved = Path(path).expanduser().resolve(strict=False)
         if resolved.is_relative_to(self.root):
-            raise ValueError("workflow state must be stored outside the L2 memory tree")
+            raise ValueError("workflow state must be stored outside the habitus tree")
         return resolved
 
     def initialize(self) -> Path:
-        """先检查根目录只含当前树的条目，再创建静态目录；没有真实内容时不创建空的 profile.md。
+        """先检查树根只含一棵 habitus 树该有的条目，再创建卡片的静态目录；没有真实内容时不创建空的 profile.md。
 
         旧记忆树（含已退出记忆类型的目录）不兼容也不迁移，启动时在这里就明确报错，
         不等到第一条记忆任务刷新目录概览时才失败。
         """
 
         self._ensure_directory(self.root)
-        for child in self._content_children(self.root):
-            if child.name == "profile.md" and child.is_file():
-                continue
-            if child.name in self._STATIC_DIRECTORIES and child.is_dir():
-                continue
-            raise MemoryTreeIntegrityError(
-                f"memory root contains an unsupported entry {child.name!r}; "
-                "the old memory tree layout is not supported, start from an empty memory root"
-            )
+        self._require_known_root_entries()
         for name in self._STATIC_DIRECTORIES:
             self._ensure_directory(self.root / name)
         return self.root
@@ -115,39 +99,7 @@ class MemoryTree:
         return self._existing_relative_path(relative, leaf_is_file=True)
 
     def _existing_relative_path(self, relative: Path, *, leaf_is_file: bool) -> Path:
-        current = self.root
-        parts = relative.parts
-        for index, part in enumerate(parts):
-            try:
-                entries = list_real_directory(
-                    current,
-                    artifact_root=self.root,
-                    max_entries=self.tree_config.max_children_per_directory,
-                )
-            except DurablePathIntegrityError as exc:
-                raise MemoryTreeIntegrityError("memory identity path cannot be resolved safely") from exc
-            desired = canonical_path_identity(part, "memory path segment")
-            matches: list[DurableDirectoryEntry] = []
-            for entry in entries:
-                try:
-                    identity = canonical_path_identity(entry.name, "memory path entry")
-                except ValueError:
-                    # 名称不是规范身份的目录项不可能等于目标路径段，跳过即可。
-                    continue
-                if identity == desired:
-                    matches.append(entry)
-            if len(matches) > 1:
-                raise MemoryTreeIntegrityError("memory tree contains multiple physical aliases for one identity")
-            if not matches:
-                return current.joinpath(*parts[index:])
-            selected = matches[0]
-            is_leaf = index == len(parts) - 1
-            if (is_leaf and leaf_is_file and not selected.is_file()) or (
-                (not is_leaf or not leaf_is_file) and not selected.is_dir()
-            ):
-                raise MemoryTreeIntegrityError("memory identity path has an incompatible physical entry")
-            current = current / selected.name
-        return current
+        return self._files.resolve(relative, leaf_is_file=leaf_is_file)
 
     def directory_path(self, directory: MemoryDirectory) -> Path:
         """把受控目录地址映射到记忆树内的真实目录。"""
@@ -163,7 +115,7 @@ class MemoryTree:
         return self.directory_path(directory) / normalized.sidecar_filename
 
     def path_for_uri(self, uri: MemoryURI | str) -> Path:
-        """把合法 ``memory://`` 节点确定性映射为树内物理路径。"""
+        """把卡片、卡片目录或侧车的 ``habitus://`` 地址确定性映射为树内物理路径。"""
 
         parsed = MemoryURI.parse(uri)
         if parsed.node_type is MemoryURINodeType.DOCUMENT:
@@ -243,40 +195,19 @@ class MemoryTree:
         )
 
     def exists(self, address: MemoryAddress) -> bool:
-        try:
-            return regular_file_exists(
-                self._existing_document_path(address),
-                artifact_root=self.root,
-            )
-        except DurablePathIntegrityError as exc:
-            raise MemoryTreeIntegrityError("memory file cannot be inspected safely") from exc
+        return self._files.file_exists(self._existing_document_path(address))
 
     def layer_exists(self, directory: MemoryDirectory, level: MemoryLevel) -> bool:
-        try:
-            return regular_file_exists(
-                self._existing_layer_path(directory, level),
-                artifact_root=self.root,
-            )
-        except DurablePathIntegrityError as exc:
-            raise MemoryTreeIntegrityError("memory semantic layer cannot be inspected safely") from exc
+        return self._files.file_exists(self._existing_layer_path(directory, level))
 
     def directory_exists(self, directory: MemoryDirectory) -> bool:
-        try:
-            return real_directory_exists(
-                self._existing_directory_path(directory),
-                artifact_root=self.root,
-            )
-        except DurablePathIntegrityError as exc:
-            raise MemoryTreeIntegrityError("memory directory cannot be inspected safely") from exc
+        return self._files.directory_exists(self._existing_directory_path(directory))
 
     def delete(self, address: MemoryAddress) -> bool:
         """删除一个记忆文件，并只清理其下方已经为空的动态目录。"""
 
         path = self._existing_document_path(address)
-        try:
-            deleted = durable_unlink(path, artifact_root=self.root)
-        except DurablePathIntegrityError as exc:
-            raise MemoryTreeIntegrityError("memory file cannot be deleted safely") from exc
+        deleted = self._files.unlink(path)
         if not deleted:
             return False
         self._prune_dynamic_directories(address, path.parent)
@@ -291,10 +222,7 @@ class MemoryTree:
         directory_path = self._existing_directory_path(directory)
         for level in (MemoryLevel.ABSTRACT, MemoryLevel.OVERVIEW):
             path = directory_path / level.sidecar_filename
-            try:
-                changed = durable_unlink(path, artifact_root=self.root) or changed
-            except DurablePathIntegrityError as exc:
-                raise MemoryTreeIntegrityError("memory semantic layer cannot be deleted safely") from exc
+            changed = self._files.unlink(path) or changed
         return changed
 
     def direct_addresses(
@@ -312,17 +240,8 @@ class MemoryTree:
         parts = directory.parts
         addresses: tuple[MemoryAddress, ...]
         if not parts:
-            children = self._content_children(path)
-            allowed_directories = set(self._STATIC_DIRECTORIES)
-            profile_present = False
-            for child in children:
-                if child.name == "profile.md" and child.is_file():
-                    profile_present = True
-                    continue
-                if child.name in allowed_directories and child.is_dir():
-                    continue
-                raise MemoryTreeIntegrityError("memory root contains an unsupported entry")
-            addresses = (MemoryAddress.profile(),) if profile_present else ()
+            self._require_known_root_entries()
+            addresses = (MemoryAddress.profile(),) if self.exists(MemoryAddress.profile()) else ()
         elif parts == ("preferences",):
             addresses = tuple(MemoryAddress.preference(name) for name in self._markdown_names(path))
         elif parts[0] == "entities" and len(parts) == 2:
@@ -425,84 +344,33 @@ class MemoryTree:
             return
         yield from (MemoryAddress.tool(name) for name in self._markdown_names(self.root / "tools"))
 
+    def _require_known_root_entries(self) -> None:
+        for child in self._content_children(self.root):
+            if (child.name in ROOT_FILES and child.is_file()) or (child.name in ROOT_DIRECTORIES and child.is_dir()):
+                continue
+            raise MemoryTreeIntegrityError(
+                f"habitus tree root contains an unsupported entry {child.name!r}; "
+                "old tree layouts are not supported, start from an empty habitus tree"
+            )
+
     def _markdown_names(self, directory: Path) -> tuple[str, ...]:
-        names: list[str] = []
-        for child in self._content_children(directory):
-            child_path = Path(child.name)
-            if not child.is_file() or child_path.suffix != ".md" or not child_path.stem:
-                raise MemoryTreeIntegrityError("memory leaf directory may contain only Markdown files")
-            names.append(child_path.stem)
-        return tuple(names)
+        return self._files.markdown_names(directory)
 
     def _directories(self, directory: Path) -> tuple[Path, ...]:
-        children = self._content_children(directory)
-        if any(not child.is_dir() for child in children):
-            raise MemoryTreeIntegrityError("memory branch may contain only directories")
-        return tuple(directory / child.name for child in children)
+        return self._files.directories(directory)
 
     def _content_children(self, directory: Path) -> tuple[DurableDirectoryEntry, ...]:
-        content: list[DurableDirectoryEntry] = []
-        semantic_names = {
-            MemoryLevel.ABSTRACT.sidecar_filename,
-            MemoryLevel.OVERVIEW.sidecar_filename,
-        }
-        for child in self._children(directory):
-            if child.name in semantic_names:
-                if not child.is_file():
-                    raise MemoryTreeIntegrityError("memory semantic layer is not a regular file")
-                continue
-            if child.name.startswith("."):
-                if child.is_file() and atomic_temporary_destination(child.name) is not None:
-                    continue
-                raise MemoryTreeIntegrityError("memory directory contains an unsupported hidden entry")
-            content.append(child)
-        return tuple(content)
-
-    def _children(self, directory: Path) -> tuple[DurableDirectoryEntry, ...]:
-        try:
-            return list_real_directory(
-                directory,
-                artifact_root=self.root,
-                max_entries=self.tree_config.max_children_per_directory,
-            )
-        except DurablePathIntegrityError as exc:
-            raise MemoryTreeIntegrityError("memory directory cannot be enumerated safely") from exc
+        return self._files.content_children(directory)
 
     def _ensure_directory(self, directory: Path) -> None:
-        self._require_inside_root(directory)
-        try:
-            ensure_real_directory(directory, artifact_root=self.root)
-        except DurablePathIntegrityError as exc:
-            raise MemoryTreeIntegrityError("memory directory cannot be created safely") from exc
+        self._files.ensure_directory(directory, check_capacity=False)
 
     def _require_inside_root(self, path: Path) -> None:
-        candidate = path.resolve(strict=False)
-        if candidate != self.root and self.root not in candidate.parents:
-            raise MemoryTreeIntegrityError("memory path cannot be used safely outside its tree root")
+        self._files.require_inside(path)
 
-    def _read_utf8(
-        self,
-        path: Path,
-        *,
-        label: str,
-        max_bytes: int | None = None,
-    ) -> str:
+    def _read_utf8(self, path: Path, *, label: str, max_bytes: int | None = None) -> str:
         maximum = self.document_config.max_encoded_bytes if max_bytes is None else max_bytes
-        if maximum <= 0:
-            raise ValueError("max_bytes must be a positive integer")
-        try:
-            payload = read_regular_bytes(
-                path,
-                artifact_root=self.root,
-                max_bytes=maximum,
-            )
-            return payload.decode("utf-8")
-        except DurablePathIntegrityError as exc:
-            if "read bound" in str(exc):
-                raise MemoryTreeIntegrityError(f"{label} exceeds its configured read bound") from exc
-            raise MemoryTreeIntegrityError(f"{label} cannot be read safely") from exc
-        except UnicodeDecodeError as exc:
-            raise MemoryTreeIntegrityError(f"{label} is not valid UTF-8") from exc
+        return self._files.read_utf8(path, label=label, max_bytes=maximum)
 
     def _read_document(
         self,
@@ -525,10 +393,7 @@ class MemoryTree:
             raise MemoryTreeIntegrityError("memory L2 document failed integrity validation") from exc
 
     def _atomic_write(self, path: Path, payload: bytes) -> None:
-        try:
-            atomic_replace_bytes(path, payload, artifact_root=self.root)
-        except DurablePathIntegrityError as exc:
-            raise MemoryTreeIntegrityError("memory file cannot be written safely") from exc
+        self._files.replace(path, payload)
 
     def _prune_dynamic_directories(self, address: MemoryAddress, parent: Path) -> None:
         if address.kind is not MemoryKind.ENTITY:
@@ -542,15 +407,9 @@ class MemoryTree:
                 MemoryLevel.ABSTRACT.sidecar_filename,
                 MemoryLevel.OVERVIEW.sidecar_filename,
             ):
-                sidecar = current / filename
-                try:
-                    durable_unlink(sidecar, artifact_root=self.root)
-                except DurablePathIntegrityError as exc:
-                    raise MemoryTreeIntegrityError("memory semantic layer cannot be pruned safely") from exc
+                self._files.unlink(current / filename)
             try:
-                deleted = durable_rmdir(current, artifact_root=self.root)
-            except DurablePathIntegrityError as exc:
-                raise MemoryTreeIntegrityError("memory directory cannot be pruned safely") from exc
+                deleted = self._files.rmdir(current)
             except OSError:
                 break
             if not deleted:

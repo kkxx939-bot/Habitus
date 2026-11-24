@@ -28,6 +28,7 @@ from habitus.foundation.network import OutboundSettings
 from habitus.foundation.validation import is_nonblank_str
 from habitus.infrastructure.observability.config import ObservabilityConfig
 from habitus.infrastructure.store.filesystem import grants_group_or_other_access
+from habitus.infrastructure.tree.layout import tree_root
 
 _FIXED_RETRIEVAL_DOCUMENTS = 1
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -41,6 +42,16 @@ _REMOVED_SECTIONS = (
     ("memory", "semantic_search"),
     ("conversation", "summary_vector_store"),
     ("conversation", "summary_vector_index"),
+)
+
+
+_REMOVED_BEHAVIOR_OVERVIEW_FIELDS = (
+    "semantic_max_direct_entries",
+    "semantic_max_prompt_chars",
+    "semantic_max_narrative_chars",
+    "semantic_max_entry_summary_chars",
+    "semantic_max_overview_chars",
+    "semantic_max_abstract_chars",
 )
 
 
@@ -74,6 +85,17 @@ def _reject_removed_sections(value: object) -> None:
         raise ConfigError(
             "记忆写入已经不用多文件事务日志和变更回执（裁定 111），这些配置项随之移除，请从配置文件里删掉后重启："
             + "、".join(write_fields)
+        )
+    behavior = value.get("behavior")
+    overview_fields = [
+        f"config.behavior.{name}"
+        for name in _REMOVED_BEHAVIOR_OVERVIEW_FIELDS
+        if isinstance(behavior, Mapping) and name in behavior
+    ]
+    if overview_fields:
+        raise ConfigError(
+            "行为每天的模型概览已经移除（裁定 112），这些配置项随之移除，请从配置文件里删掉后重启："
+            + "、".join(overview_fields)
         )
 
 
@@ -118,10 +140,10 @@ class HabitusConfig:
         return Path(self.storage.root)
 
     @property
-    def memory_root(self) -> Path:
-        """返回唯一 L2 记忆树根目录。"""
+    def tree_root(self) -> Path:
+        """一棵 habitus 树的根（四类卡片与两支的事件、空白都在里面，裁定 112）：存储根下固定的子目录，不可配置。"""
 
-        return self.storage_root / "memory"
+        return tree_root(self.storage_root)
 
     @property
     def conversation_root(self) -> Path:
@@ -131,7 +153,7 @@ class HabitusConfig:
 
     @property
     def behavior_root(self) -> Path:
-        """返回行为管线（观测/判断/回执/作业/行为树/归约账本）的共同根目录。"""
+        """行为管线在树外的存储（观测/判断/回执/归约账本/词表）的共同根目录；事件与空白在 ``tree_root`` 里。"""
 
         return self.storage_root / "behavior"
 

@@ -189,7 +189,7 @@ def hit_paths(scene: Path) -> list[Path]:
 
 def test_a_fresh_hit_day_reads_back(tmp_path: Path) -> None:
     scene = sealed_wednesday(tmp_path)
-    assert len(ConceptHitStore(scene).read_day(WEDNESDAY)) == 2
+    assert len(ConceptHitStore(scene, lane="session").read_day(WEDNESDAY)) == 2
 
 
 @pytest.mark.parametrize(
@@ -212,7 +212,7 @@ def test_a_hit_record_with_one_old_field_is_refused_naming_the_file(tmp_path: Pa
     path = hit_paths(scene)[0]
     edit_footer(path, HITS_MARKER, lambda payload: payload.__setitem__(key, value))
     with pytest.raises(ValueError, match=re.escape(path.name.removesuffix(".md"))):
-        ConceptHitStore(scene).read_day(WEDNESDAY)
+        ConceptHitStore(scene, lane="session").read_day(WEDNESDAY)
 
 
 @pytest.mark.parametrize("key", ["hits_version", "sealed_at", "situations_checked", "classified"])
@@ -221,7 +221,7 @@ def test_a_hit_record_missing_a_field_is_refused_naming_the_file(tmp_path: Path,
     path = hit_paths(scene)[0]
     edit_footer(path, HITS_MARKER, lambda payload: payload.pop(key))
     with pytest.raises(ValueError, match=re.escape(path.name.removesuffix(".md"))):
-        ConceptHitStore(scene).read_day(WEDNESDAY)
+        ConceptHitStore(scene, lane="session").read_day(WEDNESDAY)
 
 
 # ── 日完成章 ──────────────────────────────────────────────────────────────────
@@ -245,7 +245,7 @@ def edit_marker(scene: Path, edit: Callable[[dict[str, Any]], None]) -> None:
 def test_a_day_seal_with_one_extra_key_is_refused_naming_the_file(tmp_path: Path, key: str, value: object) -> None:
     scene = sealed_wednesday(tmp_path)
     edit_marker(scene, lambda payload: payload.__setitem__(key, value))
-    store = ConceptHitStore(scene)
+    store = ConceptHitStore(scene, lane="session")
     with pytest.raises(ValueError, match=re.escape(DONE_FILENAME)):
         store.read_marker(WEDNESDAY)
     with pytest.raises(ValueError, match=re.escape(DONE_FILENAME)):
@@ -257,7 +257,7 @@ def test_a_day_seal_missing_a_key_is_refused_naming_the_file(tmp_path: Path, key
     scene = sealed_wednesday(tmp_path)
     edit_marker(scene, lambda payload: payload.pop(key))
     with pytest.raises(ValueError, match=re.escape(DONE_FILENAME)):
-        ConceptHitStore(scene).read_marker(WEDNESDAY)
+        ConceptHitStore(scene, lane="session").read_marker(WEDNESDAY)
 
 
 # ── D2：从空盘面换代，不产生待生效的概念目录与写概念的记号 ─────────────────────────

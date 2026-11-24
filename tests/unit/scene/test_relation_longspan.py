@@ -134,7 +134,7 @@ def test_a_return_on_a_day_without_a_present_slot_does_not_stall_the_lane(kind, 
     records.append(replace(last, last_observed_at=last.started_at + timedelta(minutes=4)))
     records.sort(key=lambda item: (item.started_at, item.uri))
     (begin, finish) = hidden
-    gap = SeriesGap(uri="behavior://gaps/g.md", started_at=at(back, *begin), ended_at=at(back, *finish), kind=kind)
+    gap = SeriesGap(uri="habitus://gaps/session/g.md", started_at=at(back, *begin), ended_at=at(back, *finish), kind=kind)
     series = EventSeries(cutoff=back + timedelta(days=1), records=tuple(records), gaps=(gap,))
     line = build_timelines(series, CONCEPTS, {}, CONFIG)["session"]
     assert not line.present.get(back)

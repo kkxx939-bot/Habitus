@@ -357,7 +357,7 @@ class World:
 
     # ── 词表 ──
     def kinds_state(self, lane: str) -> dict[str, Any]:
-        path = Path(self.branch(lane).tree.root) / "kinds.state.json"
+        path = Path(self.branch(lane).kind_store.root) / "kinds.state.json"
         return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
 
     def in_use(self, lane: str) -> set[str]:
@@ -430,7 +430,7 @@ class World:
             formed_at=formed,
             source=source,
             trigger="interval",
-            trigger_instance=f"behavior://{identity}.md",
+            trigger_instance=f"occ:{identity}.md",
             window=window,
             deadline=deadline,
             basis=(),

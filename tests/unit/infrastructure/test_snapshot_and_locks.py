@@ -71,11 +71,11 @@ def test_snapshot_reader_only_converts_file_not_found_and_enforces_all_resource_
 
 
 def test_snapshot_models_reject_incoherent_state_and_batch_metadata() -> None:
-    missing = VersionedSnapshot.missing("memory://profile")
+    missing = VersionedSnapshot.missing("habitus://profile")
     with pytest.raises(ValueError, match="missing snapshot"):
         replace(missing, size_bytes=1)
     found = VersionedSnapshot(
-        identity="memory://profile",
+        identity="habitus://profile",
         state=SnapshotState.FOUND,
         value="body",
         revision=1,
@@ -90,14 +90,14 @@ def test_snapshot_models_reject_incoherent_state_and_batch_metadata() -> None:
 
 def test_process_local_lock_excludes_competitors_and_increments_fence_after_release() -> None:
     store = ProcessLocalLockStore()
-    first = store.acquire("memory://profile")
+    first = store.acquire("habitus://profile")
     with pytest.raises(TimeoutError, match="already held"):
-        store.acquire("memory://profile")
+        store.acquire("habitus://profile")
     store.assert_owned(first)
     store.renew(first)
     store.release(first)
 
-    second = store.acquire("memory://profile")
+    second = store.acquire("habitus://profile")
     assert second.fence == first.fence + 1
     with pytest.raises(LockLostError):
         store.assert_owned(first)
@@ -161,7 +161,7 @@ def test_path_lock_retries_transient_acquire_renew_and_release_without_replaying
     store = TransientStore()
     body_calls = 0
     with PathLock(store).acquire(
-        "memory://profile.md",
+        "habitus://profile.md",
         wait_timeout_seconds=0.1,
         retry_delay_seconds=0.001,
     ) as guard:
@@ -190,7 +190,7 @@ def test_path_lock_retries_only_the_fencing_entry_not_the_critical_section() -> 
     store = TransientFencingStore()
     body_calls = 0
     with PathLock(store).acquire(
-        "memory://profile.md",
+        "habitus://profile.md",
         wait_timeout_seconds=0.1,
         retry_delay_seconds=0.001,
     ) as guard:

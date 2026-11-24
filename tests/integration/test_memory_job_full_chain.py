@@ -210,8 +210,8 @@ def test_empty_tree_final_round_still_insufficient_commits_job_and_audits_limit(
     runtime.initialize()
     chats[0].retrieval_script.extend(
         [
-            _list("memory://preferences"),
-            _list("memory://entities"),
+            _list("habitus://preferences"),
+            _list("habitus://entities"),
             {
                 "status": "insufficient",
                 "action": "finish",
@@ -236,7 +236,7 @@ def test_empty_tree_final_round_still_insufficient_commits_job_and_audits_limit(
     assert chats[0].retrieval_script == []
     assert chats[0].response_names.count("memory_retrieval_decision") == 3
     assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
-    assert result.job.changed_uris == ("memory://preferences/回答风格.md",)
+    assert result.job.changed_uris == ("habitus://preferences/回答风格.md",)
     plans = [event for event in observer.events if (event.category, event.operation) == ("workflow", "memory_plan")]
     assert len(plans) == 1
     assert plans[0].attributes["retrieval_ended_at_limit"] is True
@@ -261,7 +261,7 @@ def _read_unexposed() -> dict[str, object]:
         "status": "insufficient",
         "action": "memory_read",
         "directory": None,
-        "uris": ["memory://preferences/磁盘清理.md"],
+        "uris": ["habitus://preferences/磁盘清理.md"],
         "keywords": [],
         "reason": "猜一个可能存在的旧记忆。",
     }
@@ -274,7 +274,7 @@ def _read_seeded_entity() -> dict[str, object]:
         "status": "insufficient",
         "action": "memory_read",
         "directory": None,
-        "uris": ["memory://entities/软件项目/habitus.md"],
+        "uris": ["habitus://entities/软件项目/habitus.md"],
         "keywords": [],
         "reason": "名字清单里有相关实体，读完整旧记忆。",
     }
@@ -373,8 +373,8 @@ def test_cards_written_job_resumes_after_semantic_refresh_failure_without_replan
 
     assert failed is not None and failed.status is MemoryJobStatus.FAILED
     assert failed.cards_written
-    assert failed.changed_uris == ("memory://preferences/回答风格.md",)
-    assert (tmp_path / "data" / "memory" / "preferences" / "回答风格.md").exists()
+    assert failed.changed_uris == ("habitus://preferences/回答风格.md",)
+    assert (tmp_path / "data" / "habitus" / "preferences" / "回答风格.md").exists()
     assert chats[0].response_names.count("memory_candidate_batch") == 1
     assert asyncio.run(runtime.failed_memory_jobs()) == (failed,)
 
@@ -384,7 +384,7 @@ def test_cards_written_job_resumes_after_semantic_refresh_failure_without_replan
 
     assert result.recovered
     assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
-    assert result.job.changed_uris == ("memory://preferences/回答风格.md",)
+    assert result.job.changed_uris == ("habitus://preferences/回答风格.md",)
     assert chats[0].response_names.count("memory_candidate_batch") == 1
     assert asyncio.run(runtime.failed_memory_jobs()) == ()
 
@@ -425,7 +425,7 @@ def test_a_write_that_stops_part_way_keeps_written_files_and_a_retry_finishes_wi
     tree.write = write
     failed = caught.value.job
 
-    preferences = tmp_path / "data" / "memory" / "preferences"
+    preferences = tmp_path / "data" / "habitus" / "preferences"
     assert failed is not None and failed.status is MemoryJobStatus.FAILED and not failed.cards_written
     assert sorted(path.name for path in preferences.glob("[!.]*.md")) == ["回答风格.md"]
 
@@ -567,7 +567,7 @@ def test_failing_candidate_after_repair_is_dropped_and_the_rest_of_the_batch_and
 
     assert second.job is not None and second.job.status is MemoryJobStatus.COMMITTED and second.job.attempts == 1
     assert chats[0].response_names.count("memory_candidate_batch") - calls_before == 2
-    memory_root = tmp_path / "data" / "memory"
+    memory_root = tmp_path / "data" / "habitus"
     assert (memory_root / "preferences" / "回答风格.md").exists()
     assert "补充对比结论" not in (memory_root / "entities" / "软件项目" / "habitus.md").read_text(encoding="utf-8")
     plan = _plan_events(observer)[-1]
@@ -600,7 +600,7 @@ def test_a_candidate_on_an_unread_old_card_never_fails_the_job_and_later_jobs_co
     second = asyncio.run(runtime.run_next())
 
     assert second.job is not None and second.job.status is MemoryJobStatus.COMMITTED
-    assert (tmp_path / "data" / "memory" / "preferences" / "回答风格.md").exists()
+    assert (tmp_path / "data" / "habitus" / "preferences" / "回答风格.md").exists()
     plan = _plan_events(observer)[-1]
     assert plan.attributes["source_rejected_count"] == 1
     third = asyncio.run(runtime.run_next())
@@ -631,8 +631,8 @@ def test_failing_candidate_repaired_by_the_model_is_written_with_the_rest_of_the
     assert chats[0].response_names.count("memory_candidate_batch") - calls_before == 2
     assert chats[0].candidate_script == []
     assert result.job.changed_uris == (
-        "memory://entities/软件项目/openviking.md",
-        "memory://preferences/回答风格.md",
+        "habitus://entities/软件项目/openviking.md",
+        "habitus://preferences/回答风格.md",
     )
     assert _plan_events(observer)[-1].attributes["source_rejected_count"] == 0
 
@@ -705,7 +705,7 @@ def test_normal_model_variation_in_source_checks_no_longer_fails_the_job(
     result = asyncio.run(runtime.run_next())
 
     assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
-    assert (tmp_path / "data" / "memory" / "preferences" / "回答风格.md").exists()
+    assert (tmp_path / "data" / "habitus" / "preferences" / "回答风格.md").exists()
     assert _plan_events(observer)[-1].attributes["source_rejected_count"] == 1
 
 
@@ -836,4 +836,4 @@ def test_a_failed_job_whose_history_was_never_published_can_be_retried_through_r
     result = asyncio.run(runtime.run_next())
 
     assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
-    assert result.job.changed_uris == ("memory://preferences/回答风格.md",)
+    assert result.job.changed_uris == ("habitus://preferences/回答风格.md",)

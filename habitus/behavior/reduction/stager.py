@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
 
-from habitus.behavior.document import BehaviorDocumentMetadata
 from habitus.behavior.document.config import BehaviorDocumentLimitError
 from habitus.behavior.kinds.calls import CallFailure
 from habitus.behavior.model import BehaviorAddress, BehaviorKind
@@ -35,6 +34,7 @@ from habitus.behavior.tree import BehaviorTree, BehaviorTreeIntegrityError
 from habitus.behavior.uri import BehaviorURI
 from habitus.foundation.integrity import canonical_digest
 from habitus.infrastructure.store.contracts.path_lock import LeaseGuard
+from habitus.infrastructure.tree.metadata import DocumentMetadata
 
 #: stage 里出了错误的一条：判断、原因、进夜里待处理堆的原因（定夜里试不试，裁定 94 错误分类）。
 Failed = tuple[ReducibleJudgement, str, RetryCause]
@@ -84,7 +84,7 @@ class ReductionStager:
         stamps: KindStamps,
         *,
         entries: Sequence[BehaviorReductionEntry],
-        refresh_days: set[date],
+        touched_days: set[date],
         reminded: Callable[[str, datetime], bool],
         signals: list[str],
         guard: LeaseGuard,
@@ -108,7 +108,7 @@ class ReductionStager:
             checkpoint = {
                 "reduction_version": REDUCTION_VERSION,
                 "staged_at": now.isoformat(timespec="microseconds"),
-                "refresh_days": sorted(day.isoformat() for day in (refresh_days | document_days(documents))),
+                "touched_days": sorted(day.isoformat() for day in (touched_days | document_days(documents))),
                 "documents": documents,
             }
             encoded = self.checkpoints.encode(checkpoint)
@@ -160,11 +160,12 @@ class ReductionStager:
         # 归类结果由调用方先算好（按节点身份给，不依赖地址），这里只取用。
         sources = {ref for _, record in ready for ref in record.source_refs}
         observation_index = self._observation_index(sources, signals) if sources else {}
+        lane = self.tree.lane
         naming = _name_occurrences(
-            ready, stamps, occupied, observation_index, reminded=reminded, dropped=dropped, guard=guard
+            ready, stamps, occupied, observation_index, lane=lane, reminded=reminded, dropped=dropped, guard=guard
         )
 
-        documents: list[dict[str, Any]] = _gap_documents(ready_gaps, occupied, staged_at, dropped)
+        documents: list[dict[str, Any]] = _gap_documents(ready_gaps, occupied, staged_at, dropped, lane=lane)
         documents += _occurrence_documents(ready, naming, staged_at, guard)
         documents, rejected = _publishable(self.tree, documents, now, dropped, guard)
         # 干跑校验不过的行为：同一份判断再归约也一样，走我们自己处理不了的那条路（换成「错误」、进堆不白试，那天等它落成空白
@@ -184,7 +185,7 @@ class ReductionStager:
         for day in sorted(days):
             for kind in (BehaviorKind.OCCURRENCE, BehaviorKind.GAP):
                 for address in self.tree.list_day_addresses(kind, day):
-                    found.add(str(BehaviorURI.from_address(address)))
+                    found.add(str(self.tree.uri_for(address)))
         return found
 
     def _observation_index(self, source_refs: Iterable[str], signals: list[str]) -> dict[str, BehaviorObservation]:
@@ -208,6 +209,7 @@ def _name_occurrences(
     occupied: set[str],
     observations: dict[str, BehaviorObservation],
     *,
+    lane: str,
     reminded: Callable[[str, datetime], bool],
     dropped: list[str],
     guard: LeaseGuard | None,
@@ -233,7 +235,7 @@ def _name_occurrences(
             continue
         was_reminded = bool(reminded(token, record.started_at))
         try:
-            uri, payload = _materialize(record, token, occupied, observations, reminded=was_reminded)
+            uri, payload = _materialize(record, token, occupied, observations, lane=lane, reminded=was_reminded)
         except BehaviorTreeIntegrityError:
             raise  # 树本身不可安全检视（别名冲突、符号链接）：整轮失败、可见告警，不当坏名字吞
         except (TypeError, ValueError, BehaviorReductionError) as exc:
@@ -269,6 +271,7 @@ def _materialize(
     occupied: set[str],
     observations: dict[str, BehaviorObservation],
     *,
+    lane: str,
     reminded: bool,
 ) -> tuple[str, dict[str, Any]]:
     """先以基名物化一次（坏名字、死引用在这里抛），再挑第一个没被占的后缀地址物化最终 payload。"""
@@ -286,10 +289,10 @@ def _materialize(
         reminded=reminded,
     )
     candidate, ordinal = base, 1
-    while str(BehaviorURI.from_address(occurrence_address(record, candidate))) in occupied:
+    while str(BehaviorURI.from_address(occurrence_address(record, candidate), lane)) in occupied:
         ordinal += 1
         candidate = f"{base}-{ordinal}"
-    uri = str(BehaviorURI.from_address(occurrence_address(record, candidate)))
+    uri = str(BehaviorURI.from_address(occurrence_address(record, candidate), lane))
     payload = occurrence_payload(
         record,
         name=candidate,
@@ -302,7 +305,7 @@ def _materialize(
 
 
 def _gap_documents(
-    ready_gaps: tuple[ReducibleJudgement, ...], occupied: set[str], staged_at: str, dropped: list[str]
+    ready_gaps: tuple[ReducibleJudgement, ...], occupied: set[str], staged_at: str, dropped: list[str], *, lane: str
 ) -> list[dict[str, Any]]:
     """gap 先落。gap 地址的叶名是枚举类型、无法加后缀：批内**同一微秒同偏移**起点的空白机械合并成
     一个节点（溯源并集、终点取最大）；撞上账本里既有空白时，本段记账指向既有节点——
@@ -312,7 +315,7 @@ def _gap_documents(
     merged_gaps: dict[str, list[ReducibleJudgement]] = {}
     for record in ready_gaps:
         address = BehaviorAddress.gap(record.started_at.date(), gap_kind_of(record), record.started_at)
-        merged_gaps.setdefault(str(BehaviorURI.from_address(address)), []).append(record)
+        merged_gaps.setdefault(str(BehaviorURI.from_address(address, lane)), []).append(record)
     for uri in sorted(merged_gaps):
         group = merged_gaps[uri]
         judgement_ids = sorted(item.judgement_id for item in group)
@@ -389,7 +392,7 @@ def _publishable(
     永久卡死；在这里按文档剔除并留信号，其余照常落。返回（留下的文档，剔掉的行为文档消费的判断与原因）。
     """
 
-    metadata = BehaviorDocumentMetadata.initial(now)
+    metadata = DocumentMetadata.initial(now)
 
     def dry_run(kind: str, payload: Mapping[str, Any]) -> None:
         # 与写盘同一道检查：schema、正文字数、编码后字节（只 build 不 encode 的话，字节超限要到发布时才抛）

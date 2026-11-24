@@ -72,7 +72,7 @@ def made(identity: str, day: date, *, kind: str = "s-k0100", trigger: str = "rel
         formed_at=datetime.combine(day, datetime.min.time(), CST) + timedelta(minutes=5),
         source="日子",
         trigger=trigger,
-        trigger_instance=f"behavior://{identity}.md",
+        trigger_instance=f"occ:{identity}.md",
         window=(
             datetime.combine(day, datetime.min.time(), CST) + timedelta(hours=14),
             datetime.combine(day, datetime.min.time(), CST) + timedelta(hours=15),
@@ -314,7 +314,7 @@ def hotel() -> Expectation:
         formed_at=formed,
         source="日子",
         trigger="rel",
-        trigger_instance="behavior://hotel.md",
+        trigger_instance="occ:hotel.md",
         window=(formed + timedelta(minutes=4), formed + timedelta(minutes=51)),
         deadline=formed + timedelta(hours=3),
         basis=(),

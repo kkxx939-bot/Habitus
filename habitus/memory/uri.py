@@ -1,18 +1,15 @@
-"""严格映射当前记忆树的 ``memory://`` 地址值对象。"""
+"""``habitus://`` 地址里四类卡片那一部分的值对象：只认卡片、卡片目录和它们的 L0/L1 侧车。"""
 
 from __future__ import annotations
 
 from enum import Enum
-from urllib.parse import unquote
 
-from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
-
-_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
-_UNRESERVED_ASCII = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+from habitus.infrastructure.tree.address import SCHEME, TreeAddressError, format_uri, split_uri
+from habitus.memory.model import MEMORY_DIRECTORIES, MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
 
 
 class MemoryURIError(ValueError):
-    """URI 不是规范的 ``memory://`` 地址，或无法映射到已确认记忆树。"""
+    """URI 不是规范的 ``habitus://`` 地址，或不是卡片、卡片目录及其侧车。"""
 
 
 class MemoryURINodeType(str, Enum):
@@ -31,7 +28,7 @@ class MemoryURI:
     规范 IRI：Unicode 保持原文，保留字符使用大写百分号编码。
     """
 
-    SCHEME = "memory"
+    SCHEME = SCHEME
     _uri: str
     _segments: tuple[str, ...]
     _node_type: MemoryURINodeType
@@ -48,24 +45,14 @@ class MemoryURI:
     )
 
     def __init__(self, uri: str) -> None:
-        if not uri or uri != uri.strip():
-            raise MemoryURIError("memory URI must be non-empty without surrounding whitespace")
-        prefix = f"{self.SCHEME}://"
-        if not uri.startswith(prefix):
-            raise MemoryURIError(f"memory URI must start with '{prefix}'")
-
-        raw_path = uri[len(prefix) :]
-        if raw_path.endswith("/"):
-            raise MemoryURIError("memory URI must not contain a trailing slash")
-        raw_segments = tuple(raw_path.split("/")) if raw_path else ()
-        if any(not segment for segment in raw_segments):
-            raise MemoryURIError("memory URI contains an empty path segment")
-        segments = tuple(_decode_segment(segment) for segment in raw_segments)
+        try:
+            segments = split_uri(uri)
+        except TreeAddressError as exc:
+            raise MemoryURIError(str(exc)) from exc
         node_type, address, directory, level = _classify(segments)
         segments = _canonical_segments(node_type, address, directory, level)
-        encoded_path = "/".join(_encode_segment(segment) for segment in segments)
 
-        object.__setattr__(self, "_uri", f"{prefix}{encoded_path}")
+        object.__setattr__(self, "_uri", format_uri(segments))
         object.__setattr__(self, "_segments", segments)
         object.__setattr__(self, "_node_type", node_type)
         object.__setattr__(self, "_address", address)
@@ -135,8 +122,7 @@ class MemoryURI:
 
     @classmethod
     def _from_segments(cls, segments: tuple[str, ...]) -> MemoryURI:
-        encoded = "/".join(_encode_segment(segment) for segment in segments)
-        return cls(f"{cls.SCHEME}://{encoded}")
+        return cls(format_uri(segments))
 
     @staticmethod
     def is_valid(uri: object) -> bool:
@@ -297,7 +283,7 @@ def _classify(
     address = _address(segments)
     if address is not None:
         return MemoryURINodeType.DOCUMENT, address, None, None
-    raise MemoryURIError("memory URI does not map to a confirmed memory tree node")
+    raise MemoryURIError("habitus URI does not identify a memory card, card directory or its layer")
 
 
 def _canonical_segments(
@@ -329,7 +315,7 @@ def _canonical_segments(
 def _directory(segments: tuple[str, ...]) -> MemoryDirectory | None:
     if not segments:
         return MemoryDirectory.root()
-    if segments[0] not in {"preferences", "entities", "tools"}:
+    if segments[0] not in MEMORY_DIRECTORIES:
         return None
     try:
         return MemoryDirectory(segments)
@@ -359,36 +345,6 @@ def _markdown_stem(filename: str) -> str:
     if not stem:
         raise MemoryURIError("memory L2 URI filename must have a non-empty stem")
     return stem
-
-
-def _decode_segment(value: str) -> str:
-    index = 0
-    while index < len(value):
-        if value[index] != "%":
-            index += 1
-            continue
-        if index + 2 >= len(value) or value[index + 1] not in _HEX_DIGITS or value[index + 2] not in _HEX_DIGITS:
-            raise MemoryURIError("memory URI contains malformed percent encoding")
-        index += 3
-    try:
-        decoded = unquote(value, encoding="utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise MemoryURIError("memory URI contains invalid UTF-8 percent encoding") from exc
-    if not decoded:
-        raise MemoryURIError("memory URI contains an empty decoded segment")
-    return decoded
-
-
-def _encode_segment(value: str) -> str:
-    if not value:
-        raise MemoryURIError("memory URI segments must be non-empty strings")
-    encoded: list[str] = []
-    for character in value:
-        if character in _UNRESERVED_ASCII or ord(character) >= 128:
-            encoded.append(character)
-            continue
-        encoded.extend(f"%{byte:02X}" for byte in character.encode("utf-8"))
-    return "".join(encoded)
 
 
 __all__ = ["MemoryURI", "MemoryURIError", "MemoryURINodeType", "decode_memory_uri"]

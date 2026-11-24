@@ -1,4 +1,4 @@
-// habitus memory ls / tree / read（方案 36 第 2 步）：按 memory:// 地址浏览 Habitus 记下的东西。只读，经本地服务的
+// habitus memory ls / tree / read（方案 36 第 2 步）：按 habitus:// 地址浏览 Habitus 记下的东西。只读，经本地服务的
 // GET /api/v1/memory/tree 与 /api/v1/memory/document；服务不给文件路径，这里也只认地址。
 
 import { call, connect, requireFeature } from "./service.mjs";
@@ -6,7 +6,7 @@ import { call, connect, requireFeature } from "./service.mjs";
 const USAGE = `usage: habitus memory ls [地址] [--json]
        habitus memory tree [地址] [-L 层数] [--json]
        habitus memory read <地址> [--json]
-地址形如 memory://preferences、memory://entities/项目/habitus.md；省略 memory:// 也行，省略地址是根。`;
+地址形如 habitus://preferences、habitus://entities/项目/habitus.md；省略 habitus:// 也行，省略地址是根。`;
 const DEFAULT_DEPTH = 3;
 const MAX_DEPTH = 6;
 
@@ -78,7 +78,7 @@ async function ready(env) {
 }
 
 function list(connection, uri) {
-  const query = uri === "memory://" ? "" : `?uri=${encodeURIComponent(uri)}`;
+  const query = uri === "habitus://" ? "" : `?uri=${encodeURIComponent(uri)}`;
   return call(connection, "memory ls", `/api/v1/memory/tree${query}`);
 }
 
@@ -106,14 +106,14 @@ function render(stdout, node, indent) {
 }
 
 function address(value) {
-  if (value == null || value === "" || value === "/") return "memory://";
+  if (value == null || value === "" || value === "/") return "habitus://";
   const text = String(value).trim();
-  return text.startsWith("memory://") ? text.replace(/\/+$/, "") || "memory://" : `memory://${text.replace(/^\/+|\/+$/g, "")}`;
+  return text.startsWith("habitus://") ? text.replace(/\/+$/, "") || "habitus://" : `habitus://${text.replace(/^\/+|\/+$/g, "")}`;
 }
 
 function name(uri) {
-  const path = decodeURIComponent(String(uri).slice("memory://".length));
-  return path.split("/").at(-1) || "memory://";
+  const path = decodeURIComponent(String(uri).slice("habitus://".length));
+  return path.split("/").at(-1) || "habitus://";
 }
 
 function take(args, flag) {

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -56,7 +57,7 @@ def test_a_record_must_point_at_an_occurrence_and_stay_self_consistent(tmp_path)
     # 成立的情境必然判过：没列进 checked 的补进去
     assert record.situations_checked == ("周五", "周末")
 
-    gap_uri = str(BehaviorURI.from_address(BehaviorAddress.gap(DAY1, "没读懂", at(DAY1, 20, 0))))
+    gap_uri = str(BehaviorURI.from_address(BehaviorAddress.gap(DAY1, "没读懂", at(DAY1, 20, 0)), "session"))
     with pytest.raises(ConceptHitsError, match="occurrence document"):
         hits_for(gap_uri)
     with pytest.raises(ConceptHitsError, match="repeats"):
@@ -127,15 +128,16 @@ def test_store_mirrors_the_behaviour_tree_address_and_reads_a_day_in_time_order(
     site = Site(tmp_path, now=NOW)
     late = publish(site.behavior_tree, DAY1, "就寝", 23, 50)
     early = publish(site.behavior_tree, DAY1, "早餐", 8, 0)
-    store = ConceptHitStore(tmp_path / "scene")
+    store = ConceptHitStore(tmp_path / "scene", lane="session")
     path = store.write(hits_for(late))
     store.write(hits_for(early, kind_token=kind_id("早餐")))
 
     leaf = BehaviorURI.parse(late).to_address().identity_name
     assert path == tmp_path / "scene" / "occurrences" / "2026" / "08" / "15" / f"{leaf}.md"
-    assert path.relative_to(tmp_path / "scene") == site.behavior_tree.path_for(
-        BehaviorURI.parse(late).to_address()
-    ).relative_to(site.behavior_tree.root)
+    # 命中记录的文件与树上的那条同叶名同日期目录；树上多一段支（裁定 112），语义树的根本来就按支分
+    tree_path = site.behavior_tree.path_for(BehaviorURI.parse(late).to_address()).relative_to(site.behavior_tree.root)
+    assert tree_path.parts[:2] == ("occurrences", "session")
+    assert path.relative_to(tmp_path / "scene") == Path(tree_path.parts[0], *tree_path.parts[2:])
     assert [record.occurrence_uri for record in store.read_day(DAY1)] == [early, late]
     assert store.exists(BehaviorURI.parse(late).to_address())
     assert not store.exists(BehaviorAddress.occurrence(DAY2, "就寝", at(DAY2, 23, 50)))
@@ -147,7 +149,7 @@ def test_completion_marker_counts_checks_the_hits_version_and_summarises_the_day
     site = Site(tmp_path, now=NOW)
     uri = publish(site.behavior_tree, DAY1, "就寝", 23, 50)
     other = publish(site.behavior_tree, DAY1, "早餐", 8, 0)
-    store = ConceptHitStore(tmp_path / "scene")
+    store = ConceptHitStore(tmp_path / "scene", lane="session")
     store.write(hits_for(uri, situations=(ConceptHit("周末"),)))
     store.write(hits_for(other, kind_token="s-待定", classified=False))
 
@@ -180,7 +182,7 @@ def test_a_completion_marker_of_another_shape_is_refused_naming_the_file(tmp_pat
     """完成章的字段集合是严格的：旧盘面的未决条数、映射口径一出现就拒，信息里带文件名。"""
 
     site = Site(tmp_path, now=NOW)
-    store = ConceptHitStore(tmp_path / "scene")
+    store = ConceptHitStore(tmp_path / "scene", lane="session")
     store.write(hits_for(publish(site.behavior_tree, DAY1, "就寝", 23, 50)))
     store.complete_day(DAY1, records=1, completed_at=NOW, hits_version=HITS_VERSION, digest=DIGEST)
     marker = store.path_for(BehaviorAddress.occurrence(DAY1, "就寝", at(DAY1, 23, 50))).parent / ".done.json"
@@ -197,7 +199,7 @@ def test_redoing_a_day_withdraws_the_marker_in_the_same_step_and_clears_noise(tm
     site = Site(tmp_path, now=NOW)
     kept = publish(site.behavior_tree, DAY1, "就寝", 23, 50)
     gone = publish(site.behavior_tree, DAY1, "看手机", 22, 0)
-    store = ConceptHitStore(tmp_path / "scene")
+    store = ConceptHitStore(tmp_path / "scene", lane="session")
     store.write(hits_for(kept))
     store.write(hits_for(gone))
     store.complete_day(DAY1, records=2, completed_at=NOW, hits_version=HITS_VERSION, digest=DIGEST)
@@ -220,7 +222,7 @@ def test_redoing_a_day_withdraws_the_marker_in_the_same_step_and_clears_noise(tm
 
 def test_store_enforces_capacity_and_canonical_leaf_names(tmp_path) -> None:
     site = Site(tmp_path, now=NOW)
-    store = ConceptHitStore(tmp_path / "scene", max_directory_entries=2)
+    store = ConceptHitStore(tmp_path / "scene", lane="session", max_directory_entries=2)
     a = publish(site.behavior_tree, DAY1, "就寝", 23, 50)
     b = publish(site.behavior_tree, DAY1, "早餐", 8, 0)
     c = publish(site.behavior_tree, DAY1, "午饭", 12, 0)
@@ -242,7 +244,7 @@ def test_a_finished_day_is_decoded_once_and_read_again_only_when_its_marker_chan
 
     site = Site(tmp_path, now=NOW)
     uri = publish(site.behavior_tree, DAY1, "就寝", 23, 50)
-    store = ConceptHitStore(tmp_path / "scene")
+    store = ConceptHitStore(tmp_path / "scene", lane="session")
     store.write(hits_for(uri))
     decoded: list[object] = []
     original = store._decode

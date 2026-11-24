@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 def vocabulary_parts(
     chat: StructuredChatClient, lane: Lane, root: Path, domain: BehaviorDomainConfigs, lock_store: LockStore
 ) -> tuple[BehaviorKindStore, WordPicker]:
-    """这一支的词表状态（``root`` 是行为树根）与选词器。选词器答复结构不合格时带着错误重问 ``pick_retries`` 次（另起一个结构化
+    """这一支的词表状态（``root`` 是这一支在树外的根 ``behavior/<lane>``）与选词器。选词器答复结构不合格时带着错误重问 ``pick_retries`` 次（另起一个结构化
     客户端，只换重问次数）；两支的选词器都拿这一支的词表状态（每一条现读、写新节点）。"""
 
     kinds = domain.kinds

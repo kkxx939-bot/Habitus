@@ -92,5 +92,5 @@ def test_a_document_carrying_last_confirmed_at_is_rejected() -> None:
 
 def test_encoded_metadata_has_no_confirmation_key() -> None:
     encoded = codec().encode(document())
-    metadata = json.loads(encoded.split("<!-- HABITUS_MEMORY_FIELDS\n", 1)[1].rsplit("\n-->", 1)[0])
+    metadata = json.loads(encoded.split("<!-- HABITUS_FIELDS\n", 1)[1].rsplit("\n-->", 1)[0])
     assert "last_confirmed_at" not in metadata

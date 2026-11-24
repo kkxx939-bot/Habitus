@@ -71,6 +71,28 @@ def refuse_write_layout(config: HabitusConfig) -> None:
         )
 
 
+class TwoTreeLayoutError(RuntimeError):
+    """盘上还有合成一棵树之前的记忆根或行为树（裁定 112，不迁移、不读）。"""
+
+
+def refuse_two_tree_layout(config: HabitusConfig) -> None:
+    """存储根下还有旧的 ``memory/`` 记忆根，或 ``behavior/<支>/tree/`` 行为树（连同它根下的旧词表文件）：明确报错、点出目录。
+
+    归约的检查点与账本里定格着地址字符串，旧盘面上起新代码会拿旧地址去写新树，所以这一条要在任何 Worker 起来之前查。"""
+
+    found = [config.storage_root / "memory"] + [
+        config.behavior_root / lane / "tree" for lane in ("session", "physical")
+    ]
+    present = [path for path in found if path.exists()]
+    if present:
+        raise TwoTreeLayoutError(
+            f"cards, occurrences and gaps now live in one habitus tree ({config.tree_root}); the old memory root and "
+            "behavior trees are not migrated, start from an empty storage root (remove "
+            + ", ".join(str(path) for path in present)
+            + " and the workflow, behavior, scene and foresight state written next to them) and restart"
+        )
+
+
 class RuntimeLifecycle:
     """``observe`` 是 Runtime 的观测出口；本类不持有也不改变 Runtime 状态。"""
 
@@ -80,24 +102,28 @@ class RuntimeLifecycle:
         self._observe = observe
 
     def initialize_stores(self) -> Path:
-        """初始化树与各存储，返回记忆根。旧的向量库、事务日志、回执目录与旧格式任务文件在这里就报错。"""
+        """初始化树与各存储，返回树根。旧的记忆根与行为树、向量库、事务日志、回执目录与旧格式任务文件在这里就报错。
 
+        树的初始化在这一处：卡片的目录总是建；事件与空白的两支目录只在行为侧开着时建（关着时树里没有它们）。"""
+
+        refuse_two_tree_layout(self.config)
         self.components.infrastructure.initialize()
         refuse_vector_layout(self.config)
         refuse_write_layout(self.config)
-        memory_root = self.components.memory.tree.initialize()
+        tree_root = self.components.memory.tree.initialize()
         self.components.workflow.jobs.initialize()
         self.components.memory.lifecycle.initialize()
         self.components.conversation.summary_use.initialize()
         self.components.workflow.lifecycle.retirement_store.initialize()
         if self.components.behavior is not None:
-            # 行为树静态目录；幂等，重复初始化零写入。
+            # 这一支的事件与空白目录；幂等，重复初始化零写入。
             # 此处失败**允许**阻断整个 Runtime（对"行为失败不阻断"哲学的边界取舍）：
             # 同一 storage root 下建不了目录，几乎必然意味着记忆侧同样不可用；
             # 静默跳过反而会让 RUNNING 状态掩盖一个坏掉的存储根。
             for branch in self.components.behavior:
                 branch.tree.initialize()
-                # 旧词表（变更日志、待定池、迁移计划……）不迁移、不兼容：盘上还有就在启动时报错、点出文件（裁定 101）
+                # 旧词表（变更日志、待定池、迁移计划……）不迁移、不兼容：盘上还有就在启动时报错、点出文件（裁定 101）；
+                # 词表文件在这一支树外的根下（裁定 112）
                 branch.kind_store.check()
         if self.components.pipelines:
             # 语义树按支分根（裁定 42：``scene/<lane>/``）之前的旧布局不迁移：盘上还有就在启动时报错、点出目录
@@ -107,7 +133,7 @@ class RuntimeLifecycle:
             advice = item.scene.advice
             if advice is not None:
                 advice.store.refuse_proposal_books()
-        return memory_root
+        return tree_root
 
     async def start(self, started: float) -> None:
         """恢复交付，依次启动 Job Worker、生命周期维护 Worker 与可选的后台循环。"""

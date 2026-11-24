@@ -52,14 +52,14 @@ def short(  # type: ignore[no-untyped-def]
 
 
 def test_an_antecedent_that_no_longer_holds_voids_the_opportunity_whatever_happened() -> None:
-    voided = short("准时", "behavior://run.md", holds=False, prompted=True)
+    voided = short("准时", "occ:run.md", holds=False, prompted=True)
     assert voided is not None and (voided.kind, voided.good, voided.strength, voided.at) == (VOID, False, 0.0, FORMED)
 
 
 def test_an_unobserved_stretch_makes_only_an_overdue_neutral() -> None:
     neutral = short("过期待决", unobserved=True)
     assert neutral is not None and (neutral.kind, neutral.good, neutral.strength) == ("过期待决", False, 0.0)
-    assert short("准时", "behavior://run.md", unobserved=True) is None
+    assert short("准时", "occ:run.md", unobserved=True) is None
 
 
 def test_a_said_done_reply_makes_only_an_overdue_neutral() -> None:
@@ -69,23 +69,23 @@ def test_a_said_done_reply_makes_only_an_overdue_neutral() -> None:
     neutral = short("过期待决", said_done=True)
     assert neutral is not None and (neutral.kind, neutral.good, neutral.strength) == ("过期待决", False, 0.0)
     assert short("过期待决") is None  # 没回已做：交给按结果写（坏、强度 1）
-    assert short("准时", "behavior://run.md", said_done=True) is None
-    assert short("提醒后发生", "behavior://run.md", said_done=True) is None
+    assert short("准时", "occ:run.md", said_done=True) is None
+    assert short("提醒后发生", "occ:run.md", said_done=True) is None
     voided = short("过期待决", holds=False, said_done=True)
     assert voided is not None and voided.kind == VOID
 
 
 def test_a_happening_prompted_by_another_reminder_is_done_but_no_evidence() -> None:
-    prompted = short("准时", "behavior://run.md", prompted=True)
+    prompted = short("准时", "occ:run.md", prompted=True)
     assert prompted is not None and (prompted.kind, prompted.good, prompted.strength) == ("提醒后发生", True, 0.0)
     assert prompted.offset_minutes is None
     # 这条自己的提醒引出的、或者根本没发生的：不走这一条
-    assert short("提醒后发生", "behavior://run.md", prompted=True) is None
+    assert short("提醒后发生", "occ:run.md", prompted=True) is None
     assert short("过期待决", prompted=True) is None
 
 
 def test_nothing_special_leaves_the_fact_to_the_outcome_and_its_strength() -> None:
-    assert short("准时", "behavior://run.md") is None
+    assert short("准时", "occ:run.md") is None
     assert short("过期待决") is None
 
 
@@ -128,7 +128,7 @@ def test_the_offset_history_only_takes_chances_strictly_before_this_one() -> Non
 
     earlier = AccountFact(ITEM.account, FORMED - timedelta(days=7), True, 1.0, "准时", "old", offset_minutes=0)
     same = AccountFact(ITEM.account, FORMED, True, 1.0, "晚了但做了", "twin", offset_minutes=50)
-    fact = settlement_fact(ITEM, result("早到", "behavior://run.md"), known=[earlier, same])
+    fact = settlement_fact(ITEM, result("早到", "occ:run.md"), known=[earlier, same])
     assert fact.strength == 1.0
 
 

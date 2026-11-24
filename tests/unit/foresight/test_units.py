@@ -78,9 +78,9 @@ def entry(identity: str, hits: int, misses: int, **kwargs: object) -> Input:
 
 
 def test_the_signature_is_the_present_inputs_and_the_present_suppressors() -> None:
-    cancel = Antecedent("session|cancel|luggage|next_day", True, False, "behavior://cancel.md")
+    cancel = Antecedent("session|cancel|luggage|next_day", True, False, "occ:cancel.md")
     absent = Antecedent("session|other|luggage|next_day", False, False)
-    raising = Antecedent("session|hotel|luggage|days_2_7", True, True, "behavior://hotel.md")
+    raising = Antecedent("session|hotel|luggage|days_2_7", True, True, "occ:hotel.md")
     first = expect("x", trigger="session|flight|luggage|days_2_7", antecedents=(cancel, absent, raising))
     second = expect("y", source="日子", trigger="weekday=3")
     assert signature((first, second)) == frozenset({first.account, second.account, "↓session|cancel|luggage|next_day"})
@@ -133,7 +133,7 @@ def test_a_suppressor_present_reads_lower_and_an_unseen_combination_leans_on_the
     """取消出差在场（压低）的那几刻下一步多半没来：同一组读数低；没见过的组合退到"同样多"、再退到最强那本账。"""
 
     flight = entry("flight", 9, 1)
-    cancel = Antecedent("session|cancel|luggage|next_day", True, False, "behavior://cancel.md")
+    cancel = Antecedent("session|cancel|luggage|next_day", True, False, "occ:cancel.md")
     cancelled = replace(flight, expectation=replace(flight.expectation, antecedents=(cancel,)))
     plain = frozenset({flight.account})
     suppressed = frozenset({flight.account, "↓session|cancel|luggage|next_day"})
@@ -269,7 +269,7 @@ def test_the_basis_is_chosen_only_among_inputs_already_due() -> None:
 def test_coincidental_inputs_stay_out_of_the_signature_and_the_counts() -> None:
     """语义树判成巧合（效应不够大）的输入不进"同一组"的签名、不计入"同样多"（方案第六节第 1 条）；权重照数，不在这里。"""
 
-    cancel = Antecedent("session|cancel|luggage|next_day", True, False, "behavior://cancel.md")
+    cancel = Antecedent("session|cancel|luggage|next_day", True, False, "occ:cancel.md")
     first = expect("x", trigger="session|flight|luggage|days_2_7", antecedents=(cancel,))
     second = expect("y", trigger="session|photo|luggage|days_2_7")
     full = signature((first, second))

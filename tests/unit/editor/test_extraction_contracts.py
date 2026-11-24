@@ -27,7 +27,7 @@ def test_retrieval_decision_allows_exactly_one_action_shape() -> None:
         {
             "status": "insufficient",
             "action": "memory_list",
-            "directory": "memory://entities/项目",
+            "directory": "habitus://entities/项目",
             "uris": [],
             "keywords": [],
             "reason": "需要看看这个目录。",
@@ -38,7 +38,7 @@ def test_retrieval_decision_allows_exactly_one_action_shape() -> None:
             "status": "insufficient",
             "action": "memory_read",
             "directory": None,
-            "uris": ["memory://profile.md", "memory://preferences/回答风格.md"],
+            "uris": ["habitus://profile.md", "habitus://preferences/回答风格.md"],
             "keywords": [],
             "reason": "需要阅读全文。",
         }
@@ -47,14 +47,14 @@ def test_retrieval_decision_allows_exactly_one_action_shape() -> None:
         {
             "status": "insufficient",
             "action": "memory_search",
-            "directory": "memory://entities",
+            "directory": "habitus://entities",
             "uris": [],
             "keywords": ["拉新方案"],
             "reason": "名字看不出，按内容找。",
         }
     )
     assert (finish.action, listing.action, search.action, read.action) == tuple(MemoryRetrievalAction)
-    assert read.uris == ("memory://profile.md", "memory://preferences/回答风格.md")
+    assert read.uris == ("habitus://profile.md", "habitus://preferences/回答风格.md")
     assert search.keywords == ("拉新方案",)
 
     with pytest.raises(ValueError, match="requires keywords"):
@@ -64,7 +64,7 @@ def test_retrieval_decision_allows_exactly_one_action_shape() -> None:
             MemoryRetrievalStatus.INSUFFICIENT,
             MemoryRetrievalAction.READ,
             None,
-            ("memory://profile.md",),
+            ("habitus://profile.md",),
             "读时带词",
             keywords=("词",),
         )
@@ -90,7 +90,7 @@ def test_retrieval_decision_allows_exactly_one_action_shape() -> None:
             MemoryRetrievalStatus.INSUFFICIENT,
             MemoryRetrievalAction.READ,
             None,
-            ("memory://profile.md", "memory://profile.md"),
+            ("habitus://profile.md", "habitus://profile.md"),
             "重复地址",
         )
     with pytest.raises(ValueError, match="must finish"):
@@ -98,7 +98,7 @@ def test_retrieval_decision_allows_exactly_one_action_shape() -> None:
             MemoryRetrievalStatus.SUFFICIENT,
             MemoryRetrievalAction.READ,
             None,
-            ("memory://profile.md",),
+            ("habitus://profile.md",),
             "错误组合",
         )
     with pytest.raises(ValueError, match="unknown fields"):
@@ -139,7 +139,7 @@ def test_final_retrieval_round_schema_and_decision_only_allow_finish() -> None:
         MemoryRetrievalFinalDecision(
             MemoryRetrievalStatus.INSUFFICIENT,
             MemoryRetrievalAction.LIST,
-            "memory://preferences",
+            "habitus://preferences",
             (),
             "上下文不足",
         )
@@ -147,7 +147,7 @@ def test_final_retrieval_round_schema_and_decision_only_allow_finish() -> None:
         MemoryRetrievalFinalDecision(
             MemoryRetrievalStatus.SUFFICIENT,
             MemoryRetrievalAction.FINISH,
-            "memory://preferences",
+            "habitus://preferences",
             (),
             "完成",
         )
@@ -165,8 +165,8 @@ def test_observation_is_a_bounded_audit_reference_not_a_document_copy() -> None:
     observation = MemoryRetrievalObservation(
         1,
         MemoryRetrievalAction.LIST,
-        ("memory://preferences",),
-        ("memory://preferences/回答风格.md",),
+        ("habitus://preferences",),
+        ("habitus://preferences/回答风格.md",),
         (),
         (),
     )
@@ -183,8 +183,8 @@ def test_observation_is_a_bounded_audit_reference_not_a_document_copy() -> None:
         MemoryRetrievalObservation(
             1,
             MemoryRetrievalAction.READ,
-            ("memory://profile.md",),
-            ("memory://profile.md", "memory://profile.md"),
+            ("habitus://profile.md",),
+            ("habitus://profile.md", "habitus://profile.md"),
             (),
             (),
         )

@@ -64,7 +64,7 @@ def test_when_he_did_the_child_the_parent_is_not_said_this_time(tmp_path: Path) 
 
     child = child_item(window=(clock(9, 10), clock(9, 40)))
     run, ledger, outlet = site(tmp_path, parent_item(), child)
-    rows = (Seen(clock(9, 20), clock(9, 25), CHILD, "behavior://done.md"),)
+    rows = (Seen(clock(9, 20), clock(9, 25), CHILD, "occ:done.md"),)
     walk(run, clock(9), clock(9, 45), rows=rows)
     assert book(ledger, "p", "c") == {
         "p": [("等时窗末", "09:15"), ("已发生", "09:45")],
@@ -78,6 +78,6 @@ def test_when_he_did_the_parent_the_child_is_still_said(tmp_path: Path) -> None:
 
     child = child_item(window=(clock(9, 10), clock(9, 40)))
     run, ledger, _outlet = site(tmp_path, child)
-    rows = (Seen(clock(9, 20), clock(9, 25), PARENT, "behavior://done.md"),)
+    rows = (Seen(clock(9, 20), clock(9, 25), PARENT, "occ:done.md"),)
     walk(run, clock(9), clock(9, 45), rows=rows)
     assert book(ledger, "c")["c"][-1][0] == "待取"

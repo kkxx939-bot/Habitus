@@ -234,7 +234,7 @@ def test_an_occurrence_two_overlapping_day_expectations_settled_on_is_one_moment
     两条都认 01-07 那一次，单元历史只算给起算最早的 01-06 那一刻。"""
 
     run, ledger, store = stage(tmp_path)
-    found = "behavior://occurrences/2026/09/07/news.md"
+    found = "habitus://occurrences/session/2026/09/07/news.md"
     for day in (date(2026, 9, 6), date(2026, 9, 7)):
         start = datetime(day.year, day.month, day.day, tzinfo=CST)
         item = replace(

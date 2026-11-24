@@ -8,13 +8,14 @@ import pytest
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
 from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.tree.metadata import DocumentMetadata
 from habitus.memory.compaction import (
     MemoryLifecycleCommitter,
     MemoryLifecycleOperationStore,
     MemoryLifecycleScanStore,
     MemoryRecoveryStore,
 )
-from habitus.memory.document import MemoryDocumentMetadata, MemoryLinkType, MemoryStoredLink
+from habitus.memory.document import MemoryLinkType, MemoryStoredLink
 from habitus.memory.editor import (
     MemoryCandidate,
     MemoryCandidateBatch,
@@ -111,11 +112,11 @@ def test_workflow_state_is_refused_inside_the_memory_tree(tmp_path: Path) -> Non
     tree = MemoryTree(tmp_path / "memory", document_codec=codec())
     inside = tree.root / "workflow"
     path_lock = PathLock(ProcessLocalLockStore())
-    with pytest.raises(ValueError, match="outside the L2 memory tree"):
+    with pytest.raises(ValueError, match="outside the habitus tree"):
         MemoryRecoveryStore(tree, inside)
-    with pytest.raises(ValueError, match="outside the L2 memory tree"):
+    with pytest.raises(ValueError, match="outside the habitus tree"):
         MemoryLifecycleOperationStore(tree, path_lock, inside)
-    with pytest.raises(ValueError, match="outside the L2 memory tree"):
+    with pytest.raises(ValueError, match="outside the habitus tree"):
         MemoryLifecycleScanStore(tree, path_lock, inside)
 
 
@@ -216,7 +217,7 @@ def _stored(tree: MemoryTree, kind: MemoryKind, fields: dict[str, object], *, li
     document = codec().build(
         kind,
         fields,
-        metadata=MemoryDocumentMetadata(revision=1, created_at=BASE_TIME, updated_at=BASE_TIME),
+        metadata=DocumentMetadata(revision=1, created_at=BASE_TIME, updated_at=BASE_TIME),
         links=tuple(sorted(links, key=lambda item: item.identity)),
         backlinks=tuple(sorted(backlinks, key=lambda item: item.identity)),
     )
@@ -230,10 +231,10 @@ def _messy_graph(tree: MemoryTree):
     a_fields = {"topic": "回答风格", "content": "- 偏好简洁直接的回答"}
     b_fields = {"category": "项目", "name": "Habitus", "summary": "Habitus 是用户正在重构的记忆系统。"}
     c_fields = {"category": "项目", "name": "看板", "summary": "看板显示记忆来自哪一段对话。"}
-    a_uri = MemoryURI.parse("memory://preferences/回答风格.md")
-    b_uri = MemoryURI.parse("memory://entities/项目/Habitus.md")
-    c_uri = MemoryURI.parse("memory://entities/项目/看板.md")
-    ghost = MemoryURI.parse("memory://entities/项目/已删.md")
+    a_uri = MemoryURI.parse("habitus://preferences/回答风格.md")
+    b_uri = MemoryURI.parse("habitus://entities/项目/Habitus.md")
+    c_uri = MemoryURI.parse("habitus://entities/项目/看板.md")
+    ghost = MemoryURI.parse("habitus://entities/项目/已删.md")
     to_ghost = MemoryStoredLink(from_uri=a_uri, to_uri=ghost, link_type=MemoryLinkType.BELONGS_TO)
     to_b = MemoryStoredLink(from_uri=a_uri, to_uri=b_uri, link_type=MemoryLinkType.BELONGS_TO)
     from_c = MemoryStoredLink(from_uri=c_uri, to_uri=a_uri, link_type=MemoryLinkType.DERIVED_FROM)

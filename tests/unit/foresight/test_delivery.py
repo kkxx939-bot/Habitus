@@ -34,7 +34,7 @@ def expectation(**overrides: object) -> Expectation:
         formed_at=FORMED,
         source="事件",
         trigger="session|s-k0001|s-k0002|chain",
-        trigger_instance="behavior://flight.md",
+        trigger_instance="occ:flight.md",
         window=(FORMED + timedelta(minutes=4), FORMED + timedelta(minutes=51)),
         deadline=FORMED + timedelta(hours=3),
         basis=(),
@@ -126,8 +126,8 @@ def test_closing_goes_through_the_reasons_in_order_before_the_ladder_decides() -
         == "影子"
     )
     assert closing(facts=facts(absent=True)).reason == RETURNED
-    broken = closing(facts=facts(holds=False), evidence=("behavior://a.md",))
-    assert (broken.reason, broken.evidence) == ("前因不成立", ("behavior://a.md",))
+    broken = closing(facts=facts(holds=False), evidence=("occ:a.md",))
+    assert (broken.reason, broken.evidence) == ("前因不成立", ("occ:a.md",))
     assert closing(kept=False).reason == "模型判不像"
     assert closing(spoken_kinds=frozenset({KIND})).reason == "同类已说"
     assert closing(alive=False, text=must_not_ask_text).reason == "不可达"
@@ -144,7 +144,7 @@ def test_awaiting_closes_on_doing_it_or_on_the_deadline_and_otherwise_waits() ->
 
 
 def seen(at: datetime, *, kind: str = KIND, abandoned: bool = False) -> Seen:
-    return Seen(at, at + timedelta(minutes=5), kind, f"behavior://{at:%H%M}.md", abandoned=abandoned)
+    return Seen(at, at + timedelta(minutes=5), kind, f"occ:{at:%H%M}.md", abandoned=abandoned)
 
 
 def test_done_since_counts_the_same_kind_started_after_observed_from_up_to_now_and_not_abandoned() -> None:

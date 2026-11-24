@@ -43,7 +43,6 @@ def downstream_participants(
         LifecycleHousekeepingParticipant(
             (
                 source_retries,
-                *(item for branch in branches for item in branch.retry_ledgers),
                 *(item.queue.retries for item in pipelines),
             ),
             keep_days=config.lifecycle.retry.given_up_days,

@@ -26,7 +26,7 @@ def valid_mapping(tmp_path: Path) -> dict[str, object]:
 def test_example_yaml_declares_a_complete_cross_domain_configuration(tmp_path) -> None:
     config = HabitusConfig.from_mapping(valid_mapping(tmp_path))
     assert config.storage_root == configured_storage_root(tmp_path / "data")
-    assert config.memory_root == config.storage_root / "memory"
+    assert config.tree_root == config.storage_root / "habitus"
     assert config.conversation_root == config.storage_root / "conversation"
     assert config.workflow_root == config.storage_root / "workflow"
     assert config.foresight_root == config.storage_root / "foresight"
@@ -688,9 +688,7 @@ def _behavior_domains() -> dict[str, type]:
     from habitus.behavior.fusion.lanes.session import SessionLaneConfig
     from habitus.behavior.kinds.config import BehaviorKindConfig
     from habitus.behavior.observation.config import BehaviorObservationConfig
-    from habitus.behavior.semantic import BehaviorSemanticConfig
-    from habitus.behavior.tree.config import BehaviorTreeConfig
-    from habitus.behavior.tree.writer import BehaviorWriteConfig
+    from habitus.behavior.tree.config import BehaviorTreeConfig, BehaviorWriteConfig
 
     return {
         "session_": SessionLaneConfig,
@@ -701,7 +699,6 @@ def _behavior_domains() -> dict[str, type]:
         "tree_": BehaviorTreeConfig,
         "document_": BehaviorDocumentConfig,
         "write_": BehaviorWriteConfig,
-        "semantic_": BehaviorSemanticConfig,
     }
 
 
@@ -731,14 +728,12 @@ def test_every_behaviour_override_prefix_maps_onto_its_domain_config() -> None:
             physical_max_segments=7,
             document_max_encoded_bytes=4096,
             write_lock_ttl_seconds=45,
-            semantic_max_prompt_chars=5000,
         )
     )
     assert built.session.max_step_chars == 99
     assert built.physical.max_segments == 7
     assert built.document.max_encoded_bytes == 4096
     assert built.write.lock_ttl_seconds == 45
-    assert built.semantic.max_prompt_chars == 5000
 
 
 @pytest.mark.parametrize(

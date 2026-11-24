@@ -72,7 +72,7 @@ def expectation() -> Expectation:
         formed_at=formed,
         source="日子",
         trigger="rel",
-        trigger_instance="behavior://hotel.md",
+        trigger_instance="occ:hotel.md",
         window=(formed + timedelta(minutes=4), formed + timedelta(minutes=51)),
         deadline=formed + timedelta(hours=3),  # 17:07
         basis=(),

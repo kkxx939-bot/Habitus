@@ -144,7 +144,7 @@ def test_settlement_reads_the_compacted_offsets_as_earlier_history() -> None:
         formed_at=formed,
         source="日子",
         trigger="rel",
-        trigger_instance="behavior://now.md",
+        trigger_instance="occ:now.md",
         window=(formed, formed + timedelta(minutes=30)),
         deadline=formed + timedelta(hours=2),
         basis=(),
@@ -152,7 +152,7 @@ def test_settlement_reads_the_compacted_offsets_as_earlier_history() -> None:
         hits=3,
         observed_from=formed,
     )
-    late = Settlement("now", "s-k0002", formed.date(), formed + timedelta(hours=3), "晚了但做了", "behavior://x.md", 40)
+    late = Settlement("now", "s-k0002", formed.date(), formed + timedelta(hours=3), "晚了但做了", "occ:x.md", 40)
     alone = settlement_fact(item, late, known=())
     assert alone.strength == 1.0  # 没有历史：只有方向
     with_history = settlement_fact(item, late, known=(), earlier_offsets=(0, 0, 0, 60))

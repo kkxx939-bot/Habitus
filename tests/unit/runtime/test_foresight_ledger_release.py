@@ -23,7 +23,7 @@ def expectation(day: date, identity: str) -> Expectation:
         formed_at=formed,
         source="日子",
         trigger="rel",
-        trigger_instance=f"behavior://{identity}.md",
+        trigger_instance=f"occ:{identity}.md",
         window=(formed, formed + timedelta(minutes=30)),
         deadline=formed + timedelta(hours=3),
         basis=(),
@@ -73,7 +73,7 @@ def test_a_released_day_takes_its_index_first_and_then_every_record_of_the_day(t
     store = seeded(tmp_path)
     item = expectation(FIRST, "e0")
     store.record_delivery(FIRST, Delivery("e0", item.formed_at, 0, False, "影子", 0.0))
-    store.record_settlement(Settlement("e0", "s-k0002", FIRST, item.deadline, "准时", "behavior://x.md"))
+    store.record_settlement(Settlement("e0", "s-k0002", FIRST, item.deadline, "准时", "occ:x.md"))
     store.mark_final(FIRST, at=item.deadline)
     assert store.day_of("e0") == FIRST
     store.discard_day(FIRST)
@@ -88,7 +88,7 @@ def test_omissions_keep_only_the_recent_days_and_unit_levels_keep_the_latest_and
     for offset in range(3):
         day = FIRST + timedelta(days=offset)
         store.record_omission(
-            Omission(f"behavior://o{offset}.md", "s-k0003", day, datetime(2026, 12, 20, tzinfo=CST), False)
+            Omission(f"occ:o{offset}.md", "s-k0003", day, datetime(2026, 12, 20, tzinfo=CST), False)
         )
     assert store.discard_omissions_before(FIRST + timedelta(days=2)) == 2
     assert store.omissions_on(FIRST) == () and len(store.omissions_on(FIRST + timedelta(days=2))) == 1

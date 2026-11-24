@@ -297,7 +297,7 @@ def test_a3_14_a_request_followed_by_happened_keeps_its_place(tmp_path: Path) ->
     """A3-14：「待取」之后「已发生」：这次不动，仍占名额，另一件事「名额已满」。"""
 
     run, ledger, _outlet = site(tmp_path, basis_item(deadline=clock(14)), other_item(), daily_cap=1)
-    rows = (Seen(clock(10, 20), clock(10, 25), E_KIND, "behavior://done.md"),)
+    rows = (Seen(clock(10, 20), clock(10, 25), E_KIND, "occ:done.md"),)
     walk(run, clock(9, 45), clock(10, 45), kinds=FLAT, rows=rows)
     assert book(ledger, "e", "x") == {
         "e": [("等时窗末", "10:00"), ("待取", "10:15"), ("已发生", "10:30")],
@@ -343,7 +343,7 @@ def test_a3_17_an_antecedent_that_failed_stays_silent_when_the_cap_frees_up(tmp_
     started = clock(10)
     other = other_item(trigger=RELATION, source="事件", instance=started.astimezone(DAY0.tzinfo).isoformat())
     run, ledger, _outlet = site(tmp_path, basis_item(), other, daily_cap=1)
-    rows = (Seen(started, started, "s-k0304", "behavior://antecedent.md"),)
+    rows = (Seen(started, started, "s-k0304", "occ:antecedent.md"),)
     walk(run, clock(9, 45), clock(10, 45), kinds=FLAT, table=table_of(relation()), rows=rows)
     assert book(ledger, "e", "x") == {"e": UNCLAIMED, "x": [("等时窗末", "10:30"), ("前因不成立", "10:45")]}
 

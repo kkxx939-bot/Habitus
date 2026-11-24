@@ -289,7 +289,7 @@ def test_job_file_with_wrongly_typed_time_is_rejected_by_the_decoder(tmp_path: P
     ("field", "bad", "message"),
     [
         ("cards_written", 1, "memory job cards_written must be a boolean"),
-        ("changed_uris", "memory://profile.md", "memory job changed_uris must be a list of URIs"),
+        ("changed_uris", "habitus://profile.md", "memory job changed_uris must be a list of URIs"),
         ("deleted_uris", [1], "memory job deleted_uris must be a list of URIs"),
     ],
 )
@@ -393,13 +393,13 @@ def test_record_written_keeps_the_stage_and_addresses_through_retry_and_completi
     lease = jobs.claim(queued, "worker")
     written = jobs.record_written(
         lease,
-        changed_uris=("memory://preferences/b.md", "memory://preferences/a.md"),
-        deleted_uris=("memory://tools/x.md",),
+        changed_uris=("habitus://preferences/b.md", "habitus://preferences/a.md"),
+        deleted_uris=("habitus://tools/x.md",),
     )
     assert written.cards_written
-    assert written.changed_uris == ("memory://preferences/a.md", "memory://preferences/b.md")
+    assert written.changed_uris == ("habitus://preferences/a.md", "habitus://preferences/b.md")
     retry = jobs.fail(jobs.renew(MemoryJobLease(written)), RuntimeError("refresh failed"), retryable=True)
-    assert retry.cards_written and retry.deleted_uris == ("memory://tools/x.md",)
+    assert retry.cards_written and retry.deleted_uris == ("habitus://tools/x.md",)
     clock.advance(seconds=1)
     assert jobs.complete(jobs.claim(retry, "worker")).changed_uris == written.changed_uris
 

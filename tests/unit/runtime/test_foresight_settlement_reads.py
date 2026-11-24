@@ -232,7 +232,7 @@ def seed_day(ledger: ForesightLedgerStore, day: date, *, settled: bool) -> None:
     for item in items:
         ledger.append_fact(AccountFact(item.account, item.formed_at, True, 1.0, "准时", item.expectation_id))
         ledger.record_settlement(
-            Settlement(item.expectation_id, item.kind_token, day, moment, "准时", "behavior://done.md")
+            Settlement(item.expectation_id, item.kind_token, day, moment, "准时", "occ:done.md")
         )
     ledger.mark_final(day, at=moment)
 
@@ -295,7 +295,7 @@ def ground(tmp_path: Path) -> Ground:
         expectation("late", LATE, at(DAY, 9, 0), window_minutes=(4, 51), deadline_hours=3),
     )
     for item in items:
-        ledger.record_expectation(replace(item, trigger_instance=f"behavior://{item.expectation_id}.md"))
+        ledger.record_expectation(replace(item, trigger_instance=f"occ:{item.expectation_id}.md"))
     ledger.record_delivery(DAY, Delivery("card", at(DAY, 14, 20), 1, True, "说了", 1.0, "该还信用卡了"))
     ledger.record_response(DAY, Response("card", at(DAY, 14, 25), "负", "turn-1"))
     publish(site.behavior_tree, DAY, "订酒店", 14, 28, kind="订酒店")

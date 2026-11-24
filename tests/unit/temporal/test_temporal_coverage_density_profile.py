@@ -60,7 +60,7 @@ def test_coverage_counts_every_calendar_day_and_subtracts_gaps_by_share() -> Non
     # 那天有一条「非事件」也算开过会话：只看那天有没有记录，不看进没进序列
     from habitus.series import SkippedRecord, SkipReason
 
-    skipped = SkippedRecord("behavior://s-非事件/x", START + timedelta(days=2), SkipReason.NOT_EVENT)
+    skipped = SkippedRecord("occ:s-非事件/x", START + timedelta(days=2), SkipReason.NOT_EVENT)
     with_skip = replace(series(records, cutoff=START + timedelta(days=5), gaps=gaps), skipped=(skipped,))
     assert coverage_of(with_skip, "session", slot_minutes=15).day_share(START + timedelta(days=2)) == 1.0
     # 物理 lane 同一个规矩（用户 2026-11-16）：上游一点数据都没送来的那天也算没在看；有记录的那天照样按空白扣

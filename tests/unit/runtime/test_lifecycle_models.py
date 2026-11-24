@@ -56,7 +56,7 @@ def test_lifecycle_cycle_result_validates_outcomes() -> None:
 
 def test_runtime_initialization_requires_absolute_root(tmp_path: Path) -> None:
     memory_root = (tmp_path / "memory").resolve()
-    assert RuntimeInitialization(memory_root).memory_root == memory_root
+    assert RuntimeInitialization(memory_root).tree_root == memory_root
     with pytest.raises(ValueError, match="absolute"):
         RuntimeInitialization(Path("relative"))
 

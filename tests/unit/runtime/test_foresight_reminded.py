@@ -24,7 +24,7 @@ def expectation(identity: str, kind: str = "s-k0002") -> Expectation:
         formed_at=FORMED,
         source="事件",
         trigger="rel",
-        trigger_instance="behavior://a.md",
+        trigger_instance="occ:a.md",
         window=(FORMED + timedelta(minutes=10), FORMED + timedelta(minutes=40)),
         deadline=FORMED + timedelta(hours=2),
         basis=(),

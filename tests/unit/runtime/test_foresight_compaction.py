@@ -85,7 +85,7 @@ def test_an_unfinished_day_holds_compaction_back(tmp_path) -> None:
             formed_at=formed,
             source="日子",
             trigger="rel",
-            trigger_instance="behavior://open.md",
+            trigger_instance="occ:open.md",
             window=(formed, formed + timedelta(minutes=30)),
             deadline=formed + timedelta(hours=2),
             basis=(),

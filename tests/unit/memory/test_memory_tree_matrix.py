@@ -10,8 +10,9 @@ import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.filesystem import durable_io
+from habitus.infrastructure.tree.metadata import DocumentMetadata
 from habitus.memory.compaction import MemoryLifecycleOperationStore, MemoryLifecycleScanStore
-from habitus.memory.document import MemoryDocumentConfig, MemoryDocumentMetadata
+from habitus.memory.document import MemoryDocumentConfig
 from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.semantic import MemorySemanticRefresher
 from habitus.memory.tree import MemoryDocumentLockKeyspace, MemoryTree, MemoryTreeConfig, MemoryTreeIntegrityError
@@ -388,7 +389,7 @@ def test_leaf_enumeration_is_sorted_and_bounded(tmp_path: Path, count: int, kind
         item = codec().build(
             kind,
             fields,
-            metadata=MemoryDocumentMetadata.initial(BASE_TIME),
+            metadata=DocumentMetadata.initial(BASE_TIME),
         )
         tree.write(item)
         addresses.append(item.address)
@@ -590,7 +591,8 @@ def test_lock_keys_derived_from_the_memory_root_keep_their_literal_strings() -> 
     else:
         fixture = Path("/habitus-lock-key-fixture")
         root_digest = "6988d8f5be62511ef8ed9bb0"
-    uri_digest = "5dd4f775cc27154312c3bd5b841c410a6cf2611734f652ae2a88f864d1f85f50"
+    # 地址协议换成 habitus:// 之后（裁定 112）同一张卡片的地址字符串变了，文档锁的摘要随之变；根摘要与各前缀不变
+    uri_digest = "b9af83363d5a64e6e32e9c22dbba862945bb09640a7f861e94db3db182035d87"
     tree = MemoryTree(fixture / "memory")
     path_lock = PathLock(ProcessLocalLockStore())
     keyspace = MemoryDocumentLockKeyspace(tree.root)
@@ -599,7 +601,7 @@ def test_lock_keys_derived_from_the_memory_root_keep_their_literal_strings() -> 
     operations = MemoryLifecycleOperationStore(tree, path_lock, workflow_root)
     scan = MemoryLifecycleScanStore(tree, path_lock, workflow_root)
 
-    assert keyspace.key("memory://preferences/style.md") == f"memory-document:{root_digest}:{uri_digest}"
+    assert keyspace.key("habitus://preferences/style.md") == f"memory-document:{root_digest}:{uri_digest}"
     assert refresher._lock_key(MemoryDirectory.root()) == f"memory-semantic:{root_digest}:/"
     assert refresher._lock_key(MemoryDirectory.preferences()) == f"memory-semantic:{root_digest}:preferences"
     assert operations._lock_prefix == f"memory-lifecycle-operation:{root_digest}"

@@ -136,7 +136,7 @@ def test_only_present_time_counts_gaps_and_the_cutoff_make_the_outcome_unknown()
         record(day, 17, 0, "写文档"),
     )
     gap = SeriesGap(
-        uri="behavior://gaps/x", started_at=at(day, 10, 15), ended_at=at(day, 11, 0), kind=GapKind.UNOBSERVED
+        uri="habitus://gaps/session/x", started_at=at(day, 10, 15), ended_at=at(day, 11, 0), kind=GapKind.UNOBSERVED
     )
     series = EventSeries(cutoff=day + timedelta(days=1), records=records, gaps=(gap,))
     line = build_timelines(series, CONCEPTS, {}, CONFIG)["session"]

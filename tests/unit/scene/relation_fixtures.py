@@ -30,7 +30,7 @@ def at(day: date, hour: int, minute: int) -> datetime:
 def record(day: date, hour: int, minute: int, title: str, *, number: int = 0) -> SeriesRecord:
     started = at(day, hour, minute)
     return SeriesRecord(
-        uri=f"behavior://occurrences/{day:%Y/%m/%d}/{title}{number}--{started:%H%M}.md",
+        uri=f"habitus://occurrences/session/{day:%Y/%m/%d}/{title}{number}--{started:%H%M}.md",
         name=f"{title}{number}",
         day=day,
         started_at=started,

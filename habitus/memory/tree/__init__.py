@@ -2,7 +2,7 @@
 
 from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.tree.config import MemoryTreeConfig
-from habitus.memory.tree.lock_key import MemoryDocumentLockKeyspace, memory_root_digest, memory_root_lock_prefix
+from habitus.memory.tree.lock_key import MemoryDocumentLockKeyspace
 from habitus.memory.tree.store import MemoryTree, MemoryTreeIntegrityError
 
 __all__ = [
@@ -14,6 +14,4 @@ __all__ = [
     "MemoryTree",
     "MemoryTreeConfig",
     "MemoryTreeIntegrityError",
-    "memory_root_digest",
-    "memory_root_lock_prefix",
 ]

@@ -132,7 +132,7 @@ def test_the_semantic_layer_and_the_recurrences_read_the_same_records(tmp_path) 
     series = read_series(site.behavior_tree, cutoff=day(7))
     recurrences = recurrences_of(series, RULERS, every_kind(series))
 
-    hits = ConceptHitStore(tmp_path / "scene")
+    hits = ConceptHitStore(tmp_path / "scene", lane="session")
     concepts = ConceptSet([BEDTIME, BREAKFAST, CODING])
     for offset in range(7):
         plan = plan_seal(hits, day(offset), series.on(day(offset)), concepts, SituationOutcome((), ()), now=NOW)
@@ -332,5 +332,5 @@ def test_active_days_count_skipped_records_too() -> None:
     """那天只有一条「非事件」也算有记录（开过会话）：``active_days`` 进序列的、没进的都算。"""
 
     first, second = date(2026, 5, 1), date(2026, 5, 2)
-    found = EventSeries(cutoff=date(2026, 5, 4), skipped=(SkippedRecord("behavior://x", second, SkipReason.NOT_EVENT),))
+    found = EventSeries(cutoff=date(2026, 5, 4), skipped=(SkippedRecord("occ:x", second, SkipReason.NOT_EVENT),))
     assert found.active_days() == frozenset({second}) and first not in found.active_days()

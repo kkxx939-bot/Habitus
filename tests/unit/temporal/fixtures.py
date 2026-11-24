@@ -18,7 +18,7 @@ def record(
     moment: datetime, kind: str = "s-k0001", *, reminded: bool = False, minutes: int = 10, number: int = 0
 ) -> SeriesRecord:
     return SeriesRecord(
-        uri=f"behavior://{kind}/{moment.isoformat()}/{number}",
+        uri=f"occ:{kind}/{moment.isoformat()}/{number}",
         name=kind,
         day=moment.date(),
         started_at=moment,
@@ -42,7 +42,7 @@ def with_sessions(records: list[SeriesRecord], *, cutoff: date) -> list[SeriesRe
         moment = at(day, 6)
         found.append(
             SeriesRecord(
-                uri=f"behavior://s-待定/{moment.isoformat()}/session",
+                uri=f"occ:s-待定/{moment.isoformat()}/session",
                 name="会话",
                 day=day,
                 started_at=moment,
@@ -59,7 +59,7 @@ def with_sessions(records: list[SeriesRecord], *, cutoff: date) -> list[SeriesRe
 
 
 def gap(start: datetime, end: datetime, kind: GapKind = GapKind.UNOBSERVED) -> SeriesGap:
-    return SeriesGap(uri=f"behavior://gap/{start.isoformat()}", started_at=start, ended_at=end, kind=kind)
+    return SeriesGap(uri=f"occ:gap/{start.isoformat()}", started_at=start, ended_at=end, kind=kind)
 
 
 def series(records: list[SeriesRecord], *, cutoff: date, gaps: list[SeriesGap] | None = None) -> EventSeries:

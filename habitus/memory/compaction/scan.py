@@ -14,8 +14,9 @@ from habitus.foundation.timestamps import format_utc_z, parse_utc_z, require_awa
 from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.filesystem import atomic_replace_bytes, read_regular_bytes
+from habitus.infrastructure.tree.lock_key import root_lock_prefix
 from habitus.memory.model import MemoryAddress
-from habitus.memory.tree import MemoryTree, memory_root_lock_prefix
+from habitus.memory.tree import MemoryTree
 from habitus.memory.uri import MemoryURI, decode_memory_uri
 
 _SCHEMA = "memory_lifecycle_scan_v2"
@@ -141,7 +142,7 @@ class MemoryLifecycleScanStore:
         self.base_retry_seconds = float(base_retry_seconds)
         self.max_retry_seconds = float(max_retry_seconds)
         self.backoff = BackoffPolicy(base_seconds=self.base_retry_seconds, cap_seconds=self.max_retry_seconds)
-        self.lock_key = memory_root_lock_prefix("memory-lifecycle-scan", tree.root)
+        self.lock_key = root_lock_prefix("memory-lifecycle-scan", tree.root)
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

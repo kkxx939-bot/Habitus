@@ -211,9 +211,9 @@ def test_initialize_is_idempotent_and_creates_only_local_durable_roots(tmp_path:
     second = runtime.initialize()
 
     assert first is second
-    assert first.memory_root == config.memory_root
+    assert first.tree_root == config.tree_root
     assert runtime.state is RuntimeState.READY
-    assert config.memory_root.is_dir()
+    assert config.tree_root.is_dir()
     assert config.workflow_root.is_dir()
     recall_store = runtime.components.memory.search.recall_lifecycle.store
     assert isinstance(recall_store, SQLiteMemoryRecallLifecycleStore)
@@ -382,10 +382,10 @@ def test_runtime_public_conversation_interface_returns_pending_consistency_handl
         )
         # 记忆树的公开浏览经同一棵树（方案 36 第 2 步）：初始化后根下只有固定分支、还没有文档
         root = await runtime.list_memory()
-        assert str(root.uri) == "memory://" and root.documents == ()
-        assert "memory://preferences" in {str(item) for item in root.directories}
+        assert str(root.uri) == "habitus://" and root.documents == ()
+        assert "habitus://preferences" in {str(item) for item in root.directories}
         with pytest.raises(MemoryBrowseNotFoundError):
-            await runtime.read_memory("memory://profile.md")
+            await runtime.read_memory("habitus://profile.md")
         assert (await runtime.reminders(date(2026, 7, 28))).reminders == ()  # 还没有提醒
         assert (await runtime.reminders()).day == datetime.now(runtime.config.locale.zone()).date()
         report = await runtime.health()
@@ -642,7 +642,7 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert tick.forming.tolerance.line == pytest.approx(1.0 - runtime.config.foresight.false_alarm_rate)
     from habitus.runtime.foresight import ForesightRuntimeComponents
 
-    other = BehaviorTree(tmp_path / "elsewhere")
+    other = BehaviorTree(tmp_path / "elsewhere", lane="session")
     with pytest.raises(ValueError, match="assembled behaviour tree"):
         ForesightRuntimeComponents(
             lane="session",
@@ -963,7 +963,7 @@ def test_a_daily_reminder_is_not_held_back_as_a_return_after_absence_by_the_sett
             formed_at=at,
             source="日子",
             trigger="rel",
-            trigger_instance=f"behavior://e-{offset}.md",
+            trigger_instance=f"occ:e-{offset}.md",
             window=(at + timedelta(minutes=10), at + timedelta(minutes=40)),
             deadline=datetime.combine(at.date() + timedelta(days=1), datetime.min.time(), tzinfo=zone),
             basis=(),

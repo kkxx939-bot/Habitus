@@ -284,7 +284,7 @@ def test_a_broken_in_use_state_file_is_refused_and_names_the_file(tmp_path: Path
 def test_a_broken_in_use_state_file_stops_the_generation_count(site: Site) -> None:
     site.record("conv-a", at(D13, 9), "帮我写一份本周周报", Word("s-k0002"))
     site.record("conv-a", at(D14, 9), "这周的周报也帮我写一下", Word("s-k0002"))
-    path = site.session.tree.root / STATE_FILENAME
+    path = site.session.kind_store.root / STATE_FILENAME
     path.write_text('{"schema_version": "behavior_kinds_state_v1", "lane": "session"', encoding="utf-8")
     result = site.generate(D15)
     # 二乙起读序列也要过词表状态的换算口：状态文件坏了，必须成的读序列一步就没成，这一代没有、不写完成标记
@@ -342,7 +342,7 @@ def _publish_raw(tree: Any, token: str) -> str:
         goal=None,
     )
     document = writer.publish(BehaviorKind.OCCURRENCE, payload)
-    return str(BehaviorURI.from_address(document.address))
+    return str(BehaviorURI.from_address(document.address, "session"))
 
 
 def _chain(error: BaseException | None) -> list[str]:
@@ -359,14 +359,14 @@ BAD_TOKENS = ["s-垃圾", "s-c0001", "写周报", "s-pending", "s-k0000", "s-k00
 
 @pytest.mark.parametrize("token", BAD_TOKENS)
 def test_writing_a_tree_record_with_an_arbitrary_kind_token_is_refused(tmp_path: Path, token: str) -> None:
-    tree = BehaviorTree(tmp_path / "tree")
+    tree = BehaviorTree(tmp_path / "tree", lane="session")
     with pytest.raises(Exception) as caught:
         _publish_raw(tree, token)
     assert any("kind_token" in text for text in _chain(caught.value)), _chain(caught.value)
 
 
 def _bad_record_on_disk(tmp_path: Path, token: str, monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], str]:
-    tree = BehaviorTree(tmp_path / "tree")
+    tree = BehaviorTree(tmp_path / "tree", lane="session")
     with monkeypatch.context() as patched:
         patched.setitem(schema_fields._VALIDATORS, BehaviorFieldType.KIND_TOKEN, lambda value, label: value)
         uri = _publish_raw(tree, token)

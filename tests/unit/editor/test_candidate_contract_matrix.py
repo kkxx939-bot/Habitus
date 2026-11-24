@@ -454,6 +454,6 @@ def test_page_id_map_from_snapshots_maps_only_found_documents_in_stable_order() 
 
 def test_page_id_map_rejects_directory_and_layer_uris() -> None:
     page_ids = MemoryPageIdMap()
-    for uri in (MemoryURI.root(), MemoryURI("memory://preferences/.abstract.md")):
+    for uri in (MemoryURI.root(), MemoryURI("habitus://preferences/.abstract.md")):
         with pytest.raises(MemoryURIError):
             page_ids.register_existing(uri)

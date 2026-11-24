@@ -206,7 +206,7 @@ LEGACY_HITS = (
 
 @pytest.mark.parametrize(("day", "leaf"), LEGACY_HITS)
 def test_d10_an_old_shaped_hit_record_is_refused_naming_the_file(tmp_path: Path, day: date, leaf: str) -> None:
-    store = ConceptHitStore(tmp_path / "scene")
+    store = ConceptHitStore(tmp_path / "scene", lane="session")
     folder = tmp_path / "scene" / "occurrences" / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}"
     folder.mkdir(parents=True)
     shutil.copyfile(LEGACY / "occurrences" / f"{leaf}.md", folder / f"{leaf}.md")
@@ -218,7 +218,7 @@ def test_d10_an_old_shaped_hit_record_is_refused_naming_the_file(tmp_path: Path,
 
 
 def test_d10_an_old_version_day_seal_is_refused_naming_the_file(tmp_path: Path) -> None:
-    store = ConceptHitStore(tmp_path / "scene")
+    store = ConceptHitStore(tmp_path / "scene", lane="session")
     folder = tmp_path / "scene" / "occurrences" / "2026" / "04" / "20"
     folder.mkdir(parents=True)
     shutil.copyfile(LEGACY / "seals" / "2026" / "04" / "20" / ".done.json", folder / ".done.json")

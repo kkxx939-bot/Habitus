@@ -150,7 +150,7 @@ class CapabilityHandlers:
             {
                 "query": query,
                 "context": "用户偏好简洁回答。",
-                "memories": [{"uri": "memory://preferences/response_style.md"}],
+                "memories": [{"uri": "habitus://preferences/response_style.md"}],
                 "records": [],
                 "summaries": [],
                 "notes": [],
@@ -316,7 +316,7 @@ def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeyp
     assert remembered.json()["result"]["next_sequence"] == 2
     assert cursor.json()["result"] == {"next_sequence": 2}
     assert flushed.json()["result"] == {"jobs": [], "consistency": []}
-    assert recalled.json()["result"]["memories"][0]["uri"].startswith("memory://")
+    assert recalled.json()["result"]["memories"][0]["uri"].startswith("habitus://")
     assert jobs.json()["result"]["jobs"][0]["manual_action_required"] is True
     assert failed.json()["result"]["count"] == 1
     assert "blocking" not in failed.json()["result"]["jobs"][0]  # 失败任务不再挡后面，没有"阻塞中"这一说

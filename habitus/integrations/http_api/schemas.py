@@ -185,7 +185,7 @@ class ReminderClaimResult(StrictSchema):
 
 
 class MemoryListResult(StrictSchema):
-    """``habitus memory ls``：一个目录的直接内容，只给 ``memory://`` 地址。"""
+    """``habitus memory ls``：一个目录的直接内容，只给 ``habitus://`` 地址。"""
 
     uri: str
     directories: list[str]

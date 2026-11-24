@@ -101,7 +101,7 @@ def test_d8_a_legacy_vocabulary_file_on_disk_refuses_the_start_and_names_the_fil
     tmp_path: Path, name: str, lane: str
 ) -> None:
     habitus_config = config(tmp_path)
-    directory = habitus_config.behavior_root / lane / "tree"  # 旧词表各文件就放在这一支的行为树根
+    directory = habitus_config.behavior_root / lane  # 词表文件在这一支树外的根（裁定 112），旧词表各文件也查这里
     directory.mkdir(parents=True)
     (directory / name).write_text("{}\n", encoding="utf-8")
 

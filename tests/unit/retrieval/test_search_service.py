@@ -14,8 +14,8 @@ import pytest
 from habitus.behavior import BehaviorKind, BehaviorTree
 from habitus.behavior.tree.writer import BehaviorDocumentWriter
 from habitus.foundation.observability import ObservationEvent
+from habitus.infrastructure.tree.metadata import DocumentMetadata
 from habitus.memory.conversation import ConversationAddress, ConversationSummaryMatch, summary_reference
-from habitus.memory.document import MemoryDocumentMetadata
 from habitus.memory.model import MemoryAddress, MemoryKind, MemoryLevel
 from habitus.memory.recall import (
     MemoryRecallLifecycle,
@@ -130,7 +130,7 @@ class Recorder:
 def record(name: str, hour: int, *, day: date = date(2026, 3, 31), summary: str = "", goal: str = "") -> BehaviorRecord:
     started = datetime(day.year, day.month, day.day, hour, 0, tzinfo=CST)
     return BehaviorRecord(
-        address=f"session:behavior://occurrences/{day:%Y/%m/%d}/{name}",
+        address=f"habitus://occurrences/session/{day:%Y/%m/%d}/{name}",
         lane="session",
         day=day,
         started_at=started,
@@ -151,7 +151,7 @@ class World:
         self, kind: MemoryKind, fields: dict[str, object], *, updated: datetime = NOW - timedelta(days=1)
     ) -> MemoryURI:
         document = codec().build(
-            kind, fields, metadata=MemoryDocumentMetadata(revision=1, created_at=updated, updated_at=updated)
+            kind, fields, metadata=DocumentMetadata(revision=1, created_at=updated, updated_at=updated)
         )
         self.tree.write(document)
         self.refresher.refresh_for(document.address)
@@ -311,16 +311,16 @@ def test_a_day_that_fails_to_read_is_skipped_and_the_rest_is_returned(tmp_path: 
 def test_unwatched_gaps_are_not_records_and_continuations_are_searchable(tmp_path: Path) -> None:
     """「未观测」「没读懂」是空白（gap），不进列出和搜索；名字照常的 occurrence（含续话这类）都读得到。"""
 
-    tree = BehaviorTree(tmp_path / "behavior-tree")
+    tree = BehaviorTree(tmp_path / "behavior-tree", lane="session")
     writer = BehaviorDocumentWriter(tree, ProcessLocalLockStore(), clock=lambda: local(23, 0))
     writer.publish(BehaviorKind.OCCURRENCE, occurrence_payload())
     writer.publish(BehaviorKind.GAP, gap_payload(gap_kind="未观测", started_at=local(21, 0), ended_at=local(21, 30)))
-    source_records = BehaviorTreeRecords((("session", tree),))
+    source_records = BehaviorTreeRecords((tree,))
 
     batch = source_records.read_days(source_records.days())
 
     assert [item.name for item in batch.records] == ["洗了手"]
-    assert batch.records[0].day == DAY and batch.records[0].address.startswith("session:behavior://")
+    assert batch.records[0].day == DAY and batch.records[0].address.startswith("habitus://occurrences/session/")
     w = world(tmp_path)
     client = ScriptedClient([pick(records=source(DAY.isoformat(), DAY.isoformat(), ["未观测"])), judge([])])
     result = search(w.service(client, records=source_records))
@@ -520,17 +520,17 @@ def test_one_hop_expansion_skips_dangling_and_one_sided_relations_with_a_log(
     from habitus.memory.document import MemoryLinkType, MemoryStoredLink
 
     w = world(tmp_path)
-    seed = MemoryURI.parse("memory://preferences/方案文档表述与结构.md")
-    good = MemoryURI.parse("memory://entities/项目/habitus.md")
-    one_sided = MemoryURI.parse("memory://entities/项目/看板.md")
-    ghost = MemoryURI.parse("memory://entities/项目/已删.md")
+    seed = MemoryURI.parse("habitus://preferences/方案文档表述与结构.md")
+    good = MemoryURI.parse("habitus://entities/项目/habitus.md")
+    one_sided = MemoryURI.parse("habitus://entities/项目/看板.md")
+    ghost = MemoryURI.parse("habitus://entities/项目/已删.md")
     links = tuple(
         sorted(
             (MemoryStoredLink(seed, target, MemoryLinkType.BELONGS_TO) for target in (good, one_sided, ghost)),
             key=lambda item: item.identity,
         )
     )
-    meta = MemoryDocumentMetadata(revision=1, created_at=NOW - timedelta(days=1), updated_at=NOW - timedelta(days=1))
+    meta = DocumentMetadata(revision=1, created_at=NOW - timedelta(days=1), updated_at=NOW - timedelta(days=1))
     w.tree.write(codec().build(MemoryKind.PREFERENCE, PREFERENCE, metadata=meta, links=links))
     w.tree.write(
         codec().build(
@@ -591,7 +591,7 @@ def test_the_coldest_cards_are_listed_apart_by_name_one_per_search_and_warm_up_o
     client = ScriptedClient([pick(), judge([])])
     search(w.service(client))
     normal = client.prompts[0][1].split("## 很久没用到的卡片")[0]
-    assert str(picked).removeprefix("memory://") in normal  # 用过一次回暖，回到普通清单
+    assert str(picked).removeprefix("habitus://") in normal  # 用过一次回暖，回到普通清单
 
 
 # ── 目录超出清单上限 ──────────────────────────────────────────────────────────
@@ -604,14 +604,14 @@ def test_a_directory_over_the_list_bound_says_how_many_are_missing_and_keywords_
     )
     w.put(MemoryKind.PREFERENCE, {"topic": "中间的主题", "content": "- 中间"}, updated=NOW - timedelta(days=2))
     w.put(MemoryKind.PREFERENCE, {"topic": "最新的主题", "content": "- 最新"}, updated=NOW - timedelta(days=1))
-    overview = w.tree.read_layer(MemoryURI.parse("memory://preferences").to_directory(), MemoryLevel.OVERVIEW)
+    overview = w.tree.read_layer(MemoryURI.parse("habitus://preferences").to_directory(), MemoryLevel.OVERVIEW)
     assert "（还有 1 张卡片没有列出）" in overview and "最早的主题" not in overview
 
     client = ScriptedClient([pick(card_keywords=["习惯"]), judge(["c1"])])
     result = search(w.service(client))
 
     assert "还有 1 张卡片没有列出" in client.prompts[0][1]
-    assert [str(memory.uri) for memory in result.memories] == ["memory://preferences/最早的主题.md"]
+    assert [str(memory.uri) for memory in result.memories] == ["habitus://preferences/最早的主题.md"]
 
 
 def test_a_card_written_without_refreshing_its_overview_appears_after_the_maintenance_rebuild(tmp_path: Path) -> None:
@@ -620,7 +620,7 @@ def test_a_card_written_without_refreshing_its_overview_appears_after_the_mainte
     later = codec().build(
         MemoryKind.PREFERENCE,
         {"topic": "通知措辞", "content": "- 通知要客气"},
-        metadata=MemoryDocumentMetadata(revision=1, created_at=NOW, updated_at=NOW),
+        metadata=DocumentMetadata(revision=1, created_at=NOW, updated_at=NOW),
     )
     w.tree.write(later)  # 写完卡片、刷概览之前进程没了
 

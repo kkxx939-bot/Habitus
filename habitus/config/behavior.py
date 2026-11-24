@@ -23,7 +23,6 @@ OVERRIDE_PREFIXES = (
     "tree_",
     "document_",
     "write_",
-    "semantic_",
 )
 
 
@@ -96,17 +95,11 @@ class BehaviorConfig:
     fusion_max_receipt_files: int | None = None
     fusion_max_judgement_files: int | None = None
     tree_max_children_per_directory: int | None = None
-    # 行为树文档的物理边界（``document_`` → BehaviorDocumentConfig）、文档写锁的租约（``write_`` → BehaviorWriteConfig）、
-    # 每天的语义概览（``semantic_`` → BehaviorSemanticConfig）：都是保护闸，留空取领域默认值。
+    # 事件与空白文档的物理边界（``document_`` → BehaviorDocumentConfig）、文档写锁的租约（``write_`` → BehaviorWriteConfig）：
+    # 都是保护闸，留空取领域默认值。
     document_max_markdown_body_chars: int | None = None
     document_max_encoded_bytes: int | None = None
     write_lock_ttl_seconds: int | None = None
-    semantic_max_direct_entries: int | None = None
-    semantic_max_prompt_chars: int | None = None
-    semantic_max_narrative_chars: int | None = None
-    semantic_max_entry_summary_chars: int | None = None
-    semantic_max_overview_chars: int | None = None
-    semantic_max_abstract_chars: int | None = None
 
     def __post_init__(self) -> None:
         if self.context_lookback_seconds is not None and not 60.0 <= float(self.context_lookback_seconds) <= 86_400.0:

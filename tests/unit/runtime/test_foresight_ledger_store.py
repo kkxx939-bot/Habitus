@@ -23,7 +23,7 @@ def expectation(identity: str = "e1") -> Expectation:
         formed_at=FORMED,
         source="事件",
         trigger="rel",
-        trigger_instance="behavior://flight.md",
+        trigger_instance="occ:flight.md",
         window=(FORMED + timedelta(minutes=4), FORMED + timedelta(minutes=51)),
         deadline=FORMED + timedelta(hours=3),
         basis=(),
@@ -48,9 +48,9 @@ def test_records_are_written_once_and_read_back_by_day(tmp_path) -> None:
     day = FORMED.date()
     delivery = Delivery("e1", FORMED + timedelta(minutes=1), 1, True, "说了", 1.0, "要订酒店吗")
     response = Response("e1", FORMED + timedelta(minutes=2), "负", "conv-1#3-9")
-    settlement = Settlement("e1", "s-k0002", day, FORMED + timedelta(days=1), "准时", "behavior://hotel.md")
-    ruling = Ruling("e1", FORMED + timedelta(days=2), "后补", "behavior://late.md", 90)
-    omission = Omission("behavior://other.md", "s-k0003", day, FORMED + timedelta(days=1), False)
+    settlement = Settlement("e1", "s-k0002", day, FORMED + timedelta(days=1), "准时", "occ:hotel.md")
+    ruling = Ruling("e1", FORMED + timedelta(days=2), "后补", "occ:late.md", 90)
+    omission = Omission("occ:other.md", "s-k0003", day, FORMED + timedelta(days=1), False)
     assert store.record_delivery(day, delivery) and store.record_response(day, response)
     assert store.record_settlement(settlement) and store.record_ruling(day, ruling) and store.record_omission(omission)
     assert store.deliveries_on(day) == (delivery,) and store.responses_on(day) == (response,)
@@ -184,7 +184,7 @@ def test_an_omission_noticed_again_after_a_crash_is_not_a_conflict(tmp_path) -> 
     """同一条记录的漏报只记一次：写了漏报、还没标这一天查过就断，下一晚重放时 ``noticed_at`` 不同，不当成账本损坏。"""
 
     store = ForesightLedgerStore(tmp_path / "ledger")
-    first = Omission("behavior://e.md", "s-k0003", FORMED.date(), FORMED, False)
+    first = Omission("occ:e.md", "s-k0003", FORMED.date(), FORMED, False)
     assert store.record_omission(first)
     assert not store.record_omission(replace(first, noticed_at=FORMED + timedelta(days=1)))
     assert store.omissions_on(FORMED.date()) == (first,)
@@ -194,7 +194,7 @@ def test_an_oversized_record_is_refused_at_write_time(tmp_path) -> None:
     """写入就查大小：超限的不落盘（以前落了盘、读回时被当坏文件跳过，结算永远结不到它）。"""
 
     store = ForesightLedgerStore(tmp_path / "ledger")
-    basis = tuple(f"behavior://{'x' * 200}-{n}.md" for n in range(6_000))
+    basis = tuple(f"occ:{'x' * 200}-{n}.md" for n in range(6_000))
     huge = replace(expectation(), basis=basis, hits=len(basis), opportunities=len(basis))
     with pytest.raises(ForesightError, match="exceeds"):
         store.record_expectation(huge)

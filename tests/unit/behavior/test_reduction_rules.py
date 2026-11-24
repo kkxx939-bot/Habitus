@@ -93,7 +93,7 @@ def test_pending_splits_readable_and_empty_judgements_and_skips_consumed_ones(tm
         BehaviorReductionEntry(
             chain_digest=canonical_digest({"judgement_ids": [record_id("consumed")]}),
             kind="occurrence",
-            uri="behavior://occurrences/x",
+            uri="habitus://occurrences/session/x",
             judgement_ids=(record_id("consumed"),),
             staged_at=at(600).isoformat(),
             reduction_version="behavior_reduction_v1",

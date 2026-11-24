@@ -9,13 +9,12 @@ ISO 字符串）与文档时间戳，崩溃重试逐字节重放，落盘器的�
 
 树的单一写入口：新文档只由本 runner 经 ``BehaviorDocumentWriter`` 发布，已落树的文档不改——观测 → 融合 → 归约，没有旁路。
 
-本类只留 sweep 编排骨架与落盘、释放、过期、语义刷新；检查点文件（``checkpoint``）、定稿日账（``day_ledger``）、
-待刷新集合（``refresh_pending``）与物化（``stager``）各是独立协作者。
+本类只留 sweep 编排骨架与落盘、释放、过期、记脏日；检查点文件（``checkpoint``）、定稿日账（``day_ledger``）
+与物化（``stager``）各是独立协作者。事件与空白的目录不生成概览（裁定 112）。
 """
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -37,28 +36,25 @@ from habitus.behavior.reduction.kinds_step import KindStamping, KindStamps
 from habitus.behavior.reduction.ledger import BehaviorReductionEntry, BehaviorReductionLedger
 from habitus.behavior.reduction.pending import PendingJudgements, pending_judgements
 from habitus.behavior.reduction.record import ReducibleJudgement
-from habitus.behavior.reduction.refresh import RefreshRetries, RefreshVerdict
-from habitus.behavior.reduction.refresh_pending import RefreshPendingLog
 from habitus.behavior.reduction.sealing import arrival_horizon, seal_horizon, sealed_gaps, sealed_indexes
 from habitus.behavior.reduction.stager import Failed, ReductionStager
 from habitus.behavior.reduction.telemetry import (
     assembly_attributes,
     kind_attributes,
     publish_attributes,
-    refresh_attributes,
     seal_attributes,
     stage_attributes,
 )
 from habitus.behavior.retry import RetryCause
-from habitus.behavior.semantic.model import BehaviorSemanticRefreshResult
-from habitus.behavior.semantic.refresher import BehaviorSemanticRefresher
 from habitus.behavior.telemetry import OBSERVATION_CATEGORY
 from habitus.behavior.tree import BehaviorTree
+from habitus.behavior.tree.config import BehaviorWriteConfig
 from habitus.behavior.tree.dirty_days import DirtyDayLog
-from habitus.behavior.tree.writer import BehaviorDocumentWriter, BehaviorWriteConfig
+from habitus.behavior.tree.writer import BehaviorDocumentWriter
 from habitus.foundation.observability import NullObserver, Observer, observe_operation
 from habitus.infrastructure.store.contracts.lock import LockStore
 from habitus.infrastructure.store.contracts.path_lock import LeaseGuard, PathLock
+from habitus.infrastructure.tree.lock_key import root_lock_prefix
 
 # sweep 锁的默认租约时长；实际值由 ``Config.behavior.reduction_sweep_lock_ttl_seconds`` 注入。
 # 周尺度回填（万级小文件写入会把 fseventsd 顶到 240% CPU，单篇 publish 可能被文件系统卡住数分钟）
@@ -113,7 +109,7 @@ def _never_reminded(kind_token: str, started_at: datetime) -> bool:
 
 
 class BehaviorReductionRunner:
-    """归约写入层；同一 behavior-root 的写入方必须共享 LockStore。"""
+    """一支的归约写入层；同一棵 habitus 树的写入方必须共享 LockStore。"""
 
     def __init__(
         self,
@@ -125,7 +121,6 @@ class BehaviorReductionRunner:
         lock_store: LockStore,
         kinds: KindStamping,
         ledger: BehaviorReductionLedger,
-        semantic_refresher: BehaviorSemanticRefresher | None = None,
         clock: Callable[[], datetime] | None = None,
         context_lookback_seconds: float = FUSION_CONTEXT_LOOKBACK_SECONDS,
         seal_on_arrival: bool = False,
@@ -134,7 +129,6 @@ class BehaviorReductionRunner:
         sweep_lock_ttl_seconds: int = DEFAULT_SWEEP_LOCK_TTL_SECONDS,
         observer: Observer | None = None,
         reminded: Callable[[str, datetime], bool] | None = None,
-        refresh_retries: RefreshRetries | None = None,
         dirty_days: DirtyDayLog | None = None,
         failed_chains: FailedChains,
     ) -> None:
@@ -146,8 +140,6 @@ class BehaviorReductionRunner:
         由组合根注入（本层对预测层零知识）；没接时恒为假。它在物化 payload 时定格（stage 之前），查不出来就整轮失败，
         不许静默记成没提醒（被提醒的发生混进自然率事后分不开）。"""
 
-        if semantic_refresher is not None and refresh_retries is None:
-            raise TypeError("semantic refresh needs a RefreshRetries ledger (26 号清单 2.4.1)")
         if context_lookback_seconds <= 0:
             raise ValueError("context_lookback_seconds must be a positive number")
         self.judgements = judgements
@@ -160,10 +152,8 @@ class BehaviorReductionRunner:
         self.sweep_lock_ttl_seconds = sweep_lock_ttl_seconds
         self.kinds = kinds
         self.ledger = ledger
-        self.semantic_refresher = semantic_refresher
-        self.refresh_retries = refresh_retries
-        #: 改树改到的日子记一笔增量，按天缓存的读侧据此只重读变过的日子（26 号清单 6.7）。没有读侧的支（物理一支、
-        #: 没开语义树的会话一支）不给，不记——没人截，记了只会一直长（L10.3）。
+        #: 改树改到的日子记一笔增量，按天缓存的读侧据此只重读变过的日子（26 号清单 6.7）；全仓只有这里记。
+        #: 没开语义树的支不给，不记——没人截，记了只会一直长（L10.3）。
         self.dirty_days = dirty_days
         if failed_chains.judgements is not judgements or failed_chains.ledger is not ledger:
             raise ValueError("failed chains must set aside judgements from the runner's own store and ledger")
@@ -175,8 +165,8 @@ class BehaviorReductionRunner:
         self.write_config = write_config
         self.coverage = coverage or BehaviorCoverageIndex(observations.root)
         self._path_lock = PathLock(lock_store)
-        digest = hashlib.sha256(str(tree.root).encode("utf-8")).hexdigest()[:24]
-        self._sweep_lock_key = f"behavior-reduction:{digest}"
+        # 一支一把 sweep 锁（一轮同时写事件和空白，不按类分）：两支共用一棵树，按树根派生再接上支（裁定 112）
+        self._sweep_lock_key = f"{root_lock_prefix('behavior-reduction', tree.root)}:{tree.lane}"
         self.observer: Observer = observer or NullObserver()
         self.reminded: Callable[[str, datetime], bool] = reminded if reminded is not None else _never_reminded
         #: 最近一轮认出的"封口视界被哪几份观测钉住"（按钉住的时刻排，没有是空），健康面读它（裁定 94 第 8 条）。
@@ -184,11 +174,10 @@ class BehaviorReductionRunner:
         self._build_collaborators()
 
     def _build_collaborators(self) -> None:
-        """检查点、待刷新集合、定稿日账都落在消费账本的根下。"""
+        """检查点、定稿日账都落在消费账本的根下。"""
 
         root = self.ledger.root
         self.checkpoints = CheckpointStore(root)
-        self.refresh_pending = RefreshPendingLog(root, dirty_days=self.dirty_days, refresh_retries=self.refresh_retries)
         self.day_ledger = DayClosureLedger(root, tree=self.tree, now=self._now)
         self.stager = ReductionStager(tree=self.tree, observations=self.observations, checkpoints=self.checkpoints)
 
@@ -200,7 +189,7 @@ class BehaviorReductionRunner:
     async def run_once(self) -> BehaviorReductionReport:
         """执行一轮归约；先重放遗留检查点，再归约新封口的链与空白段。
 
-        全程持一把 behavior-root 级的**租约**：单写入方是机械保证不是运维假设——两个归约
+        全程持一把这一支的**租约**：单写入方是机械保证不是运维假设——两个归约
         进程并跑会各自 stage 出时间戳不同的同址文档，互相把对方的检查点变成永久撞车。锁被
         占用时本轮直接让路（``BehaviorReductionBusyError``），下一轮 sweep 自然重试。
 
@@ -232,10 +221,10 @@ class BehaviorReductionRunner:
             replayed, replayed_days = self.checkpoints.replay(
                 lambda checkpoint: self._publish_checkpoint(checkpoint, guard)
             )
-            attributes.update(replayed_documents=replayed, refresh_days=len(replayed_days))
+            attributes.update(replayed_documents=replayed, touched_days=len(replayed_days))
         if replayed_days or self.checkpoints.exists():
-            # 重放已全部落树：先把那些日子记进待刷新集合，再立刻清检查点。
-            self.refresh_pending.touch(replayed_days, guard)
+            # 重放已全部落树：先记脏日，再立刻清检查点。
+            self._record_dirty(replayed_days)
             self.checkpoints.clear(guard)
         now = self._now()
         # 以下每一段在周尺度都可能跑很久且**不写任何东西**（另一条线实测：stage 前段静默 16 分钟即把
@@ -247,8 +236,6 @@ class BehaviorReductionRunner:
         # 消费账本这一轮只读一次、在过期之后读：扫描与物化共用（之前各读一遍，账本一长就是三遍全量读，26 号清单 6.3）。
         # 这之后到物化之前没有任何一步写账本。
         entries = self.ledger.load()
-        # 上一轮没刷成的日子并进来
-        replayed_days = replayed_days | self.refresh_pending.days()
         # "哪些判断还没归约"只有一种答法（``pending``），此刻场景的未封口读口也用它。
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_assemble") as attributes:
             pending = pending_judgements(self.judgements, self.ledger, checkpoint=guard.checkpoint, entries=entries)
@@ -261,15 +248,13 @@ class BehaviorReductionRunner:
         sealed = self._seal(pending, now, guard)
         guard.checkpoint()
         if not sealed.ready_indexes and not sealed.ready_gaps:
-            refresh_notes = await self._finish_sweep(
-                replayed_days, guard, unsealed_days=sealed.unsealed_days, horizon=sealed.horizon
-            )
+            self._finish_sweep(replayed_days, guard, unsealed_days=sealed.unsealed_days, horizon=sealed.horizon)
             return BehaviorReductionReport(
                 replayed_documents=replayed,
                 published_occurrences=0,
                 published_gaps=0,
                 chains_pending=len(pending.occurrences),
-                dropped_edges=(*quarantined, *refresh_notes, *self._sweep_signals),
+                dropped_edges=(*quarantined, *self._sweep_signals),
                 kind_signals=tuple(self._kind_signals),
                 bugs=tuple(self._bugs),
             )
@@ -283,7 +268,7 @@ class BehaviorReductionRunner:
                 now,
                 stamps,
                 entries=entries,
-                refresh_days=replayed_days,
+                touched_days=replayed_days,
                 reminded=self.reminded,
                 signals=self._sweep_signals,
                 guard=guard,
@@ -305,13 +290,13 @@ class BehaviorReductionRunner:
             batch.failed, guard, consumed=frozenset(i for entry in entries for i in entry.judgement_ids)
         )
         documents = batch.documents
-        self.refresh_pending.touch(document_days(documents), guard)
+        self._record_dirty(document_days(documents))
         # 这一轮没落树的链所在的日子也不能定稿：缩批留下的要下一轮才发布；隔离的换成了「没读懂」判断，下一轮才归约成
         # 空白——先定稿，派生层就把那一段读成"没做"（L10.5）
         held_back = _unsealed_days(pending, batch.active_indexes, batch.active_gaps) | {
             record.started_at.date() for record, _reason, _cause in batch.failed
         }
-        refresh_notes = await self._finish_sweep(
+        self._finish_sweep(
             replayed_days | document_days(documents),
             guard,
             unsealed_days=sealed.unsealed_days | held_back,
@@ -324,7 +309,7 @@ class BehaviorReductionRunner:
             published_gaps=sum(1 for item in documents if item["kind"] == BehaviorKind.GAP.value),
             # skip/defer/缩批留下的链仍未消费，一并计入 pending——报告不许把它们说成已处理。
             chains_pending=len(pending.occurrences) - published_occurrences,
-            dropped_edges=(*quarantined, *batch.dropped, *refresh_notes, *self._sweep_signals),
+            dropped_edges=(*quarantined, *batch.dropped, *self._sweep_signals),
             kind_signals=tuple(self._kind_signals),
             unavailable=sum(1 for _record, _reason, cause in batch.failed if cause is RetryCause.UNAVAILABLE),
             bugs=tuple(self._bugs),
@@ -379,32 +364,29 @@ class BehaviorReductionRunner:
         except TimeoutError as exc:
             raise BehaviorReductionBusyError(str(exc)) from exc
 
-    async def _finish_sweep(
+    def _record_dirty(self, days: set[date]) -> None:
+        """这些天的树刚变过：记一笔脏日（读序列靠它增量读盘）。"""
+
+        if days and self.dirty_days is not None:
+            self.dirty_days.record(days)
+
+    def _finish_sweep(
         self,
         days: set[date],
         guard: LeaseGuard,
         *,
         unsealed_days: frozenset[date] = frozenset(),
         horizon: datetime | None = None,
-    ) -> tuple[str, ...]:
-        """一轮的收尾，两条返回路径共用，顺序即崩溃安全的依据：
+    ) -> None:
+        """一轮的收尾，两条返回路径共用，顺序即崩溃安全的依据：清检查点 → 定稿日记账 → 释放无人引用的交付。"""
 
-        受影响日先耐久进待刷新集合 → 清检查点（发布完成即清，不再被刷新失败扣住——那会让 merge
-        之后的重放撞出永久冲突）→ 逐日刷新（失败留在集合里下轮重试）→ 定稿日记账 → 释放无人引用的交付。
-        """
-
-        # 现有的调用方交来的日子都已在各自那一步落进集合（重放、词表整理活、本轮文档日）：这一次写是防御，
-        # 保证清检查点之前它们一定耐久，不靠调用方各自记得。
-        self.refresh_pending.write(self.refresh_pending.days() | days, guard)
         self.checkpoints.clear(guard)
-        notes = await self._refresh_semantics(days, guard)
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "day_close") as attributes:
             closed, still_open = self.day_ledger.close(days, guard, unsealed_days=unsealed_days, horizon=horizon)
             attributes.update(closed_days=closed, open_days=still_open, unsealed_days=len(unsealed_days))
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "raw_release") as attributes:
             released, retained = self._release_unreferenced(guard)
             attributes.update(envelopes_released=released, envelopes_retained=retained)
-        return notes
 
     # ── 定稿日：派生层（语义树、预测层的结算）只处理已定稿的历史 ────────────────────────────
 
@@ -463,50 +445,6 @@ class BehaviorReductionRunner:
                 f"chain {record.chain_digest} {'set aside for retry' if kept else 'not kept for retry'} ({reason}); "
                 f"error {replacement[:12]}" + ("" if kept or admission is None else f"; backlog {admission.value}")
             )
-
-    async def _refresh_semantics(self, days: set[date], guard: LeaseGuard) -> tuple[str, ...]:
-        """刷新受影响目录的 L0/L1（仍在 sweep 锁内——刷新器的单写入方前提）；**逐日隔离**。
-
-        摘要是可重建派生物：某一天刷新失败只影响那一天。失败按重试账处理（``refresh.py``）：可重试的退避后再试，
-        退避期内留在待刷新集合里；超限这类确定性失败第一次就放弃、移出集合、留信号，不再每轮调一次模型。
-        """
-
-        if not days:
-            return ()
-        if self.semantic_refresher is None or self.refresh_retries is None:
-            self.refresh_pending.write(self.refresh_pending.days() - days, guard)
-            return ()
-        with observe_operation(self.observer, OBSERVATION_CATEGORY, "semantic_refresh") as attributes:
-            notes: list[str] = []
-            results: list[BehaviorSemanticRefreshResult] = []
-            remaining = self.refresh_pending.days() | days
-            given_up = 0
-            for day in sorted(days):
-                verdict = self.refresh_retries.verdict(day)
-                if verdict is RefreshVerdict.GIVEN_UP:
-                    remaining.discard(day)
-                    continue
-                if verdict is RefreshVerdict.WAIT:
-                    continue
-                guard.checkpoint()
-                try:
-                    results.extend(await self.semantic_refresher.refresh_days((day,)))
-                except Exception as exc:  # noqa: BLE001 - 派生物刷新失败一律降级为信号
-                    decision = self.refresh_retries.failed(day, exc)
-                    if decision.give_up:
-                        remaining.discard(day)
-                        given_up += 1
-                        notes.append(f"semantic refresh given up for [{day.isoformat()}]: {exc}")
-                    else:
-                        notes.append(f"semantic refresh failed for [{day.isoformat()}]: {exc}")
-                    continue
-                self.refresh_retries.succeeded(day)
-                remaining.discard(day)
-            self.refresh_pending.write(remaining, guard)
-            attributes.update(refresh_attributes(results, days=len(days), failed_days=len(notes)))
-            attributes["pending_days"] = len(remaining)
-            attributes["given_up_days"] = given_up
-            return tuple(notes)
 
     def _publish_checkpoint(self, checkpoint: Mapping[str, Any], guard: LeaseGuard) -> None:
         """把检查点逐字落盘：同字节幂等，故本函数可任意次重入；逐段续约防租约过期。"""

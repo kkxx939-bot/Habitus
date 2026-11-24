@@ -102,7 +102,7 @@ test("recall posts the query and prints the hits", async (t) => {
   const service = await serve(t, {
     "/api/v1/memory/recall": {
       query: "回答风格", context: "用户偏好简洁回答。",
-      memories: [{ uri: "memory://preferences/response_style.md" }],
+      memories: [{ uri: "habitus://preferences/response_style.md" }],
       records: [], summaries: [], notes: [], degradations: [], budget_exhausted: false, timed_out: false,
     },
   });
@@ -111,7 +111,7 @@ test("recall posts the query and prints the hits", async (t) => {
   const out = sink();
   assert.equal(await main(["recall", "回答", "风格", "--limit", "3"], { stdout: out, stderr: sink(), env }), 0);
   assert.deepEqual(service.calls.at(-1).body, { query: "回答 风格", limit: 3 });
-  assert.match(out.text(), /卡片  memory:\/\/preferences\/response_style\.md/);
+  assert.match(out.text(), /卡片  habitus:\/\/preferences\/response_style\.md/);
   assert.match(out.text(), /用户偏好简洁回答/);
   const err = sink();
   assert.equal(await main(["recall"], { stdout: sink(), stderr: err, env }), 1);
@@ -383,17 +383,17 @@ function documentAt(uri) { return `/api/v1/memory/document?uri=${encodeURICompon
 const MEMORY_ROUTES = {
   "/health": { status: "healthy" },
   "/api/v1/capabilities": { api_version: "1.0", service_version: "0.1.0", protocols: [], features: ["memory_tree_v1"] },
-  [tree()]: { uri: "memory://", directories: ["memory://entities", "memory://preferences"], documents: ["memory://profile.md"], abstract: null },
-  [tree("memory://preferences")]: { uri: "memory://preferences", directories: [], documents: ["memory://preferences/回答风格.md"], abstract: "偏好：回答简洁。" },
-  [tree("memory://entities")]: { uri: "memory://entities", directories: ["memory://entities/项目"], documents: [], abstract: null },
-  [tree("memory://entities/项目")]: { uri: "memory://entities/项目", directories: [], documents: ["memory://entities/项目/habitus.md"], abstract: null },
-  [documentAt("memory://preferences/回答风格.md")]: {
-    uri: "memory://preferences/回答风格.md", node: "document", kind: "preference", revision: 2,
+  [tree()]: { uri: "habitus://", directories: ["habitus://entities", "habitus://preferences"], documents: ["habitus://profile.md"], abstract: null },
+  [tree("habitus://preferences")]: { uri: "habitus://preferences", directories: [], documents: ["habitus://preferences/回答风格.md"], abstract: "偏好：回答简洁。" },
+  [tree("habitus://entities")]: { uri: "habitus://entities", directories: ["habitus://entities/项目"], documents: [], abstract: null },
+  [tree("habitus://entities/项目")]: { uri: "habitus://entities/项目", directories: [], documents: ["habitus://entities/项目/habitus.md"], abstract: null },
+  [documentAt("habitus://preferences/回答风格.md")]: {
+    uri: "habitus://preferences/回答风格.md", node: "document", kind: "preference", revision: 2,
     created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-20T00:00:00Z",
     fields: { topic: "回答风格", content: "- 偏好简洁直接的回答" }, text: "",
-    links: [{ from_uri: "memory://preferences/回答风格.md", to_uri: "memory://entities/项目/habitus.md", link_type: "related" }], backlinks: [],
+    links: [{ from_uri: "habitus://preferences/回答风格.md", to_uri: "habitus://entities/项目/habitus.md", link_type: "related" }], backlinks: [],
   },
-  [documentAt("memory://preferences/.overview.md")]: { uri: "memory://preferences/.overview.md", node: "layer", level: "overview", text: "## 偏好\n- 简洁" },
+  [documentAt("habitus://preferences/.overview.md")]: { uri: "habitus://preferences/.overview.md", node: "layer", level: "overview", text: "## 偏好\n- 简洁" },
 };
 
 async function memoryService(t, routes = MEMORY_ROUTES) {
@@ -402,7 +402,7 @@ async function memoryService(t, routes = MEMORY_ROUTES) {
   return { ...service, env: { HABITUS_URL: service.url, HABITUS_PLUGIN_STATE_DIR: await stateRoot(t), HABITUS_PLUGIN_TIMEOUT_MS: "1000" } };
 }
 
-test("memory ls lists a directory, with or without the memory:// prefix", async (t) => {
+test("memory ls lists a directory, with or without the habitus:// prefix", async (t) => {
   const service = await memoryService(t);
   if (!service) return;
   const root = sink();
@@ -418,10 +418,10 @@ test("memory tree walks down to the requested depth and marks what it did not op
   if (!service) return;
   const shallow = sink();
   assert.equal(await main(["memory", "tree", "-L", "1"], { stdout: shallow, stderr: sink(), env: service.env }), 0);
-  assert.equal(shallow.text(), "memory://\n├── entities/ …\n├── preferences/ …\n└── profile.md\n");
+  assert.equal(shallow.text(), "habitus://\n├── entities/ …\n├── preferences/ …\n└── profile.md\n");
   const deep = sink();
-  assert.equal(await main(["memory", "tree", "memory://entities"], { stdout: deep, stderr: sink(), env: service.env }), 0);
-  assert.equal(deep.text(), "memory://entities\n└── 项目/\n    └── habitus.md\n");
+  assert.equal(await main(["memory", "tree", "habitus://entities"], { stdout: deep, stderr: sink(), env: service.env }), 0);
+  assert.equal(deep.text(), "habitus://entities\n└── 项目/\n    └── habitus.md\n");
   assert.equal(await main(["memory", "tree", "-L", "9"], { stdout: sink(), stderr: sink(), env: service.env }), 1);
 });
 
@@ -429,10 +429,10 @@ test("memory read prints a document's fields and links, or a layer's text", asyn
   const service = await memoryService(t);
   if (!service) return;
   const doc = sink();
-  assert.equal(await main(["memory", "read", "memory://preferences/回答风格.md"], { stdout: doc, stderr: sink(), env: service.env }), 0);
+  assert.equal(await main(["memory", "read", "habitus://preferences/回答风格.md"], { stdout: doc, stderr: sink(), env: service.env }), 0);
   assert.match(doc.text(), /preference · 第 2 版/);
   assert.match(doc.text(), /topic: 回答风格/);
-  assert.match(doc.text(), /→ memory:\/\/entities\/项目\/habitus\.md（related）/);
+  assert.match(doc.text(), /→ habitus:\/\/entities\/项目\/habitus\.md（related）/);
   const layer = sink();
   assert.equal(await main(["memory", "read", "preferences/.overview.md"], { stdout: layer, stderr: sink(), env: service.env }), 0);
   assert.equal(layer.text(), "## 偏好\n- 简洁\n");

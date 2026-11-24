@@ -67,6 +67,8 @@ class ConceptHits:
             raise ConceptHitsError("kind_token must be non-empty text without surrounding whitespace")
         if not self.lane.strip() or self.lane != self.lane.strip():
             raise ConceptHitsError("lane must be non-empty text without surrounding whitespace")
+        if uri.lane != self.lane:
+            raise ConceptHitsError("occurrence_uri must sit in the record's own lane")
         started_at = uri.to_address().started_at
         if self.last_observed_at.utcoffset() is None:
             raise ConceptHitsError("last_observed_at must be a timezone-aware datetime")

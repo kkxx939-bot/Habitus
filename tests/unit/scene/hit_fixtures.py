@@ -19,7 +19,7 @@ CONCEPTS = ConceptSet((*ALL_CONCEPTS, base("起床", "起床离开床"), base("�
 
 
 def uri_for(day: date, name: str, hour: int, minute: int) -> str:
-    return str(BehaviorURI.from_address(BehaviorAddress.occurrence(day, name, at(day, hour, minute))))
+    return str(BehaviorURI.from_address(BehaviorAddress.occurrence(day, name, at(day, hour, minute)), "session"))
 
 
 def record(

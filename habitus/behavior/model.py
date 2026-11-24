@@ -1,4 +1,4 @@
-"""行为语义树共享的节点、地址与目录值对象。"""
+"""habitus 树里事件与空白那一部分共享的节点、地址与目录值对象（地址在一支之内；哪一支由地址前缀与读写视图给，见 ``behavior/uri``）。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 
 from habitus.foundation.ids import canonical_path_identity, require_safe_path_segment
+from habitus.infrastructure.tree.layout import GAPS_DIRECTORY, OCCURRENCES_DIRECTORY, SIDECAR_FILENAMES
 
 _IDENTITY_SEPARATOR = "--"
 _IDENTITY_TIMESTAMP = re.compile(
@@ -23,10 +24,6 @@ _MAX_SEMANTIC_NAME_UTF8_BYTES = _MAX_IDENTITY_NAME_UTF8_BYTES - _IDENTITY_SUFFIX
 # 空间——否则贴着预算上限的合法判断名，一旦触发消歧就会在归约期撑爆地址身份、卡死整条队列。
 MAX_BEHAVIOR_NAME_UTF8_BYTES = _MAX_SEMANTIC_NAME_UTF8_BYTES - 8
 
-# 基础词表的清单视图放在树根（behavior://kinds.md）；它由 ``behavior/kinds`` 从初始词表与在用状态生成，树只给它一个地址。
-# 地址叶名不可能与它撞车：semantic_name 拒绝 .md 后缀，gap 叶名是受控枚举。
-KINDS_REGISTRY_FILENAME = "kinds.md"
-
 
 class BehaviorKind(str, Enum):
     """行为语义树中拥有独立 L2 文档的节点类型。
@@ -40,32 +37,8 @@ class BehaviorKind(str, Enum):
     GAP = "gap"
 
 
-class BehaviorLevel(int, Enum):
-    """行为语义树的目录语义层级。"""
-
-    ABSTRACT = 0
-    OVERVIEW = 1
-    DETAIL = 2
-
-    @property
-    def sidecar_filename(self) -> str:
-        if self is BehaviorLevel.ABSTRACT:
-            return ".abstract.md"
-        if self is BehaviorLevel.OVERVIEW:
-            return ".overview.md"
-        raise ValueError("L2 uses a BehaviorAddress instead of a semantic sidecar")
-
-    @classmethod
-    def from_sidecar_filename(cls, filename: object) -> BehaviorLevel | None:
-        if filename == ".abstract.md":
-            return cls.ABSTRACT
-        if filename == ".overview.md":
-            return cls.OVERVIEW
-        return None
-
-
-OCCURRENCES_SEGMENT = "occurrences"
-GAPS_SEGMENT = "gaps"
+OCCURRENCES_SEGMENT = OCCURRENCES_DIRECTORY
+GAPS_SEGMENT = GAPS_DIRECTORY
 
 _KIND_DIRECTORY_PREFIXES: dict[BehaviorKind, tuple[str, ...]] = {
     BehaviorKind.OCCURRENCE: (OCCURRENCES_SEGMENT,),
@@ -88,18 +61,6 @@ def kind_for_directory_prefix(segments: tuple[str, ...]) -> BehaviorKind | None:
     return None
 
 
-def behavior_static_directories() -> tuple[tuple[str, ...], ...]:
-    """初始化必须存在的固定目录；父目录一定排在子目录之前。"""
-
-    directories: list[tuple[str, ...]] = []
-    for prefix in _KIND_DIRECTORY_PREFIXES.values():
-        for depth in range(1, len(prefix) + 1):
-            candidate = prefix[:depth]
-            if candidate not in directories:
-                directories.append(candidate)
-    return tuple(sorted(directories, key=lambda parts: (len(parts), parts)))
-
-
 def semantic_name(value: object, field_name: str) -> str:
     """校验可读语义名称，同时生成路径身份所需的稳定输入。"""
 
@@ -113,11 +74,7 @@ def semantic_name(value: object, field_name: str) -> str:
         raise ValueError(f"{field_name} exceeds the portable path length budget")
     if identity.endswith(".md"):
         raise ValueError(f"{field_name} must not include the .md suffix")
-    reserved = {
-        BehaviorLevel.ABSTRACT.sidecar_filename[:-3],
-        BehaviorLevel.OVERVIEW.sidecar_filename[:-3],
-    }
-    if identity in reserved:
+    if identity in {filename[:-3] for filename in SIDECAR_FILENAMES}:
         raise ValueError(f"{field_name} conflicts with a reserved semantic layer")
     return name
 
@@ -252,8 +209,8 @@ def is_ascii_digits(value: object) -> bool:
 # 【状态】树核心（本文件/uri/schema 五件套/两份 yaml/document/writer/kinds）已落地并经三路评审
 # 修正；归约写入层已落地于 ``behavior/reduction/``（五条死规则+staged 检查点+封口扫描+消费账本；
 # 判重守卫落融合校验（fusion_v2）、没读懂判断入库（fusion_v3））；类编号来自全局基础词表
-# （``behavior/kinds``，文件放在树根）；L0/L1 生成器已落地于 ``behavior/semantic/``
-# （日叙述并入同日空白、月/年上卷、digest 短路；结构落地，提示词调优子项遗留——见 generator.py）；
+# （``behavior/kinds``，文件在这一支的树外目录 ``behavior/<lane>/``）；事件与空白的目录不生成 L0/L1
+# （原来的模型概览没有读者，已整套删除，裁定 112）；
 # Runtime 组合根接线已完成（BHV-RUNTIME-001 关闭：Config.behavior 标量组可选启用、
 # Runtime/behavior.py 组装两条 lane + 归约的常驻 Worker + 健康面，端到端接缝
 # 测试在 tests/unit/runtime/test_behavior_pipeline.py）。**进程内链路**至此全部走完；明确的
@@ -279,20 +236,16 @@ def is_ascii_digits(value: object) -> bool:
 #   显式化，不付存储层代价。
 #
 # ── 树形状 ────────────────────────────────────────────────────────────────────────────
-#     behavior://
-#       occurrences/YYYY/MM/DD/{原始名}--{ts}.md   行为（add-only，双面）
-#       gaps/       YYYY/MM/DD/{类型}--{ts}.md     观测空白（add-only；类型=没读懂|未观测）
-#       episodes/   （代码零占位，用户裁定）        预测闭环成熟后再设计（BHV-EPISODE-002）
-#       kinds.md                                    基础词表的清单视图（URI behavior://kinds.md，REGISTRY
-#                                                   节点类型）；真源是随代码发布的初始词表与同目录的
-#                                                   kinds.state.json 在用状态，读写只经 ``behavior/kinds``，
-#                                                   树本身不认识词表
-#     各级日期目录带 .abstract.md/.overview.md（L0/L1 由 behavior/semantic/ 生成与刷新；调优
-#     子项见 generator.py 的 TODO(BHV-SEMANTIC-004·调优)）。
+#     habitus://（与四类卡片同一棵树，裁定 112）
+#       occurrences/<lane>/YYYY/MM/DD/{原始名}--{ts}.md   行为（add-only，双面）
+#       gaps/       <lane>/YYYY/MM/DD/{类型}--{ts}.md     观测空白（add-only；类型=没读懂|未观测）
+#       episodes/   （代码零占位，用户裁定）              预测闭环成熟后再设计（BHV-EPISODE-002）
+#     词表（初始词表 + kinds.state.json 在用状态 + kinds.md 清单视图）在树外的 behavior/<lane>/，
+#     不是树上的节点，读写只经 ``behavior/kinds``；日期目录不生成 L0/L1。
 # - 目录归一：旧 behaviors/events + behaviors/outcomes + episodes 三处 → 上述形状；BehaviorKind
 #   改为 OCCURRENCE|GAP（EPISODE 成员随 BHV-EPISODE-002 定形态时再加）。机制层（地址值对象、
 #   URI、codec、锁/读回、目录容量）全部保留（CAS 随追加通道一并退役），只换词表与节点。
-# - gap 节点使行为与空白在同一条时间轴上（一次范围读得一天完整图景，L0/L1 日摘要可如实含空白），
+# - gap 节点使行为与空白在同一条时间轴上（一次范围读得一天完整图景），
 #   并与"缺失必须记录不能解释"纪律同构；上游没接覆盖信号时树里自然没有"未观测"节点 → 曝光分母
 #   自然数满全部时段，退化假设零特例代码。gap 字段极薄：起止时间 + 溯源（没读懂→judgement_ids/
 #   observation_ids；未观测→信号来源标识，等上游契约）。
@@ -403,8 +356,7 @@ def is_ascii_digits(value: object) -> bool:
 #   以及预测层产出如何过"观测→融合→归约"单一写入口的张力都未设计——用户明说"还没想好怎么写"，
 #   等预测算法与两级执行模型（提醒确认→稳定后直接执行）落地后再定形态；届时若预测层需要回写，
 #   必须重审单一写入口纪律，不得旁路。
-# - L0/L1 生成器已落地（遗留调优子项：提示词须按纪律实测调优，见 behavior/semantic/generator.py）；
-#   生命周期（BHV-LIFECYCLE-001，判断释放为单门槛：发布即删）；
+# - 生命周期（BHV-LIFECYCLE-001，判断释放为单门槛：发布即删）；
 #   夜批傍晚滞后的取舍；覆盖信号收件箱形态（随上游契约）。
 
 
@@ -486,7 +438,7 @@ class BehaviorDirectory:
         if kind is not None:
             cls._validate_dated_branch(parts, prefix_length=len(kind_directory_prefix(kind)))
             return
-        if parts in behavior_static_directories():
+        if parts in _KIND_DIRECTORY_PREFIXES.values():
             return
         raise ValueError("behavior directory is outside the confirmed tree")
 
@@ -581,19 +533,16 @@ class BehaviorDirectory:
 
 __all__ = [
     "GAPS_SEGMENT",
-    "KINDS_REGISTRY_FILENAME",
     "MAX_BEHAVIOR_NAME_UTF8_BYTES",
     "OCCURRENCES_SEGMENT",
     "BehaviorAddress",
     "BehaviorDirectory",
     "BehaviorKind",
-    "BehaviorLevel",
     "BehaviorNameTooLongError",
     "address_name",
     "behavior_identity_name",
     "behavior_local_timestamp",
     "behavior_name",
-    "behavior_static_directories",
     "is_ascii_digits",
     "kind_directory_prefix",
     "kind_for_directory_prefix",

@@ -88,7 +88,7 @@ def build_scene_nightly(
         behavior_tree=behavior_tree,
         catalog=VocabularyCatalog(kind_store),
         concepts=ConceptStore(root),
-        hits=ConceptHitStore(root),
+        hits=ConceptHitStore(root, lane=behavior_tree.lane),
         calendar=calendar if calendar is not None else local_calendar(config),
         relations=RelationStore(
             root,
@@ -302,7 +302,7 @@ def build_model_queue(
         today=generation.today,
         sealed_day=generation.sealed_day,
         vocabulary=generation.vocabulary.revision,
-        # 账的主人带支（生命周期按主人清两支的重试账，同 ``behavior-semantic-<lane>``）
+        # 账的主人带支（生命周期按主人清两支的重试账）
         retries=retry_ledger(
             root, owner=f"model-queue-{branch.lane.value}", config=config.lifecycle.retry, clock=clock
         ),

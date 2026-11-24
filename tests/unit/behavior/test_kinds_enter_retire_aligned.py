@@ -396,7 +396,7 @@ def series_of(token: str, *days: date) -> EventSeries:
         cutoff=TODAY,
         records=tuple(
             SeriesRecord(
-                uri=f"behavior://{item.isoformat()}.md",
+                uri=f"occ:{item.isoformat()}.md",
                 name="测试行为",
                 day=item,
                 started_at=moment(item),

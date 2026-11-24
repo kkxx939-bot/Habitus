@@ -57,7 +57,7 @@ def expectation(identity: str = "e1", *, hits: int = 10) -> Expectation:
         formed_at=FORMED,
         source="日子",
         trigger="rel",
-        trigger_instance=f"behavior://{identity}.md",
+        trigger_instance=f"occ:{identity}.md",
         window=(FORMED + timedelta(minutes=4), FORMED + timedelta(minutes=51)),
         deadline=FORMED + timedelta(hours=3),
         basis=(),
@@ -71,7 +71,7 @@ def delivery(identity: str = "e1", *, text: str = "甲乙丙丁", minute: int = 
     return Delivery(identity, FORMED + timedelta(minutes=minute), 1, True, "说了", 1.0, text)
 
 
-def settlement(identity: str = "e1", *, uri: str = "behavior://hotel-a.md") -> Settlement:
+def settlement(identity: str = "e1", *, uri: str = "occ:hotel-a.md") -> Settlement:
     return Settlement(identity, KIND, DAY, FORMED + timedelta(days=1), "准时", uri)
 
 
@@ -114,22 +114,22 @@ SHAPES = (
     ),
     Shape(
         "settlement",
-        settlement(uri="behavior://hotel-a.md"),
-        settlement(uri="behavior://hotel-b.md"),
+        settlement(uri="occ:hotel-a.md"),
+        settlement(uri="occ:hotel-b.md"),
         lambda store, item: store.record_settlement(item),
         lambda store: store.settlements_on(DAY),
     ),
     Shape(
         "ruling",
-        Ruling("e1", FORMED + timedelta(days=2), "后补", "behavior://late.md", 90),
-        Ruling("e1", FORMED + timedelta(days=2), "后补", "behavior://late.md", 91),
+        Ruling("e1", FORMED + timedelta(days=2), "后补", "occ:late.md", 90),
+        Ruling("e1", FORMED + timedelta(days=2), "后补", "occ:late.md", 91),
         lambda store, item: store.record_ruling(DAY, item),
         lambda store: store.rulings_on(DAY),
     ),
     Shape(
         "omission",
-        Omission("behavior://other.md", KIND, DAY, FORMED + timedelta(days=1), False),
-        Omission("behavior://other.md", KIND, DAY, FORMED + timedelta(days=1), True),
+        Omission("occ:other.md", KIND, DAY, FORMED + timedelta(days=1), False),
+        Omission("occ:other.md", KIND, DAY, FORMED + timedelta(days=1), True),
         lambda store, item: store.record_omission(item),
         lambda store: store.omissions_on(DAY),
     ),

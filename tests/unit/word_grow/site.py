@@ -204,7 +204,7 @@ class GrowSite(Site):
     # ── 读 ──
     @property
     def state_path(self) -> Path:
-        return Path(self.session.tree.root) / STATE_FILENAME
+        return Path(self.session.kind_store.root) / STATE_FILENAME
 
     def state(self) -> Any:
         """词表状态文件的内容（没有这个文件是 None）。"""

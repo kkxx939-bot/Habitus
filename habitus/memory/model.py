@@ -6,6 +6,16 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from habitus.foundation.ids import canonical_path_identity, require_safe_path_segment
+from habitus.infrastructure.tree.layout import (
+    ABSTRACT_FILENAME,
+    ENTITIES_DIRECTORY,
+    OVERVIEW_FILENAME,
+    PREFERENCES_DIRECTORY,
+    TOOLS_DIRECTORY,
+)
+
+#: 卡片的三个目录（档案是根下的单文件 ``profile.md``）。树根下还有事件与空白的目录，不归记忆读写。
+MEMORY_DIRECTORIES = (PREFERENCES_DIRECTORY, ENTITIES_DIRECTORY, TOOLS_DIRECTORY)
 
 
 class MemoryKind(str, Enum):
@@ -27,18 +37,18 @@ class MemoryLevel(int, Enum):
         """返回 L0/L1 唯一侧车文件名；L2 没有侧车文件。"""
 
         if self is MemoryLevel.ABSTRACT:
-            return ".abstract.md"
+            return ABSTRACT_FILENAME
         if self is MemoryLevel.OVERVIEW:
-            return ".overview.md"
+            return OVERVIEW_FILENAME
         raise ValueError("L2 uses a MemoryAddress instead of a semantic sidecar")
 
     @classmethod
     def from_sidecar_filename(cls, filename: object) -> MemoryLevel | None:
         """把唯一侧车文件名反解为 L0/L1。"""
 
-        if filename == ".abstract.md":
+        if filename == ABSTRACT_FILENAME:
             return cls.ABSTRACT
-        if filename == ".overview.md":
+        if filename == OVERVIEW_FILENAME:
             return cls.OVERVIEW
         return None
 
@@ -153,7 +163,7 @@ class MemoryDirectory:
         if not parts:
             return
         root = parts[0]
-        if root not in {"preferences", "entities", "tools"}:
+        if root not in MEMORY_DIRECTORIES:
             raise ValueError("memory directory is outside the confirmed tree")
         if root in {"preferences", "tools"}:
             if len(parts) != 1:
@@ -180,6 +190,12 @@ class MemoryDirectory:
     @property
     def identity_parts(self) -> tuple[str, ...]:
         return self._identity_parts
+
+    @property
+    def label(self) -> str:
+        """概览标题行与 L0 里的目录名。"""
+
+        return "/".join(self.parts) or "记忆根"
 
     @classmethod
     def root(cls) -> MemoryDirectory:
@@ -229,6 +245,7 @@ class MemoryDirectory:
 
 __all__ = [
     "MAX_MEMORY_NAME_UTF8_BYTES",
+    "MEMORY_DIRECTORIES",
     "MemoryAddress",
     "MemoryDirectory",
     "MemoryKind",

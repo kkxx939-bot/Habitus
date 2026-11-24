@@ -57,8 +57,11 @@ class DayMarker:
 class ConceptHitStore(SceneStore):
     error_type: ClassVar[type[ValueError]] = ConceptHitStoreError
 
-    def __init__(self, scene_root: str | Path, **options: int) -> None:
+    def __init__(self, scene_root: str | Path, *, lane: str, **options: int) -> None:
+        """``lane`` 是这一支：命中记录读回时由"日期 + 叶名 + 支"重建事件的地址，与记录里存的地址比对（裁定 112）。"""
+
         super().__init__(scene_root, **options)
+        self.lane = lane
         self.directory = self._inside(Path(OCCURRENCES_SEGMENT))
         #: 做完的日子：（完成标记的字节, 解码好的命中）。按（日子, 完成标记）认——标记一变（重做、回填）就重读；没做完的
         #: 不缓存。封口与关系检验（B4）共用这一个实例，一晚每天只解码一次（26 号清单 6.10）。
@@ -260,7 +263,7 @@ class ConceptHitStore(SceneStore):
 
     def _decode(self, payload: bytes, address: BehaviorAddress) -> ConceptHits:
         try:
-            return decode(payload.decode("utf-8"), expected_uri=str(BehaviorURI.from_address(address)))
+            return decode(payload.decode("utf-8"), expected_uri=str(BehaviorURI.from_address(address, self.lane)))
         except (UnicodeDecodeError, SceneRecordError) as exc:
             raise ConceptHitStoreError(f"concept hits record {address.identity_name!r} is corrupt: {exc}") from exc
 

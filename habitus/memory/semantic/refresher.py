@@ -6,6 +6,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from habitus.infrastructure.store.contracts.path_lock import PathLock
+from habitus.infrastructure.tree.lock_key import root_lock_prefix
+from habitus.infrastructure.tree.overview import Overview, OverviewCard, OverviewChild
 from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryLevel
 from habitus.memory.schema import MemorySchemaRegistry
 from habitus.memory.semantic.config import MemorySemanticConfig
@@ -13,8 +15,6 @@ from habitus.memory.semantic.model import (
     MemorySemanticRefreshResult,
     MemorySemanticRefreshStatus,
 )
-from habitus.memory.semantic.overview import MemoryOverview, MemoryOverviewCard, MemoryOverviewChild
-from habitus.memory.tree.lock_key import memory_root_lock_prefix
 from habitus.memory.tree.store import MemoryTree
 
 
@@ -37,7 +37,7 @@ class MemorySemanticRefresher:
         self.schema_registry = schema_registry
         self.path_lock = path_lock
         self.config = config or MemorySemanticConfig()
-        self._lock_prefix = memory_root_lock_prefix("memory-semantic", self.tree.root)
+        self._lock_prefix = root_lock_prefix("memory-semantic", self.tree.root)
 
     def refresh_for(self, address: MemoryAddress) -> tuple[MemorySemanticRefreshResult, ...]:
         """从发生变化的 L2 父目录开始，依次刷新到记忆根目录。"""
@@ -102,13 +102,13 @@ class MemorySemanticRefresher:
     def _enumeration_limit(self) -> int:
         return min(10_000, self.tree.tree_config.max_children_per_directory)
 
-    def _overview(self, directory: MemoryDirectory) -> MemoryOverview:
-        cards: list[MemoryOverviewCard] = []
+    def _overview(self, directory: MemoryDirectory) -> Overview:
+        cards: list[OverviewCard] = []
         for address in self.tree.direct_addresses(directory, limit=self._enumeration_limit):
             document = self.tree.read(address)
             schema = self.schema_registry.get(document.kind)
             cards.append(
-                MemoryOverviewCard(
+                OverviewCard(
                     filename=self.tree.path_for(address).name,
                     description=schema.overview_line(document.fields),
                     created_at=document.metadata.created_at,
@@ -117,7 +117,7 @@ class MemorySemanticRefresher:
                 )
             )
         children = tuple(
-            MemoryOverviewChild(
+            OverviewChild(
                 child.parts[-1],
                 len(self.tree.direct_addresses(child, limit=self._enumeration_limit))
                 + len(self.tree.child_directories(child, limit=self._enumeration_limit)),
@@ -127,11 +127,11 @@ class MemorySemanticRefresher:
         cards.sort(key=lambda card: (-card.updated_at.timestamp(), card.filename))
         listed = cards[: self.config.max_direct_entries]
         while listed:
-            overview = MemoryOverview(directory, tuple(listed), children, len(cards) - len(listed))
+            overview = Overview(directory.label, tuple(listed), children, len(cards) - len(listed))
             if len(overview.render()) <= self.config.max_overview_chars:
                 return overview
             listed.pop()
-        overview = MemoryOverview(directory, (), children, len(cards))
+        overview = Overview(directory.label, (), children, len(cards))
         if len(overview.render()) > self.config.max_overview_chars:
             raise MemorySemanticRefreshError("memory overview cannot fit its configured character bound")
         return overview

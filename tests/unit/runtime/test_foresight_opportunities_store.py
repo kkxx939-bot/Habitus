@@ -28,7 +28,7 @@ def table(night: date, lane: str = "session", kinds: int = 1) -> OpportunityTabl
             KindDays(
                 f"s-k{index:04d}",
                 f"类{index}",
-                (OccurrenceDay(first.date(), "behavior://a.md", first, 1, 1, "behavior://a.md", first),),
+                (OccurrenceDay(first.date(), "occ:a.md", first, 1, 1, "occ:a.md", first),),
             )
             for index in range(1, kinds + 1)
         ),

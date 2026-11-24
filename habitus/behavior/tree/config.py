@@ -1,4 +1,4 @@
-"""行为语义树物理枚举的显式容量边界。"""
+"""事件与空白的视图：物理枚举的容量边界与只增写入的锁租约。"""
 
 from __future__ import annotations
 
@@ -14,4 +14,13 @@ class BehaviorTreeConfig:
             raise ValueError("max_children_per_directory must be between 2 and 1000000")
 
 
-__all__ = ["BehaviorTreeConfig"]
+@dataclass(frozen=True)
+class BehaviorWriteConfig:
+    lock_ttl_seconds: int = 30
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.lock_ttl_seconds <= 3_600:
+            raise ValueError("lock_ttl_seconds must be between 1 and 3600")
+
+
+__all__ = ["BehaviorTreeConfig", "BehaviorWriteConfig"]

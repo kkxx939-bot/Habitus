@@ -94,7 +94,7 @@ def line():  # type: ignore[no-untyped-def]
     """前一天晚上说了"和老王约好明天游泳"的那几个周一。"""
 
     rows = [
-        Seen(at(day - timedelta(days=1), 21, 0), at(day - timedelta(days=1), 21, 5), SWIM, f"behavior://swim-{day}.md")
+        Seen(at(day - timedelta(days=1), 21, 0), at(day - timedelta(days=1), 21, 5), SWIM, f"occ:swim-{day}.md")
         for day in sorted(SWIM_DAYS)
     ]
     return timeline_of(rows, lane="session", slot_minutes=15, horizon=NIGHT)
@@ -165,7 +165,7 @@ def test_after_relabelling_the_unit_reads_low_with_the_suppressor_and_normal_wit
     standing = climb(history.of(GYM), today.account, now=now, tolerance=Tolerance(line=2 / 3), evidence=EVIDENCE)
     plain = Input(today, standing)
     swim_again = Input(
-        Expectation(**{**today.__dict__, "antecedents": (Antecedent(RELATION, True, False, "behavior://swim.md"),)}),
+        Expectation(**{**today.__dict__, "antecedents": (Antecedent(RELATION, True, False, "occ:swim.md"),)}),
         standing,
     )
     low = unit_reading((swim_again,), history.of(GYM), now=now, evidence=EVIDENCE, prior_share=1 / 3)
@@ -306,14 +306,14 @@ def test_relabelling_credits_each_moment_to_the_most_specific_established_combin
     # 约游泳之前半小时先约了教练的那几个周一：条件成立
     coached = sorted(SWIM_DAYS)[:2]
     rows = [
-        Seen(at(day - timedelta(days=1), 21, 0), at(day - timedelta(days=1), 21, 5), SWIM, f"behavior://swim-{day}.md")
+        Seen(at(day - timedelta(days=1), 21, 0), at(day - timedelta(days=1), 21, 5), SWIM, f"occ:swim-{day}.md")
         for day in sorted(SWIM_DAYS)
     ] + [
         Seen(
             at(day - timedelta(days=1), 20, 30),
             at(day - timedelta(days=1), 20, 40),
             coach,
-            f"behavior://coach-{day}.md",
+            f"occ:coach-{day}.md",
         )
         for day in coached
     ]
@@ -360,7 +360,7 @@ def test_a_record_names_the_occurrence_of_a_natural_hit_only_and_round_trips() -
     """裁定 81：自然命中带着结算认出的那次发生（一次发生只算给一刻用），落空与不知道的不带。"""
 
     item = gym(TUESDAYS[1])
-    found = "behavior://occurrences/2026/07/14/gym.md"
+    found = "habitus://occurrences/session/2026/07/14/gym.md"
     came = record_of(item, answers()[item.expectation_id], occurrence_uri=found)
     assert came.occurrence_uri == found and decode_record(encode_record(came)) == came
     missed = AccountFact(item.account, item.formed_at, False, 1.0, "过期待决", item.expectation_id)

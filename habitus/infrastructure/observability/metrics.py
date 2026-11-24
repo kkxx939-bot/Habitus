@@ -128,7 +128,6 @@ _BEHAVIOR_COUNTERS: tuple[tuple[str, str, str], ...] = (
     ("reduction_publish", "gaps", "behavior_gaps_published_total"),
     ("kind_pick", "not_events", "behavior_kind_not_events_total"),
     ("kind_pick", "model_calls", "behavior_kind_model_calls_total"),
-    ("semantic_refresh", "failed_days", "behavior_semantic_refresh_failures_total"),
 )
 # 行为管线的时效：小时级的等待放不进操作时长直方图的桶，按最近一次的值记 gauge。
 _BEHAVIOR_GAUGES: tuple[tuple[str, str, str], ...] = (

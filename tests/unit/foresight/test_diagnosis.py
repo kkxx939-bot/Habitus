@@ -81,7 +81,7 @@ def _expectation(**overrides: object) -> Expectation:
         formed_at=FORMED,
         source="事件",
         trigger="session|s-k0001|s-k0003|chain",
-        trigger_instance="behavior://wake.md",
+        trigger_instance="occ:wake.md",
         window=(FORMED + timedelta(minutes=10), FORMED + timedelta(minutes=40)),
         deadline=FORMED + timedelta(hours=2),
         basis=(),

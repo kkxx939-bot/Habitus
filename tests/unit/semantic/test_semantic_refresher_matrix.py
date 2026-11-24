@@ -8,10 +8,9 @@ from pathlib import Path
 import pytest
 
 from habitus.infrastructure.store.contracts.path_lock import PathLock
+from habitus.infrastructure.tree.overview import Overview, OverviewFormatError
 from habitus.memory.model import MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.semantic import (
-    MemoryOverview,
-    MemoryOverviewFormatError,
     MemorySemanticConfig,
     MemorySemanticRefresher,
     MemorySemanticRefreshError,
@@ -90,7 +89,7 @@ def test_overview_lists_cards_by_template_and_abstract_counts_items(tmp_path: Pa
 
     overview_text = read_layer(instance, MemoryDirectory.preferences(), MemoryLevel.OVERVIEW)
     abstract_text = read_layer(instance, MemoryDirectory.preferences(), MemoryLevel.ABSTRACT)
-    overview = MemoryOverview.parse(MemoryDirectory.preferences(), overview_text)
+    overview = Overview.parse(MemoryDirectory.preferences().label, overview_text)
     (line,) = overview.cards
     assert line.filename == instance.tree.path_for(card.address).name
     assert line.description == registry().get(MemoryKind.PREFERENCE).overview_line(card.fields)
@@ -117,8 +116,8 @@ def test_parent_overview_lists_child_directories_with_item_counts(tmp_path: Path
     instance = make_refresher(tmp_path)
     instance.tree.write(document(MemoryKind.ENTITY))
     instance.refresh_for(document(MemoryKind.ENTITY).address)
-    overview = MemoryOverview.parse(
-        MemoryDirectory.entities(),
+    overview = Overview.parse(
+        MemoryDirectory.entities().label,
         read_layer(instance, MemoryDirectory.entities(), MemoryLevel.OVERVIEW),
     )
     assert overview.cards == ()
@@ -133,8 +132,8 @@ def test_cards_are_ordered_newest_first(tmp_path: Path) -> None:
     instance.tree.write(older)
     instance.tree.write(newer)
     instance.refresh_directory(MemoryDirectory.preferences())
-    overview = MemoryOverview.parse(
-        MemoryDirectory.preferences(),
+    overview = Overview.parse(
+        MemoryDirectory.preferences().label,
         read_layer(instance, MemoryDirectory.preferences(), MemoryLevel.OVERVIEW),
     )
     assert tuple(card.name for card in overview.cards) == ("新主题", "旧主题")
@@ -145,8 +144,8 @@ def test_direct_entry_limit_keeps_newest_cards_and_counts_omitted(tmp_path: Path
     for index in range(3):
         instance.tree.write(preference(f"主题{index}", minutes=index))
     instance.refresh_directory(MemoryDirectory.preferences())
-    overview = MemoryOverview.parse(
-        MemoryDirectory.preferences(),
+    overview = Overview.parse(
+        MemoryDirectory.preferences().label,
         read_layer(instance, MemoryDirectory.preferences(), MemoryLevel.OVERVIEW),
     )
     assert tuple(card.name for card in overview.cards) == ("主题2", "主题1")
@@ -159,7 +158,7 @@ def test_overview_character_bound_drops_oldest_cards_first(tmp_path: Path) -> No
     for index in range(2):
         instance.tree.write(preference(f"主题{index}", minutes=index))
     full = instance._overview(MemoryDirectory.preferences())
-    bound = len(MemoryOverview(full.directory, full.cards[:1], full.children, 1).render())
+    bound = len(Overview(full.label, full.cards[:1], full.children, 1).render())
     limited = make_refresher(tmp_path, config=MemorySemanticConfig(max_overview_chars=bound, max_abstract_chars=10))
     overview = limited._overview(MemoryDirectory.preferences())
     assert tuple(card.name for card in overview.cards) == ("主题1",)
@@ -200,8 +199,8 @@ def test_empty_directory_without_layers_is_unchanged(tmp_path: Path) -> None:
     ],
 )
 def test_overview_parse_rejects_text_that_is_not_this_template(text: str) -> None:
-    with pytest.raises(MemoryOverviewFormatError):
-        MemoryOverview.parse(MemoryDirectory.preferences(), text)
+    with pytest.raises(OverviewFormatError):
+        Overview.parse(MemoryDirectory.preferences().label, text)
 
 
 def test_rebuild_returns_empty_for_missing_subtree(tmp_path: Path) -> None:
@@ -232,8 +231,8 @@ def test_rebuild_replaces_a_non_template_overview(tmp_path: Path) -> None:
     instance.tree.write(preference("回答风格"))
     instance.tree.write_layers(MemoryDirectory.preferences(), abstract="旧简介", overview="# 旧的模型概览\n")
     instance.rebuild(MemoryDirectory.preferences())
-    MemoryOverview.parse(
-        MemoryDirectory.preferences(),
+    Overview.parse(
+        MemoryDirectory.preferences().label,
         read_layer(instance, MemoryDirectory.preferences(), MemoryLevel.OVERVIEW),
     )
 

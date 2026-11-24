@@ -1,4 +1,4 @@
-"""Conversation Summary 的稳定来源引用与检索结果（不冒充 ``memory://`` 节点）。"""
+"""Conversation Summary 的稳定来源引用与检索结果（不冒充树上的卡片节点）。"""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class ConversationSummaryStage(str, Enum):
 
 @dataclass(frozen=True)
 class ConversationSummaryReference:
-    """无需把 Summary 冒充 memory:// 节点的严格来源引用。"""
+    """无需把 Summary 冒充树上卡片节点的严格来源引用。"""
 
     address: ConversationAddress
     stage: ConversationSummaryStage

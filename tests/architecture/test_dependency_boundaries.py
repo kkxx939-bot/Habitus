@@ -43,6 +43,9 @@ RETIRED_NAMES = (
     "route_executor",
     "memoryos://",
     "viking://",
+    # 合成一棵 habitus 树之后（裁定 112）两个旧协议名退出：生产代码里连注释都不许再出现
+    "memory://",
+    "behavior://",
 )
 
 
@@ -274,7 +277,7 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     assert behavior_dependency_violations == []
 
     # 模型调用收敛在受控触点：会话 lane 的描述、词表（选词经
-    # ``kinds/calls.py`` 这一个文件）、行为树语义面生成。
+    # ``kinds/calls.py`` 这一个文件）。每天的模型概览已删（裁定 112）。
     # 存储、派生与落盘路径仍不得渗入。
     model_callers = sorted(
         path.relative_to(SRC).as_posix()
@@ -285,7 +288,6 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     assert model_callers == [
         "behavior/fusion/lanes/session/service.py",
         "behavior/kinds/calls.py",
-        "behavior/semantic/generator.py",
     ]
 
     # 直接依赖收敛了还不够：只查一跳的话，``derivation → result → service → ModelClient``
@@ -371,9 +373,7 @@ def test_reduction_modules_reach_the_model_only_through_the_runner() -> None:
 
     behavior_root = SRC / "behavior"
     graph: dict[str, Path] = {}
-    # 图必须纳入 semantic：runner → semantic.refresher → semantic.generator → ModelClient
-    # 是真实两跳链，图外的中转会让泄漏不可见（"判断存储就是这么漏掉的"的同构盲区）。
-    for package in ("reduction", "kinds", "fusion", "semantic"):
+    for package in ("reduction", "kinds", "fusion"):
         package_root = behavior_root / package
         for path in package_root.rglob("*.py"):
             if "__pycache__" in path.parts:
@@ -413,22 +413,6 @@ def test_reduction_modules_reach_the_model_only_through_the_runner() -> None:
         and reaches_model_client(module, set())
     )
     assert leaking == [], f"这些归约确定性模块传递性地依赖了 ModelClient: {leaking}"
-
-    # semantic 包自身的确定性模块（model/config/refresher 的纯逻辑面）同样不许直接碰模型；
-    # refresher 经 generator 协议触达是设计路径，generator 与包 __init__ 是仅有的白名单。
-    semantic_allowed = {
-        "habitus.behavior.semantic",
-        "habitus.behavior.semantic.generator",
-        "habitus.behavior.semantic.refresher",
-    }
-    semantic_leaking = sorted(
-        module
-        for module in graph
-        if module.startswith("habitus.behavior.semantic")
-        and module not in semantic_allowed
-        and reaches_model_client(module, set())
-    )
-    assert semantic_leaking == [], f"这些语义层确定性模块传递性地依赖了 ModelClient: {semantic_leaking}"
 
 
 def test_the_prediction_tree_is_gone_for_good() -> None:
@@ -779,7 +763,6 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
         "habitus.behavior.fusion",
         "habitus.behavior.kinds",
         "habitus.behavior.observation",
-        "habitus.behavior.semantic",
     )
     assert _scene_modules_reaching(graph, *behavior_write_side) == []
     # 旧树不许回来：目录名与模块名一起钉（2026-09-26 删的旧语义树，2026-10-07 删的假设 / 账本 / 关系投影，
@@ -1316,7 +1299,7 @@ def test_input_too_large_and_content_safety_are_classified_only_through_model_de
         or (isinstance(node, ast.ImportFrom) and any(alias.name in named for alias in node.names))
     )
     assert offenders == []
-    # 用到这一组的地方：会话 lane 的模型触点（含每晚重试的分类）、词表的模型触点、组合根给概览刷新的重试账
+    # 用到这一组的地方：会话 lane 的模型触点（含每晚重试的分类）。组合根给概览刷新的重试账随模型概览一起删了（裁定 112）
     users = sorted(
         path.relative_to(SRC).as_posix()
         for root in ("behavior", "runtime", "infrastructure")
@@ -1329,7 +1312,6 @@ def test_input_too_large_and_content_safety_are_classified_only_through_model_de
     )
     assert users == [
         "behavior/fusion/lanes/session/service.py",
-        "runtime/behavior.py",
     ]
 
 
@@ -1411,3 +1393,36 @@ def test_windows_support_imports_only_the_standard_library() -> None:
     assert violations == []
     pyproject = (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8").casefold()
     assert "pywin32" not in pyproject
+
+
+def test_only_the_reduction_publishes_occurrences_and_gaps() -> None:
+    """事件与空白只增、只有一个写入口（观测 → 融合 → 归约）：生产代码里只有归约的 runner 引用只增写入器（裁定 112 把这条
+    从"代码事实"变成测试）。"""
+
+    writers = sorted(
+        path.relative_to(SRC).as_posix()
+        for path in production_files()
+        if any(module == "habitus.behavior.tree.writer" for module in imported_modules(path))
+    )
+    assert writers == ["behavior/reduction/runner.py"]
+
+
+def test_the_shared_tree_layer_knows_no_domain() -> None:
+    """公共存储层（``infrastructure/tree``）只认路径、编码、文件外壳与锁键，不认识四类卡片或事件、空白的类型（裁定 112）：
+    它只引用 ``foundation`` 与 ``infrastructure`` 自己；协议名全仓只在它的 ``address.py`` 定义一次。"""
+
+    tree_root = SRC / "infrastructure" / "tree"
+    assert tree_root.is_dir()
+    leaking = sorted(
+        f"{path.relative_to(SRC).as_posix()} -> {root}"
+        for path in tree_root.rglob("*.py")
+        for root in imported_roots(path)
+        if (root in PRODUCTION_ROOTS or root in {"integrations", "benchmark"}) and root not in {"foundation", "infrastructure"}
+    )
+    assert leaking == []
+    defining = sorted(
+        path.relative_to(SRC).as_posix()
+        for path in production_files()
+        if 'SCHEME = "habitus"' in path.read_text(encoding="utf-8")
+    )
+    assert defining == ["infrastructure/tree/address.py"]

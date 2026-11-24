@@ -59,7 +59,7 @@ def test_pending_chains_become_rows_and_consumed_ones_do_not(tmp_path) -> None:
         BehaviorReductionEntry(
             chain_digest="a" * 64,
             kind="occurrence",
-            uri="behavior://occurrences/2026/08/16/收拾球包--x.md",
+            uri="habitus://occurrences/session/2026/08/16/收拾球包--x.md",
             judgement_ids=(record_id("done"),),
             staged_at="2026-08-16T12:00:00Z",
             reduction_version="test",

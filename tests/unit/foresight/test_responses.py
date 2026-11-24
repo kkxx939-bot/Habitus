@@ -23,7 +23,7 @@ def expectation(identity: str, *, deadline_hours: int) -> Expectation:
         formed_at=formed,
         source="日子",
         trigger="rel",
-        trigger_instance=f"behavior://{identity}.md",
+        trigger_instance=f"occ:{identity}.md",
         window=(formed, formed + timedelta(minutes=30)),
         deadline=formed + timedelta(hours=deadline_hours),
         basis=(),

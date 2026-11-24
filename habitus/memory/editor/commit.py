@@ -18,7 +18,8 @@ from typing import Any
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.memory.document import MemoryDocument, MemoryDocumentMetadata, MemoryStoredLink
+from habitus.infrastructure.tree.metadata import DocumentMetadata
+from habitus.memory.document import MemoryDocument, MemoryStoredLink
 from habitus.memory.editor.identity import (
     MemoryFinalIdentityMap,
     MemoryNodeDisposition,
@@ -333,7 +334,7 @@ class MemoryCommitWriter:
             assert isinstance(logical.before.value, MemoryDocument)
             metadata = logical.before.value.metadata.next_revision(timestamp)
         else:
-            metadata = MemoryDocumentMetadata.initial(timestamp)
+            metadata = DocumentMetadata.initial(timestamp)
         return self.tree.document_codec.build(
             logical.kind,
             logical.fields,

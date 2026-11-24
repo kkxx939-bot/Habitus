@@ -104,7 +104,7 @@ def all_kind_candidates() -> dict[str, object]:
     return result
 
 
-def list_more(directory: str = "memory://preferences") -> dict[str, object]:
+def list_more(directory: str = "habitus://preferences") -> dict[str, object]:
     return {
         "status": "insufficient",
         "action": "memory_list",
@@ -177,7 +177,7 @@ def test_loop_returns_model_candidates_without_second_semantic_review(tmp_path: 
 
 
 def test_final_round_insufficient_on_empty_tree_ends_retrieval_and_still_extracts(tmp_path: Path) -> None:
-    provider = QueueProvider([list_more(), list_more("memory://entities"), ended_insufficient(), all_kind_candidates()])
+    provider = QueueProvider([list_more(), list_more("habitus://entities"), ended_insufficient(), all_kind_candidates()])
     loop = extraction_loop(
         tmp_path,
         [],
@@ -250,7 +250,7 @@ def test_read_outside_the_listing_still_fails_instead_of_ending_at_limit(tmp_pat
     """读名字清单、列目录结果和一跳关系之外的地址明确失败，不当作在上限处结束。"""
 
     MemoryTree(tmp_path / "memory").write(document(MemoryKind.PROFILE))
-    responses = [read_more("memory://preferences/未列出.md"), ended_insufficient(), empty_candidates()]
+    responses = [read_more("habitus://preferences/未列出.md"), ended_insufficient(), empty_candidates()]
     loop = extraction_loop(
         tmp_path,
         responses,
@@ -276,7 +276,7 @@ def test_loop_executes_one_list_then_finishes_with_auditable_observation(tmp_pat
         "finish",
     )
     assert len(result.retrieval_observations) == 1
-    assert result.retrieval_observations[0].inputs == ("memory://preferences",)
+    assert result.retrieval_observations[0].inputs == ("habitus://preferences",)
 
 
 def test_name_listing_goes_into_the_first_round_and_listed_cards_can_be_read(tmp_path: Path) -> None:
@@ -594,17 +594,17 @@ def test_a_content_search_returns_matching_cards_with_snippets_and_makes_them_re
             )
         )
     tree.write(document(MemoryKind.TOOL, fields={"tool_name": "net.ping", "verification": "看丢包率。"}))
-    provider = QueueProvider([search_more("剩余空间", directory="memory://tools"), finish(), empty_candidates()])
+    provider = QueueProvider([search_more("剩余空间", directory="habitus://tools"), finish(), empty_candidates()])
     config = MemoryExtractionConfig(max_search_results=2)
 
     result = asyncio.run(extraction_loop(tmp_path, [], provider=provider, config=config).extract(segment()))
 
     observation = result.retrieval_observations[0]
-    assert observation.inputs == ("memory://tools", "剩余空间")
+    assert observation.inputs == ("habitus://tools", "剩余空间")
     assert len(observation.result_uris) == 2
-    assert all(uri.startswith("memory://tools/disk.") for uri in observation.result_uris)
+    assert all(uri.startswith("habitus://tools/disk.") for uri in observation.result_uris)
     second = json.loads(str(provider.requests[1].messages[-1].content).split("\n", 1)[1])
-    lines = second["searched"]["memory://tools 剩余空间"]
+    lines = second["searched"]["habitus://tools 剩余空间"]
     assert len(lines) == 2 and all("剩余空间" in line and "（disk." in line for line in lines)
 
     found = observation.result_uris[0]
@@ -618,7 +618,7 @@ def test_a_content_search_returns_matching_cards_with_snippets_and_makes_them_re
 
     refused = [
         search_more("剩余空间"),
-        read_more("memory://tools/net.ping.md"),
+        read_more("habitus://tools/net.ping.md"),
         ended_insufficient(),
         empty_candidates(),
     ]

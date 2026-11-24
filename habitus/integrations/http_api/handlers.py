@@ -344,7 +344,7 @@ class RuntimeHTTPHandlers:
         )
 
     async def list_memory(self, uri: str | None = None) -> MemoryListResult:
-        """列记忆树的一个目录（省略是根）：子目录、文档的 ``memory://`` 地址与目录摘要，不给文件路径。"""
+        """列记忆树的一个目录（省略是根）：子目录、文档的 ``habitus://`` 地址与目录摘要，不给文件路径。"""
 
         listing = await self.runtime.list_memory(uri)
         return MemoryListResult(

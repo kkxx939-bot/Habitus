@@ -180,7 +180,7 @@ def runner_with_fakes(store: MemoryJobStore, *, executor_error: BaseException | 
             events.append("execute")
             if executor_error is not None:
                 raise executor_error
-            job = store.record_written(lease, changed_uris=("memory://profile.md",), deleted_uris=())
+            job = store.record_written(lease, changed_uris=("habitus://profile.md",), deleted_uris=())
             return SimpleNamespace(commit="commit", job=job, summary_generated=True)
 
     class Finalizer:
@@ -195,7 +195,7 @@ def runner_with_fakes(store: MemoryJobStore, *, executor_error: BaseException | 
 
 def test_runner_resumes_a_job_whose_cards_are_written_without_replanning_or_rewriting(tmp_path: Path) -> None:
     store, lease = claimed_job(tmp_path)
-    written = store.record_written(lease, changed_uris=("memory://profile.md",), deleted_uris=())
+    written = store.record_written(lease, changed_uris=("habitus://profile.md",), deleted_uris=())
     runner, events = runner_with_fakes(store)
 
     result = asyncio.run(runner.run_claimed(MemoryJobClaim(MemoryJobLease(written))))
@@ -203,7 +203,7 @@ def test_runner_resumes_a_job_whose_cards_are_written_without_replanning_or_rewr
     assert result.recovered
     assert result.commit is None
     assert result.job.status is MemoryJobStatus.COMMITTED
-    assert events == ["finalize:('memory://profile.md',)"]
+    assert events == ["finalize:('habitus://profile.md',)"]
 
 
 def test_runner_normal_path_executes_once_then_finalizes_with_summary_generation_flag(tmp_path: Path) -> None:
@@ -216,7 +216,7 @@ def test_runner_normal_path_executes_once_then_finalizes_with_summary_generation
     assert result.summary_generated
     assert result.commit == "commit"
     assert result.job.status is MemoryJobStatus.COMMITTED
-    assert events == ["execute", "finalize:('memory://profile.md',)"]
+    assert events == ["execute", "finalize:('habitus://profile.md',)"]
 
 
 def test_runner_failure_records_a_retryable_job(tmp_path: Path) -> None:

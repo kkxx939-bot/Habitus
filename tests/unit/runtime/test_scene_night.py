@@ -56,7 +56,7 @@ def site_with_three_bedtimes(tmp_path) -> tuple[Site, ConceptHitStore]:
     """前三天各一条就寝，直接写进命中盘、盖好章（行为树上没有这几天：它们不在序列里，封口不碰它们）。"""
 
     site = Site(tmp_path, now=NOW)
-    hits = ConceptHitStore(tmp_path / "scene")
+    hits = ConceptHitStore(tmp_path / "scene", lane="session")
     for offset, (hour, minute) in enumerate(((23, 30), (23, 40), (23, 20))):
         day = DAY1 + timedelta(days=offset)
         hits.write(record(day, "睡觉", hour, minute, "就寝"))

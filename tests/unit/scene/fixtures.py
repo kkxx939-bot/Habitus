@@ -57,7 +57,7 @@ def publish(
         **overrides,
     )
     document = writer.publish(BehaviorKind.OCCURRENCE, payload)
-    return str(BehaviorURI.from_address(document.address))
+    return str(BehaviorURI.from_address(document.address, "session"))
 
 
 def publish_gap(
@@ -81,14 +81,14 @@ def publish_gap(
         BehaviorKind.GAP,
         gap_payload(occurred_on=day, gap_kind=kind, started_at=at(day, start[0], start[1]), ended_at=ended),
     )
-    return str(BehaviorURI.from_address(document.address))
+    return str(BehaviorURI.from_address(document.address, "session"))
 
 
 class Site:
     """一棵真实的行为树 + 一个可拨的时钟。"""
 
     def __init__(self, tmp_path: Path, *, now: datetime) -> None:
-        self.behavior_tree = BehaviorTree(tmp_path / "behavior" / "tree")
+        self.behavior_tree = BehaviorTree(tmp_path / "behavior" / "tree", lane="session")
         self.now = now
         self.lock_store = ProcessLocalLockStore()
 

@@ -31,7 +31,7 @@ def expectation(**overrides: object) -> Expectation:
         formed_at=FORMED,
         source="事件",
         trigger="session|s-k0001|s-k0002|chain",
-        trigger_instance="behavior://flight.md",
+        trigger_instance="occ:flight.md",
         window=(FORMED + timedelta(minutes=4), FORMED + timedelta(minutes=51)),
         deadline=FORMED + timedelta(hours=3),
         basis=(),

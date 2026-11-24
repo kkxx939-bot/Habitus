@@ -145,15 +145,18 @@ def test_each_lane_gets_its_own_whole_pipeline_and_they_share_only_the_chat_clie
     from habitus.behavior.reduction import DEFAULT_SWEEP_LOCK_TTL_SECONDS
 
     root = runtime.config.behavior_root
-    assert [(branch.lane.value, branch.tree.root) for branch in branches] == [
-        ("session", (root / "session" / "tree").resolve()),
-        ("physical", (root / "physical" / "tree").resolve()),
+    # 一棵 habitus 树、两支各一个视图（裁定 112）
+    tree_root = runtime.config.tree_root.resolve()
+    assert [(branch.lane.value, branch.tree.root, branch.tree.lane) for branch in branches] == [
+        ("session", tree_root, "session"),
+        ("physical", tree_root, "physical"),
     ]
     assert isinstance(branches.session.fusion, SessionLane)
     assert isinstance(branches.physical.fusion, PhysicalLane)
     # 脏日日志只有语义树夜批读（只接会话一支）；这份配置没开语义树，两支都不记——没人截，记了只会一直长（L10.3）
     assert [branch.reduction_runner.dirty_days for branch in branches] == [None, None]
-    # 生命周期骨架自己的状态：两支的刷新重试账、会话源的恢复账与每晚重试的堆都挂进同一个清理参与者（L10.10；裁定 67）
+    # 生命周期骨架自己的状态：会话源的恢复账与每晚重试的堆都挂进同一个清理参与者（L10.10；裁定 67）；两支的概览刷新重试账
+    # 随模型概览删了（裁定 112）
     (housekeeping,) = [
         item
         for item in runtime.components.workflow.lifecycle_worker._participants
@@ -162,11 +165,7 @@ def test_each_lane_gets_its_own_whole_pipeline_and_they_share_only_the_chat_clie
     assert housekeeping.backlogs == ()
     # 读不懂的进每晚重试的堆（裁定 67）；这份配置没开语义树、没有夜批来试，不建堆
     assert [branch.retry_backlog for branch in branches] == [None, None]
-    assert sorted(item.owner for item in housekeeping.retries) == [
-        "behavior-semantic-physical",
-        "behavior-semantic-session",
-        "conversation-source-recovery",
-    ]
+    assert sorted(item.owner for item in housekeeping.retries) == ["conversation-source-recovery"]
     assert branches.session.fusion.describer.client is runtime.components.models.structured_chat
     # 会话 lane 的记录一送到就封口（裁定 31），物理 lane 仍等满窗口
     assert (branches.session.reduction_runner.seal_on_arrival, branches.physical.reduction_runner.seal_on_arrival) == (
@@ -177,7 +176,7 @@ def test_each_lane_gets_its_own_whole_pipeline_and_they_share_only_the_chat_clie
         assert behavior.reduction_runner.context_lookback_seconds == FUSION_CONTEXT_LOOKBACK_SECONDS
         assert behavior.fusion.recorder.primary_subject == SUBJECT
         assert behavior.fusion.recorder.coverage is behavior.coverage
-        assert behavior.kind_store.catalog_path == behavior.tree.root / "kinds.md"
+        assert behavior.kind_store.catalog_path == root / behavior.lane.value / "kinds.md"
         # 这一支选的是它自己那条 lane 的词；选词与组合根共用同一个模型客户端（另起的结构化客户端只换重问次数）
         assert behavior.reduction_runner.kinds.lane is behavior.lane and behavior.picker.vocabulary.lane is behavior.lane
         assert behavior.picker.caller.client.client is runtime.components.models.structured_chat.client
@@ -198,7 +197,7 @@ def test_each_lane_gets_its_own_whole_pipeline_and_they_share_only_the_chat_clie
 
 
 def test_every_behaviour_override_reaches_the_component_that_uses_it(tmp_path: Path) -> None:
-    """E18：配置里写的保护上限真的交到用它的组件上（物理 lane、会话 lane、行为树文档、文档写锁、语义概览），两支都接。"""
+    """E18：配置里写的保护上限真的交到用它的组件上（物理 lane、会话 lane、事件与空白的文档、文档写锁），两支都接。"""
 
     providers = runtime_dependencies()
     runtime = build_runtime(
@@ -208,7 +207,6 @@ def test_every_behaviour_override_reaches_the_component_that_uses_it(tmp_path: P
             session_max_step_chars=99,
             document_max_encoded_bytes=4096,
             write_lock_ttl_seconds=45,
-            semantic_max_prompt_chars=5000,
         ),
         providers=providers,
         path_lock=PathLock(ProcessLocalLockStore()),
@@ -221,19 +219,15 @@ def test_every_behaviour_override_reaches_the_component_that_uses_it(tmp_path: P
         runner = branch.reduction_runner
         assert branch.tree.document_config.max_encoded_bytes == 4096
         assert runner.write_config is not None and runner.write_config.lock_ttl_seconds == 45
-        assert runner.semantic_refresher is not None
-        assert runner.semantic_refresher.config.max_prompt_chars == 5000
-        assert runner.semantic_refresher.generator.config.max_prompt_chars == 5000
 
 
 def test_a_physical_delivery_reaches_the_tree_end_to_end_through_the_runtime(tmp_path: Path) -> None:
     """全链路接缝：物理 lane 的正门 → 一段一条判断（不调模型）→ 归约 sweep → 行为树上的行为与「未观测」空白。
 
-    语义层的模型响应故意给垃圾：刷新按设计降级成信号、不阻塞归约——树上必须已有 occurrence。
+    事件与空白落到 habitus 树里物理这一支的目录下；归约不调别的模型（每天的模型概览已删，裁定 112）。
     """
 
     # 唯一的模型调用是物理 lane 在归约里的选词：这一条答"表里没有"，落成「表外」。
-    # 之后的语义层调用也会拿到它——对语义层是垃圾，按设计降级成信号。
     providers = scripted_dependencies([PICK_BODY])
     runtime = build_runtime(
         behavior_enabled_config(tmp_path),
@@ -273,8 +267,11 @@ def test_a_physical_delivery_reaches_the_tree_end_to_end_through_the_runtime(tmp
     assert behavior.observations.list() == ()
     late = asyncio.run(runtime.deliver_physical({**payload, "delivery_id": "delivery-e2e-late"}))
     assert {item.disposition for item in late} == {UnitDisposition.ALREADY_RECORDED}
-    # 语义层被垃圾响应打断：降级为信号，不阻塞归约
-    assert any("semantic refresh failed" in note for note in report.dropped_edges)
+    # 落在物理这一支的目录下，没有任何概览文件
+    tree_root = runtime.config.tree_root
+    assert [path.parts[-6:-4] for path in (tree_root / "occurrences").rglob("*.md")] == [("occurrences", "physical")]
+    assert [path.parts[-6:-4] for path in (tree_root / "gaps").rglob("*.md")] == [("gaps", "physical")]
+    assert not [path for path in tree_root.rglob(".*.md")]
     # 会话那一支什么都没收到：手表的行为与空白只在物理这一支上
     session = branches.session
     assert session.judgements.list() == () and session.receipts.list() == ()
@@ -344,7 +341,9 @@ def test_storage_layout_follows_each_stores_root_contract(tmp_path: Path) -> Non
     asyncio.run(runtime.deliver_physical(physical_delivery()))
 
     root = runtime.config.behavior_root / "physical"
-    assert (runtime.config.behavior_root / "session" / "tree").is_dir()  # 另一支有自己的树，里面没有这份交付
+    # 两支在一棵 habitus 树里各有自己的目录，旧的每支一棵树不再有（裁定 112）
+    assert (runtime.config.tree_root / "occurrences" / "session").is_dir()
+    assert not (runtime.config.behavior_root / "session" / "tree").exists()
     assert not (runtime.config.behavior_root / "session" / "observations").exists()
     assert (root / "observations" / "envelopes").is_dir()
     assert (root / "fusion" / "judgements").is_dir()
@@ -499,26 +498,3 @@ def test_the_reduction_worker_skips_a_tick_when_a_real_runner_finds_the_sweep_lo
     assert sweeps and all(event.attributes.get("skipped") == "lock_busy" for event in sweeps)
     assert worker.last_error is None
 
-
-@pytest.mark.parametrize("error", ["ModelInputTooLargeError", "ModelContentSafetyError"])
-def test_the_overview_refresh_gives_up_at_once_on_input_too_large_and_content_safety(
-    tmp_path: Path, error: str
-) -> None:
-    """E7：概览刷新的重试账按 ``MODEL_DETERMINISTIC`` 分类——同一天的内容再问也一样，第一次就放弃（原先当可重试，同一天
-    调 5 次模型）。"""
-
-    import habitus.model_client as model_client
-
-    providers = runtime_dependencies()
-    runtime = build_runtime(
-        behavior_enabled_config(tmp_path),
-        providers=providers,
-        path_lock=PathLock(ProcessLocalLockStore()),
-    )
-    assert runtime.components.behavior is not None
-    day = datetime(2026, 10, 10, tzinfo=CST).date()
-    for branch in runtime.components.behavior:
-        retries = branch.reduction_runner.refresh_retries
-        assert retries is not None
-        assert retries.failed(day, getattr(model_client, error)("refused")).give_up
-        assert not retries.failed(day.replace(day=11), TimeoutError("slow")).give_up

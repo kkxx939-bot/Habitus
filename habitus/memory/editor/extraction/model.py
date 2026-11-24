@@ -122,14 +122,14 @@ class MemoryRetrievalDecision:
                 "type": ["string", "null"],
                 "minLength": 1,
                 "description": (
-                    "memory_list 要列的目录，例如 memory://entities/项目；memory_search 可以用它限定只搜这个目录，"
+                    "memory_list 要列的目录，例如 habitus://entities/项目；memory_search 可以用它限定只搜这个目录，"
                     "也可以为 null 搜全部；其他动作必须为 null。"
                 ),
             },
             uris={
                 "type": "array",
                 "items": {"type": "string", "minLength": 1},
-                "description": "memory_read 要读的完整 memory:// L2 URI，可以多个；其他动作必须为空数组。",
+                "description": "memory_read 要读的完整 habitus:// L2 URI，可以多个；其他动作必须为空数组。",
             },
             keywords={
                 "type": "array",

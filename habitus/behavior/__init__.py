@@ -6,9 +6,8 @@ from habitus.behavior.document import (
     BehaviorDocumentConfig,
     BehaviorDocumentIntegrityError,
     BehaviorDocumentLimitError,
-    BehaviorDocumentMetadata,
 )
-from habitus.behavior.model import BehaviorAddress, BehaviorDirectory, BehaviorKind, BehaviorLevel
+from habitus.behavior.model import BehaviorAddress, BehaviorDirectory, BehaviorKind
 from habitus.behavior.schema import BehaviorFieldRole, BehaviorSchemaError, BehaviorSchemaRegistry
 from habitus.behavior.tree import (
     BehaviorTree,
@@ -26,10 +25,8 @@ __all__ = [
     "BehaviorDocumentConfig",
     "BehaviorDocumentIntegrityError",
     "BehaviorDocumentLimitError",
-    "BehaviorDocumentMetadata",
     "BehaviorFieldRole",
     "BehaviorKind",
-    "BehaviorLevel",
     "BehaviorSchemaError",
     "BehaviorSchemaRegistry",
     "BehaviorTree",

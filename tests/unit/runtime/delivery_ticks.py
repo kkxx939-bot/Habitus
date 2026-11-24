@@ -47,7 +47,7 @@ def made(
         formed_at=formed,
         source=source,
         trigger=trigger,
-        trigger_instance=instance if instance is not None else f"behavior://{identity}.md",
+        trigger_instance=instance if instance is not None else f"occ:{identity}.md",
         window=window,
         deadline=deadline,
         basis=(),

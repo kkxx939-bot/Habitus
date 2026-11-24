@@ -58,14 +58,14 @@ def expectation(**overrides: object) -> Expectation:
         formed_at=FORMED,
         source="事件",
         trigger="session|s-k0001|s-k0002|chain",
-        trigger_instance="behavior://occurrences/2026/12/10/订机票--x.md",
+        trigger_instance="habitus://occurrences/session/2026/12/10/订机票--x.md",
         window=(FORMED + timedelta(minutes=4), FORMED + timedelta(minutes=51)),
         deadline=FORMED + timedelta(hours=3),
-        basis=("behavior://a.md", "behavior://b.md"),
+        basis=("occ:a.md", "occ:b.md"),
         opportunities=13,
         hits=10,
         observed_from=FORMED - timedelta(minutes=30),
-        antecedents=(Antecedent("session|s-k0001|s-k0002|chain", True, True, "behavior://x.md"),),
+        antecedents=(Antecedent("session|s-k0001|s-k0002|chain", True, True, "occ:x.md"),),
         level=1,
         generation="gen-1",
         night=DAY - timedelta(days=1),
@@ -76,14 +76,14 @@ def expectation(**overrides: object) -> Expectation:
 
 
 def test_identity_ignores_the_slot_the_moment_and_the_day() -> None:
-    first = expectation_identity("s-k0002", "事件", "rel", "behavior://x.md")
-    assert first == expectation_identity("s-k0002", "事件", "rel", "behavior://x.md")
-    assert first != expectation_identity("s-k0002", "事件", "rel", "behavior://y.md")
-    assert first != expectation_identity("s-k0002", "日子", "rel", "behavior://x.md")
+    first = expectation_identity("s-k0002", "事件", "rel", "occ:x.md")
+    assert first == expectation_identity("s-k0002", "事件", "rel", "occ:x.md")
+    assert first != expectation_identity("s-k0002", "事件", "rel", "occ:y.md")
+    assert first != expectation_identity("s-k0002", "日子", "rel", "occ:x.md")
     assert len(first) == 24
     # 离上次够久的实例带着这一簇的第一天；别的实例就是出处本身
-    assert anchor_uri("behavior://x.md@2026-10-12") == "behavior://x.md"
-    assert anchor_uri("behavior://x.md") == "behavior://x.md" and anchor_uri("2026-10-12") == "2026-10-12"
+    assert anchor_uri("occ:x.md@2026-10-12") == "occ:x.md"
+    assert anchor_uri("occ:x.md") == "occ:x.md" and anchor_uri("2026-10-12") == "2026-10-12"
 
 
 def test_every_record_round_trips_through_its_codec() -> None:
@@ -105,11 +105,11 @@ def test_every_record_round_trips_through_its_codec() -> None:
     response = Response("abc", FORMED + timedelta(minutes=1), "负", "conv-1#3-9")
     assert decode_response(encode_response(response)) == response and response.closes
     assert not Response("abc", FORMED, "中", "conv-1#3-9").closes
-    settlement = Settlement("abc", "s-k0002", DAY, FORMED + timedelta(days=1), "晚了但做了", "behavior://c.md", 12)
+    settlement = Settlement("abc", "s-k0002", DAY, FORMED + timedelta(days=1), "晚了但做了", "occ:c.md", 12)
     assert decode_settlement(encode_settlement(settlement)) == settlement
-    ruling = Ruling("abc", FORMED + timedelta(days=2), "后补", "behavior://d.md", 400)
+    ruling = Ruling("abc", FORMED + timedelta(days=2), "后补", "occ:d.md", 400)
     assert decode_ruling(encode_ruling(ruling)) == ruling
-    omission = Omission("behavior://e.md", "s-k0003", DAY, FORMED + timedelta(days=1), False)
+    omission = Omission("occ:e.md", "s-k0003", DAY, FORMED + timedelta(days=1), False)
     assert decode_omission(encode_omission(omission)) == omission
     account = item.account
     fact = AccountFact(account, FORMED, True, 0.4, "晚了但做了", "abc", offset_minutes=12)
@@ -146,7 +146,7 @@ def test_records_refuse_shapes_that_cannot_be_settled() -> None:
     with pytest.raises(ForesightError, match="timezone-aware"):
         expectation(formed_at=FORMED.replace(tzinfo=None))
     with pytest.raises(ForesightError, match="absent antecedent"):
-        Antecedent("rel", False, True, "behavior://x.md")
+        Antecedent("rel", False, True, "occ:x.md")
     with pytest.raises(ForesightError, match="说了"):
         Delivery("abc", FORMED, 1, True, "影子", 1.0)
     with pytest.raises(ForesightError, match="unspoken delivery carries no text"):
@@ -166,11 +166,11 @@ def test_records_refuse_shapes_that_cannot_be_settled() -> None:
     with pytest.raises(ForesightError, match="names the occurrence exactly"):
         Settlement("abc", "s-k0002", DAY, FORMED, "准时")
     with pytest.raises(ForesightError, match="offset exactly"):
-        Settlement("abc", "s-k0002", DAY, FORMED, "准时", "behavior://c.md", 3)
+        Settlement("abc", "s-k0002", DAY, FORMED, "准时", "occ:c.md", 3)
     with pytest.raises(ForesightError, match="后补"):
         Ruling("abc", FORMED, "后补")
     with pytest.raises(ForesightError, match="unknown ruling"):
-        Ruling("abc", FORMED, "用户说忘了", "behavior://d.md", 5)  # 回话不改判：他说的话作为行为进树（裁定 61）
+        Ruling("abc", FORMED, "用户说忘了", "occ:d.md", 5)  # 回话不改判：他说的话作为行为进树（裁定 61）
     with pytest.raises(ForesightError, match="unknown settlement outcome"):
         Settlement("abc", "s-k0002", DAY, FORMED, "多余")  # 每个机会都建，已做的照常结（裁定 49）
     with pytest.raises(ForesightError, match="unknown response polarity"):

@@ -9,6 +9,7 @@ import pytest
 
 from habitus.foundation.integrity import text_digest
 from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.tree.metadata import DocumentMetadata
 from habitus.memory.compaction import (
     MemoryFieldCompactor,
     MemoryLifecycleCommitter,
@@ -1090,7 +1091,7 @@ def test_compaction_keep_ledger_matches_exact_version_and_stays_bounded(tmp_path
         max_compaction_keeps=2,
     )
     store.initialize()
-    uris = [MemoryURI.parse(f"memory://preferences/p{index}.md") for index in range(3)]
+    uris = [MemoryURI.parse(f"habitus://preferences/p{index}.md") for index in range(3)]
     versions = [
         MemoryCompactionKeep(uri, 1, "a" * 64, None, NOW + timedelta(hours=index)) for index, uri in enumerate(uris)
     ]
@@ -1126,7 +1127,7 @@ def _operation_dict() -> dict[str, object]:
     return MemoryLifecycleOperation(
         operation_id="a" * 64,
         kind=MemoryLifecycleOperationKind.COMPACT,
-        uri=MemoryURI.parse("memory://preferences/p.md"),
+        uri=MemoryURI.parse("habitus://preferences/p.md"),
         source_revision=1,
         source_digest="b" * 64,
         source_created_at=NOW,
@@ -1167,7 +1168,7 @@ def test_lifecycle_operation_decoder_rejects_wrongly_typed_disk_fields(
 
 def _recovery_dict() -> dict[str, object]:
     return MemoryRecoveryRecord(
-        uri=MemoryURI.parse("memory://preferences/p.md"),
+        uri=MemoryURI.parse("habitus://preferences/p.md"),
         source_revision=1,
         source_created_at=NOW,
         source_digest=text_digest("原文"),
@@ -1215,7 +1216,7 @@ def test_scan_state_with_wrongly_typed_fields_is_rejected_when_read_back(
     tree = MemoryTree(tmp_path / "memory", document_codec=codec())
     state_path = tmp_path / "workflow" / "lifecycle" / "l2_scan_state.json"
     state_path.parent.mkdir(parents=True)
-    uri = "memory://preferences/p.md"
+    uri = "habitus://preferences/p.md"
     state: dict[str, object] = {
         "schema": "memory_lifecycle_scan_v2",
         "after_uri": uri,
@@ -1253,11 +1254,11 @@ def test_retirement_interrupted_after_neighbour_write_finishes_on_rerun(
     """退休一张卡片先清邻居的关联再删它（阶段 3 裁定）；删之前中断，邻居已经写成、卡片还在，留下一条只有一边的关联。
     再跑一次时这条单边关联被跳过，卡片删掉、邻居上不留悬空关联。"""
 
-    from habitus.memory.document import MemoryDocumentMetadata, MemoryLinkType, MemoryStoredLink
+    from habitus.memory.document import MemoryLinkType, MemoryStoredLink
     from habitus.memory.editor import MemoryCommitError
 
     value, _recall, _current, _refreshed = manager(tmp_path, [])
-    metadata = MemoryDocumentMetadata(revision=1, created_at=NOW, updated_at=NOW)
+    metadata = DocumentMetadata(revision=1, created_at=NOW, updated_at=NOW)
     retired_fields = {"topic": "旧偏好", "content": "- 偏好旧格式"}
     neighbour_fields = {"topic": "新偏好", "content": "- 偏好新格式"}
     retired_uri = MemoryURI.from_address(document(MemoryKind.PREFERENCE, fields=retired_fields).address)

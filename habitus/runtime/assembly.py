@@ -232,7 +232,7 @@ def build_runtime(
     memory_config = config.memory
     workflow_config = config.workflow
     tree = MemoryTree(
-        config.memory_root,
+        config.tree_root,
         document_codec=codec,
         document_config=memory_config.document,
         tree_config=memory_config.tree,
@@ -441,7 +441,7 @@ def build_runtime(
         records=(
             NoBehaviorRecords()
             if behavior_components is None
-            else BehaviorTreeRecords(tuple((branch.lane.value, branch.tree) for branch in behavior_components))
+            else BehaviorTreeRecords(tuple(branch.tree for branch in behavior_components))
         ),
         zone=config.locale.zone(),
         config=memory_config.search_service,

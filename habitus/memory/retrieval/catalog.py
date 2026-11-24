@@ -11,7 +11,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 
-from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
+from habitus.infrastructure.tree.address import PREFIX
+from habitus.infrastructure.tree.overview import Overview, OverviewCard
+from habitus.memory.model import MEMORY_DIRECTORIES, MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.recall import (
     MemoryRecallCandidate,
     MemoryRecallLifecycle,
@@ -20,7 +22,6 @@ from habitus.memory.recall import (
 )
 from habitus.memory.retrieval.records import keyword_hits
 from habitus.memory.schema import MemorySchemaRegistry
-from habitus.memory.semantic import MemoryOverview, MemoryOverviewCard
 from habitus.memory.tree import MemoryTree
 from habitus.memory.uri import MemoryURI
 
@@ -63,7 +64,7 @@ class MemoryCatalog:
     def find(self, path: str) -> CatalogCard | None:
         """按模型照抄回来的路径找卡片（普通清单、最冷一组都算）；不在清单里的找不到。"""
 
-        normalized = path.strip().removeprefix("memory://").strip("/")
+        normalized = path.strip().removeprefix(PREFIX).strip("/")
         for card in (*self.cards, *self.cold):
             if card.path == normalized:
                 return card
@@ -130,16 +131,21 @@ class MemoryCatalogReader:
             directory = pending.pop(0)
             if not self.tree.layer_exists(directory, MemoryLevel.OVERVIEW):
                 if self.tree.direct_addresses(directory) or self.tree.child_directories(directory):
-                    notes.append(f"{_label(directory)} 还没有概览，这次没有列出它的卡片")
+                    notes.append(f"{directory.label} 还没有概览，这次没有列出它的卡片")
                 continue
-            overview = MemoryOverview.parse(
-                directory,
+            overview = Overview.parse(
+                directory.label,
                 self.tree.read_layer_bounded(directory, MemoryLevel.OVERVIEW, max_bytes=self.overview_max_bytes),
             )
             cards.extend(self._card(directory, row) for row in overview.cards)
             if overview.omitted_cards:
                 omitted.append((directory, overview.omitted_cards))
-            pending.extend(MemoryDirectory((*directory.parts, child.name)) for child in overview.children)
+            # 只往卡片的目录里走：树根下还有事件与空白的目录，它们不归清单（裁定 112），不靠根概览刚好没列出它们
+            pending.extend(
+                MemoryDirectory((*directory.parts, child.name))
+                for child in overview.children
+                if directory.parts or child.name in MEMORY_DIRECTORIES
+            )
         if kinds:
             cards = [card for card in cards if card.kind in kinds]
             omitted = [(directory, count) for directory, count in omitted if _directory_kind(directory) in kinds]
@@ -171,7 +177,7 @@ class MemoryCatalogReader:
                 scanned.append(
                     CatalogCard(
                         uri=uri,
-                        path=str(uri).removeprefix("memory://"),
+                        path=uri.full_path,
                         name=self.tree.path_for(address).name.removesuffix(".md"),
                         description=self.schema_registry.get(document.kind).overview_line(document.fields),
                         kind=document.kind,
@@ -185,12 +191,12 @@ class MemoryCatalogReader:
         matched = sorted((item for item in scored if item[0]), key=lambda item: (-item[0], item[1].path))
         return tuple(card for _hits, card in matched[:limit])
 
-    def _card(self, directory: MemoryDirectory, row: MemoryOverviewCard) -> CatalogCard:
+    def _card(self, directory: MemoryDirectory, row: OverviewCard) -> CatalogCard:
         address = _address(directory, row.name)
         uri = MemoryURI.from_address(address)
         return CatalogCard(
             uri=uri,
-            path=str(uri).removeprefix("memory://"),
+            path=uri.full_path,
             name=row.name,
             description=row.description,
             kind=address.kind,
@@ -278,7 +284,7 @@ def _address(directory: MemoryDirectory, name: str) -> MemoryAddress:
         return MemoryAddress.tool(name)
     if parts[0] == "entities" and len(parts) == 2:
         return MemoryAddress.entity(parts[1], name)
-    raise ValueError(f"memory overview of {_label(directory)} lists a card where no card can live")
+    raise ValueError(f"memory overview of {directory.label} lists a card where no card can live")
 
 
 def _directory_kind(directory: MemoryDirectory) -> MemoryKind:
@@ -286,10 +292,6 @@ def _directory_kind(directory: MemoryDirectory) -> MemoryKind:
     if not parts:
         return MemoryKind.PROFILE
     return {"preferences": MemoryKind.PREFERENCE, "tools": MemoryKind.TOOL}.get(parts[0], MemoryKind.ENTITY)
-
-
-def _label(directory: MemoryDirectory) -> str:
-    return "/".join(directory.parts) or "记忆根"
 
 
 __all__ = ["CatalogCard", "MemoryCatalog", "MemoryCatalogReader"]

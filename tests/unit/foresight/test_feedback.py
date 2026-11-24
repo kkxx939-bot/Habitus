@@ -32,7 +32,7 @@ def expectation(identity: str = "hotel") -> Expectation:
         formed_at=NOW,
         source="事件",
         trigger="session|flight|hotel|chain",
-        trigger_instance="behavior://flight.md",
+        trigger_instance="occ:flight.md",
         window=(NOW + timedelta(minutes=5), NOW + timedelta(minutes=50)),
         deadline=NOW + timedelta(hours=3),
         basis=(),
@@ -50,7 +50,7 @@ def settled(outcome: str) -> Settlement:
         NOW.date(),
         NOW + timedelta(hours=4),
         outcome,
-        "behavior://hotel.md" if found else None,
+        "occ:hotel.md" if found else None,
         15 if outcome in ("提醒后发生", "早到", "晚了但做了") else None,
     )
 

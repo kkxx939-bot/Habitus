@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
-from habitus.behavior.uri import BehaviorURI
+from habitus.behavior.model import BehaviorKind
+from habitus.behavior.uri import BehaviorURI, BehaviorURIError
 from habitus.foresight.hierarchy import FLAT, KindHierarchy
 from habitus.scene.views import DayIndexCache, FlowRow
 from habitus.series.reader import admitted
@@ -14,12 +15,23 @@ if TYPE_CHECKING:
     from habitus.runtime.foresight_settlement import BehaviorReadSide
 
 
-def basis_row(cache: DayIndexCache, uri: str) -> FlowRow | None:
-    try:
-        day = BehaviorURI.parse(uri).to_address().occurred_on
-    except (TypeError, ValueError):
+def tree_day(source: str) -> date | None:
+    """出处若是树上一条事件的地址，给它那一天；不是树上的出处（``unsealed:<开始时刻>``、事件触发的开始时刻、情境触发的
+    日期——都不带 ``://``）给 None。带 ``://`` 却不是一支里的事件地址（例如退出了的旧协议写法）直接报错，不当成"找不到"，
+    否则换了地址写法之后漏改的地方只会悄悄取不到行（裁定 112）。"""
+
+    if "://" not in source:
         return None
-    return cache.day(day).by_uri.get(uri)
+    address = BehaviorURI.parse(source).to_address()
+    if address.kind is not BehaviorKind.OCCURRENCE:
+        # 出处只会是一条事件；空白的地址拿去按天找事件行，只会悄悄找不到
+        raise BehaviorURIError(f"a source on the tree must be an occurrence, not a {address.kind.value}: {source}")
+    return address.occurred_on
+
+
+def basis_row(cache: DayIndexCache, uri: str) -> FlowRow | None:
+    day = tree_day(uri)
+    return None if day is None else cache.day(day).by_uri.get(uri)
 
 
 def rows_between(cache: DayIndexCache, first: date, last: date) -> tuple[FlowRow, ...]:

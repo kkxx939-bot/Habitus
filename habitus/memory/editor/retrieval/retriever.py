@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
+from habitus.infrastructure.tree.overview import Overview
 from habitus.memory.editor.retrieval.model import (
     MemoryNameEntry,
     MemoryRelatedContext,
@@ -18,7 +19,6 @@ from habitus.memory.editor.retrieval.search import MemorySearchHit, memory_conte
 from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryLevel
 from habitus.memory.recall import MemoryRecallLifecycle
 from habitus.memory.schema import MemorySchemaRegistry
-from habitus.memory.semantic import MemoryOverview, MemoryOverviewFormatError
 from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.tree import MemoryTree
 from habitus.memory.uri import MemoryURI
@@ -109,10 +109,10 @@ def memory_directory_listing(tree: MemoryTree, directory: MemoryDirectory) -> tu
     descriptions: dict[str, tuple[str, float]] = {}
     if tree.layer_exists(directory, MemoryLevel.OVERVIEW):
         try:
-            overview = MemoryOverview.parse(
-                directory, tree.read_layer_bounded(directory, MemoryLevel.OVERVIEW, max_bytes=_OVERVIEW_MAX_BYTES)
+            overview = Overview.parse(
+                directory.label, tree.read_layer_bounded(directory, MemoryLevel.OVERVIEW, max_bytes=_OVERVIEW_MAX_BYTES)
             )
-        except (MemoryOverviewFormatError, ValueError):
+        except ValueError:
             overview = None
         if overview is not None:
             descriptions = {card.filename: (card.description, card.updated_at.timestamp()) for card in overview.cards}

@@ -177,26 +177,26 @@ def test_list_returns_direct_cards_and_child_directories_and_exposes_cards(tmp_p
     top_uri = str(MemoryURI.from_address(top.address))
     entity_uri = str(MemoryURI.from_address(entity.address))
 
-    preferences = asyncio.run(context.execute(list_decision("memory://preferences"), iteration=1))
-    entities = asyncio.run(context.execute(list_decision("memory://entities"), iteration=2))
-    project = asyncio.run(context.execute(list_decision("memory://entities/项目"), iteration=3))
+    preferences = asyncio.run(context.execute(list_decision("habitus://preferences"), iteration=1))
+    entities = asyncio.run(context.execute(list_decision("habitus://entities"), iteration=2))
+    project = asyncio.run(context.execute(list_decision("habitus://entities/项目"), iteration=3))
 
     assert preferences.action is MemoryRetrievalAction.LIST
-    assert preferences.inputs == ("memory://preferences",)
+    assert preferences.inputs == ("habitus://preferences",)
     assert preferences.result_uris == (top_uri,)
-    assert entities.result_uris == ("memory://entities/项目",)
+    assert entities.result_uris == ("habitus://entities/项目",)
     assert project.result_uris == (entity_uri,)
     assert preferences.added_uris == () and project.added_uris == ()
     assert set(context.allowed_read_uris) == {top_uri, entity_uri}
-    assert set(context.listed_directories) == {"memory://preferences", "memory://entities", "memory://entities/项目"}
+    assert set(context.listed_directories) == {"habitus://preferences", "habitus://entities", "habitus://entities/项目"}
     assert context.snapshots.snapshots == ()
 
 
 def test_repeated_list_is_cached(tmp_path: Path) -> None:
     target = preference("回答风格")
     context, _tree, _reader = extraction_context(tmp_path, documents=(target,))
-    first = asyncio.run(context.execute(list_decision("memory://preferences"), iteration=1))
-    second = asyncio.run(context.execute(list_decision("memory://preferences"), iteration=2))
+    first = asyncio.run(context.execute(list_decision("habitus://preferences"), iteration=1))
+    second = asyncio.run(context.execute(list_decision("habitus://preferences"), iteration=2))
 
     assert first.cached is False
     assert second.cached is True
@@ -205,16 +205,16 @@ def test_repeated_list_is_cached(tmp_path: Path) -> None:
 
 def test_list_of_missing_directory_is_empty(tmp_path: Path) -> None:
     context, _tree, _reader = extraction_context(tmp_path)
-    observation = asyncio.run(context.execute(list_decision("memory://tools"), iteration=1))
+    observation = asyncio.run(context.execute(list_decision("habitus://tools"), iteration=1))
     assert observation.result_uris == ()
 
 
 @pytest.mark.parametrize(
     ("directory", "message"),
     [
-        ("invalid", "valid memory:// directory"),
-        ("memory://profile.md", "requires a directory"),
-        ("memory://", "only lists"),
+        ("invalid", "valid habitus:// directory"),
+        ("habitus://profile.md", "requires a directory"),
+        ("habitus://", "only lists"),
     ],
 )
 def test_list_rejects_invalid_non_directory_and_unlistable_targets(
@@ -225,7 +225,7 @@ def test_list_rejects_invalid_non_directory_and_unlistable_targets(
         asyncio.run(context.execute(list_decision(directory), iteration=1))
 
 
-@pytest.mark.parametrize("uri", ["invalid", "memory://preferences", "memory://preferences/.overview.md"])
+@pytest.mark.parametrize("uri", ["invalid", "habitus://preferences", "habitus://preferences/.overview.md"])
 def test_read_requires_a_valid_l2_memory_uri(tmp_path: Path, uri: str) -> None:
     context, _tree, _reader = extraction_context(tmp_path)
     with pytest.raises(MemoryExtractionError, match="valid L2"):
@@ -264,7 +264,7 @@ def test_read_after_list_is_allowed(tmp_path: Path) -> None:
     context, _tree, _reader = extraction_context(tmp_path, documents=(target,))
     with pytest.raises(MemoryExtractionError, match="not exposed"):
         asyncio.run(context.execute(read_decision(uri), iteration=1))
-    asyncio.run(context.execute(list_decision("memory://preferences"), iteration=1))
+    asyncio.run(context.execute(list_decision("habitus://preferences"), iteration=1))
     observation = asyncio.run(context.execute(read_decision(uri), iteration=2))
     assert observation.added_uris == (uri,)
 
@@ -432,7 +432,7 @@ def test_observation_size_limit_is_enforced_after_action(tmp_path: Path) -> None
         config=MemoryExtractionConfig(max_observation_chars=1),
     )
     with pytest.raises(MemoryExtractionError, match="observation exceeds"):
-        asyncio.run(context.execute(list_decision("memory://preferences"), iteration=1))
+        asyncio.run(context.execute(list_decision("habitus://preferences"), iteration=1))
 
 
 def test_snapshots_and_page_ids_are_defensive_views(tmp_path: Path) -> None:
@@ -497,6 +497,6 @@ def test_names_cut_from_the_listing_by_its_token_budget_are_not_readable_until_l
     assert context.omitted_listing == 1
     with pytest.raises(MemoryExtractionError, match="not exposed"):
         asyncio.run(context.execute(read_decision(str(uris[1])), iteration=1))
-    asyncio.run(context.execute(list_decision("memory://preferences"), iteration=1))
+    asyncio.run(context.execute(list_decision("habitus://preferences"), iteration=1))
     observation = asyncio.run(context.execute(read_decision(str(uris[1])), iteration=2))
     assert observation.added_uris == (str(uris[1]),)

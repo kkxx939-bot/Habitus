@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, SnapshotState, VersionedSnapshot
-from habitus.memory.document import MemoryDocument, MemoryDocumentCodec, MemoryDocumentMetadata
+from habitus.infrastructure.tree.metadata import DocumentMetadata
+from habitus.memory.document import MemoryDocument, MemoryDocumentCodec
 from habitus.memory.model import MemoryKind
 from habitus.memory.schema import MemorySchemaRegistry
 from habitus.pre.conversation.messages import (
@@ -147,7 +148,7 @@ def document(
     revision: int = 1,
     timestamp: datetime = BASE_TIME,
 ) -> MemoryDocument:
-    metadata = MemoryDocumentMetadata(
+    metadata = DocumentMetadata(
         revision=revision,
         created_at=timestamp,
         updated_at=timestamp + timedelta(seconds=revision - 1),

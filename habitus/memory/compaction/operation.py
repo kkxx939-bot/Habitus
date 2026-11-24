@@ -25,8 +25,9 @@ from habitus.infrastructure.store.filesystem import (
     is_path_alias,
     read_regular_bytes,
 )
+from habitus.infrastructure.tree.lock_key import root_lock_prefix
 from habitus.memory.snapshot import MemorySnapshot
-from habitus.memory.tree import MemoryTree, memory_root_lock_prefix
+from habitus.memory.tree import MemoryTree
 from habitus.memory.uri import MemoryURI, decode_memory_uri
 
 
@@ -200,7 +201,7 @@ class MemoryLifecycleOperationStore:
         self.root = tree.require_outside(Path(workflow_root) / "lifecycle" / "l2_operations")
         self.max_operations = max_operations
         self.max_file_bytes = max_file_bytes
-        self._lock_prefix = memory_root_lock_prefix("memory-lifecycle-operation", tree.root)
+        self._lock_prefix = root_lock_prefix("memory-lifecycle-operation", tree.root)
 
     def initialize(self) -> None:
         ensure_owner_directory(self.root)

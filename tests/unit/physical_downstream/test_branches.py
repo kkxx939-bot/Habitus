@@ -228,7 +228,7 @@ def test_c7_a_gap_in_the_physical_closed_days_stalls_only_the_physical_branch_an
             _day(world, day)
             world.night(day + timedelta(days=1))
         # 物理一支的定稿日账上去掉 04-14：之后归约只往最后定稿日之后推，它一直断着
-        ledger = Path(world.physical.tree.root).parent / "reduction" / "day_closure.json"
+        ledger = Path(world.physical.kind_store.root) / "reduction" / "day_closure.json"
         body = json.loads(ledger.read_text(encoding="utf-8"))
         body["closed"].pop("2026-04-14")
         ledger.write_text(json.dumps(body, sort_keys=True), encoding="utf-8")

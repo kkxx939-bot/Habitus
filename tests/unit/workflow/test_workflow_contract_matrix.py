@@ -224,8 +224,8 @@ def test_job_execution_error_optionally_carries_failed_job(job: MemoryJob | None
     assert error.job is job
 
 
-PREFERENCE_URI = "memory://preferences/回答风格.md"
-TOOL_URI = "memory://tools/read_file.md"
+PREFERENCE_URI = "habitus://preferences/回答风格.md"
+TOOL_URI = "habitus://tools/read_file.md"
 
 
 @pytest.mark.parametrize("status", [MemoryJobStatus.QUEUED, MemoryJobStatus.RUNNING, MemoryJobStatus.FAILED, MemoryJobStatus.COMMITTED])
@@ -254,8 +254,8 @@ def test_written_uris_require_the_written_stage() -> None:
     [
         (TOOL_URI, PREFERENCE_URI),  # 没排序
         (PREFERENCE_URI, PREFERENCE_URI),  # 重复
-        ("memory://preferences",),  # 目录不是卡片
-        ("viking://preferences/回答风格.md",),  # 不是 memory:// 协议
+        ("habitus://preferences",),  # 目录不是卡片
+        ("viking://preferences/回答风格.md",),  # 不是 habitus:// 协议
     ],
 )
 def test_written_uris_must_be_sorted_unique_canonical_card_uris(uris: tuple[str, ...]) -> None:

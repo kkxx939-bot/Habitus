@@ -1,14 +1,16 @@
 """行为管线在组合根的组装与常驻的归约 Worker。
 
 行为侧是可选启用的：``config.behavior.primary_subject`` 留空时组合根完全跳过本模块，Runtime 与既有
-行为零差异。启用后按 lane 各接一整条、互不相通的链（两条 lane 是行为树的两个分支，各在 ``behavior/<lane>/`` 下）：
+行为零差异。启用后按 lane 各接一整条、互不相通的链（两条 lane 是 habitus 树里事件与空白的两支 ``occurrences/<lane>``、
+``gaps/<lane>``，树外的存储各在 ``behavior/<lane>/`` 下）：
 
     会话那一支：会话源的交付 → ``runtime/session_lane.py`` 的桥 → 一轮一条判断（LLM 描述 + 选词）
     物理那一支：上游的一份交付（Runtime 正门）→ 一段一条判断（不调模型）
-    每一支各自：判断 / 回执存储 → 归约 sweep（封口 → 落 kind_token（物理一支在这里选词）→ 行为树 + L0/L1 → 定稿日记账）
+    每一支各自：判断 / 回执存储 → 归约 sweep（封口 → 落 kind_token（物理一支在这里选词）→ 这一支的事件与空白 → 定稿日记账）
     → 换代、语义树、预测层（两支各一条管线；见 runtime/pipeline.py）
 
-两支不共用任何存储、词表、归约或 Worker：一支上的记录、空白、词表的词，另一支看不到（裁定 35）。
+两支不共用任何存储、词表、归约或 Worker：一支上的记录、空白、词表的词，另一支看不到（裁定 35）；树是同一棵，每一支一个
+只看得到自己那支的视图（裁定 112）。
 
 模型路由与 memory 共用同一个 structured chat client（用户裁定）。锁沿组合根现状共享
 （SQLite 锁库；取舍与观测盲区记录在 ``behavior/reduction/runner.py`` 的 sweep 锁 docstring）。
@@ -58,14 +60,11 @@ from habitus.behavior.reduction import (
 )
 from habitus.behavior.reduction.failed import ChainHandler, FailedChains
 from habitus.behavior.reduction.kinds_step import KindStamping
-from habitus.behavior.reduction.refresh import RefreshRetries
 from habitus.behavior.retry import Reduction, RetryBacklogStore, RetryBranch, RetryHandler, RetryKind, RetryStage
 from habitus.behavior.retry.reread import Rereader
-from habitus.behavior.semantic import BehaviorSemanticConfig, BehaviorSemanticRefresher, LLMBehaviorOverviewGenerator
 from habitus.behavior.tree import BehaviorTree
-from habitus.behavior.tree.config import BehaviorTreeConfig
+from habitus.behavior.tree.config import BehaviorTreeConfig, BehaviorWriteConfig
 from habitus.behavior.tree.dirty_days import DirtyDayLog
-from habitus.behavior.tree.writer import BehaviorWriteConfig
 from habitus.config import BehaviorConfig, HabitusConfig
 from habitus.config.loader import construct_overrides
 from habitus.foundation.observability import (
@@ -76,17 +75,15 @@ from habitus.foundation.observability import (
     SpanController,
     observe_operation,
 )
-from habitus.infrastructure.lifecycle import RetryLedger
 from habitus.infrastructure.store.contracts.lock import LockStore
-from habitus.model_client import MODEL_DETERMINISTIC, MODEL_UNAVAILABLE, ModelUnreachable, StructuredChatClient
+from habitus.model_client import MODEL_UNAVAILABLE, ModelUnreachable, StructuredChatClient
 from habitus.runtime.behavior_kinds import vocabulary_parts
-from habitus.runtime.lifecycle_retry import retry_ledger
 from habitus.runtime.resident import ResidentWorker
 
 
 @dataclass(frozen=True)
 class BehaviorRuntimeComponents:
-    """一条 lane 这一支的全部已组装部件：它自己的存储、融合、归约、行为树与词表。
+    """一条 lane 这一支的全部已组装部件：它自己的存储、融合、归约、树视图与词表。
 
     ``fusion`` 是这条 lane 的融合前端（会话 lane 或物理 lane），与 ``lane`` 对得上。
     ``__post_init__`` 按仓库既有纪律做**实例同一性**校验：融合、归约、Worker 引用的存储必须
@@ -133,20 +130,20 @@ class BehaviorRuntimeComponents:
         for actual, wanted, label in shared:
             if actual is not wanted:
                 raise ValueError(f"behavior components must share one {label} instance")
-        if self.kind_store.root != self.tree.root:
-            raise ValueError("behavior vocabulary files must live at the tree root")
+        if self.tree.lane != self.lane.value:
+            raise ValueError(f"behavior branch {self.lane.value} must read and write its own lane of the tree")
         if self.reduction_runner.kinds.lane is not self.lane or self.picker.vocabulary.lane is not self.lane:
             raise ValueError("a branch picks words from its own lane's vocabulary")
         if self.kind_store.lane is not self.lane:
             raise ValueError("a branch keeps its own lane's vocabulary state")
-        # 一支的全部存储在同一个根下（树在它的 ``tree/`` 里）：哪一样指到别处，都是接到了另一支上。
+        # 一支在树外的全部存储（含词表文件）在同一个根下：哪一样指到别处，都是接到了另一支上。
         root = self.observations.root
         homes = (
             ("judgements", self.judgements.root),
             ("receipts", self.receipts.root),
             ("coverage", self.coverage.root),
             ("reduction ledger", self.reduction_runner.ledger.root.parent),
-            ("tree", self.tree.root.parent),
+            ("vocabulary", self.kind_store.root),
         )
         if self.retry_backlog is not None:
             if self.retry_backlog.root != root:
@@ -169,11 +166,6 @@ class BehaviorRuntimeComponents:
 
         return self.fusion.recorder.ledger if isinstance(self.fusion, PhysicalLane) else None
 
-    @property
-    def retry_ledgers(self) -> tuple[RetryLedger, ...]:
-        refresh = self.reduction_runner.refresh_retries
-        return () if refresh is None else (refresh.ledger,)
-
 
 @dataclass(frozen=True)
 class BehaviorBranches:
@@ -187,13 +179,13 @@ class BehaviorBranches:
             branch = getattr(self, name)
             if branch.lane is not lane:
                 raise TypeError(f"behavior branch {name} must be the {lane.value} lane's components")
-        apart = (
-            ("observations", self.session.observations.root, self.physical.observations.root),
-            ("tree", self.session.tree.root, self.physical.tree.root),
-        )
-        for label, left, right in apart:
-            if left == right:
-                raise ValueError(f"the two behavior branches must not share one {label} root")
+        if self.session.observations.root == self.physical.observations.root:
+            raise ValueError("the two behavior branches must not share one observations root")
+        # 一棵树、两个视图：树根相同，支不同（裁定 112）
+        if self.session.tree is self.physical.tree or self.session.tree.lane == self.physical.tree.lane:
+            raise ValueError("the two behavior branches must use different lane views of the tree")
+        if self.session.tree.root != self.physical.tree.root:
+            raise ValueError("the two behavior branches must use one habitus tree")
 
     def __iter__(self) -> Iterator[BehaviorRuntimeComponents]:
         return iter((self.session, self.physical))
@@ -248,7 +240,7 @@ class BehaviorReductionWorker(ResidentWorker):
         while not self._stop_requested.is_set():
             started = time.monotonic()
             try:
-                # 一轮 sweep 一条 trace：成链、封口、定类型（含模型调用）、发布、摘要刷新都挂在下面。
+                # 一轮 sweep 一条 trace：成链、封口、定类型（含模型调用）、发布都挂在下面。
                 with _span(self.span_controller, "reduction_sweep"):
                     report = await self.runner.run_once()
             except BehaviorReductionBusyError:
@@ -290,7 +282,6 @@ class BehaviorDomainConfigs:
     tree: BehaviorTreeConfig
     document: BehaviorDocumentConfig
     write: BehaviorWriteConfig
-    semantic: BehaviorSemanticConfig
     kinds: BehaviorKindConfig
     session: SessionLaneConfig
     physical: PhysicalLaneConfig
@@ -311,7 +302,6 @@ def behavior_domain_configs(behavior: BehaviorConfig) -> BehaviorDomainConfigs:
         tree=domain(BehaviorTreeConfig, "tree_"),
         document=domain(BehaviorDocumentConfig, "document_"),
         write=domain(BehaviorWriteConfig, "write_"),
-        semantic=domain(BehaviorSemanticConfig, "semantic_"),
         kinds=domain(BehaviorKindConfig, "kinds_"),
         session=domain(SessionLaneConfig, "session_"),
         physical=domain(PhysicalLaneConfig, "physical_"),
@@ -364,7 +354,7 @@ def _build_branch(
     source_settled: Callable[[str], bool] | None = None,
 ) -> BehaviorRuntimeComponents:
     """一条 lane 的那一支。全部存储传**这一支的根**（各存储按自己的契约派生子路径——传子目录会造成
-    目录二次嵌套与锁键漂移，评审实测过）；归约的 sweep 锁按根派生，两支互不相抢。"""
+    目录二次嵌套与锁键漂移，评审实测过）；事件与空白在 habitus 树里这一支的视图下；归约的 sweep 锁按支派生，两支互不相抢。"""
 
     behavior_config = config.behavior
     domain = behavior_domain_configs(behavior_config)
@@ -388,9 +378,10 @@ def _build_branch(
         settled=source_settled if lane is Lane.SESSION else None,
     )
 
-    tree = BehaviorTree(root / "tree", tree_config=domain.tree, document_config=domain.document)
-    # 词表状态与选词器（``runtime.behavior_kinds``）：门槛从唯一的 Config 边界进来，模型只经 KindModelCaller 一个触点
-    kind_store, picker = vocabulary_parts(structured_chat, lane, tree.root, domain, lock_store)
+    tree = BehaviorTree(config.tree_root, lane=lane.value, tree_config=domain.tree, document_config=domain.document)
+    # 词表状态与选词器（``runtime.behavior_kinds``）：词表文件在这一支的树外根下；门槛从唯一的 Config 边界进来，模型只经
+    # KindModelCaller 一个触点
+    kind_store, picker = vocabulary_parts(structured_chat, lane, root, domain, lock_store)
     reduction_ledger = BehaviorReductionLedger(root / "reduction")
     # 重试的堆只在有换代时建（换代随语义树开）：没人来试的堆只会一直满着
     backlog = RetryBacklogStore(root, max_items=behavior_config.retry_backlog_max) if config.scene.enabled else None
@@ -403,19 +394,6 @@ def _build_branch(
         # 会话一支的判断都带着选词结果（在 lane 里选好），归约对它不调模型；物理一支在这里选
         kinds=KindStamping(picker if lane is Lane.PHYSICAL else None, lane=lane),
         ledger=reduction_ledger,
-        semantic_refresher=BehaviorSemanticRefresher(
-            tree, LLMBehaviorOverviewGenerator(structured_chat, config=domain.semantic), config=domain.semantic
-        ),
-        refresh_retries=RefreshRetries(
-            # 概览要调模型：输入超长、内容安全这两类同一份内容再问也一样，第一次就放弃（内容变了会清账重新给机会）
-            retry_ledger(
-                root,
-                owner=f"behavior-semantic-{lane.value}",
-                config=config.lifecycle.retry,
-                clock=clock,
-                deterministic=MODEL_DETERMINISTIC,
-            )
-        ),
         # 脏日日志只有换代、模型队列读序列时读（语义树开着才有换代；两支各一条管线、各记各的）
         dirty_days=DirtyDayLog(root / "reduction") if config.scene.enabled else None,
         failed_chains=FailedChains(judgements, ledger=reduction_ledger, clock=clock or _utc_now, backlog=backlog),

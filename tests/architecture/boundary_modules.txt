@@ -50,7 +50,6 @@ behavior/fusion/lanes/session/service.py
 behavior/kinds/calls.py
 # 选词的答复校验（词编号、固定选项、续的记录在不在列表里，词表方案 2026-11-14）
 behavior/kinds/pick/picker.py
-behavior/semantic/generator.py
 foresight/judge/prompt.py
 foresight/judge/service.py
 memory/compaction/l2_fields.py
@@ -130,7 +129,6 @@ behavior/observation/store.py
 behavior/reduction/kinds_step.py
 behavior/reduction/ledger.py
 behavior/reduction/record.py
-behavior/reduction/refresh_pending.py
 behavior/reduction/runner.py
 behavior/retry/model.py
 behavior/retry/store.py
@@ -178,3 +176,6 @@ infrastructure/store/filesystem/durable_io/atomic_file.py
 infrastructure/store/filesystem/durable_io/common.py
 infrastructure/store/filesystem/durable_io/windows_file.py
 infrastructure/store/filesystem/path_safety.py
+# 一棵 habitus 树的公共层：地址字符串与文件末尾注释是读回的落盘数据（裁定 112）
+infrastructure/tree/address.py
+infrastructure/tree/envelope.py

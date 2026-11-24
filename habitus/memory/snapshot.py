@@ -1,4 +1,4 @@
-"""使用严格 ``memory://`` L2 URI 读取完整记忆快照。"""
+"""使用严格 ``habitus://`` L2 URI 读取完整记忆快照。"""
 
 from __future__ import annotations
 

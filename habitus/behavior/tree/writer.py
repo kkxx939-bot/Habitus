@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -19,12 +18,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from habitus.behavior.document import BehaviorDocument, BehaviorDocumentMetadata
+from habitus.behavior.document import BehaviorDocument
 from habitus.behavior.model import BehaviorDirectory, BehaviorKind
+from habitus.behavior.tree.config import BehaviorWriteConfig
 from habitus.behavior.tree.store import BehaviorTree, BehaviorTreeConflictError
 from habitus.behavior.uri import BehaviorURI
 from habitus.infrastructure.store.contracts.lock import LockStore
 from habitus.infrastructure.store.contracts.path_lock import PathLock
+from habitus.infrastructure.tree.lock_key import root_lock_prefix, uri_lock_key
+from habitus.infrastructure.tree.metadata import DocumentMetadata
 
 
 class BehaviorPublishConflictError(RuntimeError):
@@ -40,15 +42,6 @@ class BehaviorReadBackError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class BehaviorWriteConfig:
-    lock_ttl_seconds: int = 30
-
-    def __post_init__(self) -> None:
-        if not 1 <= self.lock_ttl_seconds <= 3_600:
-            raise ValueError("lock_ttl_seconds must be between 1 and 3600")
-
-
-@dataclass(frozen=True)
 class BehaviorDocumentLockKeyspace:
     root: Path
     _prefix: str = field(init=False, repr=False)
@@ -56,17 +49,16 @@ class BehaviorDocumentLockKeyspace:
     def __post_init__(self) -> None:
         normalized = self.root.expanduser().absolute().resolve(strict=False)
         object.__setattr__(self, "root", normalized)
-        digest = hashlib.sha256(str(normalized).encode("utf-8")).hexdigest()[:24]
-        object.__setattr__(self, "_prefix", f"behavior-document:{digest}")
+        object.__setattr__(self, "_prefix", root_lock_prefix("behavior-document", normalized))
 
     def key(self, uri: BehaviorURI | str) -> str:
-        parsed = BehaviorURI.parse(uri)
-        digest = hashlib.sha256(str(parsed).encode("utf-8")).hexdigest()
-        return f"{self._prefix}:{digest}"
+        """地址带支，两支写同一天同名的事件也是两把锁。"""
+
+        return uri_lock_key(self._prefix, str(BehaviorURI.parse(uri)))
 
 
 class BehaviorDocumentWriter:
-    """纯 add-only 发布器；占用同一 behavior-root 的写入方必须共享 LockStore。"""
+    """纯 add-only 发布器；占用同一 habitus 树的写入方必须共享 LockStore。"""
 
     def __init__(
         self,
@@ -89,10 +81,10 @@ class BehaviorDocumentWriter:
         document = self.tree.document_codec.build(
             normalized_kind,
             payload,
-            metadata=BehaviorDocumentMetadata.initial(self._timestamp()),
+            metadata=DocumentMetadata.initial(self._timestamp()),
         )
-        uri = BehaviorURI.from_address(document.address)
-        directory_uri = BehaviorURI.from_directory(BehaviorDirectory.for_address(document.address))
+        uri = self.tree.uri_for(document.address)
+        directory_uri = BehaviorURI.from_directory(BehaviorDirectory.for_address(document.address), self.tree.lane)
         # 目录 URI 一并入锁：容量不变量（max_children_per_directory）跨文档，只锁文档
         # 会让两次并发发布各自通过容量检查后共同越界，且越界目录在读侧直接完整性拒绝。
         # 现有两种锁存储的 fenced 本身就全局串行（进程内一把锁、SQLite 的 BEGIN IMMEDIATE），这把目录锁在它们下面是
@@ -124,9 +116,7 @@ class BehaviorDocumentWriter:
     def _require_read_back(self, expected: BehaviorDocument) -> None:
         actual = self.tree.read(expected.address)
         if actual != expected:
-            raise BehaviorReadBackError(
-                f"behavior document read-back mismatch: {BehaviorURI.from_address(expected.address)}"
-            )
+            raise BehaviorReadBackError(f"behavior document read-back mismatch: {self.tree.uri_for(expected.address)}")
 
     def _timestamp(self) -> datetime:
         value = self.clock()
@@ -139,5 +129,4 @@ __all__ = [
     "BehaviorDocumentWriter",
     "BehaviorPublishConflictError",
     "BehaviorReadBackError",
-    "BehaviorWriteConfig",
 ]

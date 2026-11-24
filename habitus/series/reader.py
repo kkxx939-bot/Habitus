@@ -30,7 +30,7 @@ from habitus.behavior.document import BehaviorDocument
 from habitus.behavior.kinds.counted import uncounted
 from habitus.behavior.kinds.ids import KindIdError, Lane, is_word, lane_of_token
 from habitus.behavior.schema.vocabulary import PROMPTERS
-from habitus.behavior.tree import BehaviorKind, BehaviorTree
+from habitus.behavior.tree import BehaviorAddress, BehaviorKind, BehaviorTree
 from habitus.behavior.tree.dirty_days import DirtyDayLog
 from habitus.behavior.uri import BehaviorURI
 from habitus.series.model import (
@@ -86,6 +86,7 @@ class SeriesReader:
             self._documents(BehaviorKind.GAP, cutoff),
             cutoff,
             None if self.kinds is None else self.kinds(),
+            self.tree.uri_for,
         )
 
     def _forget_dirty_days(self) -> None:
@@ -126,11 +127,14 @@ def _assemble(
     gap_documents: Sequence[BehaviorDocument],
     cutoff: date,
     resolve: Callable[[str], str] | None,
+    uri_of: Callable[[BehaviorAddress], BehaviorURI],
 ) -> EventSeries:
+    """``uri_of`` 是这一支的视图给的地址（地址带支，裁定 112）。"""
+
     records: list[SeriesRecord] = []
     skipped: list[SkippedRecord] = []
     for document in occurrences:
-        uri = str(BehaviorURI.from_address(document.address))
+        uri = str(uri_of(document.address))
         day = document.address.occurred_on
         reason = skip_reason(document)
         if reason is not None:
@@ -149,7 +153,7 @@ def _assemble(
     gaps = [
         part
         for document in gap_documents
-        for part in standing_parts(_gap(document), lambda day: starts.get(day, ()))
+        for part in standing_parts(_gap(document, uri_of), lambda day: starts.get(day, ()))
         if part.started_at.date() < cutoff
     ]
     return EventSeries(
@@ -209,14 +213,14 @@ def _record(document: BehaviorDocument, uri: str, token: str, lane: Lane) -> Ser
     )
 
 
-def _gap(document: BehaviorDocument) -> SeriesGap:
+def _gap(document: BehaviorDocument, uri_of: Callable[[BehaviorAddress], BehaviorURI]) -> SeriesGap:
     raw = document.fields.get("gap_kind")
     try:
         kind = GapKind(raw)
     except ValueError as exc:
         raise SeriesError(f"unknown gap kind: {raw!r}") from exc
     return SeriesGap(
-        uri=str(BehaviorURI.from_address(document.address)),
+        uri=str(uri_of(document.address)),
         started_at=_local(document.fields.get("started_at"), "started_at"),
         ended_at=_local(document.fields.get("ended_at"), "ended_at"),
         kind=kind,

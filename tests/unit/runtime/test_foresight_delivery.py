@@ -57,7 +57,7 @@ def expectation(
         formed_at=formed,
         source=source,
         trigger=trigger,
-        trigger_instance=f"behavior://{identity}.md",
+        trigger_instance=f"occ:{identity}.md",
         window=(formed + timedelta(minutes=window[0]), formed + timedelta(minutes=window[1])),
         deadline=formed + timedelta(hours=deadline_hours),
         basis=(),
@@ -362,13 +362,13 @@ def test_the_omission_views_list_what_happened_without_a_covering_expectation(tm
         (60, "s-k0004", False),
     ):
         day = DAY0 - timedelta(days=offset)
-        ledger.record_omission(Omission(f"behavior://{kind}-{offset}.md", kind, day.date(), day, had))
+        ledger.record_omission(Omission(f"occ:{kind}-{offset}.md", kind, day.date(), day, had))
     views = run.omission_views(DAY0)
     assert [(view.kind_token, view.count, view.with_expectation) for view in views] == [
         ("s-k0003", 3, 1),
         ("s-k0004", 1, 0),
     ]
-    assert views[0].latest_uri == "behavior://s-k0003-1.md"
+    assert views[0].latest_uri == "occ:s-k0003-1.md"
 
 
 def test_at_the_window_end_the_account_is_read_again_and_the_model_is_asked_then(tmp_path) -> None:
@@ -430,11 +430,11 @@ def test_before_speaking_an_event_reminder_checks_its_antecedent_again(tmp_path)
     table = OpportunityTable("session", DAY0.date(), DAY0.date(), 15, 3, (relation,), ())
 
     def rows(kind: str):  # type: ignore[no-untyped-def]
-        seen = Seen(started, started, kind, "behavior://x.md", "订机票", "")
+        seen = Seen(started, started, kind, "occ:x.md", "订机票", "")
         return lambda uris: {uri: seen for uri in uris}
 
     def read(kind: str) -> tuple[Seen, ...]:
-        return (Seen(started, started, kind, "behavior://x.md", "订机票", ""),)
+        return (Seen(started, started, kind, "occ:x.md", "订机票", ""),)
 
     changed = JudgeMaterials(table, rows("s-k0009"), seen=read("s-k0009"))
     asyncio.run(run.run_once(DAY0 + timedelta(minutes=15), changed))
@@ -476,7 +476,7 @@ def test_a_suppressor_present_holds_the_unit_back_even_when_the_account_alone_wo
 
     run, ledger = stage(tmp_path)
     account = account_key("s-k0002", "日子", "rel")
-    cancel = Antecedent("session|cancel|s-k0002|next_day", True, False, "behavior://cancel.md")
+    cancel = Antecedent("session|cancel|s-k0002|next_day", True, False, "occ:cancel.md")
     suppressed = frozenset({account, f"{DOWN}session|cancel|s-k0002|next_day"})
     plain = frozenset({account})
     # 约了游泳（压低）的那几刻在前、平常的二十刻在后：这条边自己读高，压低的那一组读低

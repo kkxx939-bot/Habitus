@@ -15,7 +15,6 @@ from typing import Any
 from habitus.behavior.model import BehaviorKind
 from habitus.behavior.reduction.pending import PendingJudgements
 from habitus.behavior.reduction.record import ReducibleJudgement
-from habitus.behavior.semantic.model import BehaviorSemanticRefreshResult, BehaviorSemanticRefreshStatus
 from habitus.behavior.telemetry import Attributes, count_notes_by_leading_token, seconds_between
 
 _LEDGER_ONLY = "ledger-only"
@@ -136,16 +135,6 @@ def publish_attributes(documents: Sequence[Mapping[str, Any]], *, published_at: 
     return attributes
 
 
-def refresh_attributes(results: Sequence[BehaviorSemanticRefreshResult], *, days: int, failed_days: int) -> Attributes:
-    """摘要刷新：每个目录的去向；``written`` 才真的调了模型（日目录）或重写了文件。"""
-
-    statuses = Counter(result.status for result in results)
-    attributes: Attributes = {"days": days, "failed_days": failed_days}
-    for status in BehaviorSemanticRefreshStatus:
-        attributes[f"directories_{status.value}"] = statuses.get(status, 0)
-    return attributes
-
-
 def _instant(value: object) -> datetime:
     return datetime.fromisoformat(str(value))
 
@@ -154,7 +143,6 @@ __all__ = [
     "assembly_attributes",
     "kind_attributes",
     "publish_attributes",
-    "refresh_attributes",
     "seal_attributes",
     "stage_attributes",
 ]

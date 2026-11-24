@@ -226,7 +226,7 @@ class MemoryJob:
     model_waits: int = 0
     #: 卡片已经全部写进记忆树（裁定 111）：之后崩溃或失败重来，只补刷概览、清冷热状态和标完成，不再调模型提取
     cards_written: bool = False
-    #: 这一次写到的地址（新建、更新、只改关联的邻居）与删掉的地址，``memory://`` 规范形式、排序去重；
+    #: 这一次写到的地址（新建、更新、只改关联的邻居）与删掉的地址，``habitus://`` 规范形式、排序去重；
     #: 完成时据此刷概览、清冷热状态，看板据此显示卡片来自哪一段对话
     changed_uris: tuple[str, ...] = ()
     deleted_uris: tuple[str, ...] = ()
@@ -313,7 +313,7 @@ class MemoryJob:
             for value in values:
                 MemoryURI.parse(value).to_address()
                 if str(MemoryURI.parse(value)) != value:
-                    raise ValueError(f"memory job {name} must hold canonical memory:// URIs")
+                    raise ValueError(f"memory job {name} must hold canonical habitus:// URIs")
             if values != tuple(sorted(set(values))):
                 raise ValueError(f"memory job {name} must be unique and sorted")
             object.__setattr__(self, name, values)

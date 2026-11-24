@@ -19,7 +19,7 @@ from tests.unit.kind_ids import kind_id
 
 
 def build_writer(tmp_path) -> tuple[BehaviorDocumentWriter, BehaviorTree]:
-    tree = BehaviorTree(tmp_path / "behavior-tree")
+    tree = BehaviorTree(tmp_path / "behavior-tree", lane="session")
     writer = BehaviorDocumentWriter(tree, ProcessLocalLockStore(), clock=lambda: local(23, 0))
     return writer, tree
 
@@ -117,8 +117,8 @@ def test_cross_midnight_occurrence_lands_on_its_local_day(tmp_path) -> None:
         summary="起夜上了个厕所",
     )
     document = writer.publish(BehaviorKind.OCCURRENCE, small_hours)
-    uri = BehaviorURI.from_address(document.address)
-    assert uri.segments[1:4] == ("2026", "08", "16")  # 本地日
+    uri = BehaviorURI.from_address(document.address, "session")
+    assert uri.segments[2:5] == ("2026", "08", "16")  # 本地日（前两段是类与支）
     utc_day = document.address.started_at.astimezone(UTC).date()
     assert utc_day.isoformat() == "2026-08-15"  # UTC 日确实不同 → 输入有判别力
     assert document.address.started_at.utcoffset() == timedelta(hours=8)
@@ -134,6 +134,7 @@ def test_directory_capacity_holds_under_concurrent_publishes(tmp_path) -> None:
 
     tree = BehaviorTree(
         tmp_path / "behavior-tree",
+        lane="session",
         tree_config=BehaviorTreeConfig(max_children_per_directory=2),
     )
     lock_store = ProcessLocalLockStore()
@@ -175,12 +176,12 @@ def test_document_lock_rows_are_dropped_after_publishing_and_a_new_holder_still_
     from habitus.behavior.tree.writer import BehaviorDocumentLockKeyspace
     from habitus.behavior.uri import BehaviorURI
 
-    tree = BehaviorTree(tmp_path / "behavior-tree")
+    tree = BehaviorTree(tmp_path / "behavior-tree", lane="session")
     lock_store = ProcessLocalLockStore()
     writer = BehaviorDocumentWriter(tree, lock_store, clock=lambda: local(23, 0))
     document = writer.publish(BehaviorKind.OCCURRENCE, occurrence_payload())
     assert not any(key.startswith("behavior-document:") for key in (*lock_store.locks, *lock_store.fences))
-    key = BehaviorDocumentLockKeyspace(tree.root).key(BehaviorURI.from_address(document.address))
+    key = BehaviorDocumentLockKeyspace(tree.root).key(BehaviorURI.from_address(document.address, "session"))
     held = lock_store.acquire(key, ttl_seconds=60)
     with pytest.raises(TimeoutError):
         lock_store.acquire(key, ttl_seconds=60)

@@ -2,28 +2,18 @@
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Mapping
-from datetime import date, datetime
-from typing import Any, NoReturn, Protocol
+from datetime import date
+from typing import Any, Protocol
 
-from habitus.foundation.validation import is_int
+from habitus.infrastructure.tree import envelope
+from habitus.infrastructure.tree.metadata import DocumentMetadata
 from habitus.memory.document.link import MemoryStoredLink, parse_stored_links
-from habitus.memory.document.model import MemoryDocument, MemoryDocumentMetadata
+from habitus.memory.document.model import MemoryDocument
 from habitus.memory.model import MemoryAddress, MemoryKind
 
-_MARKER = "\n<!-- HABITUS_MEMORY_FIELDS\n"
-_FOOTER = "\n-->\n"
-_METADATA_KEYS = {
-    "memory_type",
-    "revision",
-    "created_at",
-    "updated_at",
-    "fields",
-    "links",
-    "backlinks",
-}
+_METADATA_KEYS = frozenset({envelope.TYPE_KEY, "revision", "created_at", "updated_at", "fields", "links", "backlinks"})
 
 
 class MemoryDocumentIntegrityError(ValueError):
@@ -57,7 +47,7 @@ class MemoryDocumentCodec:
         kind: MemoryKind | str,
         payload: Mapping[str, Any],
         *,
-        metadata: MemoryDocumentMetadata,
+        metadata: DocumentMetadata,
         links: tuple[MemoryStoredLink, ...] = (),
         backlinks: tuple[MemoryStoredLink, ...] = (),
     ) -> MemoryDocument:
@@ -67,8 +57,10 @@ class MemoryDocumentCodec:
         normalized = self.registry.validate(normalized_kind, payload)
         address = self.registry.address_for(normalized_kind, normalized)
         markdown_body = self.registry.render_markdown(normalized_kind, normalized)
-        if _MARKER in markdown_body:
-            raise MemoryDocumentIntegrityError("memory Markdown body contains the reserved metadata marker")
+        try:
+            envelope.require_plain_body(markdown_body)
+        except envelope.TreeEnvelopeError as exc:
+            raise MemoryDocumentIntegrityError("memory Markdown body contains the reserved metadata marker") from exc
         return MemoryDocument(
             kind=normalized_kind,
             address=address,
@@ -95,65 +87,37 @@ class MemoryDocumentCodec:
             raise MemoryDocumentIntegrityError("memory document body is not canonical")
         fields = {name: self._json_value(value) for name, value in canonical.fields.items()}
         metadata = {
-            "memory_type": canonical.kind.value,
+            envelope.TYPE_KEY: canonical.kind.value,
             "revision": canonical.metadata.revision,
-            "created_at": self._timestamp(canonical.metadata.created_at),
-            "updated_at": self._timestamp(canonical.metadata.updated_at),
+            "created_at": envelope.format_timestamp(canonical.metadata.created_at),
+            "updated_at": envelope.format_timestamp(canonical.metadata.updated_at),
             "fields": fields,
             "links": [link.to_dict() for link in canonical.links],
             "backlinks": [link.to_dict() for link in canonical.backlinks],
         }
-        metadata_json = json.dumps(
-            metadata,
-            ensure_ascii=False,
-            sort_keys=True,
-            indent=2,
-            allow_nan=False,
-        )
-        # HTML 注释不能包含双连字符；只转义 JSON 字符串中的该序列。
-        metadata_json = metadata_json.replace("--", "\\u002d\\u002d")
-        return f"{canonical.markdown_body}{_MARKER}{metadata_json}{_FOOTER}"
+        return envelope.encode(canonical.markdown_body, metadata)
 
     def decode(self, raw: str, *, expected_address: MemoryAddress) -> MemoryDocument:
         """解析并验证唯一末尾注释、Schema、真实地址和正文规范性。"""
 
-        if raw.count(_MARKER) != 1 or not raw.endswith(_FOOTER):
-            raise MemoryDocumentIntegrityError(
-                "memory document must contain one terminal HABITUS_MEMORY_FIELDS comment"
-            )
-        markdown_body, _separator, metadata_with_footer = raw.partition(_MARKER)
-        metadata_source = metadata_with_footer[: -len(_FOOTER)]
         try:
-            metadata = json.loads(
-                metadata_source,
-                object_pairs_hook=self._unique_object,
-                parse_constant=self._reject_json_constant,
-            )
-        except (json.JSONDecodeError, MemoryDocumentIntegrityError) as exc:
-            raise MemoryDocumentIntegrityError("memory document metadata is not strict JSON") from exc
-        if not isinstance(metadata, dict) or set(metadata) != _METADATA_KEYS:
-            raise MemoryDocumentIntegrityError("memory document metadata has an invalid shape")
-        raw_kind = metadata["memory_type"]
-        raw_revision = metadata["revision"]
-        raw_created_at = metadata["created_at"]
-        raw_updated_at = metadata["updated_at"]
+            markdown_body, metadata = envelope.decode(raw, keys=_METADATA_KEYS)
+        except envelope.TreeEnvelopeError as exc:
+            raise MemoryDocumentIntegrityError(f"memory document envelope is invalid: {exc}") from exc
+        raw_kind = metadata[envelope.TYPE_KEY]
         raw_fields = metadata["fields"]
         raw_links = metadata["links"]
         raw_backlinks = metadata["backlinks"]
-        if not isinstance(raw_kind, str):
-            raise MemoryDocumentIntegrityError("memory document type must be a string")
-        if not isinstance(raw_fields, dict) or any(not isinstance(name, str) for name in raw_fields):
-            raise MemoryDocumentIntegrityError("memory document fields must be an object")
         try:
             links = parse_stored_links(raw_links, label="memory document links")
             backlinks = parse_stored_links(
                 raw_backlinks,
                 label="memory document backlinks",
             )
-            system_metadata = MemoryDocumentMetadata(
-                revision=self._parse_revision(raw_revision),
-                created_at=self._parse_timestamp(raw_created_at, "created_at"),
-                updated_at=self._parse_timestamp(raw_updated_at, "updated_at"),
+            system_metadata = DocumentMetadata(
+                revision=envelope.parse_revision(metadata["revision"]),
+                created_at=envelope.parse_timestamp(metadata["created_at"], "created_at"),
+                updated_at=envelope.parse_timestamp(metadata["updated_at"], "updated_at"),
             )
             document = self.build(
                 MemoryKind(raw_kind),
@@ -171,40 +135,6 @@ class MemoryDocumentCodec:
         if self.encode(document) != raw:
             raise MemoryDocumentIntegrityError("memory document is not canonically serialized")
         return document
-
-    @staticmethod
-    def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise MemoryDocumentIntegrityError("memory document metadata contains a duplicate JSON key")
-            result[key] = value
-        return result
-
-    @staticmethod
-    def _reject_json_constant(value: str) -> NoReturn:
-        raise MemoryDocumentIntegrityError(f"memory document metadata contains an invalid JSON constant: {value}")
-
-    @staticmethod
-    def _timestamp(value: datetime) -> str:
-        return value.isoformat(timespec="microseconds").replace("+00:00", "Z")
-
-    @staticmethod
-    def _parse_revision(value: object) -> int:
-        """注释里读回的 revision 在构造前确认是整数，文字照抄 ``MemoryDocumentMetadata.__post_init__``。"""
-
-        if not is_int(value):
-            raise ValueError("memory document revision must be a positive integer")
-        return value
-
-    @staticmethod
-    def _parse_timestamp(value: object, field_name: str) -> datetime:
-        if not isinstance(value, str):
-            raise MemoryDocumentIntegrityError(f"memory document {field_name} must be a timestamp string")
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise MemoryDocumentIntegrityError(f"memory document {field_name} is not a valid ISO timestamp") from exc
 
     @classmethod
     def _json_value(cls, value: Any) -> str | int | float | bool:

@@ -259,7 +259,7 @@ def test_every_memory_kind_renders_all_present_fields_and_no_system_metadata(kin
     assert markdown.endswith("\n")
     for value in payload.values():
         assert str(value) in markdown
-    for forbidden in ("revision", "created_at", "updated_at", "HABITUS_MEMORY_FIELDS"):
+    for forbidden in ("revision", "created_at", "updated_at", "HABITUS_FIELDS"):
         assert forbidden not in markdown
 
 

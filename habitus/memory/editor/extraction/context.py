@@ -325,7 +325,7 @@ def _directory(value: str, action: str) -> MemoryDirectory:
     try:
         parsed = MemoryURI.parse(value)
     except (TypeError, ValueError) as exc:
-        raise MemoryExtractionError(f"{action} requires a valid memory:// directory URI") from exc
+        raise MemoryExtractionError(f"{action} requires a valid habitus:// directory URI") from exc
     if parsed.node_type is not MemoryURINodeType.DIRECTORY:
         raise MemoryExtractionError(f"{action} requires a directory URI")
     target = parsed.to_directory()
