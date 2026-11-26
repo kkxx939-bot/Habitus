@@ -1,12 +1,12 @@
 // 宿主命令在 Windows 上怎么找、怎么起（host-command.mjs）。找法与转义是纯函数，POSIX 上也测；
 // 真起一个 .cmd 的那条只在 Windows 跑（POSIX 上 runHostCommand 就是 spawnSync，没有可测的另一支）。
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { HOST_TIMEOUT_STATUS, resolveWindowsCommand, runHostCommand, windowsLaunch } from "../../host-command.mjs";
+import { HOST_TIMEOUT_STATUS, killTree, resolveWindowsCommand, runHostCommand, windowsLaunch } from "../../host-command.mjs";
 
 const existing = (...paths) => (path) => paths.includes(path);
 
@@ -90,5 +90,21 @@ test(
     assert.ok(Date.now() - started < 8000, `took ${Date.now() - started} ms`);
     // 找不到的命令与 POSIX 一样是 Node 自己的 ENOENT
     assert.equal(runHostCommand("nohost", [], { env }).error?.code, "ENOENT");
+  },
+);
+
+// 杀进程树的程序自己卡住（一直不退）时，killTree 到点就返回，不把调用方吊住
+test(
+  "killing a process tree gives up waiting once the kill program itself hangs",
+  { timeout: 10_000, skip: process.platform === "win32" && "用 sh 脚本冒充卡住的 taskkill，Windows 上起不了" },
+  async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "habitus-kill-tree-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const stuck = join(directory, "stuck-taskkill");
+    await writeFile(stuck, "#!/bin/sh\nexec sleep 30\n");
+    await chmod(stuck, 0o755);
+    const started = Date.now();
+    killTree(12345, stuck, 200);
+    assert.ok(Date.now() - started < 3000, `took ${Date.now() - started} ms`);
   },
 );

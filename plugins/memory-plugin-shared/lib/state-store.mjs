@@ -9,6 +9,10 @@ const DIR_MODE = 0o700;
 const LOCK_STALE_MS = 60_000;
 const LOCK_HEARTBEAT_MS = 10_000;
 const LOCK_UNVERIFIED_LIVE_MAX_STALE_MS = 300_000;
+// Windows 上锁目录里有文件正被打开（别的进程在读 owner.json、杀毒软件在扫）时，改名这个目录会被拒（EPERM / EACCES / EBUSY），
+// 稍等就好；POSIX 上这几个码是真的没权限，不重试
+const WINDOWS_TRANSIENT_RENAME_CODES = ["EPERM", "EACCES", "EBUSY"];
+const RELEASE_RENAME_RETRY_DELAYS_MS = [10, 20, 40, 80, 160];
 const execFileAsync = promisify(execFile);
 
 export function sessionKey(host, nativeSessionId) {
@@ -129,7 +133,9 @@ export async function writeState(root, host, nativeSessionId, value) {
   await replaceJsonDurably(target.state, { ...value, schemaVersion: 3 });
 }
 
-export async function withSessionLock(root, host, nativeSessionId, callback) {
+// io 只给测试换掉锁目录的改名与平台判断；平时不传
+export async function withSessionLock(root, host, nativeSessionId, callback, io = {}) {
+  const lockIo = { rename: io.rename ?? rename, platform: io.platform ?? process.platform };
   const target = paths(root, host, nativeSessionId);
   await mkdir(target.directory, { recursive: true, mode: DIR_MODE });
   const deadline = Date.now() + 5000;
@@ -147,7 +153,7 @@ export async function withSessionLock(root, host, nativeSessionId, callback) {
       break;
     } catch (error) {
       if (error?.code !== "EEXIST") { await discardUninitializedLock(target, ownerToken); throw error; }
-      if (await reclaimAbandonedLock(target, ownerToken)) continue;
+      if (await reclaimAbandonedLock(target, ownerToken, lockIo)) continue;
       if (Date.now() >= deadline) throw new Error("timed out waiting for the plugin session lock");
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
@@ -164,8 +170,12 @@ export async function withSessionLock(root, host, nativeSessionId, callback) {
     return result;
   } finally {
     clearInterval(heartbeat);
-    await releaseOwnedLock(target, ownerToken);
+    await releaseOwnedLock(target, ownerToken, lockIo);
   }
+}
+
+function isWindowsTransientRename(error, platform) {
+  return platform === "win32" && WINDOWS_TRANSIENT_RENAME_CODES.includes(error?.code);
 }
 
 async function discardUninitializedLock(target, ownerToken) {
@@ -175,7 +185,7 @@ async function discardUninitializedLock(target, ownerToken) {
   await rm(quarantine, { recursive: true, force: true });
 }
 
-async function reclaimAbandonedLock(target, contenderToken) {
+async function reclaimAbandonedLock(target, contenderToken, lockIo) {
   let metadata;
   try { metadata = await stat(target.owner); }
   catch (error) {
@@ -198,8 +208,12 @@ async function reclaimAbandonedLock(target, contenderToken) {
     if (staleAge <= LOCK_UNVERIFIED_LIVE_MAX_STALE_MS) return false;
   }
   const quarantine = `${target.lock}.stale-${contenderToken}`;
-  try { await rename(target.lock, quarantine); }
-  catch (error) { if (["ENOENT", "EEXIST", "ENOTEMPTY"].includes(error?.code)) return false; throw error; }
+  try { await lockIo.rename(target.lock, quarantine); }
+  catch (error) {
+    // Windows 上一时改不了名同"抢输了"：外层的等锁循环本来就会再试，到截止为止
+    if (["ENOENT", "EEXIST", "ENOTEMPTY"].includes(error?.code) || isWindowsTransientRename(error, lockIo.platform)) return false;
+    throw error;
+  }
   await rm(quarantine, { recursive: true, force: true });
   return true;
 }
@@ -254,12 +268,19 @@ async function readWindowsProcessStart(pid) {
   } catch { return null; }
 }
 
-async function releaseOwnedLock(target, ownerToken) {
+async function releaseOwnedLock(target, ownerToken, lockIo) {
   let owner;
   try { owner = JSON.parse(await readFile(target.owner, "utf8")); } catch { return; }
   if (![1, 2].includes(owner?.schemaVersion) || owner.ownerToken !== ownerToken) return;
   const quarantine = `${target.lock}.released-${ownerToken}`;
-  try { await rename(target.lock, quarantine); }
-  catch (error) { if (error?.code === "ENOENT") return; throw error; }
+  // 放锁只能自己做：Windows 上一时改不了名就退避重试，用完仍不行照样报错（锁留着，等陈旧后由别人回收）
+  for (let attempt = 0; ; attempt += 1) {
+    try { await lockIo.rename(target.lock, quarantine); break; }
+    catch (error) {
+      if (error?.code === "ENOENT") return;
+      if (!isWindowsTransientRename(error, lockIo.platform) || attempt >= RELEASE_RENAME_RETRY_DELAYS_MS.length) throw error;
+      await new Promise((resolve) => setTimeout(resolve, RELEASE_RENAME_RETRY_DELAYS_MS[attempt]));
+    }
+  }
   await rm(quarantine, { recursive: true, force: true });
 }

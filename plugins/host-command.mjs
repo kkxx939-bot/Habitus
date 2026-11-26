@@ -79,8 +79,11 @@ function taskkill() {
   return win32.join(systemRoot(), "System32", "taskkill.exe");
 }
 
-function killTree(pid, executable = taskkill()) {
-  spawnSync(executable, ["/T", "/F", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
+// taskkill 是同步等的：它卡住会把调用方（doctor、plugin status、运行器）整个吊住，所以最多等这么久就不等了
+export const KILL_TREE_TIMEOUT_MS = 1000;
+
+export function killTree(pid, executable = taskkill(), timeoutMs = KILL_TREE_TIMEOUT_MS) {
+  spawnSync(executable, ["/T", "/F", "/PID", String(pid)], { stdio: "ignore", windowsHide: true, timeout: timeoutMs });
 }
 
 /** 同 spawnSync(command, args, options)。Windows 上见文件头：经运行器起，到点杀整棵进程树，超时的退出码是 HOST_TIMEOUT_STATUS。 */

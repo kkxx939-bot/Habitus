@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -235,3 +235,70 @@ test(
     );
   },
 );
+
+// 改名到含 marker 的目标时，前 failures 次按 code 失败，之后照真改名；calls() 是改到这类目标的次数
+function flakyRename(marker, code, failures) {
+  let calls = 0;
+  const flaky = async (from, to) => {
+    if (to.includes(marker)) {
+      calls += 1;
+      if (calls <= failures) throw Object.assign(new Error(`${code}: simulated rename failure`), { code });
+    }
+    return rename(from, to);
+  };
+  return { rename: flaky, calls: () => calls };
+}
+
+function lockPath(root) {
+  return join(root, "sessions", "test-host", `${sessionKey("test-host", "session")}.lock`);
+}
+
+test("on Windows a lock that briefly cannot be renamed away is still released and the callback result is kept", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "habitus-plugin-lock-release-retry-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const flaky = flakyRename(".released-", "EPERM", 2);
+  const result = await withSessionLock(root, "test-host", "session", async () => "done", { rename: flaky.rename, platform: "win32" });
+  assert.equal(result, "done");
+  assert.equal(flaky.calls(), 3);
+  await assert.rejects(stat(lockPath(root)), { code: "ENOENT" });
+});
+
+test("on Windows releasing gives up after its bounded retries and reports the error, keeping the lock", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "habitus-plugin-lock-release-exhausted-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const flaky = flakyRename(".released-", "EBUSY", Infinity);
+  await assert.rejects(
+    withSessionLock(root, "test-host", "session", async () => "done", { rename: flaky.rename, platform: "win32" }),
+    { code: "EBUSY" },
+  );
+  assert.equal(flaky.calls(), 6);
+  assert.equal((await stat(join(lockPath(root), "owner.json"))).isFile(), true);
+});
+
+test("off Windows a release that cannot rename is reported at once, without retrying", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "habitus-plugin-lock-release-posix-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const flaky = flakyRename(".released-", "EPERM", 1);
+  await assert.rejects(
+    withSessionLock(root, "test-host", "session", async () => "done", { rename: flaky.rename, platform: "linux" }),
+    { code: "EPERM" },
+  );
+  assert.equal(flaky.calls(), 1);
+});
+
+test("on Windows a stale lock that briefly cannot be renamed away is reclaimed on a later try", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "habitus-plugin-lock-reclaim-retry-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(lockPath(root), { recursive: true });
+  const owner = join(lockPath(root), "owner.json");
+  await writeFile(owner, JSON.stringify({
+    schemaVersion: 2, ownerToken: "crashed-owner", pid: DEAD_PID, processIdentity: null, acquiredAt: new Date(0).toISOString(),
+  }));
+  const stale = new Date(Date.now() - 61_000);
+  await utimes(owner, stale, stale);
+  const flaky = flakyRename(".stale-", "EACCES", 1);
+  let entered = false;
+  await withSessionLock(root, "test-host", "session", async () => { entered = true; }, { rename: flaky.rename, platform: "win32" });
+  assert.equal(entered, true);
+  assert.equal(flaky.calls(), 2);
+});

@@ -386,7 +386,8 @@ export function inspectHookReview(definition, options = {}) {
 
 // 问完（答了、没答、出错）都把 app-server 收干净再交结果：关 stdin、断开两条管道、SIGTERM，宽限内没退就 SIGKILL，
 // 等到它退出。宿主可能接管 SIGTERM、它的子进程可能占着 stdout：只发一次 SIGTERM 不等它退，doctor / plugin status
-// 印完结果也会被子进程的句柄吊着不退出。最长用时是 timeoutMs + 2 × HOOK_REVIEW_KILL_GRACE_MS
+// 印完结果也会被子进程的句柄吊着不退出。最长用时是 timeoutMs + 2 × HOOK_REVIEW_KILL_GRACE_MS；Windows 上两次杀进程树是
+// 同步的，再加 2 × KILL_TREE_TIMEOUT_MS
 export const HOOK_REVIEW_KILL_GRACE_MS = 1000;
 
 // Codex：`codex app-server` 的 JSON-RPC（initialize → hooks/list），trustStatus 由 Codex 自己判（trusted / managed 才算批了）
