@@ -30,7 +30,9 @@
  8      单元历史 → 压实（同上，跟在机会表后面）              否          表照用、压实跳过
  9      当天的日子预期（从零点起看）                        是          今天没有这一代
  10     习惯卡片（只做记录，裁定 113；锁外）                否          卡片停在上一次，下一代再对
- 11     完成标记 ``generation/<今天>.json``                  是          —
+ 11     关系卡片（只做记录，裁定 115；锁外；读盘上最晚      否          卡片停在上一次，下一代再对
+        那张关系表）
+ 12     完成标记 ``generation/<今天>.json``                  是          —
 =====  ==================================================  ==========  ==================================================
 
 只有必须成的那几步失败才算"今天没有这一代"（不写完成标记，下一眼从头再做：各步本来可重做）；其余失败大声报出（step 的结局、
@@ -80,6 +82,7 @@ from habitus.runtime.generation_result import (
     MODEL_UNREACHABLE,
     MUST,
     OPPORTUNITIES,
+    RELATION_CARDS,
     RETRY,
     REWOUND,
     SCENE,
@@ -101,6 +104,7 @@ from habitus.runtime.generation_trace import GENERATION_SPAN, STEP_SPAN_PREFIX
 from habitus.runtime.generation_vocabulary import Counted, VocabularyCounter
 from habitus.runtime.generation_watermark import TickWatermark
 from habitus.runtime.habit_cards import HabitCards
+from habitus.runtime.relation_cards import RelationCards
 from habitus.runtime.scene_lock import SceneWriteLock
 from habitus.runtime.scene_night import NightReport, SceneNightlyRun
 from habitus.series import EventSeries
@@ -133,14 +137,10 @@ class Generation:
         closed_at: Callable[[date], datetime | None] | None = None,
         unreduced_gaps: Callable[[date], int] | None = None,
         habits: HabitCards | None = None,
+        relation_cards: RelationCards | None = None,
         lane: str = "",
     ) -> None:
-        if scene.behavior_tree is not behavior_tree:
-            raise ValueError("the scene run must read the same behaviour tree")
-        if series is not None and series.tree is not behavior_tree:
-            raise ValueError("the series reader must read the same behaviour tree")
-        if days is not None and foresight is None:
-            raise ValueError("the day expectations are built from the opportunity table this generation writes")
+        _require_wired(behavior_tree, scene, series, has_days=days is not None, has_foresight=foresight is not None)
         if margin < timedelta(0):
             raise ValueError("margin must not be negative")
         self.behavior_tree = behavior_tree
@@ -167,6 +167,7 @@ class Generation:
         #: 某一天什么时候定的稿（归约的定稿日账：量"从昨天定稿到今天这一代写出"）；截止日之前还没归约的空判断条数。
         self.closed_at, self.unreduced_gaps = closed_at, unreduced_gaps
         self.habits = habits  # 这一支的习惯卡片（只做记录，裁定 113）；没接是 None
+        self.relation_cards = relation_cards  # 这一支的关系卡片（只做记录，裁定 115）；没接是 None
         self.clock: Callable[[], datetime] = clock if clock is not None else lambda: datetime.now(UTC)
 
     def today(self) -> date:
@@ -265,6 +266,7 @@ class Generation:
             )
             await self._step(result, DAYS, lambda report: steps.days_step(self, report))
         await self._step(result, HABITS, lambda report: steps.habits_step(self, report, series, scene, result))
+        await self._step(result, RELATION_CARDS, lambda report: steps.relation_cards_step(self, report, result))
         await self._step(result, MARK, lambda report: steps.mark_step(self, report, result))
 
     async def _step(
@@ -309,6 +311,24 @@ class Generation:
         """语义树一步持语义树写锁（没接就不持）。"""
 
         return self.scene_lock.held() if self.scene_lock is not None else nullcontext()
+
+
+def _require_wired(
+    behavior_tree: BehaviorTree,
+    scene: SceneNightlyRun,
+    series: SeriesReader | None,
+    *,
+    has_days: bool,
+    has_foresight: bool,
+) -> None:
+    """换代的部件读的是同一棵行为树；日子预期要有这一代写的机会表。"""
+
+    if scene.behavior_tree is not behavior_tree:
+        raise ValueError("the scene run must read the same behaviour tree")
+    if series is not None and series.tree is not behavior_tree:
+        raise ValueError("the series reader must read the same behaviour tree")
+    if has_days and not has_foresight:
+        raise ValueError("the day expectations are built from the opportunity table this generation writes")
 
 
 __all__ = ["Generation"]

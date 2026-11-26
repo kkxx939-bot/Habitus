@@ -475,7 +475,7 @@ def texts_under(root: Path) -> str:
 
 
 def files_under(root: Path) -> list[str]:
-    return sorted(str(item.relative_to(root)) for item in root.rglob("*") if item.is_file()) if root.is_dir() else []
+    return sorted(item.relative_to(root).as_posix() for item in root.rglob("*") if item.is_file()) if root.is_dir() else []
 
 
 __all__ = [

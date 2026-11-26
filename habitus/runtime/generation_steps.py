@@ -17,6 +17,7 @@ from habitus.runtime.generation_result import (
     FALLBACK_COMPACTION,
     FALLBACK_HABITS,
     FALLBACK_HISTORY,
+    FALLBACK_RELATION_CARDS,
     FALLBACK_RELATIONS,
     FALLBACK_SCENE,
     FALLBACK_SETTLEMENT,
@@ -25,6 +26,7 @@ from habitus.runtime.generation_result import (
     MODEL_UNREACHABLE,
     NO_MATERIALS,
     NO_RECORDS,
+    NO_RELATION_TABLE,
     QUEUE_BACKING_OFF,
     RETRY_REDUCING,
     RETRY_UNFINISHED,
@@ -46,6 +48,7 @@ from habitus.runtime.generation_summary import (
 )
 from habitus.runtime.generation_vocabulary import Counted
 from habitus.runtime.habit_cards import HabitSync
+from habitus.runtime.relation_cards import RelationSync
 from habitus.runtime.scene_night import NightReport
 from habitus.scene.habits import habit_numbers
 from habitus.series import EventSeries, GapKind
@@ -288,7 +291,7 @@ async def opportunities_step(
         raise Degrade(f"机会表出错: {'; '.join(opportunities.failed)}")
 
 
-# ── 9–10：日子预期、完成标记 ───────────────────────────────────────────
+# ── 9–12：日子预期、习惯卡片、关系卡片、完成标记 ───────────────────────────────────────────
 
 
 async def days_step(gen: Generation, report: dict[str, object]) -> None:
@@ -323,6 +326,34 @@ async def habits_step(
         result.fallbacks[FALLBACK_HABITS] += 1
         raise
     report.update({"written": synced.written, "deleted": synced.deleted, "waiting": synced.waiting})
+
+
+async def relation_cards_step(gen: Generation, report: dict[str, object], result: GenerationResult) -> None:
+    """关系卡片（裁定 115，只做记录、预测不读）尽力而为：拿盘上最晚那张关系表把这一支的卡片对一遍。语义树一步结束后它就是这一代
+    的最终样子；关系沿用上一代的那几种（模型队列在整体退避、关系判定没做成）读到的是上一代的表，字段没变就什么都不写。一张表都
+    还没有（语义树还没写过）是这一代不做；最晚那张读不出（坏了）是没做成，一张卡片都不删。写的是 habitus 树，不在语义树写锁里。"""
+
+    if gen.relation_cards is None:
+        raise Skip("没接关系卡片")
+    cards, store = gen.relation_cards, gen.scene.relations
+
+    def sync() -> RelationSync | None:
+        night = store.latest_night(cards.lane)
+        if night is None:
+            return None
+        table = store.read(cards.lane, night)
+        names = {str(word.id): word.name for word in gen.vocabulary.store.read().words}
+        report["relation_night"] = night.isoformat()
+        return cards.sync(table, names, now=gen.clock())
+
+    try:
+        synced = await asyncio.to_thread(sync)
+    except BaseException:
+        result.fallbacks[FALLBACK_RELATION_CARDS] += 1
+        raise
+    if synced is None:
+        raise Skip(NO_RELATION_TABLE)
+    report.update({"written": synced.written, "deleted": synced.deleted, "ended": synced.ended})
 
 
 async def mark_step(gen: Generation, report: dict[str, object], result: GenerationResult) -> None:

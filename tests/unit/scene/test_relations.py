@@ -253,7 +253,7 @@ def _tarone_family_by_definition(minimum, weights, q):  # type: ignore[no-untype
 
 
 def test_tarone_family_matches_its_definition_and_stays_fast_on_a_large_night() -> None:
-    """检验族与"一个 K 一个 K 数"的定义逐项相同；四十万个键、四百个够得着的，一次不到一秒（原来每个 K 扫一遍全部键）。"""
+    """检验族与"一个 K 一个 K 数"的定义逐项相同；四十万个键、四百个够得着的，一次不到五秒（原来每个 K 扫一遍全部键；本机约 0.2 秒，门槛给 CI 慢机器和覆盖率插桩留余量）。"""
 
     import random
     import time
@@ -271,7 +271,9 @@ def test_tarone_family_matches_its_definition_and_stays_fast_on_a_large_night() 
     p_values = {key: generator.random() if index < 400 else 1.0 for index, key in enumerate(keys)}
     started = time.perf_counter()
     family, _passed = stats.tarone_bh(p_values, minimum, {}, q=0.05)
-    assert time.perf_counter() - started < 1.0 and len(family) == 400
+    elapsed = time.perf_counter() - started
+    assert len(family) == 400
+    assert elapsed < 5.0, elapsed
 
 
 def test_tarone_prunes_hopeless_tests_and_bh_controls_the_rest() -> None:

@@ -10,7 +10,7 @@ import pytest
 from habitus.behavior.kinds.active import count_active
 from habitus.behavior.kinds.ids import ClassId, Lane
 from habitus.behavior.kinds.model import Vocabulary, Word, WordOrigin
-from habitus.runtime.generation_result import DEGRADED, FALLBACK_HABITS, HABITS, MARK
+from habitus.runtime.generation_result import DEGRADED, FALLBACK_HABITS, HABITS, MARK, RELATION_CARDS
 from habitus.runtime.habit_cards import ACTIVE, EXITED, HabitCards
 from habitus.runtime.record_files import RecordFileError
 from habitus.scene.habits import HabitNumbers, habit_numbers
@@ -176,6 +176,6 @@ def test_the_habit_step_failing_degrades_the_generation_which_still_writes_its_m
     assert step is not None and step.outcome == DEGRADED and "习惯卡片出错" in (step.reason or "")
     assert result.fallbacks[FALLBACK_HABITS] == 1 and result.complete
     assert run.marks.read(run.today()).steps[HABITS]["outcome"] == DEGRADED  # type: ignore[union-attr]
-    assert [item.step for item in result.steps][-2:] == [HABITS, MARK]
+    assert [item.step for item in result.steps][-3:] == [HABITS, RELATION_CARDS, MARK]
     # 同一天不为它重做：完成标记在，这一天就不再做
     assert run.ready().day is None

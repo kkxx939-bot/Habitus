@@ -37,6 +37,7 @@ from habitus.runtime.generation_result import (
     MARK,
     NO_RECORDS,
     OPPORTUNITIES,
+    RELATION_CARDS,
     RETRY,
     SCENE,
     SERIES,
@@ -201,6 +202,7 @@ def test_a_generation_runs_its_steps_in_the_ruled_order_and_writes_its_mark(tmp_
         OPPORTUNITIES,
         DAYS,
         HABITS,
+        RELATION_CARDS,
         MARK,
     ]
     assert result.complete and run.marks.finished(TODAY) is True

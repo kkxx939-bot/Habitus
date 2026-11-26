@@ -15,11 +15,11 @@ from habitus.runtime.generation_summary import UNREACHABLE, reason_code
 
 CALENDAR, RETRY, SETTLE = "calendar", "retry", "settle"
 SERIES, ACTIVE, SCENE, OPPORTUNITIES, DAYS, MARK = "series", "active", "scene", "opportunities", "days", "mark"
-HABITS = "habits"
+HABITS, RELATION_CARDS = "habits", "relation_cards"
 #: 换代的各步，按先后。"数在用的词"在读序列之后、语义树之前（裁定 101 第 7 条：要按日子数就得先有序列；
 #: 数出来的集合显式交给这一代的语义树）。单元历史与压实在机会表那一步里、跟在表后面（各自一个 ``foresight.*`` 子 span）。
-#: 习惯卡片（裁定 113）只做记录、预测不读：排在必须成的几步之后、完成标记之前，这一代要写成了才更新卡片。
-STEPS = (CALENDAR, RETRY, SETTLE, SERIES, ACTIVE, SCENE, OPPORTUNITIES, DAYS, HABITS, MARK)
+#: 习惯卡片（裁定 113）与关系卡片（裁定 115）只做记录、预测不读：排在必须成的几步之后、完成标记之前，这一代要写成了才更新卡片。
+STEPS = (CALENDAR, RETRY, SETTLE, SERIES, ACTIVE, SCENE, OPPORTUNITIES, DAYS, HABITS, RELATION_CARDS, MARK)
 #: 必须成的几步：失败 = 今天没有这一代。
 MUST = frozenset({SERIES, OPPORTUNITIES, DAYS, MARK})
 LABELS = {
@@ -32,6 +32,7 @@ LABELS = {
     OPPORTUNITIES: "机会表",
     DAYS: "日子预期",
     HABITS: "习惯卡片",
+    RELATION_CARDS: "关系卡片",
     MARK: "完成标记",
 }
 
@@ -46,6 +47,7 @@ RETRY_UNFINISHED = "重试收尾没完成"
 RETRY_REDUCING = "就近重试写回的判断还在等归约"
 QUEUE_BACKING_OFF = "模型队列在整体退避"
 NO_MATERIALS = "语义树没有交出材料"
+NO_RELATION_TABLE = "还没有关系表"
 #: ``Generation.ready`` 的两个"不换代"原因：worker 按它们清掉过时的失败、记下日期回退（健康面报）。
 ALREADY_DONE = "今天这一代已经做完"
 REWOUND = "日期回到了已换代的日子之前"
@@ -60,6 +62,7 @@ FALLBACK_CALENDAR = "calendar_stale"  # 放假数据重读失败，照用上一�
 FALLBACK_SCENE = "scene_step_failed"  # 语义树那一步里没做成的段数（同步词表、关系判定）
 FALLBACK_ACTIVE = "active_count_failed"  # 数在用的词没做成：语义树按盘上已有的在用状态
 FALLBACK_HABITS = "habit_cards_failed"  # 习惯卡片没对成：卡片停在上一次，下一代再对
+FALLBACK_RELATION_CARDS = "relation_cards_failed"  # 关系卡片没对成（含关系表读不出）：卡片停在上一次，下一代再对
 FALLBACKS = (
     FALLBACK_RELATIONS,
     FALLBACK_SETTLEMENT,
@@ -70,6 +73,7 @@ FALLBACKS = (
     FALLBACK_SCENE,
     FALLBACK_ACTIVE,
     FALLBACK_HABITS,
+    FALLBACK_RELATION_CARDS,
 )
 
 #: 线上任何一处调模型碰到它就是模型整个调不通：触点抛的 ``ModelUnreachable``，以及模型客户端原样抛出的"整个用不了"。
@@ -238,8 +242,10 @@ __all__ = [
     "MODEL_UNREACHABLE",
     "MUST",
     "NO_RECORDS",
+    "NO_RELATION_TABLE",
     "OPPORTUNITIES",
     "QUEUE_BACKING_OFF",
+    "RELATION_CARDS",
     "RETRY",
     "RETRY_REDUCING",
     "RETRY_UNFINISHED",

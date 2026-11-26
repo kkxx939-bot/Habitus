@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
@@ -23,8 +24,11 @@ from habitus.runtime import build_runtime
 from habitus.runtime.foresight import foresight_ledger
 from habitus.runtime.foresight_tree_rows import tree_day
 from habitus.runtime.runtime_lifecycle import TwoTreeLayoutError
-from habitus.runtime.scene import habit_cards
+from habitus.runtime.scene import habit_cards, relation_cards
 from habitus.scene.habits import HabitNumbers
+from habitus.scene.relations.engine import RelationKey
+from habitus.scene.relations.spans import Segment
+from habitus.scene.relations.state import LaneState, Relation, Status
 from habitus.scene.views.index import DayIndex
 from habitus.series.reader import admitted, read_series
 from tests.helpers import document
@@ -114,7 +118,8 @@ def test_tree_lookups_parse_scheme_bearing_sources_strictly_and_skip_the_rest() 
     old = "behavior:" + "//occurrences/2026/08/16/洗了手--20260816T193018000000%2B0800.md"
     gap = "habitus://gaps/session/2026/08/16/没读懂--20260816T193018000000%2B0800.md"  # 空白不是出处
     habit, reminder = "habitus://habits/session/s-k0001.md", "habitus://reminders/session/2026/08/16/e1.md"  # 只做记录，裁定 113
-    for bad in (old, "habitus://occurrences/2026/08/16/洗了手--20260816T193018000000%2B0800.md", "habitus://x.md", gap, habit, reminder):
+    relation = "habitus://relations/session/s-k0001/s-k0002--chain.md"  # 只做记录，裁定 115
+    for bad in (old, "habitus://occurrences/2026/08/16/洗了手--20260816T193018000000%2B0800.md", "habitus://x.md", gap, habit, reminder, relation):
         with pytest.raises(BehaviorURIError):
             tree_day(bad)
 
@@ -139,6 +144,13 @@ def test_cards_ignore_the_occurrence_and_gap_directories_at_the_root(tmp_path) -
         now=datetime.now(UTC),
     )
     awaiting(foresight_ledger(config, "session"), expectation())
+    # 再放一张关系卡片（裁定 115）：同样看不到
+    key = RelationKey("physical", "p-k0001", "p-k0002", Segment.CHAIN)
+    relation_cards(config, "physical").sync(
+        LaneState("physical", DAY, 1, (Relation(key, Status.RETIRED, True, retired_on=DAY),)),
+        {"p-k0001": "喝水", "p-k0002": "周报"},
+        now=datetime.now(UTC),
+    )
     memory = runtime.components.memory
     tree = memory.tree
     assert {path.name for path in tree.root.iterdir()} >= {
@@ -146,11 +158,13 @@ def test_cards_ignore_the_occurrence_and_gap_directories_at_the_root(tmp_path) -
         "gaps",
         "habits",
         "reminders",
+        "relations",
         "preferences",
         "entities",
         "tools",
     }
     assert list((tree.root / "habits").rglob("*.md")) and list((tree.root / "reminders").rglob("*.md"))
+    assert list((tree.root / "relations").rglob("*.md"))
 
     card = document(MemoryKind.PREFERENCE)
     tree.initialize()
@@ -169,11 +183,17 @@ def test_cards_ignore_the_occurrence_and_gap_directories_at_the_root(tmp_path) -
     catalog = memory.search.catalog.read(kinds=tuple(MemoryKind), now=datetime.now(UTC), on_recall_failure=lambda error: None)
     assert [item.uri for item in (*catalog.cards, *catalog.cold, *catalog.hidden)] == [MemoryURI.from_address(card.address)]
     assert catalog.notes == ()
-    for directory in ("habitus://occurrences/physical", "habitus://habits/physical", "habitus://reminders/session"):
+    for directory in (
+        "habitus://occurrences/physical",
+        "habitus://habits/physical",
+        "habitus://reminders/session",
+        "habitus://relations/physical",
+    ):
         with pytest.raises(ValueError):
             MemoryURI(directory)  # 浏览、提取的读口都只认卡片地址
     for scoped in (MemoryDirectory.root(), None):
-        assert all("habits" not in str(hit.uri) for hit in memory_content_search(tree, None, keywords=("喝水", "周报"), directory=scoped, limit=10))
+        hits = memory_content_search(tree, None, keywords=("喝水", "周报"), directory=scoped, limit=10)
+        assert all("habits" not in str(hit.uri) and "relations" not in str(hit.uri) for hit in hits)
     # 清单的范围是显式限定的，不靠根概览刚好没列：根概览里就算出现事件目录，清单也不往里走、不失败
     listed = Overview.parse("记忆根", root_overview)
     widened = Overview("记忆根", listed.cards, (*listed.children, OverviewChild("occurrences", 1)), listed.omitted_cards)
@@ -194,8 +214,8 @@ def test_without_the_behavior_side_the_tree_has_no_occurrence_or_gap_directories
 
 
 def test_without_the_semantic_layer_or_foresight_there_are_no_habit_or_reminder_directories(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """习惯卡片只在语义树开着时写、提醒记录只在预测开着时写，目录都是第一次写时才建（裁定 113）：行为侧开着、两者关着时
-    树里没有 ``habits``、``reminders``。"""
+    """习惯卡片与关系卡片只在语义树开着时写、提醒记录只在预测开着时写，目录都是第一次写时才建（裁定 113、115）：行为侧开着、两者关着时
+    树里没有 ``habits``、``relations``、``reminders``。"""
 
     config = behavior_enabled_config(tmp_path)
     runtime = build_runtime(config, providers=scripted_dependencies([PICK_BODY]), path_lock=PathLock(ProcessLocalLockStore()))
@@ -244,7 +264,7 @@ def test_an_old_two_tree_layout_refuses_the_start_before_anything_runs(tmp_path,
     config = behavior_enabled_config(tmp_path)
     (config.storage_root / old).mkdir(parents=True)
     runtime = build_runtime(config, providers=scripted_dependencies([PICK_BODY]), path_lock=PathLock(ProcessLocalLockStore()))
-    with pytest.raises(TwoTreeLayoutError, match=str(config.storage_root / old)):
+    with pytest.raises(TwoTreeLayoutError, match=re.escape(str(config.storage_root / old))):
         runtime.initialize()
     # 报错发生在初始化最前面：树、行为的存储都还没建，归约更没起来
     assert not config.tree_root.exists()

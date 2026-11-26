@@ -625,13 +625,18 @@ def test_chinese_readme_calls_the_service_local() -> None:
     assert "服务端" not in (REPOSITORY_ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
 
 
-def test_readmes_say_what_init_and_the_part_staging_actually_do() -> None:
-    """裁定 75 第 2、6 条只改 README：自定义配置路径的 init 同时改写默认的 ``connection.json``（T8，行为由
+def test_docs_say_what_init_and_the_part_staging_actually_do() -> None:
+    """裁定 75 第 2、6 条只改文档（原在 README，现在 docs/plugins-and-cli*.md 与 docs/http-api*.md）：自定义配置路径的 init 同时改写默认的 ``connection.json``（T8，行为由
     ``test_custom_config_init_persists_plugin_connection_in_the_default_state_root`` 钉住）；分块暂存在下一块到来时才清掉过期的
     （T20，行为由 ``test_staged_parts_expire_after_their_ttl_and_free_their_bytes`` 钉住）。"""
 
-    english = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
-    chinese = (REPOSITORY_ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    docs = REPOSITORY_ROOT / "docs"
+    english = "\n".join(
+        (docs / name).read_text(encoding="utf-8") for name in ("plugins-and-cli.md", "http-api.md")
+    )
+    chinese = "\n".join(
+        (docs / name).read_text(encoding="utf-8") for name in ("plugins-and-cli.zh-CN.md", "http-api.zh-CN.md")
+    )
     assert "also rewrites the default `~/.habitus/agent-plugin/connection.json`" in english
     assert "同时改写默认的 `~/.habitus/agent-plugin/connection.json`" in chinese
     assert "is dropped when the next part of any upload arrives" in english

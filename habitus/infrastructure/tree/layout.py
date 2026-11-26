@@ -2,7 +2,8 @@
 
 只列名字，不认识名字背后的领域类型：四类卡片（``profile.md``、``preferences``、``entities``、``tools``）由记忆读写，
 事件与空白（``occurrences``、``gaps``，下面再按支分 ``session`` / ``physical``）由行为读写；习惯与提醒记录（``habits``、
-``reminders``，同样按支分）由系统在换代与提醒的账写完之后写，只做记录（裁定 113）。各自校验自己那部分的结构；
+``reminders``，同样按支分）由系统在换代与提醒的账写完之后写，只做记录（裁定 113）；关系卡片（``relations``，同样按支分，
+和语义树工作目录里存关系表的 ``relations`` 同名不同根）由换代照语义树一步写出的关系表写，只做记录（裁定 115）。各自校验自己那部分的结构；
 根目录只许出现这里列出的条目，多出来的就是旧盘面或手放的东西，读写时明确报错。
 """
 
@@ -21,6 +22,8 @@ OCCURRENCES_DIRECTORY = "occurrences"
 GAPS_DIRECTORY = "gaps"
 HABITS_DIRECTORY = "habits"
 REMINDERS_DIRECTORY = "reminders"
+#: 树根下的关系卡片目录（裁定 115）；不是语义树工作目录里存关系表的那个 ``relations``。
+RELATION_CARDS_DIRECTORY = "relations"
 
 #: 目录 L0 / L1 的侧车文件名；只有卡片目录生成它们，事件与空白的目录不生成（裁定 112）。
 ABSTRACT_FILENAME = ".abstract.md"
@@ -37,6 +40,7 @@ ROOT_DIRECTORIES = frozenset(
         GAPS_DIRECTORY,
         HABITS_DIRECTORY,
         REMINDERS_DIRECTORY,
+        RELATION_CARDS_DIRECTORY,
     }
 )
 
@@ -56,6 +60,7 @@ __all__ = [
     "OVERVIEW_FILENAME",
     "PREFERENCES_DIRECTORY",
     "PROFILE_FILE",
+    "RELATION_CARDS_DIRECTORY",
     "REMINDERS_DIRECTORY",
     "ROOT_DIRECTORIES",
     "ROOT_FILES",

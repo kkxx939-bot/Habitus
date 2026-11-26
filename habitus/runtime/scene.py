@@ -35,6 +35,7 @@ from habitus.runtime.behavior import BehaviorRuntimeComponents, behavior_domain_
 from habitus.runtime.conditions import SharedCalendar, local_calendar
 from habitus.runtime.evidence import evidence_of
 from habitus.runtime.foresight import ForesightRuntimeComponents, build_foresight_nightly
+from habitus.runtime.foresight_nightly import ForesightNightlyRun
 from habitus.runtime.foresight_tick import ForesightTick
 from habitus.runtime.foresight_worker import ForesightWorker, SlotBranch
 from habitus.runtime.generation import Generation
@@ -49,6 +50,7 @@ from habitus.runtime.lifecycle_retry import retry_ledger
 from habitus.runtime.model_queue import ModelQueue, ModelQueueState, QueueJournal, QueueSettings
 from habitus.runtime.model_queue_worker import ModelQueueWorker
 from habitus.runtime.pipeline import ScenePipeline
+from habitus.runtime.relation_cards import RelationCards
 from habitus.runtime.scene_advice import RelationAdvice
 from habitus.runtime.scene_config import relation_config
 from habitus.runtime.scene_lock import SceneWriteLock, unlocked
@@ -156,16 +158,7 @@ def build_generation(
         vocabulary=VocabularyCounter(kind_store, kind_store.config),
         marks=marks,
         clock=clock,
-        foresight=(
-            None
-            if foresight is None
-            else build_foresight_nightly(
-                foresight,
-                relations=RelationStore(scene.relations.root),
-                relation_config=relation_config(config),
-                unseen_day_types=config.foresight.unseen_day_types,
-            )
-        ),
+        foresight=None if foresight is None else _foresight_nightly(config, foresight, scene),
         settlement=None if foresight is None else foresight.settlement,
         retry=retry,
         days=None if foresight is None else foresight.days,
@@ -178,7 +171,21 @@ def build_generation(
         closed_at=closed_at,
         unreduced_gaps=unreduced_gaps,
         habits=habit_cards(config, kind_store.lane.value),
+        relation_cards=relation_cards(config, kind_store.lane.value),
         lane=kind_store.lane.value,  # 是哪一支：记在 span 与报告上
+    )
+
+
+def _foresight_nightly(
+    config: HabitusConfig, foresight: ForesightRuntimeComponents, scene: SceneNightlyRun
+) -> ForesightNightlyRun:
+    """换代里预测层那几步（机会表、单元历史、压实）：读这一支语义树写的关系表。"""
+
+    return build_foresight_nightly(
+        foresight,
+        relations=RelationStore(scene.relations.root),
+        relation_config=relation_config(config),
+        unseen_day_types=config.foresight.unseen_day_types,
     )
 
 
@@ -188,6 +195,18 @@ def habit_cards(config: HabitusConfig, lane: str) -> HabitCards:
 
     domain = behavior_domain_configs(config.behavior)
     return HabitCards(
+        config.tree_root,
+        lane=lane,
+        max_children=domain.tree.max_children_per_directory,
+        max_bytes=domain.document.max_encoded_bytes,
+    )
+
+
+def relation_cards(config: HabitusConfig, lane: str) -> RelationCards:
+    """一支的关系卡片（``habitus/relations/<支>/``，裁定 115）：只做记录，上限与习惯卡片同一组，不另设。"""
+
+    domain = behavior_domain_configs(config.behavior)
+    return RelationCards(
         config.tree_root,
         lane=lane,
         max_children=domain.tree.max_children_per_directory,

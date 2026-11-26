@@ -234,8 +234,8 @@ def test_a_physical_question_asked_on_codex_desktop_is_kept_in_the_physical_outl
         HostMessage(4, asked_at + timedelta(minutes=3), "completion", "报错看完了。"),
     )  # fmt: skip
     assert run.observe("codex-1", first, host="codex").awaiting_reply == 1
-    physical = [str(path.relative_to(tmp_path)) for path in (tmp_path / "physical").rglob("*")]
-    session = [str(path.relative_to(tmp_path)) for path in (tmp_path / "session").rglob("*")]
+    physical = [path.relative_to(tmp_path).as_posix() for path in (tmp_path / "physical").rglob("*")]
+    session = [path.relative_to(tmp_path).as_posix() for path in (tmp_path / "session").rglob("*")]
     assert any(name.startswith("physical/outlet/asked") for name in physical), physical
     assert not any("asked" in name for name in session), session
     reply = {

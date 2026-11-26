@@ -447,15 +447,15 @@ test("once the prompt budget is spent, no further request goes out and both stag
   ]);
 });
 
-// 杀变异 PC21（默认预算改了）：README 两份写的超时与预算默认值就是插件实际用的
-test("the timeout and budget defaults the READMEs give are the ones the plugin uses", async () => {
+// 杀变异 PC21（默认预算改了）：文档两份（docs/plugins-and-cli*.md）写的超时与预算默认值就是插件实际用的
+test("the timeout and budget defaults the docs give are the ones the plugin uses", async () => {
   const defaults = loadPluginConfig({});
   const expected = {
     HABITUS_PLUGIN_TIMEOUT_MS: defaults.timeoutMs,
     HABITUS_PLUGIN_PROMPT_BUDGET_MS: defaults.promptBudgetMs,
     HABITUS_PLUGIN_REMINDER_TIMEOUT_MS: defaults.reminderTimeoutMs,
   };
-  for (const readme of ["README.md", "README.zh-CN.md"]) {
+  for (const readme of ["docs/plugins-and-cli.md", "docs/plugins-and-cli.zh-CN.md"]) {
     const text = await readFile(join(PLUGINS_ROOT, "..", readme), "utf8");
     for (const [name, value] of Object.entries(expected)) {
       const row = text.match(new RegExp(`^\\| \`${name}\` \\| \`(\\d+)\` \\|`, "m"));

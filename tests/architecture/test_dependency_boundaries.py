@@ -1429,12 +1429,18 @@ def test_the_shared_tree_layer_knows_no_domain() -> None:
 
 
 def test_habits_and_reminder_records_are_written_only_and_never_read_by_prediction() -> None:
-    """习惯卡片与提醒记录只做记录（裁定 113）：生产代码里引用这两类读写模块的文件只有写它们的那几处与装配；目录名只在
-    布局与各自的读写模块里出现——预测、语义树、归约、记忆这半边都没有路径读到它们。"""
+    """习惯卡片与提醒记录（裁定 113）、关系卡片（裁定 115）只做记录：生产代码里引用这几类读写模块的文件只有写它们的那几处
+    与装配；目录名只在布局与各自的读写模块里出现——预测、语义树、归约、记忆这半边都没有路径读到它们。"""
 
     owners = {
         "habitus.scene.habits": ["runtime/generation_steps.py", "runtime/habit_cards.py"],
-        "habitus.runtime.record_files": ["runtime/habit_cards.py", "runtime/reminder_records.py"],
+        "habitus.runtime.record_files": [
+            "runtime/habit_cards.py",
+            "runtime/relation_cards.py",
+            "runtime/reminder_records.py",
+        ],
+        "habitus.scene.relations.cards": ["runtime/relation_cards.py"],
+        "habitus.runtime.relation_cards": ["runtime/generation.py", "runtime/generation_steps.py", "runtime/scene.py"],
         "habitus.runtime.habit_cards": ["runtime/generation.py", "runtime/generation_steps.py", "runtime/scene.py"],
         "habitus.runtime.reminder_records": ["runtime/foresight.py", "runtime/foresight_reminder_records.py"],
         "habitus.runtime.foresight_reminder_records": ["runtime/foresight.py"],
@@ -1445,8 +1451,10 @@ def test_habits_and_reminder_records_are_written_only_and_never_read_by_predicti
         )
         assert importers == expected, module
     for constant, expected in (
-        ("HABITS_DIRECTORY", ["infrastructure/tree/layout.py", "runtime/habit_cards.py"]),
+        # 关系卡片只拿它拼指向习惯卡片的地址（普通字符串），不读习惯卡片（裁定 115 第 7 条）
+        ("HABITS_DIRECTORY", ["infrastructure/tree/layout.py", "runtime/habit_cards.py", "runtime/relation_cards.py"]),
         ("REMINDERS_DIRECTORY", ["infrastructure/tree/layout.py", "runtime/reminder_records.py"]),
+        ("RELATION_CARDS_DIRECTORY", ["infrastructure/tree/layout.py", "runtime/relation_cards.py"]),
     ):
         users = sorted(
             path.relative_to(SRC).as_posix()

@@ -370,7 +370,7 @@ def test_a_day_whose_hits_on_disk_cannot_be_read_fails_the_seal_step(tmp_path) -
     night(run, TONIGHT, NOW)
     assert TONIGHT in run.hits.days_done()
     # 盘上一份命中记录多了个字段（读不了），完成章撤掉让这一天重封
-    record = next((tmp_path / "scene" / "occurrences").rglob("*.md"))
+    record = next((tmp_path / "scene" / "occurrences" / f"{TONIGHT:%Y}" / f"{TONIGHT:%m}" / f"{TONIGHT:%d}").glob("*.md"))
     record.write_text(
         record.read_text(encoding="utf-8").replace('"classified":true', '"classified":true,"x":1'),
         encoding="utf-8",
