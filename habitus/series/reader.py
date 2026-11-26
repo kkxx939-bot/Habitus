@@ -114,12 +114,6 @@ class SeriesReader:
         return found
 
 
-def read_series(tree: BehaviorTree, *, cutoff: date, kinds: KindResolution | None = None) -> EventSeries:
-    """截至 ``cutoff`` 的序列，读一次不缓存（换代用常驻的 ``SeriesReader``）。"""
-
-    return SeriesReader(tree, kinds=kinds).read(cutoff=cutoff)
-
-
 def _assemble(
     occurrences: Sequence[BehaviorDocument],
     gap_documents: Sequence[BehaviorDocument],
@@ -267,4 +261,4 @@ def _local(raw: object, field: str) -> datetime:
     return parsed
 
 
-__all__ = ["admitted", "read_series", "skip_reason"]
+__all__ = ["admitted", "skip_reason"]

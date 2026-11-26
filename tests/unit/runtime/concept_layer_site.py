@@ -26,7 +26,7 @@ from habitus.model_client.structured import StructuredChatClient
 from habitus.runtime.scene import build_scene_nightly, scene_branch_root
 from habitus.runtime.scene_night import NightReport, SceneNightlyRun
 from habitus.scene.occurrences.model import ConceptHits
-from habitus.series.reader import read_series
+from tests.series_helpers import read_series
 from tests.unit.foresight.scripted_model import ScriptedProvider, model_config
 from tests.unit.scene.fixtures import Site
 

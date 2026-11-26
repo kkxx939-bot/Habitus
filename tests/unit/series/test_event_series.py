@@ -24,8 +24,8 @@ from habitus.series import (
     SkippedRecord,
     SkipReason,
 )
-from habitus.series.reader import read_series
 from habitus.temporal import Rulers
+from tests.series_helpers import read_series
 from tests.unit.scene.concept_fixtures import BEDTIME, BREAKFAST, CODING, every_kind
 from tests.unit.scene.fixtures import DAY1, Site, at, publish, publish_gap
 
@@ -64,7 +64,8 @@ def test_the_reading_rules_live_in_one_place(tmp_path) -> None:
     assert [(record.name, record.kind_token) for record in pending] == [("说不清的一件事", PENDING)]
     assert {record.lane for record in series.records} == {"session"}
     # 非事件与撞车重复不进序列，只留可观测量
-    assert series.skipped_on(day(1), SkipReason.NOT_EVENT) == 1 and series.skipped_on(day(2), SkipReason.DUPLICATE) == 1
+    skipped = [(item.day, item.reason) for item in series.skipped]
+    assert skipped.count((day(1), SkipReason.NOT_EVENT)) == 1 and skipped.count((day(2), SkipReason.DUPLICATE)) == 1
     assert all(record.kind_token != NOT_EVENT for record in series.records)
     # 被提醒过的原样带着，目标、概要也在
     (reminded,) = [record for record in series.records if record.uri == meal]

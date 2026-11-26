@@ -22,8 +22,8 @@ from habitus.runtime.foresight_tick import ForesightTick
 from habitus.scene.concepts import ConceptSet
 from habitus.scene.recurrence import recurrences_of
 from habitus.scene.relations import Relation, RelationConfig, RelationKey, Segment, Status, build_timelines
-from habitus.series.reader import read_series
 from habitus.temporal import Rulers
+from tests.series_helpers import read_series
 from tests.unit.kind_ids import kind_id
 from tests.unit.scene.concept_fixtures import base
 from tests.unit.scene.fixtures import DAY1, SUBJECT, Site, at, publish

@@ -16,7 +16,7 @@ import pytest
 from habitus.behavior.kinds.ids import ClassId
 from habitus.behavior.kinds.model import Vocabulary
 from habitus.scene.relations import LaneTests
-from habitus.series.reader import read_series
+from tests.series_helpers import read_series
 from tests.unit.hierarchy_downstream.site import (
     ACCOUNT,
     BASELINE_IN_USE,

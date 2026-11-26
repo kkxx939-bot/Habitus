@@ -134,16 +134,6 @@ def test_lane_of_a_behaviour_is_its_own_and_a_calendar_situation_belongs_to_no_l
     assert concepts.lane_of("周末") is None and concepts.lane_of("不在集里") is None
 
 
-def test_relatable_to_keeps_one_lane_plus_calendar_situations_and_never_itself() -> None:
-    meal = physical_base("吃饭")
-    concepts = ConceptSet([*ALL_CONCEPTS, meal])
-    related = concepts.relatable_to(cid("早餐"))
-    assert cid("早餐") not in related and meal.name not in related
-    assert {cid("打球"), cid("就寝"), "周末"} <= set(related)
-    assert concepts.relatable_to(meal.name) == ("周末",)  # 物理 lane 只有它自己 + 不属于任何 lane 的日历情境
-    assert list(related) == sorted(related)
-
-
 def test_labels_are_unique_within_a_lane_but_may_repeat_across_lanes() -> None:
     """给模型看的是名字（裁定 21-1）：同一条 lane 能一起出现的概念不许同名；两条 lane 各有一个「打球」可以。"""
 

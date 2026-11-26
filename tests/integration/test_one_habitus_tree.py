@@ -30,9 +30,10 @@ from habitus.scene.relations.engine import RelationKey
 from habitus.scene.relations.spans import Segment
 from habitus.scene.relations.state import LaneState, Relation, Status
 from habitus.scene.views.index import DayIndex
-from habitus.series.reader import admitted, read_series
+from habitus.series.reader import admitted
 from tests.helpers import document
 from tests.lock_store import ProcessLocalLockStore
+from tests.series_helpers import read_series
 from tests.unit.behavior.kinds_fixtures import named_words
 from tests.unit.behavior.tree_payloads import DAY, gap_payload, local, occurrence_payload
 from tests.unit.runtime.test_behavior_pipeline import (

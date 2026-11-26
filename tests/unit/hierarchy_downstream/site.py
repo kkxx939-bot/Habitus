@@ -48,7 +48,7 @@ from habitus.runtime.foresight import (
 )
 from habitus.runtime.scene import build_scene_nightly, scene_branch_root
 from habitus.runtime.scene_night import NightReport, SceneNightlyRun
-from habitus.series.reader import read_series
+from tests.series_helpers import read_series
 from tests.unit.foresight.scripted_model import model_config
 from tests.unit.runtime.concept_layer_site import SUBJECT, ModelMustNotBeCalled, example_mapping
 from tests.unit.runtime.test_model_queue_acceptance import queue_on

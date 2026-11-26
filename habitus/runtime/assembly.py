@@ -4,130 +4,34 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Mapping
-from datetime import timedelta
 
 from habitus.config import HabitusConfig
-from habitus.conversation import (
-    AddressWatermarks,
-    BehaviorSessionOutputStore,
-    ConversationConsumerDelivery,
-    ConversationConsumerExecutionFence,
-    ConversationConsumerOutcomeStore,
-    ConversationConsumerStateInspector,
-    ConversationSourceConsumer,
-    ConversationSourceCoordinator,
-    ConversationSourceLedger,
-    ConversationSourceRecovery,
-    ConversationSourceReleaser,
-    ConversationSourceStore,
-    PendingSources,
-    SourceIndex,
-)
-from habitus.conversation.source.salvage import SourceSalvage
 from habitus.foundation.observability import CompositeObserver, Observer
-from habitus.infrastructure.lifecycle import CapacitySnapshotStore, LifecycleParticipant
 from habitus.infrastructure.observability import ManagedObservability, MetricRegistry
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.sqlite import SQLiteLockStore
-from habitus.memory.browse import MemoryBrowser
-from habitus.memory.compaction import (
-    MemoryFieldCompactor,
-    MemoryLifecycleCommitter,
-    MemoryLifecycleManager,
-    MemoryLifecycleOperationStore,
-    MemoryLifecycleScanStore,
-    MemoryRecoveryStore,
-)
-from habitus.memory.conversation import (
-    ConversationMessageJournal,
-    ConversationRangeSummaryGenerator,
-    ConversationRangeSummaryStore,
-    ConversationRetentionPlanner,
-    ConversationSummaryCompactor,
-    ConversationSummaryExpander,
-    ConversationSummaryGenerator,
-    ConversationSummaryReader,
-    ConversationSummaryRetirementStore,
-    ConversationSummaryService,
-    ConversationSummaryStore,
-    SQLiteConversationSummaryUseStore,
-)
-from habitus.memory.document import MemoryDocumentCodec
-from habitus.memory.editor import (
-    MemoryCommitWriter,
-    MemoryEditor,
-    MemoryExtractionLoop,
-    MemoryIdentityPlanner,
-    MemoryRelatedRetriever,
-)
-from habitus.memory.recall import (
-    MemoryRecallLifecycle,
-    SQLiteMemoryRecallLifecycleStore,
-)
-from habitus.memory.retrieval import (
-    ConversationSearchContextReader,
-    MemoryCatalogReader,
-    NoBehaviorRecords,
-    SearchService,
-)
-from habitus.memory.schema import MemorySchemaRegistry
-from habitus.memory.semantic import MemorySemanticRefresher
-from habitus.memory.snapshot import MemorySnapshotReader
-from habitus.memory.tree import MemoryTree
-from habitus.memory.workflow import (
-    ConversationLifecycleManager,
-    ConversationMemoryEnqueuer,
-    MemoryConversationConsumer,
-    MemoryConversationOutputStore,
-    MemoryJobRunner,
-    MemoryJobStore,
-)
 from habitus.model_client import ChatClient, ProviderFactory, StructuredChatClient
 from habitus.pre.conversation import ConversationAdapterRegistry
+from habitus.runtime.assembly_shared import AssemblyShared
 from habitus.runtime.behavior import (
     behavior_domain_configs,
     build_behavior_components,
 )
-from habitus.runtime.behavior_records import BehaviorTreeRecords
-from habitus.runtime.components import (
-    RuntimeComponents,
-    RuntimeConversation,
-    RuntimeInfrastructure,
-    RuntimeMemory,
-    RuntimeModels,
-    RuntimeWorkflow,
+from habitus.runtime.components import RuntimeComponents, RuntimeInfrastructure, RuntimeModels
+from habitus.runtime.conversation_assembly import (
+    build_conversation,
+    build_source_delivery,
+    build_sources,
+    runtime_conversation,
+    source_settled,
 )
-from habitus.runtime.conditions import local_calendar
-from habitus.runtime.evidence import evidence_of
-from habitus.runtime.foresight import (
-    build_outlet,
-    build_outlet_consumer,
-    build_reminder_responses,
-    foresight_ledger,
-)
-from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
-from habitus.runtime.lifecycle import LifecycleWorker
-from habitus.runtime.lifecycle_downstream import downstream_participants
-from habitus.runtime.lifecycle_idle import ConversationIdleSealParticipant, fully_sealed
-from habitus.runtime.lifecycle_memory import ConversationChainParticipant, MemoryL2Participant, conversation_lease_key
-from habitus.runtime.lifecycle_retry import retry_ledger
-from habitus.runtime.lifecycle_sources import ConversationSourceParticipant, ConversationSourceRecoveryParticipant
-from habitus.runtime.pipeline_assembly import assemble_pipeline
+from habitus.runtime.memory_assembly import build_memory, build_memory_search
+from habitus.runtime.pipeline_assembly import assemble_downstream
 from habitus.runtime.runtime import Runtime
-from habitus.runtime.scene import (
-    build_workers,
-    model_tracer,
-)
+from habitus.runtime.scene import model_tracer
 from habitus.runtime.scene_config import relation_thresholds
-from habitus.runtime.session_lane import (
-    BehaviorSessionConsumer,
-    answered_question_tools,
-    session_salvager,
-    unwatched_writer,
-)
-from habitus.runtime.worker import MemoryWorker
+from habitus.runtime.workflow_assembly import build_lifecycle, build_memory_workflow
 
 
 def validate_domain_configs(config: HabitusConfig) -> None:
@@ -149,15 +53,51 @@ def build_runtime(
     path_lock: PathLock | None = None,
     observer: Observer | None = None,
 ) -> Runtime:
-    """无存储写入、无模型请求地完成一次显式依赖组装。"""
+    """无存储写入、无模型请求地完成一次显式依赖组装。各段按依赖先后组装：基础 → 长期记忆、会话 → 记忆任务 → 会话源 →
+    行为侧 → 检索、下游 → 会话源交付 → 生命周期。"""
 
     validate_domain_configs(config)
-
-    # 会话协议的适配器也声明各宿主的提问工具与宿主名：出口、会话 lane、出口那层消费者都从这一份取
-    adapters = (
-        conversation_adapters if conversation_adapters is not None else ConversationAdapterRegistry.with_builtins()
+    infrastructure, models, shared = _foundation(config, providers, conversation_adapters, path_lock, observer)
+    memory = build_memory(config, shared.path_lock, shared.structured_chat)
+    conversation = build_conversation(config, shared.path_lock, shared.structured_chat)
+    workflow = build_memory_workflow(config, memory, conversation, shared)
+    stores = build_sources(config, conversation.journal, workflow.enqueuer)
+    # 行为组件要先于会话源的交付组装：会话 lane 是会话源的一个消费者，写的是行为侧的判断存储。
+    behavior = build_behavior_components(
+        config,
+        structured_chat=shared.structured_chat,
+        lock_store=shared.path_lock.lock_store,
+        observer=shared.observer,
+        span_controller=shared.managed_observability,
+        source_settled=source_settled(stores),
     )
-    resolved_providers = providers or _builtin_provider_factory()
+    search = build_memory_search(config, memory, conversation, behavior, shared.structured_chat, shared.observer)
+    downstream = assemble_downstream(config, behavior, shared)
+    delivery = build_source_delivery(config, stores, conversation.journal, behavior, downstream, shared)
+    components = RuntimeComponents(
+        infrastructure=infrastructure,
+        models=models,
+        conversation=runtime_conversation(conversation, stores, delivery),
+        memory=search,
+        workflow=build_lifecycle(config, memory, workflow, stores, delivery, downstream, behavior, shared),
+        behavior=behavior,
+        pipelines=downstream.pipelines,
+        slot_worker=downstream.slot_worker,
+        model_queue=downstream.model_queue,
+        outlet=downstream.outlet,
+    )
+    return Runtime(config, components, conversation_adapters=shared.adapters)
+
+
+def _foundation(
+    config: HabitusConfig,
+    providers: ProviderFactory | None,
+    conversation_adapters: ConversationAdapterRegistry | None,
+    path_lock: PathLock | None,
+    observer: Observer | None,
+) -> tuple[RuntimeInfrastructure, RuntimeModels, AssemblyShared]:
+    """观测、锁与模型客户端：后面各段都共用这几样。"""
+
     metrics_config = config.observability.metrics
     observability = MetricRegistry(
         enabled=metrics_config.enabled,
@@ -175,469 +115,36 @@ def build_runtime(
         observers.append(observer)
     operation_observer: Observer = CompositeObserver(*observers)
     resolved_lock = path_lock or PathLock(
-        SQLiteLockStore(
-            config.workflow_root / "locks.sqlite3",
-            config=config.storage.sqlite_lock,
-            initialize=False,
-        ),
+        SQLiteLockStore(config.workflow_root / "locks.sqlite3", config=config.storage.sqlite_lock, initialize=False),
         observer=operation_observer,
     )
-
-    schema_registry = MemorySchemaRegistry.load_default()
-    codec = MemoryDocumentCodec(schema_registry)
-    conversation_config = config.conversation
-    memory_config = config.memory
-    workflow_config = config.workflow
-    tree = MemoryTree(
-        config.tree_root,
-        document_codec=codec,
-        document_config=memory_config.document,
-        tree_config=memory_config.tree,
-    )
-    snapshot_reader = MemorySnapshotReader(tree, config=memory_config.snapshot)
-    recall_lifecycle = MemoryRecallLifecycle(  # 提取时搜内容要剔退休卡片，所以在检索器之前建
-        SQLiteMemoryRecallLifecycleStore(
-            config.workflow_root / "memory_recall_lifecycle.sqlite3",
-            config=memory_config.recall_lifecycle,
-            initialize=False,
-        ),
-        config=memory_config.recall_lifecycle,
-    )
+    resolved_providers = providers or _builtin_provider_factory()
     chat = _chat_client(resolved_providers, config, operation_observer)
-    retriever = MemoryRelatedRetriever(
-        schema_registry=schema_registry,
-        snapshot_reader=snapshot_reader,
-        config=memory_config.editor_retrieval,
-        recall_lifecycle=recall_lifecycle,
-    )
     structured_chat = StructuredChatClient(
         chat,
         allow_json_repair=config.models.structured_output.allow_json_repair,
         validation_retries=config.models.structured_output.validation_retries,
     )
-    extraction_loop = MemoryExtractionLoop(
-        client=structured_chat,
-        retriever=retriever,
-        zone=config.locale.zone(),
-        config=memory_config.extraction,
-    )
-
-    writer = MemoryCommitWriter(tree, snapshot_reader, resolved_lock, config=memory_config.commit)
-    editor = MemoryEditor(
-        extraction_loop=extraction_loop,
-        identity_planner=MemoryIdentityPlanner(schema_registry),
-        writer=writer,
-    )
-
-    semantic_refresher = MemorySemanticRefresher(tree, schema_registry, resolved_lock, config=memory_config.semantic)
-
-    conversations = ConversationMessageJournal(
-        config.conversation_root,
-        resolved_lock,
-        config=conversation_config.journal,
-    )
-    retention = ConversationRetentionPlanner(conversation_config.segmentation)
-    summary_store = ConversationSummaryStore(
-        conversations.layout,
-        config=conversation_config.summary,
-    )
-    summary_generator = ConversationSummaryGenerator(
-        structured_chat,
-        zone=config.locale.zone(),
-        config=conversation_config.summary,
-    )
-    summaries = ConversationSummaryService(summary_store, summary_generator)
-    range_summary_store = ConversationRangeSummaryStore(
-        conversations.layout,
-        config=conversation_config.summary,
-    )
-    range_summary_generator = ConversationRangeSummaryGenerator(
-        structured_chat,
-        summary_config=conversation_config.summary,
-        compaction_config=conversation_config.lifecycle.summary_compaction,
-    )
-    summary_use = SQLiteConversationSummaryUseStore(
-        config.workflow_root / "conversation_summary_use.sqlite3",
-        initialize=False,
-    )
-    summary_compactor = ConversationSummaryCompactor(
-        conversations,
-        summary_store,
-        range_summary_store,
-        range_summary_generator,
-        use_store=summary_use,
-        config=conversation_config.lifecycle.summary_compaction,
-    )
-    summary_retirements = ConversationSummaryRetirementStore(config.workflow_root)
-    summary_expander = ConversationSummaryExpander(
-        summary_store,
-        range_summary_store,
-        max_source_reads=(
-            conversation_config.lifecycle.summary_compaction.range_to_archive.max_source_count
-            * (1 + conversation_config.lifecycle.summary_compaction.segment_to_range.max_source_count)
-        ),
-    )
-    summary_reader = ConversationSummaryReader(
-        conversations,
-        summary_compactor,
-        config=conversation_config.summary_reader,
-        retirement_store=summary_retirements,
-    )
-    search_context_reader = ConversationSearchContextReader(
-        conversations,
-        summary_compactor,
-        config=memory_config.search_service,
-        retirement_filter=summary_retirements,
-    )
-    field_compactor = MemoryFieldCompactor(
-        structured_chat,
-        registry=schema_registry,
-        config=memory_config.field_compaction,
-    )
-    recovery_store = MemoryRecoveryStore(tree, config.workflow_root)
-    lifecycle_committer = MemoryLifecycleCommitter(writer, snapshot_reader)
-
-    async def refresh_lifecycle_derivatives(uris):
-        addresses = tuple(uri.to_address() for uri in uris)
-        await asyncio.to_thread(semantic_refresher.refresh_for_many, addresses)
-
-    memory_lifecycle = MemoryLifecycleManager(
-        tree,
-        snapshot_reader,
-        recall_lifecycle,
-        field_compactor,
-        recovery_store,
-        lifecycle_committer,
-        MemoryLifecycleOperationStore(tree, resolved_lock, config.workflow_root),
-        MemoryLifecycleScanStore(tree, resolved_lock, config.workflow_root),
-        config=memory_config.lifecycle_maintenance,
-        derived_refresh=refresh_lifecycle_derivatives,
-    )
-    jobs = MemoryJobStore(config.workflow_root, resolved_lock, memory_root=tree.root, config=workflow_config.jobs)
-    conversation_lifecycle = ConversationLifecycleManager(
-        summary_compactor,
-        conversations,
-        summary_store,
-        range_summary_store,
-        jobs,
-        summary_retirements,
-        summary_config=conversation_config.lifecycle.summary_compaction,
-        workflow_config=workflow_config.lifecycle,
-    )
-    enqueuer = ConversationMemoryEnqueuer(
-        conversations,
-        jobs,
-        retention_planner=retention,
-    )
-    source_config = conversation_config.source
-    source_ledger = ConversationSourceLedger(
-        SourceIndex(
-            config.conversation_root,
-            max_addresses=source_config.max_source_addresses,
-            max_markers_per_address=source_config.max_markers_per_address,
-        ),
-        PendingSources(config.conversation_root, max_entries=source_config.max_pending_sources),
-        AddressWatermarks(config.conversation_root),
-    )
-    source_store = ConversationSourceStore(
-        config.conversation_root,
-        max_file_bytes=source_config.max_envelope_bytes,
-        ledger=source_ledger,
-    )
-    source_outcomes = ConversationConsumerOutcomeStore(
-        config.conversation_root,
-        max_file_bytes=source_config.max_outcome_bytes,
-    )
-    memory_output_store = MemoryConversationOutputStore(
-        config.conversation_root,
-        max_files_per_source=source_config.max_output_files_per_consumer,
-        max_file_bytes=source_config.max_memory_output_bytes,
-    )
-    behavior_session_outputs = BehaviorSessionOutputStore(
-        config.conversation_root,
-        max_files_per_source=source_config.max_output_files_per_consumer,
-        max_file_bytes=source_config.max_behavior_session_output_bytes,
-    )
-    memory_conversation_consumer = MemoryConversationConsumer(
-        enqueuer,
-        conversations,
-        memory_output_store,
-    )
-
-    # 行为组件要先于会话源的交付组装：会话 lane 是会话源的一个消费者，写的是行为侧的判断存储。
-    def behavior_settled(source_id: str) -> bool:
-        """这份会话源的 Behavior 到终态了没有：Outcome 只在终态才建；整份已释放（信封都删了）也算。"""
-
-        if source_outcomes.read(source_id, ConversationSourceConsumer.BEHAVIOR_SESSION) is not None:
-            return True
-        return source_store.read(source_id) is None
-
-    behavior_components = build_behavior_components(
-        config,
+    shared = AssemblyShared(
+        path_lock=resolved_lock,
+        observer=operation_observer,
+        managed_observability=managed_observability,
         structured_chat=structured_chat,
-        lock_store=resolved_lock.lock_store,
+        adapters=(
+            conversation_adapters if conversation_adapters is not None else ConversationAdapterRegistry.with_builtins()
+        ),
+    )
+    infrastructure = RuntimeInfrastructure(
+        path_lock=resolved_lock,
+        observability=observability,
         observer=operation_observer,
-        span_controller=managed_observability,
-        source_settled=behavior_settled,
+        managed_observability=managed_observability,
     )
-    # 检索在行为组件之后建：它要读两支行为树里每一轮的记录（行为侧没开就没有这一处来源）。
-    search_service = SearchService(
-        catalog=MemoryCatalogReader(
-            tree,
-            schema_registry,
-            recall_lifecycle,
-            max_catalog_chars=memory_config.search_service.max_catalog_chars,
-            overview_max_bytes=memory_config.semantic.max_overview_chars * 4 + 4,
-            max_unlisted_scan=memory_config.search_service.max_unlisted_scan,
-        ),
-        snapshot_reader=snapshot_reader,
-        client=structured_chat,
-        recall_lifecycle=recall_lifecycle,
-        conversation_context=search_context_reader,
-        summaries=summary_reader,
-        records=(
-            NoBehaviorRecords()
-            if behavior_components is None
-            else BehaviorTreeRecords(tuple(branch.tree for branch in behavior_components))
-        ),
-        zone=config.locale.zone(),
-        config=memory_config.search_service,
-        cold_probe_expander=memory_lifecycle,
-        summary_use_recorder=summary_use,
-        summary_expander=summary_expander,
-        observer=operation_observer,
+    return (
+        infrastructure,
+        RuntimeModels(providers=resolved_providers, chat=chat, structured_chat=structured_chat),
+        shared,
     )
-    # behavior 关着而 scene / foresight 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
-    # 所以这里 behavior_components 为 None 时换代与预测层必然都没开，直接跳过即可。
-    # 两支各一条下游管线（裁定 42：两条 lane 彻底分开，三棵树各有会话、物理两支）：代码一套，按支各装一份、各用各的根；
-    # 两支只共用两个常驻 worker（每一槽 / 每一轮依次做两支，会话在前）、当地日历与提醒出口。
-    branches = () if behavior_components is None else tuple(behavior_components)
-    # 当地日历只建一份：两支的语义树与预测层读同一份，换代开头重读放假数据时一起换
-    calendar = None if behavior_components is None else local_calendar(config)
-    # 读账的两个值（裁定 49）：α 借关系检验前向验证的显著性；遗忘半衰期是几次机会（裁定 57）
-    evidence = None if behavior_components is None or not config.foresight.enabled else evidence_of(config)
-    # 各支的账本先建，提醒出口两支共用一个（出口只有宿主里的会话；「说了」与回话写回请求所属那一支的账本）
-    ledgers = (
-        {}
-        if evidence is None
-        else {branch.lane.value: foresight_ledger(config, branch.lane.value, branch.kind_store) for branch in branches}
-    )
-    outlet = (
-        None
-        if not ledgers
-        else build_outlet(
-            config,
-            ledgers,
-            # 出口认提问时拿词名配题目（那一支词表给人看的名字；编号仍是身份）
-            kind_stores={branch.lane.value: branch.kind_store for branch in branches},
-            question_tools=adapters.question_tools(),
-            observer=operation_observer,
-        )
-    )
-    pipelines = tuple(
-        pipeline
-        for branch in branches
-        if (
-            pipeline := assemble_pipeline(
-                config,
-                branch,
-                # 没在看的时段写成会话一支的「未观测」空判断，由会话一支的归约落树。物理一支不写：
-                # 在没在看是上游的逻辑，融合不替上游补没报到的时间（裁定 43），这一支只推水位
-                unwatched=(
-                    unwatched_writer(behavior_components.session_lane)
-                    if behavior_components is not None and branch is behavior_components.session
-                    else None
-                ),
-                calendar=calendar,
-                evidence=evidence,
-                ledger=ledgers.get(branch.lane.value),
-                outlet=outlet,
-                structured_chat=structured_chat,
-                lock_store=resolved_lock.lock_store,
-                observer=operation_observer,
-                span_backend=managed_observability,
-            )
-        )
-        is not None
-    )
-    foresights = tuple(item.foresight for item in pipelines if item.foresight is not None)
-    if foresights:
-        # 说那一半：会话 lane 每轮带上两支开着的提醒、把模型判出的回应写回提醒所属那一支的账本
-        assert behavior_components is not None
-        behavior_components.session_lane.attach_reminders(
-            build_reminder_responses(foresights, config=config, observer=operation_observer)
-        )
-    # 行为侧没启用时消费者仍要注册（交付层要求名单里每一项都有实现），它把每份源落成"跳过"。
-    behavior_session_consumer: BehaviorSessionConsumer | OutletObservingConsumer = BehaviorSessionConsumer(
-        None if behavior_components is None else behavior_components.session_lane,
-        behavior_session_outputs,
-        question_tools=answered_question_tools(adapters),
-    )
-    if outlet is not None and foresights and isinstance(behavior_session_consumer, BehaviorSessionConsumer):
-        # 提醒出口：同一份会话先过出口（认出 agent 的提问、写「说了」与固定选项的回话），再进会话 lane
-        behavior_session_consumer = build_outlet_consumer(
-            outlet, behavior_session_consumer, observer=operation_observer, host_of=adapters.host
-        )
-    source_inspector = ConversationConsumerStateInspector(source_outcomes)
-    source_fence = ConversationConsumerExecutionFence(
-        resolved_lock,
-        ttl_seconds=source_config.execution_lock_ttl_seconds,
-        heartbeat_interval_seconds=source_config.execution_lock_heartbeat_seconds,
-        wait_seconds=source_config.execution_lock_wait_seconds,
-    )
-    source_delivery = ConversationConsumerDelivery(
-        source_store,
-        source_outcomes,
-        source_inspector,
-        source_fence,
-        {
-            ConversationSourceConsumer.MEMORY: memory_conversation_consumer,
-            ConversationSourceConsumer.BEHAVIOR_SESSION: behavior_session_consumer,
-        },
-        observer=operation_observer,
-    )
-    source_coordinator = ConversationSourceCoordinator(source_store, source_delivery)
-    # 行为侧的账坏了的会话源：逐轮补救（没写过的轮落「没读懂」、进换代重试的堆，裁定 67、68）
-    source_salvage = SourceSalvage(
-        config.conversation_root,
-        salvagers={
-            ConversationSourceConsumer.BEHAVIOR_SESSION: session_salvager(
-                None if behavior_components is None else behavior_components.session_lane,
-                question_tools=answered_question_tools(adapters),
-            )
-        },
-    )
-    source_recovery = ConversationSourceRecovery(
-        source_store,
-        source_delivery,
-        batch_size=source_config.recovery_batch_size,
-        retries=retry_ledger(
-            config.conversation_root, owner="conversation-source-recovery", config=config.lifecycle.retry
-        ),
-        salvage=source_salvage,
-        orphan_grace=timedelta(seconds=source_config.orphan_grace_seconds),
-    )
-    source_releaser = ConversationSourceReleaser(
-        source_store,
-        source_outcomes,
-        source_ledger,
-        source_delivery.consumers,
-        resolved_lock.lock_store,
-        lock_ttl_seconds=source_config.execution_lock_ttl_seconds,
-        fully_sealed=fully_sealed(conversations),
-        salvage=source_salvage,
-    )
-    runner = MemoryJobRunner(
-        jobs,
-        conversations,
-        editor,
-        semantic_refresher,
-        summaries,
-        recall_lifecycle,
-        observer=operation_observer,
-    )
-    worker = MemoryWorker(
-        runner,
-        workflow_config.worker,
-        observer=operation_observer,
-        span_controller=managed_observability,
-    )
-    lifecycle_lock_store = conversation_lifecycle.journal.path_lock.lock_store
-    participants: list[LifecycleParticipant] = [
-        ConversationChainParticipant(
-            conversation_lifecycle,
-            conversation_config.lifecycle,
-            lock_store=lifecycle_lock_store,
-            lease_ttl_seconds=config.lifecycle.worker.lease_ttl_seconds,
-        ),
-        MemoryL2Participant(memory_lifecycle, semantic_refresher),
-        ConversationSourceParticipant(source_releaser, batch_addresses=source_config.release_batch_addresses),
-        ConversationSourceRecoveryParticipant(source_recovery, source_coordinator, wake_memory=worker.wake),
-    ]
-
-    slot_worker, model_queue_worker = (
-        build_workers(config, pipelines, observer=operation_observer) if pipelines else (None, None)
-    )
-    participants.extend(
-        downstream_participants(config, pipelines, behavior_components, source_retries=source_recovery.retries)
-    )
-    lifecycle_worker = LifecycleWorker(
-        tuple(participants),
-        config.lifecycle.worker,
-        lock_store=lifecycle_lock_store,
-        lease_key=conversation_lease_key(conversation_lifecycle.journal),
-        # 闲置封存每一拍都跑，其余按 lifecycle.worker 的周期（裁定 107）
-        frequent=(
-            ConversationIdleSealParticipant(
-                enqueuer,
-                source_releaser,
-                resolved_lock,
-                conversation_config.lifecycle,
-                lock_ttl_seconds=source_config.execution_lock_ttl_seconds,
-                wake_memory=worker.wake,
-            ),
-        ),
-        frequent_interval_seconds=conversation_config.lifecycle.idle_scan_interval_seconds,
-        capacity=CapacitySnapshotStore(jobs.root),
-        observer=operation_observer,
-    )
-    components = RuntimeComponents(
-        infrastructure=RuntimeInfrastructure(
-            path_lock=resolved_lock,
-            observability=observability,
-            observer=operation_observer,
-            managed_observability=managed_observability,
-        ),
-        models=RuntimeModels(
-            providers=resolved_providers,
-            chat=chat,
-            structured_chat=structured_chat,
-        ),
-        conversation=RuntimeConversation(
-            sources=source_store,
-            source_outcomes=source_outcomes,
-            memory_outputs=memory_output_store,
-            behavior_session_outputs=behavior_session_outputs,
-            behavior_session_consumer=behavior_session_consumer,
-            source_inspector=source_inspector,
-            source_fence=source_fence,
-            source_delivery=source_delivery,
-            source_coordinator=source_coordinator,
-            source_recovery=source_recovery,
-            source_ledger=source_ledger,
-            source_releaser=source_releaser,
-            journal=conversations,
-            retention=retention,
-            summaries=summaries,
-            summary_compactor=summary_compactor,
-            summary_reader=summary_reader,
-            summary_use=summary_use,
-            summary_expander=summary_expander,
-        ),
-        memory=RuntimeMemory(
-            tree=tree,
-            search=search_service,
-            editor=editor,
-            semantic_refresher=semantic_refresher,
-            lifecycle=memory_lifecycle,
-            browser=MemoryBrowser(tree),
-        ),
-        workflow=RuntimeWorkflow(
-            jobs=jobs,
-            enqueuer=enqueuer,
-            conversation_consumer=memory_conversation_consumer,
-            lifecycle=conversation_lifecycle,
-            runner=runner,
-            worker=worker,
-            lifecycle_worker=lifecycle_worker,
-        ),
-        behavior=behavior_components,
-        pipelines=pipelines,
-        slot_worker=slot_worker,
-        model_queue=model_queue_worker,
-        outlet=outlet,
-    )
-    return Runtime(config, components, conversation_adapters=adapters)
 
 
 def _builtin_provider_factory() -> ProviderFactory:

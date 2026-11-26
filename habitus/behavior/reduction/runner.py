@@ -77,10 +77,6 @@ class BehaviorReductionReport:
     #: 这一轮拦住的我们自己的 bug（归类抛了模型之外的异常）：常驻节拍把它挂到健康面，当场报出。
     bugs: tuple[str, ...] = ()
 
-    @property
-    def published_documents(self) -> int:
-        return self.published_occurrences + self.published_gaps
-
 
 @dataclass(frozen=True)
 class PinnedFrontier:

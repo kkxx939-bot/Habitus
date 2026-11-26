@@ -24,6 +24,7 @@ from habitus.foresight.ledger import (
     account_key,
 )
 from habitus.runtime.foresight_delivery import DeliveryStage, JudgeMaterials
+from habitus.runtime.foresight_delivery_facts import antecedent_holds
 from habitus.runtime.foresight_delivery_tally import spoken_today
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
@@ -767,7 +768,7 @@ def test_delivery_and_settlement_read_the_same_rows_the_same_way(tmp_path, case)
         calendar_on=lambda _day: (),
         rows_on=lambda found: [AntecedentRow(r.at, r.last_observed_at, r.kind_token) for r in cache.day(found).rows],
     )
-    assert run._antecedent_holds(item, materials) is settling is True
+    assert antecedent_holds(item, materials) is settling is True
     done = first_occurrence(item, cache.day(day).rows) is not None
     assert done_since(item, seen, now=now) is done is (consequent is not None)
 

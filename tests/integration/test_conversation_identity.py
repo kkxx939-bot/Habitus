@@ -81,9 +81,6 @@ def _keys(conversation_id: str) -> dict[str, object]:
         "source_id": ConversationSourceEnvelope.source_identity(conversation_id, DAY, "c" * 64),
         "job_key": MemoryJobStore._source_key_values(address, SEGMENT, DIGEST),
         "summary_identity": ConversationSummaryReference(address, ConversationSummaryStage.SEGMENT, SEGMENT).identity,
-        "summary_scope": ConversationSummaryReference(
-            address, ConversationSummaryStage.SEGMENT, SEGMENT
-        ).conversation_scope,
         "address": address,
     }
 

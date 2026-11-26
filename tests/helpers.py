@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, SnapshotState, VersionedSnapshot
 from habitus.infrastructure.tree.metadata import DocumentMetadata
 from habitus.memory.document import MemoryDocument, MemoryDocumentCodec
+from habitus.memory.editor.page_id import MemoryPageIdMap
 from habitus.memory.model import MemoryKind
 from habitus.memory.schema import MemorySchemaRegistry
 from habitus.pre.conversation.messages import (
@@ -174,3 +175,13 @@ def memory_snapshot(value: MemoryDocument) -> VersionedSnapshot[MemoryDocument]:
 def snapshot_batch(*documents: MemoryDocument) -> SnapshotBatch[MemoryDocument]:
     snapshots = tuple(sorted((memory_snapshot(item) for item in documents), key=lambda item: item.identity))
     return SnapshotBatch(snapshots, sum(item.size_bytes for item in snapshots))
+
+
+def page_ids_from(snapshots: SnapshotBatch[MemoryDocument]) -> MemoryPageIdMap:
+    """按快照顺序给存在的旧记忆分编号，和提取上下文读入旧记忆时的做法一样（``extraction/context.py``）。"""
+
+    page_ids = MemoryPageIdMap()
+    for snapshot in snapshots.snapshots:
+        if snapshot.exists:
+            page_ids.register_existing(snapshot.identity)
+    return page_ids

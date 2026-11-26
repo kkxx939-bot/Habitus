@@ -8,9 +8,8 @@
 口径（与共享说明 P0-2 第 1 段一致，实现与基线用同一套）：
 
 - 范围：``habitus/`` 下全部 ``.py``，包括 ``integrations`` 和 ``benchmark``，不含路径中任一段是
-  ``__pycache__`` 或 ``node_modules`` 的文件（``habitus/integrations/openclaw/node_modules/`` 是本地 npm
-  装出来、被 ``.gitignore`` 忽略的目录，CI 的检出里没有；不排除的话本地装了带 ``.py`` 的 npm 包会让本地
-  和 CI 结果不一样）。不复用 ``test_dependency_boundaries.PRODUCTION_ROOTS``，它不含 ``integrations``
+  ``__pycache__`` 或 ``node_modules`` 的文件（``node_modules/`` 是本地 npm 装出来、被 ``.gitignore``
+  忽略的目录，CI 的检出里没有；不排除的话本地装了带 ``.py`` 的 npm 包会让本地和 CI 结果不一样）。不复用 ``test_dependency_boundaries.PRODUCTION_ROOTS``，它不含 ``integrations``
   和 ``benchmark``。
 - 函数长度：``FunctionDef`` / ``AsyncFunctionDef`` 的 ``end_lineno - lineno + 1``（``lineno`` 是 ``def``
   那一行，装饰器不算）；嵌套函数单独再算一次。

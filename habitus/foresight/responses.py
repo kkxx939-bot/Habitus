@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -70,10 +70,4 @@ def open_reminders(
     return tuple(found[:limit])
 
 
-def closes_after(responses: Sequence[Response]) -> bool:
-    """这条提醒已经判出正 / 负 / 已做（之后的会话不再判）。"""
-
-    return any(item.closes for item in responses)
-
-
-__all__ = ["OpenReminder", "closes_after", "open_reminders"]
+__all__ = ["OpenReminder", "open_reminders"]

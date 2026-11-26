@@ -23,7 +23,7 @@ from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.scene.concepts import ConceptSet
 from habitus.scene.relations import build_timelines
-from habitus.series.reader import read_series
+from tests.series_helpers import read_series
 from tests.unit.runtime.test_foresight_daily_miss_and_silent_day import (
     CONFIG,
     HABIT,

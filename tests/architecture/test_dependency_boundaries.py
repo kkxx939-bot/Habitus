@@ -1372,7 +1372,7 @@ def test_memory_gets_the_subjects_time_zone_from_the_composition_root() -> None:
         if "__pycache__" not in path.parts and ("config" in imported_roots(path) or "zoneinfo" in imported_roots(path))
     )
     assert offenders == []
-    assembly = (SRC / "runtime" / "assembly.py").read_text(encoding="utf-8")
+    assembly = (SRC / "runtime" / "memory_assembly.py").read_text(encoding="utf-8")
     loop_call = assembly[assembly.index("MemoryExtractionLoop(") :]
     loop_call = loop_call[: loop_call.index("\n    )")]
     assert "zone=config.locale.zone()," in loop_call

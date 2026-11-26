@@ -33,9 +33,9 @@ from habitus.runtime.foresight_tick import ForesightTick
 from habitus.scene.concepts import ConceptSet
 from habitus.scene.recurrence import recurrences_of
 from habitus.scene.relations import RelationConfig, build_timelines
-from habitus.series.reader import read_series
 from habitus.temporal import Rulers
 from habitus.temporal.coverage import coverage_of
+from tests.series_helpers import read_series
 from tests.unit.kind_ids import kind_id
 from tests.unit.runtime.test_foresight_delivery import EVIDENCE, LOSS, Outlet, Seeded
 from tests.unit.scene.concept_fixtures import base

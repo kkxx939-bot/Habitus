@@ -44,10 +44,6 @@ class ConversationSummaryReference:
             f"{self.summary_id}"
         )
 
-    @property
-    def conversation_scope(self) -> str:
-        return f"conversation-summary-scope:{self.address.started_on.isoformat()}:{self.address.identity}"
-
     @classmethod
     def parse(cls, value: str) -> ConversationSummaryReference:
         if not value.startswith("conversation-summary:"):

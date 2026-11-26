@@ -1,6 +1,6 @@
 """预测拍不重复读账（丙批处三 B1、B2、B4–B8、B11）：两拍之间账没变就不再打开记录文件，账变了下一拍一定读到。
 
-读文件的次数在 ``JsonFiles.load`` 这一层按路径数；入口是真实的 ``DeliveryStage._due``、``spoken_today`` 与 ``ForesightTick.run_once``。
+读文件的次数在 ``JsonFiles.load`` 这一层按路径数；入口是真实的 ``scan_due``、``spoken_today`` 与 ``ForesightTick.run_once``。
 B1、B2、B4 在改动前的代码上失败（那正是要修的重复读），其余改动前后都通过。
 """
 
@@ -22,6 +22,7 @@ from habitus.foresight import Evidence, NoUnsealed, Tolerance
 from habitus.foresight.ledger import Delivery, Expectation, Settlement
 from habitus.runtime.foresight import ForesightReadSide
 from habitus.runtime.foresight_delivery import DeliveryStage
+from habitus.runtime.foresight_delivery_due import scan_due
 from habitus.runtime.foresight_delivery_tally import spoken_today
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
@@ -126,7 +127,7 @@ def delivery_stage(ledger: ForesightLedgerStore, *, outlet: Any = None) -> Deliv
 def due_and_spoken(stage: DeliveryStage, now: datetime = NOW, since: datetime = SINCE) -> tuple[Any, dict[str, Any]]:
     """一拍里读账的那两处：四拨到期的、今天说过的。"""
 
-    return stage._due(now, since, voiced=lambda item: True), spoken_today(stage.ledger, now)
+    return scan_due(stage.ledger, now, since, voiced=lambda item: True, claimed=stage.claimed), spoken_today(stage.ledger, now)
 
 
 def whole_tick(tmp_path: Path, stage: DeliveryStage, clock: Callable[[], datetime]) -> ForesightTick:

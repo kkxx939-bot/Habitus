@@ -153,12 +153,6 @@ class MemoryURI:
         return self._uri[len(f"{self.SCHEME}://") :]
 
     @property
-    def decoded_path(self) -> str:
-        """返回供内部展示使用的已解码路径。"""
-
-        return "/".join(self._segments)
-
-    @property
     def segments(self) -> tuple[str, ...]:
         return self._segments
 
@@ -181,16 +175,6 @@ class MemoryURI:
         if not self._segments:
             return None
         return self._from_segments(self._segments[:-1])
-
-    @property
-    def containing_directory(self) -> MemoryDirectory:
-        """返回当前节点所在目录；目录节点返回自身。"""
-
-        if self._node_type is MemoryURINodeType.DOCUMENT:
-            assert self._address is not None
-            return MemoryDirectory.for_address(self._address)
-        assert self._directory is not None
-        return self._directory
 
     def to_address(self) -> MemoryAddress:
         """把 L2 文档 URI 反解为 ``MemoryAddress``。"""
@@ -221,13 +205,6 @@ class MemoryURI:
         if not part or "/" in part or "\\" in part:
             raise MemoryURIError("memory URI join part must be one safe non-empty segment")
         return self._from_segments((*self._segments, part))
-
-    def matches_prefix(self, prefix: MemoryURI | str) -> bool:
-        """按完整路径段匹配前缀，避免字符串前缀产生同名误匹配。"""
-
-        parsed = self.parse(prefix)
-        size = len(parsed._segments)
-        return self._segments[:size] == parsed._segments
 
     def __str__(self) -> str:
         return self._uri

@@ -26,7 +26,7 @@ from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.scene.concepts import ConceptSet
 from habitus.scene.relations import build_timelines
-from habitus.series.reader import read_series
+from tests.series_helpers import read_series
 from tests.unit.runtime.test_foresight_daily_miss_and_silent_day import (
     CONFIG,
     HABIT,
@@ -112,7 +112,7 @@ def _ask_and_decline(w: World, day: date) -> bool:
 def _state(w: World, day: date) -> dict[str, object]:
     unit = w.ledger.unit_level_of(w.kind)
     table = w.opportunities.latest("session")
-    fb = w.delivery._feedback(w.kind, table)  # noqa: SLF001 — 递送那一拍读的同一个数
+    fb = w.delivery.readings.feedback(w.kind, table)  # 递送那一拍读的同一个数
     items = interval_items(w, day)
     return {
         "day": day.isoformat(),

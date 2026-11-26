@@ -20,6 +20,7 @@ from habitus.foresight.ledger import Expectation
 from habitus.foresight.opportunities import OpportunityTable, TreeReading
 from habitus.foresight.opportunities.model import RelationOpportunities
 from habitus.foresight.units import Input, basis, tree_reading
+from habitus.runtime import foresight_delivery_facts
 from habitus.runtime.foresight_delivery import DeliveryStage, JudgeMaterials
 from tests.unit.foresight.scripted_model import recording_client
 from tests.unit.runtime.test_foresight_delivery import DAY0, LIKE, Outlet, earn, expectation, stage
@@ -325,7 +326,7 @@ def test_a_member_whose_antecedent_failed_lets_the_other_take_over(tmp_path, mon
     """X 开口前核出前因不成立：这一刻的话没说出口，Y 到自己的时窗末照常接手。"""
 
     run, ledger, materials = two_late_members(tmp_path)
-    monkeypatch.setattr(run, "_antecedent_holds", lambda item, _materials: item.expectation_id != "x")
+    monkeypatch.setattr(foresight_delivery_facts, "antecedent_holds", lambda item, _materials: item.expectation_id != "x")
     for minutes in (T, 90, Y_CLOSES):
         asyncio.run(run.run_once(at(minutes), materials))
     assert reasons(ledger, "x") == ["单元已选", "前因不成立"]
@@ -337,7 +338,7 @@ def test_a_basis_whose_antecedent_failed_lets_its_member_take_over(tmp_path, mon
 
     run, ledger = stage(tmp_path, tick_seconds=TICK)
     materials = JudgeMaterials(table(relation("rel-b"), relation("rel-x")), lambda uris: {})
-    monkeypatch.setattr(run, "_antecedent_holds", lambda item, _materials: item.expectation_id != "b")
+    monkeypatch.setattr(foresight_delivery_facts, "antecedent_holds", lambda item, _materials: item.expectation_id != "b")
     earn(ledger, trigger="rel-b", source="事件", hits=8)
     earn(ledger, trigger="rel-x", source="事件", hits=8)
     ledger.record_expectation(expectation("b", DAY0, trigger="rel-b", source="事件"))

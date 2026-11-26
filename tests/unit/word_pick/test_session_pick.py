@@ -20,7 +20,7 @@ from habitus.behavior.model import BehaviorKind
 from habitus.behavior.retry import RetryCause, RetryKind
 from habitus.model_client import ModelAuthenticationError, ModelContentSafetyError
 from habitus.series.model import SkipReason
-from habitus.series.reader import read_series
+from tests.series_helpers import read_series
 from tests.unit.word_pick.site import (
     MISSING,
     NONE,

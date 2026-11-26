@@ -80,8 +80,9 @@ from habitus.runtime.scene_advice import RelationAdvice
 from habitus.scene.advice.prior import PriorAdvisor, PriorConfig
 from habitus.scene.advice.store import AdviceStore
 from habitus.scene.occurrences import ConceptHitStore
-from habitus.series.reader import SeriesReader, read_series
+from habitus.series.reader import SeriesReader
 from tests.lock_store import ProcessLocalLockStore
+from tests.series_helpers import read_series
 from tests.unit.kind_ids import kind_id
 from tests.unit.runtime.test_foresight_nightly import components as foresight_components
 from tests.unit.runtime.test_generation import StubSettlement, assembled_with, generate, sealed_through

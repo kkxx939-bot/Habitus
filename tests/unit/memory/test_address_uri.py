@@ -82,14 +82,12 @@ def test_uri_rejects_short_legacy_noncanonical_and_tree_escape_forms(uri: str) -
 def test_uri_preserves_unicode_and_canonicalizes_reserved_percent_encoding() -> None:
     uri = MemoryURI("habitus://preferences/视频%20输出.md")
     assert str(uri) == "habitus://preferences/视频%20输出.md"
-    assert uri.decoded_path == "preferences/视频 输出.md"
+    assert "/".join(uri.segments) == "preferences/视频 输出.md"
     assert MemoryURI.parse(uri) is uri
 
 
-def test_uri_join_requires_directory_and_prefix_matches_complete_segments() -> None:
+def test_uri_join_requires_directory() -> None:
     preferences = MemoryURI.from_directory(MemoryDirectory.preferences())
     assert preferences.join("回答风格.md") == "habitus://preferences/回答风格.md"
     with pytest.raises(MemoryURIError, match="directory"):
         preferences.join("回答风格.md").join("child")
-    assert MemoryURI("habitus://entities/项目/Habitus.md").matches_prefix("habitus://entities/项目")
-    assert not MemoryURI("habitus://entities/项目甲/Habitus.md").matches_prefix("habitus://entities/项目")

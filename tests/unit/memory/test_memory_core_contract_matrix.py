@@ -169,7 +169,6 @@ def test_every_valid_directory_supports_l0_l1_uri_round_trip(directory: MemoryDi
     uri = MemoryURI.from_layer(directory, level)
     assert uri.node_type is MemoryURINodeType.LAYER
     assert uri.to_layer() == (directory, level)
-    assert uri.containing_directory == directory
     assert uri.parent == MemoryURI.from_directory(directory)
 
 
@@ -234,7 +233,7 @@ def test_uri_normalizes_reserved_percent_encoding_and_keeps_unicode(
 ) -> None:
     uri = MemoryURI(raw)
     assert str(uri) == canonical
-    assert uri.decoded_path == decoded
+    assert "/".join(uri.segments) == decoded
     assert MemoryURI.normalize(raw) == canonical
 
 
@@ -252,7 +251,6 @@ def test_directory_uri_properties_and_wrong_conversions(directory: MemoryDirecto
     uri = MemoryURI.from_directory(directory)
     assert uri.node_type is MemoryURINodeType.DIRECTORY
     assert uri.to_directory() == directory
-    assert uri.containing_directory == directory
     assert uri.is_root is (directory == MemoryDirectory.root())
     with pytest.raises(MemoryURIError):
         uri.to_address()
@@ -266,7 +264,6 @@ def test_document_uri_properties_and_wrong_conversions(kind: MemoryKind) -> None
     uri = MemoryURI.from_address(address)
     assert uri.node_type is MemoryURINodeType.DOCUMENT
     assert uri.to_address() == address
-    assert uri.containing_directory == MemoryDirectory.for_address(address)
     with pytest.raises(MemoryURIError):
         uri.to_directory()
     with pytest.raises(MemoryURIError):

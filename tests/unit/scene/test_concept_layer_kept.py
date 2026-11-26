@@ -29,8 +29,8 @@ from habitus.scene.occurrences.situations import SituationInputs, situation_hits
 from habitus.scene.recurrence import recurrences_of
 from habitus.scene.relations import LaneTests, RelationConfig, build_timelines
 from habitus.scene.relations.spans import Segment
-from habitus.series.reader import read_series
 from habitus.temporal import Rulers
+from tests.series_helpers import read_series
 from tests.unit.scene.fixtures import Site, publish
 
 ZONE = ZoneInfo("Asia/Shanghai")

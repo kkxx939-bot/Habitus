@@ -44,8 +44,9 @@ from habitus.runtime.model_queue import (
     QueueSettings,
 )
 from habitus.runtime.model_queue_health import queue_problems
-from habitus.series.reader import SeriesReader, read_series
+from habitus.series.reader import SeriesReader
 from tests.lock_store import ProcessLocalLockStore
+from tests.series_helpers import read_series
 from tests.unit.runtime.test_scene_night import (
     NOW,
     TONIGHT,

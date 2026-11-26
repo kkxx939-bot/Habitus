@@ -39,7 +39,7 @@ from habitus.scene.occurrences.situations import SituationInputs, situation_hits
 from habitus.scene.occurrences.store import ConceptHitStore
 from habitus.scene.relations import LaneTests, RelationConfig, build_timelines
 from habitus.series.model import SkipReason
-from habitus.series.reader import read_series
+from tests.series_helpers import read_series
 from tests.unit.scene.fixtures import Site as TreeSite
 from tests.unit.scene.fixtures import publish
 from tests.unit.word_pick.site import NONE, Raw, Site, at

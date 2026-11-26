@@ -273,18 +273,6 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
 
         return self[name].lane if name in self else None
 
-    def relatable_to(self, consequent: str) -> tuple[str, ...]:
-        """能和这个后件连成一条关系的概念（不含它自己）：同一条 lane 的行为概念 + 不属于任何 lane 的日历情境。
-
-        关系只在一条 lane 内（裁定 20）：两两检验的对从这里取。
-        """
-
-        own = self[consequent].identity
-        lane = self.lane_of(own)
-        return tuple(
-            identity for identity in sorted(self._items) if identity != own and self.lane_of(identity) in (lane, None)
-        )
-
     def label_of(self, name: str) -> str:
         """概念 → 给人和模型看的名字；不在集里的原样返回（读侧拿它渲染，概念删了的旧记录照样印得出）。"""
 

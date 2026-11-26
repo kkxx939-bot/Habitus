@@ -237,7 +237,7 @@ def test_second_sweep_is_a_no_op(tmp_path) -> None:
 
     report = asyncio.run(harness.runner.run_once())
 
-    assert report.published_documents == 0
+    assert report.published_occurrences + report.published_gaps == 0
     assert report.replayed_documents == 0
     assert len(harness.tree.list_addresses(BehaviorKind.OCCURRENCE)) == 1
 
@@ -250,7 +250,7 @@ def test_chains_inside_the_window_stay_pending(tmp_path) -> None:
 
     report = asyncio.run(harness.runner.run_once())
 
-    assert report.published_documents == 0
+    assert report.published_occurrences + report.published_gaps == 0
     assert report.chains_pending == 1
     assert harness.tree.list_addresses(BehaviorKind.OCCURRENCE) == ()
 
@@ -292,7 +292,7 @@ def test_an_unfused_observation_blocks_sealing_despite_the_wall_clock(tmp_path) 
     report = asyncio.run(harness.runner.run_once())
 
     # 前沿 cutoff = 302s（backlog 的 available_at），视界 = 302s - 3600s < 判断 evidence
-    assert report.published_documents == 0
+    assert report.published_occurrences + report.published_gaps == 0
     assert report.chains_pending == 1
 
     # 该观测融合完成（回执覆盖）后，同一墙钟下立即可封。
@@ -633,7 +633,10 @@ def test_an_address_already_on_the_tree_is_disambiguated_without_a_ledger_entry(
     seed_wash(harness, source)
     report = asyncio.run(harness.runner.run_once())
     assert report.published_occurrences == 1
-    names = sorted(document.fields["name"] for document in harness.tree.iter_documents(BehaviorKind.OCCURRENCE))
+    names = sorted(document.fields["name"] for document in (
+            harness.tree.read(address)
+            for address in harness.tree.list_addresses(BehaviorKind.OCCURRENCE, limit=10_000)
+        ))
     assert names == ["洗手", "洗手-2"]
     assert not (tmp_path / "reduction" / "staged.json").exists()
     # 消歧记录 = 已知重复：词表整理与事件序列都不计（同一口径）

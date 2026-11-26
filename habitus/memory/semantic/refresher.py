@@ -39,12 +39,6 @@ class MemorySemanticRefresher:
         self.config = config or MemorySemanticConfig()
         self._lock_prefix = root_lock_prefix("memory-semantic", self.tree.root)
 
-    def refresh_for(self, address: MemoryAddress) -> tuple[MemorySemanticRefreshResult, ...]:
-        """从发生变化的 L2 父目录开始，依次刷新到记忆根目录。"""
-
-        self.tree.initialize()
-        return tuple(self.refresh_directory(directory) for directory in MemoryDirectory.for_address(address).lineage())
-
     def refresh_for_many(
         self,
         addresses: tuple[MemoryAddress, ...],

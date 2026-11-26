@@ -18,7 +18,7 @@ from habitus.behavior.kinds.ids import Lane, pending_token
 from habitus.conditions import DAY_OF_MONTH_KEY, WEEKDAY_KEY
 from habitus.runtime.scene_night import SceneNightlyRun
 from habitus.scene.concepts.calendar_situations import calendar_key
-from habitus.series.reader import read_series
+from tests.series_helpers import read_series
 from tests.unit.runtime.concept_layer_site import (
     CLASSES,
     CST,

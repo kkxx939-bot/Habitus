@@ -8,7 +8,7 @@ import pytest
 
 from habitus.foresight.errors import ForesightError
 from habitus.foresight.ledger import Delivery, Expectation, Response
-from habitus.foresight.responses import closes_after, open_reminders
+from habitus.foresight.responses import open_reminders
 
 CST = timezone(timedelta(hours=8))
 NOW = datetime(2026, 10, 1, 10, 0, tzinfo=CST)
@@ -76,7 +76,6 @@ def test_open_reminders_are_spoken_unexpired_and_not_yet_closed_sorted_by_deadli
     assert "waiting" in {
         i.expectation_id for i in open_reminders(items, deliveries, [*responses, later], at=NOW, limit=5)
     }
-    assert closes_after(responses[:1]) and not closes_after(responses[1:])
     with pytest.raises(ForesightError):
         open_reminders(items, deliveries, responses, at=NOW, limit=0)
     with pytest.raises(ForesightError):

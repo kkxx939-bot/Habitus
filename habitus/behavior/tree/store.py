@@ -113,20 +113,6 @@ class BehaviorTree:
         self._files.create(path, encoded)
         return document
 
-    def iter_documents(self, kind: BehaviorKind) -> Iterator[BehaviorDocument]:
-        """按地址序分页读出某类的全部文档（全量扫描）。"""
-
-        after: BehaviorAddress | None = None
-        while True:
-            page = self.list_addresses(kind, limit=10_000, after=after)
-            if not page:
-                return
-            for address in page:
-                yield self.read(address)
-            after = page[-1]
-            if len(page) < 10_000:
-                return
-
     def read(self, address: BehaviorAddress) -> BehaviorDocument:
         return self._decode(self._existing_document_path(address), address)
 

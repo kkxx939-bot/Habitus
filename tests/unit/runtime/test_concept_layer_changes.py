@@ -27,7 +27,7 @@ from habitus.scene.concepts.calendar_situations import calendar_key
 from habitus.scene.concepts.store import ConceptStore
 from habitus.scene.occurrences.store import ConceptHitStore
 from habitus.scene.relations.store import RelationStore
-from habitus.series.reader import read_series
+from tests.series_helpers import read_series
 from tests.unit.runtime.concept_layer_site import (
     CLASSES,
     CST,

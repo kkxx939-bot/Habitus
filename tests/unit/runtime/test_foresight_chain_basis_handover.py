@@ -27,7 +27,7 @@ from habitus.runtime.foresight_tick import ForesightTick
 from habitus.scene.concepts import ConceptSet
 from habitus.scene.recurrence import recurrences_of
 from habitus.scene.relations import Relation, RelationKey, Segment, Status, build_timelines
-from habitus.series.reader import read_series
+from tests.series_helpers import read_series
 from tests.unit.kind_ids import kind_id
 from tests.unit.runtime.test_foresight_daily_miss_and_silent_day import (
     CONFIG,

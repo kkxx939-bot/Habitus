@@ -38,8 +38,8 @@ from habitus.behavior.uri import BehaviorURI
 from habitus.infrastructure.store.sqlite import SQLiteLockStore
 from habitus.runtime.generation_report import GenerationReports
 from habitus.runtime.generation_result import generation_attributes
-from habitus.series.reader import read_series
 from tests.lock_store import ProcessLocalLockStore
+from tests.series_helpers import read_series
 from tests.unit.behavior.judgement_builders import batch_from
 from tests.unit.behavior.test_fusion_judgement_durability import FRAGMENTS, JUDGED_AT, LANE_VERSION, SOURCE_REFS, body
 from tests.unit.behavior.test_fusion_judgement_durability import PROMPT_VERSION as JUDGEMENT_PROMPT_VERSION

@@ -21,13 +21,12 @@ from habitus.memory.editor.candidate import (
 from habitus.memory.editor.page_id import (
     MemoryPageIdError,
     MemoryPageIdMap,
-    validate_new_page_id,
     validate_page_id,
     validate_unique_page_ids,
 )
 from habitus.memory.model import MemoryAddress, MemoryKind
 from habitus.memory.uri import MemoryURI, MemoryURIError
-from tests.helpers import document, memory_fields, snapshot_batch
+from tests.helpers import document, memory_fields, page_ids_from, snapshot_batch
 
 FIELD_FOR_KIND = {
     MemoryKind.PROFILE: "profile",
@@ -59,17 +58,6 @@ def test_page_id_accepts_all_positive_integer_ranges(value: int) -> None:
 def test_page_id_rejects_non_positive_bool_and_non_integer(value: object) -> None:
     with pytest.raises(MemoryPageIdError):
         validate_page_id(value)
-
-
-@pytest.mark.parametrize("value", [100, 101, 999, 2**63])
-def test_new_page_id_accepts_only_new_range(value: int) -> None:
-    assert validate_new_page_id(value) == value
-
-
-@pytest.mark.parametrize("value", [1, 2, 98, 99, 0, -1, True, 100.0, "100", None])
-def test_new_page_id_rejects_existing_or_invalid_range(value: object) -> None:
-    with pytest.raises(MemoryPageIdError):
-        validate_new_page_id(value)
 
 
 @pytest.mark.parametrize("values", [(1, 1), (99, 99), (100, 100), (1, 100, 1), (100, 101, 100)])
@@ -420,12 +408,12 @@ def test_page_id_map_register_copy_and_multi_binding_are_isolated() -> None:
     page_ids = MemoryPageIdMap()
     assert page_ids.register_existing(first) == 1
     assert page_ids.register_existing(first) == 1
-    page_ids.register_new(first, 100)
-    page_ids.register_new(second, 101)
+    page_ids.register_resolved(first, 100)
+    page_ids.register_resolved(second, 101)
     copied = page_ids.copy()
-    copied.register_new(second, 102)
-    assert page_ids.page_ids_for(second) == frozenset({101})
-    assert copied.page_ids_for(second) == frozenset({101, 102})
+    copied.register_resolved(second, 102)
+    assert page_ids.resolve(102) is None and page_ids.resolve(101) == str(second)
+    assert copied.resolve(102) == str(second) and copied.resolve(101) == str(second)
     assert page_ids.page_id_for(first) == 1
     assert page_ids.existing_items() == ((1, str(first)),)
 
@@ -446,7 +434,7 @@ def test_page_id_map_from_snapshots_maps_only_found_documents_in_stable_order() 
     profile = document(MemoryKind.PROFILE)
     preference = document(MemoryKind.PREFERENCE)
     batch = snapshot_batch(preference, profile)
-    page_ids = MemoryPageIdMap.from_snapshots(batch)
+    page_ids = page_ids_from(batch)
     identities = tuple(item.identity for item in batch.snapshots)
     assert page_ids.items() == tuple(enumerate(identities, start=1))
     assert all(page_ids.resolve(index) == identity for index, identity in page_ids.items())

@@ -17,7 +17,7 @@ from habitus.model_client import ModelTransportError
 from habitus.runtime import health as health_module
 from habitus.runtime.generation_marks import GenerationMark, GenerationMarks
 from habitus.runtime.model_queue import ADVICE, DONE, ModelQueueState, QueueSettings
-from habitus.series.reader import read_series
+from tests.series_helpers import read_series
 from tests.unit.kind_ids import kind_id
 from tests.unit.runtime.test_model_queue_acceptance import TODAY, chat_breaker, disk, done, queue_on, scene_on
 from tests.unit.runtime.test_scene_night import NOW, publish_tonight, site_with_three_bedtimes

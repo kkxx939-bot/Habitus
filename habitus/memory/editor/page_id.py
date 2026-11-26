@@ -4,13 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from habitus.infrastructure.editor.snapshot import SnapshotBatch
-from habitus.memory.document import MemoryDocument
 from habitus.memory.uri import MemoryURI
 
 EXISTING_PAGE_ID_MIN = 1
 EXISTING_PAGE_ID_MAX = 99
-NEW_PAGE_ID_MIN = 100
 
 
 class MemoryPageIdError(ValueError):
@@ -29,22 +26,6 @@ class MemoryPageIdMap:
         self._uri_to_pages: dict[str, set[int]] = {}
         self._next_existing_page_id = EXISTING_PAGE_ID_MIN
 
-    @classmethod
-    def from_snapshots(cls, snapshots: SnapshotBatch[MemoryDocument]) -> MemoryPageIdMap:
-        """按快照身份的稳定顺序为所有已存在旧记忆分配编号。"""
-
-        result = cls()
-        for snapshot in snapshots.snapshots:
-            if not snapshot.exists:
-                continue
-            if snapshot.value is None:
-                raise MemoryPageIdError("existing memory snapshot has an invalid value")
-            document_uri = str(MemoryURI.from_address(snapshot.value.address))
-            if snapshot.identity != document_uri:
-                raise MemoryPageIdError("existing memory snapshot identity does not match its document")
-            result.register_existing(snapshot.identity)
-        return result
-
     def register_existing(self, uri: MemoryURI | str) -> int:
         """注册一个完整旧记忆 URI，重复注册同一 URI 时返回原编号。"""
 
@@ -59,13 +40,6 @@ class MemoryPageIdMap:
         self._next_existing_page_id += 1
         self._bind(page_id, normalized)
         return page_id
-
-    def register_new(self, uri: MemoryURI | str, page_id: int) -> None:
-        """在最终 URI 已确定后绑定模型声明的新节点编号。"""
-
-        normalized_page_id = validate_new_page_id(page_id)
-        normalized_uri = self._document_uri(uri)
-        self._bind(normalized_page_id, normalized_uri)
 
     def register_resolved(self, uri: MemoryURI | str, page_id: int) -> None:
         """绑定节点决策产生的最终 URI，并保护旧编号不被重定向。"""
@@ -101,11 +75,6 @@ class MemoryPageIdMap:
 
         page_ids = self._uri_to_pages.get(self._document_uri(uri))
         return min(page_ids) if page_ids else None
-
-    def page_ids_for(self, uri: MemoryURI | str) -> frozenset[int]:
-        """返回当前指向同一最终 URI 的全部临时编号。"""
-
-        return frozenset(self._uri_to_pages.get(self._document_uri(uri), set()))
 
     def existing_items(self) -> tuple[tuple[int, str], ...]:
         """按编号返回系统分配的全部旧节点映射。"""
@@ -146,15 +115,6 @@ def validate_page_id(value: object) -> int:
     return value
 
 
-def validate_new_page_id(value: object) -> int:
-    """严格校验模型为新节点声明的编号。"""
-
-    page_id = validate_page_id(value)
-    if page_id < NEW_PAGE_ID_MIN:
-        raise MemoryPageIdError("new memory page_id must be at least 100")
-    return page_id
-
-
 def validate_unique_page_ids(values: Iterable[int]) -> None:
     """拒绝同一解析输出中的重复编号。"""
 
@@ -171,8 +131,6 @@ __all__ = [
     "EXISTING_PAGE_ID_MIN",
     "MemoryPageIdError",
     "MemoryPageIdMap",
-    "NEW_PAGE_ID_MIN",
-    "validate_new_page_id",
     "validate_page_id",
     "validate_unique_page_ids",
 ]

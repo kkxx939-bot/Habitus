@@ -17,7 +17,6 @@ from habitus.memory.editor import (
     MemoryMutationPlanner,
     MemoryMutationReadSet,
     MemoryNodeDisposition,
-    MemoryPageIdMap,
     MemoryRelationAction,
     MemoryRelationCandidate,
 )
@@ -30,7 +29,7 @@ from habitus.memory.editor.extraction import (
 from habitus.memory.editor.mutation import MemoryFieldMerger, MemoryNodeMatch, MemoryNodeMatchStatus
 from habitus.memory.model import MemoryKind
 from habitus.memory.uri import MemoryURI
-from tests.helpers import document, memory_snapshot, snapshot_batch
+from tests.helpers import document, memory_snapshot, page_ids_from, snapshot_batch
 
 
 def candidate_batch(candidate: MemoryCandidate | None, *, proposal, relations=()):
@@ -55,7 +54,7 @@ def candidate_batch(candidate: MemoryCandidate | None, *, proposal, relations=()
 
 def extraction(old_documents, candidate, proposal, *, relations=()):
     old = snapshot_batch(*old_documents)
-    pages = MemoryPageIdMap.from_snapshots(old)
+    pages = page_ids_from(old)
     batch = candidate_batch(candidate, proposal=proposal, relations=relations)
     if candidate is None:
         targets = SnapshotBatch((), 0)
@@ -99,7 +98,7 @@ def test_same_memory_merge_requires_allowed_kind_and_preserves_live_target() -> 
         fields={"topic": "答复长度", "content": "- 偏好简洁回答"},
     )
     old = snapshot_batch(source, target)
-    pages = MemoryPageIdMap.from_snapshots(old)
+    pages = page_ids_from(old)
     source_page = pages.page_id_for(MemoryURI.from_address(source.address))
     target_page = pages.page_id_for(MemoryURI.from_address(target.address))
     proposal = MemoryIdentityProposal(
@@ -123,7 +122,7 @@ def test_same_memory_rejects_cross_kind_and_tool_merges_after_candidate_validati
     preference = document(MemoryKind.PREFERENCE)
     entity = document(MemoryKind.ENTITY)
     old = snapshot_batch(preference, entity)
-    pages = MemoryPageIdMap.from_snapshots(old)
+    pages = page_ids_from(old)
     source_page = pages.page_id_for(MemoryURI.from_address(preference.address))
     target_page = pages.page_id_for(MemoryURI.from_address(entity.address))
     proposal = MemoryIdentityProposal(
@@ -150,7 +149,7 @@ def test_same_memory_rejects_cross_kind_and_tool_merges_after_candidate_validati
         fields={"tool_name": "workspace.read", "verification": "检查退出状态。"},
     )
     tools = snapshot_batch(first_tool, second_tool)
-    tool_pages = MemoryPageIdMap.from_snapshots(tools)
+    tool_pages = page_ids_from(tools)
     source_id = tool_pages.page_id_for(MemoryURI.from_address(first_tool.address))
     target_id = tool_pages.page_id_for(MemoryURI.from_address(second_tool.address))
     tool_proposal = MemoryIdentityProposal(
@@ -179,7 +178,7 @@ def test_retired_identity_source_cannot_also_participate_in_relation_candidate()
         fields={"topic": "新名称", "content": "- 偏好简洁"},
     )
     old = snapshot_batch(source, target)
-    pages = MemoryPageIdMap.from_snapshots(old)
+    pages = page_ids_from(old)
     source_page = pages.page_id_for(MemoryURI.from_address(source.address))
     target_page = pages.page_id_for(MemoryURI.from_address(target.address))
     proposal = MemoryIdentityProposal(
@@ -211,7 +210,7 @@ def test_retired_identity_source_cannot_also_participate_in_relation_candidate()
 def test_validated_remove_memory_becomes_delete_without_creating_a_content_mutation(basis) -> None:
     source = document(MemoryKind.ENTITY)
     old = snapshot_batch(source)
-    pages = MemoryPageIdMap.from_snapshots(old)
+    pages = page_ids_from(old)
     source_page = pages.page_id_for(MemoryURI.from_address(source.address))
     proposal = MemoryIdentityProposal(
         MemoryIdentityProposalType.REMOVE_MEMORY,

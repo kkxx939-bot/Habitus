@@ -28,7 +28,6 @@ from habitus.memory.editor import (
     MemoryMutationPlanner,
     MemoryMutationReadSet,
     MemoryNodeDisposition,
-    MemoryPageIdMap,
     MemoryRelationPlanner,
     MemoryRelationReadSet,
 )
@@ -40,7 +39,7 @@ from habitus.memory.uri import MemoryURI
 from habitus.memory.workflow import MemoryJobClaim, MemoryJobExecutionError, MemoryJobRunner, MemoryJobStatus
 from habitus.memory.workflow.completion import MemoryCommittedJobFinalizer
 from habitus.memory.workflow.jobs import MemoryJobConfig, MemoryJobStore
-from tests.helpers import BASE_TIME, closed_turn, registry, segment
+from tests.helpers import BASE_TIME, closed_turn, page_ids_from, registry, segment
 from tests.lock_store import ProcessLocalLockStore
 
 
@@ -129,7 +128,7 @@ def preference_plan(reader: MemorySnapshotReader, contents: dict[str, str]) -> M
     targets = reader.read_many(uris)
     existing = tuple(snapshot for snapshot in targets.snapshots if snapshot.exists)
     old = SnapshotBatch(existing, sum(snapshot.size_bytes for snapshot in existing))
-    pages = MemoryPageIdMap.from_snapshots(old)
+    pages = page_ids_from(old)
     candidates = tuple(
         MemoryCandidate(pages.page_id_for(uri) or draft.page_id, draft.kind, draft.fields)
         for draft, uri in zip(drafts, uris, strict=True)
@@ -231,7 +230,7 @@ def test_a_merge_whose_target_fails_to_write_keeps_its_source(
     source_uri = MemoryURI.parse("habitus://preferences/回答风格.md")
     target_uri = MemoryURI.parse("habitus://preferences/输出格式.md")
     old = site.reader.read_many((source_uri, target_uri))
-    pages = MemoryPageIdMap.from_snapshots(old)
+    pages = page_ids_from(old)
     source_page = pages.page_id_for(source_uri)
     target_page = pages.page_id_for(target_uri)
     assert source_page is not None and target_page is not None

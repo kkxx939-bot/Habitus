@@ -16,7 +16,7 @@ from habitus.pre.conversation import (
     ConversationToolResultContentMode,
     ConversationToolResultStatus,
 )
-from tests.helpers import document, memory_fields, message, segment, snapshot_batch, tool_turn
+from tests.helpers import document, memory_fields, message, page_ids_from, segment, snapshot_batch, tool_turn
 
 
 def empty_output() -> dict[str, object]:
@@ -76,16 +76,16 @@ def test_page_ids_are_deterministic_and_existing_ids_cannot_be_redirected() -> N
     profile = document(MemoryKind.PROFILE)
     preference = document(MemoryKind.PREFERENCE)
     snapshots = snapshot_batch(profile, preference)
-    page_ids = MemoryPageIdMap.from_snapshots(snapshots)
+    page_ids = page_ids_from(snapshots)
     assert page_ids.existing_items() == tuple(enumerate((item.identity for item in snapshots.snapshots), start=1))
 
     old_id, old_uri = page_ids.existing_items()[0]
     with pytest.raises(MemoryPageIdError, match="redirected"):
         page_ids.register_resolved(page_ids.existing_items()[1][1], old_id)
-    with pytest.raises(MemoryPageIdError, match="at least 100"):
-        page_ids.register_new(old_uri, 99)
-    page_ids.register_new(old_uri, 100)
-    assert page_ids.page_ids_for(old_uri) == frozenset({old_id, 100})
+    with pytest.raises(MemoryPageIdError, match="not registered from old-memory"):
+        page_ids.register_resolved(old_uri, 99)
+    page_ids.register_resolved(old_uri, 100)
+    assert page_ids.resolve(100) == str(old_uri) and page_ids.page_id_for(old_uri) == old_id
 
 
 def test_tool_candidate_requires_exact_successful_tool_name_from_conversation() -> None:
@@ -163,7 +163,7 @@ def test_tool_failure_recovery_carried_over_verbatim_keeps_its_old_source() -> N
         "verification": "本次调用成功列出了 memory 包目录、源文件清单以及包外运行时调用位置。",
     }
     old_batch = snapshot_batch(document(MemoryKind.TOOL, fields=old_fields))
-    page_ids = MemoryPageIdMap.from_snapshots(old_batch)
+    page_ids = page_ids_from(old_batch)
     only_successes = segment(messages=tool_turn())
     output = empty_output()
     output["tools"] = [
@@ -184,7 +184,7 @@ def test_tool_failure_recovery_carried_over_verbatim_keeps_its_old_source() -> N
     output["tools"][0]["failure_recovery"] = old_recovery
     with pytest.raises(MemoryCandidateError, match="failure followed"):
         MemoryCandidateBatch.model_validate(output).validate_context(
-            only_successes, fresh_batch, MemoryPageIdMap.from_snapshots(fresh_batch)
+            only_successes, fresh_batch, page_ids_from(fresh_batch)
         )
 
 

@@ -154,7 +154,7 @@ class World:
             kind, fields, metadata=DocumentMetadata(revision=1, created_at=updated, updated_at=updated)
         )
         self.tree.write(document)
-        self.refresher.refresh_for(document.address)
+        self.refresher.refresh_for_many((document.address,))
         return MemoryURI.from_address(document.address)
 
     def service(

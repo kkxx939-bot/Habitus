@@ -54,7 +54,7 @@ def test_refresh_for_walks_leaf_to_root_and_refreshes_each_directory_once(tmp_pa
     instance = make_refresher(tmp_path)
     entity = document(MemoryKind.ENTITY)
     instance.tree.write(entity)
-    results = instance.refresh_for(entity.address)
+    results = instance.refresh_for_many((entity.address,))
     assert tuple(result.directory for result in results) == (
         MemoryDirectory.entities("项目"),
         MemoryDirectory.entities(),
@@ -115,7 +115,7 @@ def test_refresh_is_deterministic_and_unchanged_when_nothing_changed(tmp_path: P
 def test_parent_overview_lists_child_directories_with_item_counts(tmp_path: Path) -> None:
     instance = make_refresher(tmp_path)
     instance.tree.write(document(MemoryKind.ENTITY))
-    instance.refresh_for(document(MemoryKind.ENTITY).address)
+    instance.refresh_for_many((document(MemoryKind.ENTITY).address,))
     overview = Overview.parse(
         MemoryDirectory.entities().label,
         read_layer(instance, MemoryDirectory.entities(), MemoryLevel.OVERVIEW),

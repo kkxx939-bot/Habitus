@@ -17,7 +17,7 @@ from habitus.memory.editor import (
 )
 from habitus.memory.model import MemoryKind
 from habitus.memory.uri import MemoryURI
-from tests.helpers import document, memory_fields, memory_snapshot
+from tests.helpers import document, memory_fields, memory_snapshot, page_ids_from
 
 
 def target_batch(*snapshots: VersionedSnapshot) -> SnapshotBatch:
@@ -29,7 +29,7 @@ def test_existing_candidate_becomes_noop_or_update_without_llm_patch_operations(
     old = document(MemoryKind.PREFERENCE)
     old_snapshot = memory_snapshot(old)
     old_batch = target_batch(old_snapshot)
-    page_ids = MemoryPageIdMap.from_snapshots(old_batch)
+    page_ids = page_ids_from(old_batch)
     planner = MemoryMutationPlanner()
 
     same = MemoryCandidate(1, MemoryKind.PREFERENCE, old.fields)
@@ -78,7 +78,7 @@ def test_new_page_id_reusing_an_old_memory_uri_still_fails_planning() -> None:
         MemoryMutationPlanner().plan(
             MemoryCandidateBatch(entities=(MemoryCandidate(100, MemoryKind.ENTITY, old_entity.fields),)),
             MemoryMutationReadSet(batch, batch),
-            MemoryPageIdMap.from_snapshots(batch),
+            page_ids_from(batch),
         )
 
 

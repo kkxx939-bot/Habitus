@@ -209,14 +209,6 @@ class EventSeries:
 
         return frozenset(record.day for record in self.records) | frozenset(item.day for item in self.skipped)
 
-    def skipped_on(self, day: date, reason: SkipReason) -> int:
-        return sum(1 for item in self.skipped if item.day == day and item.reason is reason)
-
-    def gaps_on(self, day: date) -> tuple[SeriesGap, ...]:
-        """落在这一天的空白段（跨午夜的空白前一天开始的那段，后一天那半段也在这里）。"""
-
-        return tuple(gap for gap in self.gaps if gap.started_at.date() == day)
-
     def until(self, cutoff: date) -> EventSeries:
         """截到更早（或同一个）截止日：等于直接按那个截止日读一遍行为树。"""
 

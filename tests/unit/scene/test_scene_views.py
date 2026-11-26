@@ -110,8 +110,8 @@ def test_every_day_sees_the_same_gaps_as_the_series(tmp_path) -> None:
     from datetime import timedelta
 
     from habitus.behavior.model import BehaviorKind
-    from habitus.series.reader import read_series
     from tests.lock_store import ProcessLocalLockStore
+    from tests.series_helpers import read_series
 
     ground = Site(tmp_path, now=at(DAY2 + timedelta(days=4), 3, 0))
     writer = BehaviorDocumentWriter(ground.behavior_tree, ProcessLocalLockStore(), clock=lambda: ground.now)
@@ -133,7 +133,8 @@ def test_every_day_sees_the_same_gaps_as_the_series(tmp_path) -> None:
     cache = cache_for(ground)
     for day in days:
         assert [(gap.started_at, gap.ended_at, gap.kind) for gap in cache.day(day).gaps] == [
-            (gap.started_at, gap.ended_at, gap.kind.value) for gap in series.gaps_on(day)
+            (gap.started_at, gap.ended_at, gap.kind.value) for gap in series.gaps
+            if gap.started_at.date() == day
         ]
     assert [(gap.started_at, gap.ended_at) for gap in cache.day(days[1]).gaps] == []
     assert [(gap.started_at, gap.ended_at) for gap in cache.day(days[2]).gaps] == [

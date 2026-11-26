@@ -19,7 +19,6 @@
     "habitus/model_client/adapters/openai_compatible_chat.py::OpenAICompatibleChatProvider": 270,
     "habitus/model_client/client.py::ChatClient": 358,
     "habitus/pre/conversation/messages/model.py::ConversationMessage": 268,
-    "habitus/runtime/foresight_delivery.py::DeliveryStage": 513,
     "habitus/runtime/foresight_ledger.py::ForesightLedgerStore": 533,
     "habitus/runtime/foresight_outlet.py::ReminderOutlet": 439,
     "habitus/runtime/foresight_settlement.py::SettlementStage": 406,
@@ -31,7 +30,7 @@
   },
   "files": {
     "habitus/behavior/observation/model.py": 661,
-    "habitus/behavior/reduction/runner.py": 608,
+    "habitus/behavior/reduction/runner.py": 604,
     "habitus/benchmark/boundary.py": 763,
     "habitus/benchmark/http_boundary.py": 625,
     "habitus/benchmark/runner.py": 805,
@@ -44,8 +43,6 @@
     "habitus/pre/conversation/adapters.py": 1216,
     "habitus/pre/conversation/messages/model.py": 612,
     "habitus/pre/conversation/summaries/model.py": 659,
-    "habitus/runtime/assembly.py": 670,
-    "habitus/runtime/foresight_delivery.py": 677,
     "habitus/runtime/foresight_ledger.py": 702,
     "habitus/runtime/foresight_outlet.py": 875,
     "habitus/runtime/runtime.py": 768
@@ -97,11 +94,8 @@
     "habitus/pre/conversation/adapters.py::CodexRolloutConversationAdapter.adapt": 108,
     "habitus/pre/conversation/adapters.py::_add_anthropic_content": 76,
     "habitus/pre/conversation/messages/model.py::ConversationMessage.__post_init__": 67,
-    "habitus/runtime/assembly.py::build_runtime": 497,
     "habitus/runtime/behavior.py::_build_branch": 121,
     "habitus/runtime/foresight.py::build_foresight_components": 66,
-    "habitus/runtime/foresight_delivery.py::DeliveryStage._due": 74,
-    "habitus/runtime/foresight_delivery.py::DeliveryStage.run_once": 116,
     "habitus/scene/relations/state.py::fold": 66,
     "habitus/scene/relations/timeline.py::build_timelines": 74
   }

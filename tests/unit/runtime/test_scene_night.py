@@ -22,8 +22,8 @@ from habitus.scene.occurrences import ConceptHitStore, ConceptHitStoreError
 from habitus.scene.occurrences.daily import HITS_VERSION
 from habitus.scene.relations import RelationConfig
 from habitus.scene.relations.store import RelationStore, RelationStoreError
-from habitus.series.reader import read_series
 from habitus.temporal import Rulers
+from tests.series_helpers import read_series
 from tests.unit.foresight.scripted_model import ScriptedProvider
 from tests.unit.kind_ids import kind_id
 from tests.unit.scene.fixtures import DAY1, Site, at, publish

@@ -444,7 +444,7 @@ def test_snapshots_and_page_ids_are_defensive_views(tmp_path: Path) -> None:
         selected=(uri,),
     )
     copied = context.page_ids
-    copied.register_new(MemoryURI.from_address(MemoryAddress.preference("新节点")), 100)
+    copied.register_resolved(MemoryURI.from_address(MemoryAddress.preference("新节点")), 100)
 
     assert context.page_ids.resolve(100) is None
     assert context.snapshots.total_bytes == sum(item.size_bytes for item in context.snapshots.snapshots)
