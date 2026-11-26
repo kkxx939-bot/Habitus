@@ -1,4 +1,4 @@
-"""一支行为的词表部件：词表状态与选词器（``runtime.behavior`` 装配一支时调；分出来是因为那个文件到了大小上限）。
+"""一支行为的词表部件：词表状态与选词器（``runtime.behavior`` 装配一支时调）。
 
 词表的门槛从唯一的 Config 边界进来；模型只经 ``KindModelCaller`` 一个触点。词表状态的写入整段持行为根锁库上的租约，时长与行为树
 写锁同一个配置（``behavior.write_lock_ttl_seconds``）。

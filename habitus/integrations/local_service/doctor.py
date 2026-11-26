@@ -352,7 +352,7 @@ def _chat_check(chat_result: Mapping[str, object], config: HabitusConfig) -> Doc
 
 
 def _network_check(config: HabitusConfig) -> DoctorCheck:
-    """调模型服务时生效的出站设置（不连网）：证书库、额外 CA、代理从哪来；SSL context 此刻建不出来就 FAIL（W18）。"""
+    """调模型服务时生效的出站设置（不连网）：证书库、额外 CA、代理从哪来；SSL context 此刻建不出来就 FAIL。"""
 
     network = config.network
     try:

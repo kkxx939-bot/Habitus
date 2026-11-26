@@ -65,12 +65,6 @@ class MemoryRelatedContext:
         if self.omitted_listing_entries < 0:
             raise ValueError("omitted listing entries must be non-negative")
 
-    @property
-    def selected_uris(self) -> tuple[MemoryURI, ...]:
-        """返回已经尝试完整读取的全部规范 L2 URI。"""
-
-        return tuple(MemoryURI(snapshot.identity) for snapshot in self.snapshots.snapshots)
-
 
 def _is_sha256(value: str) -> bool:
     return len(value) == 64 and value == value.lower() and all(character in "0123456789abcdef" for character in value)

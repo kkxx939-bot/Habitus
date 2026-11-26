@@ -2,9 +2,6 @@
 
 本模块只有纯标量、不 import ``scene``（与 ``config/behavior.py`` 同一纪律）。
 
-旧语义树（按候选累积的关联）那一组参数——提示词字符上限、重试、每轮调用数、每批目标数、前因/前提
-行数预算——随它整块删掉（2026-09-26）。新语义树按功能分支重建，每支的旋钮在那一支落地时再进配置。
-
 ``relations``：关系检验的统计门槛（裁定 26）。每一项都可以不写，不写就是 ``scene.relations.config.RelationThresholds``
 的默认值（组合根只把写了的换算过去，默认值不在这里抄第二份）。和时间有关的尺子（槽宽、合并窗口）不在这一组：
 它们只认 ``config.temporal``（裁定 59），语义树不另配一份。
@@ -52,7 +49,7 @@ class SceneConfig:
 
     enabled: bool = False
     relations: SceneRelationsConfig = field(default_factory=SceneRelationsConfig)
-    # 换代什么时候做不是配置：预测 worker 每个槽边界看一眼，连续定稿到昨天、预测拍水位过了余量就做（实时化阶段 1、2）。
+    # 换代什么时候做不是配置：预测 worker 每个槽边界看一眼，连续定稿到昨天、预测拍水位过了余量就做。
     # 完成标记、每代报告、trace 文件留几天（一年）：结算认"那天没有这一代"只往回看到过期待决的预期还没裁的那一段。
     generation_kept_days: int = 366
     # 三把锁（预测根租约、语义树写锁、模型队列租约）共用的租期：多久过期、多久续一次（两个进程挂同一个 storage root 时
@@ -62,12 +59,12 @@ class SceneConfig:
     # 连续几槽看到"定稿日不连续"（较早一天还没定稿、较晚一天已定稿）就在健康面报出卡住的那一天；正常只持续一轮归约。
     generation_stuck_ticks: int = 3
     # 必须成的那一步（改树、读序列、机会表、日子预期、完成标记）没成之后，同一天按退避一直重试：首次等多久、最多等多久
-    # （逐次加倍，用户 11-10）。退避只在进程里，重启后从头。
+    # （逐次加倍）。退避只在进程里，重启后从头。
     generation_retry_base_seconds: float = 300.0
     generation_retry_max_seconds: float = 3_600.0
-    # 模型队列（原来换代里调模型的活都在它那里做，一项一项）：没活时隔多久从盘上看一眼有没有新欠账。
+    # 模型队列（换代里调模型的活都在它那里逐项做）：没活时隔多久从盘上看一眼有没有新欠账。
     model_queue_poll_seconds: float = 60.0
-    # 模型此刻用不了时队列怎么等：并进了模型层的熔断（``models.call_failures``，裁定 108）。
+    # 模型此刻用不了时队列怎么等，由模型层的熔断决定（``models.call_failures``，裁定 108）。
     # 停机时等模型队列当前这一项多久，超时取消（取消掉的那一项下次从盘上重新认出来）。
     model_queue_shutdown_timeout_seconds: float = 30.0
     # 欠账到这么多项、或最老一项等了这么久，健康面报降级（non-critical；清完自动消掉）。

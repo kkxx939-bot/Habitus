@@ -1,14 +1,13 @@
-"""先验（语义树新方案 ``13`` ②）：常识上 A 之后 B 会不会更容易 / 更难发生。模型触点。
+"""先验：常识上 A 之后 B 会不会更容易 / 更难发生。模型触点。
 
-- **输入只给词表**：类名、判据句、lane。**不给概要、计数、节律或任何统计量**——
+- 输入只给词表：类名、判据句、lane。不给概要、计数、节律或任何统计量——
   先验必须和检验数据独立，否则它就不是先验，而是把同一份数据看了两遍。
-- 两种问法（实时化阶段 2「先验混合问法」），一对（前因, 后果）只归其中一题（归哪一题在 ``scene.advice.pairing``）：
-  **旧问法**固定一个后果、列前因（``rate``）；**新问法**固定一个前因、列后果（``rate_consequents``）——新概念出现时只问两题，
-  调用量不随概念总数增长。两种都分三档，**乱序问三遍**（原序、倒序、对半轮转），取中位，差两档的给中性。
-  新问法的提示词、请求拼法、校验照原型（``数据/先验问法对照/run_compare.py``）落下来，在旧提示词上只做"后果 / 前因"角色互换；
-  旧问法那一半的提示词、版本号一个字不动（盘上已有的答案照用），新问法另起版本号、另一份缓存。
+- 两种问法，一对（前因, 后果）只归其中一题（归哪一题在 ``scene.advice.pairing``）：
+  按后果问固定一个后果、列前因（``rate``）；按前因问固定一个前因、列后果（``rate_consequents``）——新概念出现时只问两题，
+  调用量不随概念总数增长。两种都分三档，乱序问三遍（原序、倒序、对半轮转），取中位，差两档的给中性。
+  按前因问的提示词只把按后果问的提示词做"后果 / 前因"角色互换，另起版本号、另一份缓存。
 - 按输入摘要缓存（由调用方存）：词表与概念不变，就不重问；回放只读缓存。
-- 先验只调第 1 道的权重；每晚同时报不加权的结果，只靠先验才成立的打"靠先验"标签（状态折叠里做）。
+- 先验只调第 1 道的权重；每代同时报不加权的结果，只靠先验才成立的打"靠先验"标签（状态折叠里做）。
 """
 
 from __future__ import annotations
@@ -24,8 +23,7 @@ from habitus.model_client.asking import Answered, Failed, ask
 from habitus.scene.advice.model import PriorLevel, settle
 from habitus.scene.concepts.model import ConceptSet
 
-# v1 → v2（2026-10-08，裁定 27 第 8 条）：例子"讨论完方案之后动手改代码"正是这份数据上唯一成立的那一对——等于把检验结果写进了先验；
-# 换成与数据无关的例子，判据一字未动。没跑真实模型对照（去掉的是泄漏，不是调措辞），对照放到提示词那一轮。
+# 提示词里的例子与用户数据无关，免得把检验结果写进先验（裁定 27）。
 PRIOR_PROMPT_VERSION = "scene_relation_prior_prompt_v2"
 
 PRIOR_SYSTEM_PROMPT = """你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。
@@ -44,7 +42,7 @@ PRIOR_SYSTEM_PROMPT = """你在给一个人的行为之间可能的关联打先�
 - 每个前因恰好答一次，不多不少，照抄名字。"""
 
 
-#: 新问法（固定前因、列后果）：另起版本号，缓存与旧问法的分开。
+#: 按前因问（固定前因、列后果）：另起版本号，缓存与按后果问的分开。
 PRIOR_BY_ANTECEDENT_PROMPT_VERSION = "scene_relation_prior_by_antecedent_prompt_v1"
 
 PRIOR_BY_ANTECEDENT_SYSTEM_PROMPT = """你在给一个人的行为之间可能的关联打先验分，供后面的统计检验加权用。
@@ -97,7 +95,7 @@ def question_for(concepts: ConceptSet, lane: str, consequent: str, antecedents: 
 
 @dataclass(frozen=True)
 class ConsequentsQuestion:
-    """新问法问一次的全部输入：前因与归这一题的后果（都按概念身份），以及给模型看的名字与判据。"""
+    """按前因问一次的全部输入：前因与归这一题的后果（都按概念身份），以及给模型看的名字与判据。"""
 
     lane: str
     antecedent: str
@@ -132,7 +130,7 @@ def prior_json_schema(names: Sequence[str]) -> dict[str, Any]:
 
 
 def prior_by_antecedent_json_schema(names: Sequence[str]) -> dict[str, Any]:
-    """新问法的 schema：后果名字钉进 enum。"""
+    """按前因问的 schema：后果名字钉进 enum。"""
 
     return _ratings_schema(names, "后果")
 
@@ -161,7 +159,7 @@ def _ratings_schema(names: Sequence[str], role: str) -> dict[str, Any]:
 
 
 PRIOR_SCHEMA_FINGERPRINT = canonical_digest(prior_json_schema(("样例",)))[:12]
-#: 提示词正文的指纹进版本：正文改了而忘了手动升版本号，缓存 / 续跑也不会拿旧答案冒充新提示词的答案（第四轮评审 E15）。
+#: 提示词正文的指纹进版本：正文改了而忘了手动升版本号，缓存 / 续跑也不会拿旧答案冒充新提示词的答案。
 PROMPT_FINGERPRINT = canonical_digest({"prompt": PRIOR_SYSTEM_PROMPT})[:8]
 PRIOR_VERSION = f"{PRIOR_PROMPT_VERSION}+prompt{PROMPT_FINGERPRINT}+schema{PRIOR_SCHEMA_FINGERPRINT}"
 PRIOR_BY_ANTECEDENT_VERSION = (
@@ -212,7 +210,7 @@ def assemble_ratings(parsed: object, question: PriorQuestion) -> dict[str, Prior
 
 
 def assemble_consequent_ratings(parsed: object, question: ConsequentsQuestion) -> dict[str, PriorLevel]:
-    """新问法的核对：每个后果恰好一条、档在三档里；名字换回概念身份。"""
+    """按前因问的核对：每个后果恰好一条、档在三档里；名字换回概念身份。"""
 
     return _assemble(parsed, question.consequents, question.labels, "a consequent", "consequents")
 
@@ -257,7 +255,7 @@ class PriorAnswer:
 
 @dataclass(frozen=True)
 class PriorConfig:
-    #: 乱序问几遍（方案：三遍取中位）。
+    #: 乱序问几遍，取中位。
     rounds: int = 3
 
 
@@ -272,12 +270,12 @@ class PriorAdvisor:
 
     @property
     def version_by_antecedent(self) -> str:
-        """新问法（固定前因、列后果）的版本：缓存键里用它，与旧问法的缓存分开。"""
+        """按前因问（固定前因、列后果）的版本：缓存键里用它，与按后果问的缓存分开。"""
 
         return f"{PRIOR_BY_ANTECEDENT_VERSION}+llm:{self.client.client.model}"
 
     async def rate(self, question: PriorQuestion) -> PriorAnswer:
-        """旧问法：固定后果、列前因。乱序问 ``rounds`` 遍；任何一遍没答成，这一题这一回就不给先验（权重按 1），下次再问。"""
+        """按后果问：固定后果、列前因。乱序问 ``rounds`` 遍；任何一遍没答成，这一题这一回就不给先验（权重按 1），下次再问。"""
 
         return await self._rate(
             question.antecedents,
@@ -290,7 +288,7 @@ class PriorAdvisor:
         )
 
     async def rate_consequents(self, question: ConsequentsQuestion) -> PriorAnswer:
-        """新问法：固定前因、列后果；``levels`` 的键是后果。同样乱序问 ``rounds`` 遍取中位。"""
+        """按前因问：固定前因、列后果；``levels`` 的键是后果。同样乱序问 ``rounds`` 遍取中位。"""
 
         return await self._rate(
             question.consequents,

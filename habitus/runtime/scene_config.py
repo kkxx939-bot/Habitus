@@ -1,4 +1,4 @@
-"""语义树关系检验的配置换算：组合根里三处要用（语义树夜批、预测层的证据、启动校验），只在这里拼一次。"""
+"""语义树关系检验的配置换算：组合根里三处要用（换代的语义树一步、预测层的证据、启动校验），只在这里拼一次。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from habitus.scene.relations import RelationConfig, RelationThresholds
 
 def relation_config(config: HabitusConfig) -> RelationConfig:
     """关系检验的配置：槽宽与"同一条链"的槽数只认 ``config.temporal``（裁定 59）；统计门槛见 ``relation_thresholds``。
-    久别重来不再借固定天数窗，按 temporal 的逐次判法。关系行退休的"久没来"与账的久别同一把尺：H 取预测层的遗忘半衰期、
+    久别重来按 temporal 的逐次判法，不用固定天数窗。关系行退休的"久没来"与账的久别同一把尺：H 取预测层的遗忘半衰期、
     最少间隔数取 ``foresight.strength.MIN_HISTORY``，不另开 YAML 项。"""
 
     return RelationConfig(

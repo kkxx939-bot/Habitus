@@ -1,5 +1,5 @@
 """账本的落盘：按预期的六种记录各一个目录、按预期所在的日子分目录；按账的记录在 ``accounts/<账>/`` 下（裁定 48）；
-按行为单元的记录在 ``units/<行为>/`` 下（裁定 61：提醒反馈、设置、档按行为）。一条一文件、写一次不改。
+按行为单元的记录（提醒反馈、设置、档）在 ``units/<行为>/`` 下（裁定 61）。一条一文件、写一次不改。
 
 住在组合根：``foresight`` 不许 import infrastructure，形状与编解码在 ``foresight.ledger``，这里只管目录与字节。
 同身份重写幂等（内容相同返回 False），内容不同是账本损坏。
@@ -19,7 +19,7 @@
     <root>/units/<行为类哈希>/settings/<at>.json        人对这个行为的设置
     <root>/units/<行为类哈希>/feedback/<预期>--<时刻>.json  说出口之后他做没做（提醒反馈，一个行为一份）
 
-账是流水（权重每晚从单元历史数，裁定 61）；开不开口看单元：单元历史、单元的提醒反馈、单元的设置。
+账是流水（权重每代从单元历史数，裁定 61）；开不开口看单元：单元历史、单元的提醒反馈、单元的设置。
 
 递送、回话、裁决都挂在它们那条预期所在的日子下，读一条预期的全部往来只开一个目录。
 一个坏文件不许让整层停（读写的规矩在 ``runtime.foresight_files``，各 store 同一份）：读不出来（解析不了、形状或版本不对）的
@@ -99,7 +99,7 @@ from habitus.runtime.foresight_files import LedgerFiles
 _FINAL = "_final"
 #: 一本账压实了的那一段（整份替换）。
 _COMPACTION = "compaction.json"
-#: 结完低水位、查过漏报的日子（26 号清单 6.11）。
+#: 结完低水位、查过漏报的日子。
 _FINAL_WATERMARK = "final_through.json"
 _SCAN_WATERMARK = "omissions_scanned.json"
 
@@ -124,7 +124,7 @@ def _index_day(raw: dict[str, Any]) -> date:
 class ForesightLedgerStore:
     def __init__(self, root: str | Path, *, limits: ForesightStoreConfig | None = None) -> None:
         limits = limits if limits is not None else ForesightStoreConfig()
-        #: 写一次的记录写入就查大小（超限的不落盘：按目录读时会被当坏文件跳过、结算永远结不到它，26 号清单 2.5.4）。
+        #: 写一次的记录写入就查大小（超限的不落盘：按目录读时会被当坏文件跳过、结算永远结不到它）。
         self._files = LedgerFiles(root, limits)
         self.root = self._files.root
         self._expectations = self.root / "expectations"
@@ -138,7 +138,7 @@ class ForesightLedgerStore:
         self._units = self.root / "units"
         #: 标过结完的日子（标记只增不撤，记住了就不用再看盘）。
         self._finals: set[date] = set()
-        #: 夜批（结算在线程里跑）与白天那一拍共用这一个实例：这两份内存状态的改动加锁（2026-10-17 四方评审）。
+        #: 换代（结算在线程里跑）与预测拍共用这一个实例：这两份内存状态的改动加锁。
         self._lock = threading.Lock()
 
     # ── 预期 ────────────────────────────────────────────────────────────────
@@ -162,9 +162,8 @@ class ForesightLedgerStore:
         return self._files.read(self._index / f"{expectation_id}.json", _index_day)
 
     def has_expectation(self, expectation_id: str) -> bool:
-        """这条预期真写下了：索引占了位、而且那一天的预期文件在（2026-10-17 四方评审：只看索引的话，"索引写了、预期文件还没写
-        就断了"的那条，之后每拍都被当成已有、``record_expectation`` 补写那一步永远走不到，这次机会就丢了）。索引坏了的
-        算写过：不知道它在哪一天，不另起一份。"""
+        """这条预期真写下了：索引占了位、而且那一天的预期文件在。只看索引的话，"索引写了、预期文件还没写就断了"的那条
+        会一直被当成已有，``record_expectation`` 永远补写不到。索引坏了的算写过：不知道它在哪一天，不另起一份。"""
 
         placed, day = self._index_entry(expectation_id)
         if not placed:
@@ -189,7 +188,7 @@ class ForesightLedgerStore:
         return tuple(day for day in self._days(self._expectations) if since is None or day >= since)
 
     def open_days(self) -> tuple[date, ...]:
-        """有预期、还没标结完的日子（升序）：只看"结完低水位"以上的（26 号清单 6.11）。"""
+        """有预期、还没标结完的日子（升序）：只看"结完低水位"以上的。"""
 
         through = self.final_through()
         since = None if through is None else through + timedelta(days=1)
@@ -224,10 +223,10 @@ class ForesightLedgerStore:
         return created
 
     def reopen(self, day: date) -> None:
-        """撤销"这一天结完了"：重结把这一天的某条预期改回了过期待决，之后每晚还要看它有没有补做。
+        """撤销"这一天结完了"：重结把这一天的某条预期改回了过期待决，之后每代还要看它有没有补做。
 
         先降水位、再删标记：水位以下的日子一律算结完（``is_final``），反过来删到一半被杀，这一天既不 final 又在水位以下，
-        从 ``open_days`` 里永久消失（L10.4）。"""
+        从 ``open_days`` 里永久消失。"""
 
         through = self.final_through()
         if through is not None and day <= through:
@@ -238,7 +237,7 @@ class ForesightLedgerStore:
 
     def is_final(self, day: date) -> bool:
         """结完了：有标记，或在结完低水位以下（水位只在那一段全部结完时推进；整天释放删到一半、标记先没了的日子
-        照样算结完，不会变成"既不 final 又在水位以下"的僵尸日，L10.4）。"""
+        照样算结完，不会变成"既不 final 又在水位以下"的僵尸日）。"""
 
         with self._lock:
             if day in self._finals:
@@ -314,7 +313,7 @@ class ForesightLedgerStore:
 
     def record_omission(self, item: Omission) -> bool:
         """一条记录的漏报只记一次：已经记过（同一条 occurrence）就不再写——重放时内容里的 ``noticed_at`` 不同，按内容比会被当成
-        账本损坏，整晚结算每晚都失败、日子永远结不完（2026-10-17 四方评审）。"""
+        账本损坏，换代结算每次都失败、日子永远结不完。"""
 
         identity = sha256(item.occurrence_uri.encode("utf-8")).hexdigest()[:24]
         if (self._day_dir(self._omissions, item.day) / f"{identity}.json").is_file():
@@ -325,7 +324,7 @@ class ForesightLedgerStore:
         return tuple(self._records(self._omissions, day, decode_omission))
 
     def scan_watermark(self, *, start: date) -> Watermark[date]:
-        """查过漏报的日子（26 号清单 6.11）：连续前缀 + 零散查过的；没有时从 ``start`` 的前一天起。"""
+        """查过漏报的日子：连续前缀 + 零散查过的；没有时从 ``start`` 的前一天起。"""
 
         raw = self._read_watermark(_SCAN_WATERMARK, _scan_watermark)
         if raw is None:
@@ -352,7 +351,7 @@ class ForesightLedgerStore:
                 removed += 1
         return removed
 
-    # ── 按天释放（26 号清单 6.11；哪些天能放由 ``runtime.lifecycle_foresight`` 判） ───────────────
+    # ── 按天释放（哪些天能放由 ``runtime.lifecycle_foresight`` 判） ───────────────
 
     def discard_index(self, day: date) -> int:
         """这一天的预期的索引项删掉（索引平铺、从不列，只能经预期拿身份）；返回删了几条。要在删预期之前删：
@@ -435,7 +434,7 @@ class ForesightLedgerStore:
         found = self._decoded(self._account_dir(account) / "facts", decode_fact)
         return tuple(fact for fact in found if base is None or not base.covers(fact.at, fact.expectation_id))
 
-    # ── 压实（26 号清单 4.8；策略在 ``foresight.compaction``，这里只管字节）──────────────────
+    # ── 压实（策略在 ``foresight.compaction``，这里只管字节）──────────────────
 
     def compaction_of(self, account: str) -> AccountCompaction | None:
         path = self._account_dir(account) / _COMPACTION

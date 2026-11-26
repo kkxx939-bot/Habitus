@@ -295,10 +295,6 @@ class BenchmarkJudgeRecord:
     judge_total_tokens: int = 0
     judge_latency_ms: float = 0.0
 
-    @property
-    def graded(self) -> bool:
-        return self.verdict in {"correct", "wrong"}
-
     def to_dict(self) -> dict[str, object]:
         return {
             **self.answer.to_dict(),

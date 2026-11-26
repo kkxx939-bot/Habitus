@@ -20,8 +20,8 @@ from habitus.infrastructure.store.filesystem import (
     read_regular_bytes,
 )
 
-# 释放：两个消费者都终态、且被同地址后一份已提交的交付超越之后，由 ``release.py`` 删（裁定 60，26 号清单 2.1）。
-# 不再提供全量 ``list()``：有序检查读按地址的标记，恢复读"还没终态"的标记。
+# 释放：两个消费者都终态、且被同地址后一份已提交的交付超越之后，由 ``release.py`` 删（裁定 60）。
+# 不提供全量 ``list()``：有序检查读按地址的标记，恢复读"还没终态"的标记。
 
 
 class ConversationSourceStore:

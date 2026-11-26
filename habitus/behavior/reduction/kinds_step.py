@@ -1,4 +1,4 @@
-"""归约里的词表一步：封口的判断落成 ``kind_token``（裁定 101 第 2、3 条）。
+"""归约里的词表一步：封口的判断落成 ``kind_token``（裁定 101）。
 
 一条规则：判断上已经带着选词结果的（会话 lane 在 lane 里选好的），直接落；没带的（物理 lane：入口是同步的写盘流程，放不进
 模型调用），在这里给它选——一条记录一次调用，看名字、概要、目标、步骤。没问出结论的（这一份被拦、输入超长、模型用不了）
@@ -19,7 +19,7 @@ from habitus.behavior.reduction.record import ReducibleJudgement
 from habitus.behavior.retry import RetryCause
 
 #: 选词没问出结论的那几条换成「错误」时进堆的原因：内容安全拦下的不重试、健康面单列；输入超长是我们自己处理不了的
-#: （材料上限与模型窗口没对上，裁定 94 错误分类）；模型整个用不了的放一边、换代前再选一次；别的是 bug，当场报、不白试。
+#: （材料上限与模型窗口没对上，裁定 94）；模型整个用不了的放一边、换代前再选一次；别的是 bug，当场报、不白试。
 #: 答复不合格（``INVALID``）不会走到这里：选词器把它记成「待定」。
 SET_ASIDE: Mapping[CallFailure, RetryCause] = {
     CallFailure.INVALID: RetryCause.INVALID,

@@ -1,9 +1,7 @@
 """行为树唯一的公开写入策略：纯 add-only 发布。
 
-树的每个字都从一个门进（观测 → 融合 → 归约 → 此处落盘）；本模块只承担落盘一环——
-锁内检查、原子创建、完整读回。旧的 Outcome CAS 追加与 Episode 引用校验随
-``TODO(BHV-TREE-REBUILD-001)`` 取消追加通道一并退役：封口窗口使晚到引用在机械上不可能，
-可变性没有生产者。
+树的每个字都从一个门进（观测 → 融合 → 归约 → 此处落盘）；本模块只承担落盘一环：
+锁内检查、原子创建、完整读回。封口窗口使晚到引用在机械上不可能，所以没有追加通道。
 
 调用方只有归约：``reduction.runner`` 发布新文档；已落树的文档不改（词表没有迁移，裁定 101）。
 语义树只读 ``behavior.tree``，不许触达本模块（架构测试钉死）。
@@ -30,10 +28,10 @@ from habitus.infrastructure.tree.metadata import DocumentMetadata
 
 
 class BehaviorPublishConflictError(RuntimeError):
-    """add-only 地址已绑定到**不同**内容。
+    """add-only 地址已绑定到不同内容。
 
-    逐字节相同内容的重放是幂等成功，不抛本错误——归约层按死规则⑤（stage 之后只有确定性
-    落盘）崩溃重试时，同地址同字节必须能通过；底层 ``atomic_create_bytes`` 正为此设计。
+    逐字节相同内容的重放是幂等成功，不抛本错误：归约 stage 之后只有确定性落盘，崩溃重试时
+    同地址同字节必须能通过。
     """
 
 
@@ -109,7 +107,7 @@ class BehaviorDocumentWriter:
             )
             with self._path_lock.fenced(guards):
                 yield
-        # 文档只写一次（add-only）：锁放了之后这几行再也用不上，空闲的删掉（26 号清单 7.1）；别人正持有的不动
+        # 文档只写一次（add-only）：锁放了之后这几行再也用不上，空闲的删掉；别人正持有的不动
         for key in keys:
             self._path_lock.lock_store.discard_idle(key)
 

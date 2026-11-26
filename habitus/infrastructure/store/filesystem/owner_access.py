@@ -1,9 +1,9 @@
 """“仅本人可访问”的公共权限工具：POSIX 用权限位，Windows 用 DACL。
 
 全仓库凡是要把文件收成 0600、把目录收成 0700、或检查"组与其他人没有权限"的地方都走这里，
-不再各自 ``os.chmod`` / 读 ``st_mode``。Windows 上权限位不起作用，"仅本人"改由只含当前用户 SID、
+不各自 ``os.chmod`` / 读 ``st_mode``。Windows 上权限位不起作用，"仅本人"改由只含当前用户 SID、
 关闭继承的 DACL 表达（``windows_api``，标准库 ctypes 实现，零新依赖）。设权限时 DACL 里不放 SYSTEM 与
-Administrators（用户 2026-11-07 定：锁死机器上本人始终完全控制，不依赖管理员）。
+Administrators（本人始终完全控制，不依赖管理员）。
 """
 
 from __future__ import annotations

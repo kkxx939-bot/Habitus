@@ -147,7 +147,7 @@ _SCALAR_CHECKS: dict[object, tuple[Callable[[object], bool], str, str]] = {
 
 
 def require_field_types(model_type: type[object], data: Mapping[str, object], *, path: str) -> None:
-    """YAML 读进来的标量字段按 dataclass 注解查类型，构造值对象之前就拒（W16：类型检查在边界）。
+    """YAML 读进来的标量字段按 dataclass 注解查类型，构造值对象之前就拒（类型检查在边界）。
 
     只查注解（去掉 ``None`` 后）恰为 ``bool``/``int``/``float``/``str`` 或其 ``tuple[..., ...]`` 的字段；多成员联合、
     嵌套配置、枚举、``Literal``、映射由各自的解码或取值规则负责。``int`` 不收 ``bool``，``float`` 收整数不收 ``bool``。

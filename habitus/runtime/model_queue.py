@@ -1,6 +1,6 @@
-"""模型队列（实时化方案第 4 节；阶段 2 第一小步）：原来换代里调模型的活都在这里做，一项一项；换代里没有模型调用。
+"""模型队列：换代之外调模型的活都在这里做，一项一项；换代里没有模型调用。
 
-**欠账每一轮从盘上现算，不记"做到哪了"的账**：关机、杀进程之后不恢复任何队列状态，重起就接着做。一轮按固定先后看各类
+欠账每一轮从盘上现算，不记"做到哪了"的账：关机、杀进程之后不恢复任何队列状态，重起就接着做。一轮按固定先后看各类
 （后一类要用前一类的结果）；前一类里有一项没做成，后面的类照做（尽力而为）：
 
 ==========  ==========================================  ====================================================
@@ -13,30 +13,30 @@
  sync        同步到的版本没记、又没有要写的概念            记下同步到的版本（``SyncStage.run``；不调模型）
 ==========  ==========================================  ====================================================
 
-retry 之外都是**已封口的日子**的活：只在"换代的触发条件里除今天的完成标记之外都满足"时才算欠着（``sealed_day``：
+retry 之外都是已封口的日子的活：只在"换代的触发条件里除今天的完成标记之外都满足"时才算欠着（``sealed_day``：
 早于这一刻读序列，「未观测」的空白可能还没落树）。命中记录不在这里建：换代的语义树一步封口时由代码直接生成、核条数、
-盖章；补问先验排在今天这一代完成之后（实时化阶段 2「生效时点」），那时昨天已经封口，时间线读盘上盖了章的命中。
+盖章；补问先验排在今天这一代完成之后，那时昨天已经封口，时间线读盘上盖了章的命中。
 换代不等队列，换代先做完、队列后做是允许的；只有 unsealed 是专为今天这一代的日子预期备的，这一代做完之后归预测拍自己选。
 
-**一项没做成**分两种。
+一项没做成分两种。
 
-*不是模型失败的*（代码抛了、做完之后判据还说欠着——模型答了但不合格）：按重试账退避（``RetryLedger``），
-队列接着做下一项——账的键带着这一晚，下一晚重新给机会。锁被另一进程拿着是还没准备好：这一类这一轮到此为止，不算失败。
+不是模型失败的（代码抛了、做完之后判据还说欠着——模型答了但不合格）：按重试账退避（``RetryLedger``），
+队列接着做下一项——账的键带着这一天，下一天重新给机会。锁被另一进程拿着是还没准备好：这一类这一轮到此为止，不算失败。
 认欠账时读盘抛了：这一类这一轮记失败、后面的类照做，这一趟做完再抛出来。
 
-*模型调用失败*（到达队列的 ``UNREACHABLE_ERRORS`` 那一组，以及出错重试 / 归约报出的"模型用不了"）按全流程统一的三条规则
+模型调用失败（到达队列的 ``UNREACHABLE_ERRORS`` 那一组，以及出错重试 / 归约报出的"模型用不了"）按全流程统一的三条规则
 （``model_client.errors``，裁定 108）：重试只在模型客户端一层；这一项留着（仍算欠着、不记落盘的重试账），下一轮从盘上
-重新认出来再试。"连着失败整个队列退避"并进了对话熔断（``model_client.breaker``）：熔断开着时这一轮到此为止、``drain``
+重新认出来再试。"连着失败整个队列退避"由对话熔断承担（``model_client.breaker``）：熔断开着时这一轮到此为止、``drain``
 直接返回，到试探的时候再做；试探成功就接着做。排在后面的各类也从盘上认一遍"还欠几项"（只认、不做）。
 
 同一进程的换代在那一刻问"模型是不是此刻用不了"（``ModelQueueState.down``，读熔断），是就不判关系、沿用上一代（裁定 96）。
 
-**与换代不抢盘**（阶段 2 第二小步）：写语义树的那几类活（sync、advice）每一项在语义树写锁之内做，调模型
+与换代不抢盘：写语义树的那几类活（sync、advice）每一项在语义树写锁之内做，调模型
 的那几段先放开锁（``runtime.scene_lock``）；同一进程的换代在做时（``ModelQueueState.generating``），两项之间先不取下一项，等它
 做完。队列租约包着整趟，换代不拿它。
 
-**做到没有欠账**：``drain`` 一轮一轮做，直到没有可做的项、或进入整体退避，返回这一趟做了哪些、还欠哪些。常驻 worker
-（``runtime.model_queue_worker``）有活连着做、没活按间隔看；回放工具在每个槽的那一拍之前调它。
+做到没有欠账：``drain`` 一轮一轮做，直到没有可做的项、或进入整体退避，返回这一趟做了哪些、还欠哪些。常驻 worker
+（``runtime.model_queue_worker``）有活连着做、没活按间隔看。
 
 可查的痕迹：每一项一个 ``model_queue.item`` span（类别、结局、用时；模型调用是它下面的 ``model.call`` 子 span）、一条指标事件、
 一行本地流水（``<scene_root>/model_queue/<日期>.jsonl``，带信号文字，只在本地）；各类还欠多少、最老一项等了多久、整体退避的
@@ -46,7 +46,6 @@ retry 之外都是**已封口的日子**的活：只在"换代的触发条件里
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
@@ -88,8 +87,6 @@ from habitus.runtime.scene_lock import SceneWriteLock
 from habitus.runtime.scene_night import SceneNightlyRun
 from habitus.runtime.unsealed import UnsealedFromJudgements
 from habitus.series.reader import SeriesReader
-
-logger = logging.getLogger("habitus.model_queue")
 
 #: 一趟 ``drain`` 最多几轮（保护闸：正常两三轮就没有可做的了）。
 _MAX_ROUNDS = 64
@@ -209,7 +206,7 @@ class ModelQueue:
                 if stop() or not await self._generation_done(stop):
                     return False
                 if item.key is not None and await asyncio.to_thread(self.retries.blocked, item.key):
-                    continue  # 在退避或已放弃：这一晚不再排，账的键带着这一晚
+                    continue  # 在退避或已放弃：这一天不再排，账的键带着这一天
                 result = await self._execute(item, current)
                 done.append(result)
                 if result.outcome == UNREACHABLE and state.down():

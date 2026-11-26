@@ -1,7 +1,7 @@
 """会话源的两个生命周期参与者：
 
 - 释放：每轮按地址释放已经可以放的信封、Outcome、输出与锁行；
-- 恢复（26 号清单 L9.2）：每轮挑出"现在该试"的没终态的 Source/Consumer，交给协调器去跑，不占住 Worker 这一轮；
+- 恢复：每轮挑出"现在该试"的没终态的 Source/Consumer，交给协调器去跑，不占住 Worker 这一轮；
   Memory 恢复出任务时唤醒 Memory Worker。
 """
 

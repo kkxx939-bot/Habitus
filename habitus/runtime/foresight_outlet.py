@@ -1,23 +1,22 @@
-"""提醒出口（方案 32；裁定 64）：预测层决定说之后，话怎么到人、"说了"怎么回到账本。
+"""提醒出口（裁定 64）：预测层决定说之后，话怎么到人、"说了"怎么回到账本。
 
 预测层照旧只产出"递送请求 + 档 + 话"（递送那一拍记「待取」）。出口是它外面薄薄一层宿主适配：
 
-- **取**（``claim``）：宿主在 UserPromptSubmit 时来取此刻可取的请求，带租约（租约内别的会话取不到；同一会话重取拿回自己手里的；新交出之前再判一次，裁定 104 第 2 条）；
+- 取（``claim``）：宿主在 UserPromptSubmit 时来取此刻可取的请求，带租约（租约内别的会话取不到；同一会话重取拿回自己手里的；新交出之前再判一次，裁定 104）；
   来取这件事本身就是活性（``alive``）——最近一段有宿主来取过，递送那一拍才问模型写话、记「待取」，否则记「不可达」、不花模型钱。
-- **认**（``observe``）：转写照常由 Stop hook 送回服务；同一份会话先过出口、再进会话 lane。出口在取走记录对应的会话里找 agent 用
+- 认（``observe``）：转写照常由 Stop hook 送回服务；同一份会话先过出口、再进会话 lane。出口在取走记录对应的会话里找 agent 用
   宿主提问工具问人的那次调用：题目含类名、或与那句话相似、或选项就是我们给的那几个 → 配上 → 账本追加「说了」（``decided_at`` =
   提问那一刻、``text`` = 题目原文、``via`` = 宿主、``turn`` = call_id）。他点的固定选项直接写回话（现在就做 → 正、这次不用 → 负、
-  知道了 → 中、已经做过了 → 已做），不经模型；自己填的话不写，交给会话 lane 的模型照旧判（裁定 64 第 7、8 条）。取走了、这一轮过了却没问 → 放回、
+  知道了 → 中、已经做过了 → 已做），不经模型；自己填的话不写，交给会话 lane 的模型判（裁定 64）。取走了、这一轮过了却没问 → 放回、
   ``attempts += 1``；到上限不再给。
-- **保证**：一条预期最多一条「说了」（写前查账本已有的 spoken，重放、换会话再问都挡住）；提问出现在最晚时限之后的不算；
+- 保证：一条预期最多一条「说了」（写前查账本已有的 spoken，重放、换会话再问都挡住）；提问出现在最晚时限之后的不算；
   租约过期只让别的会话能取（不算放回：问可能早就问了、转写只是还没回来）；历任持有者都认得出自己那次提问。
 
-传输状态（可取清单、取走记录、问过的提问、宿主活性）在 ``runtime/foresight_outlet_store.py``，不进账本。两支共用这一个出口、账按支记（裁定 102 第 3 条；``runtime/foresight_outlet_ledgers.py``），两支之间不仲裁。
+传输状态（可取清单、取走记录、问过的提问、宿主活性）在 ``runtime/foresight_outlet_store.py``，不进账本。两支共用这一个出口、账按支记（裁定 102；``runtime/foresight_outlet_ledgers.py``），两支之间不仲裁。
 宿主 → 提问工具 / 题目字段 / 作答怎么回来 由各会话协议的适配器声明（``ConversationAdapterRegistry.question_tools``），组合根传进来。
-
-TODO(裁定 64 第 8 条)：自由作答现在走会话 lane 的模型判正 / 中 / 负 / 已做（``runtime/foresight_responses.py`` 那座桥）；推式宿主（第六节
-本地通知）与别的 harness 的回复不是提问工具的作答时也要靠那条路——这里只写固定选项，模型路保留不删。
 """
+
+# TODO(裁定 64): 推式宿主与别的 harness 的非提问工具作答还没接，目前只走会话 lane 的模型判。
 
 from __future__ import annotations
 
@@ -43,8 +42,8 @@ from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_outlet_ledgers import OutletLedgers, OutletStores
 from habitus.runtime.foresight_outlet_store import OutletStore
 
-#: 四个固定选项（产品定措辞，所有宿主一样；第三个不叫"稍后再说"——不再问第二次，裁定 64 第 8 条；第四个"已经做过了"记「已做」：
-#: 到时限没看到做时提醒反馈不写、账上记中性，裁定 91 第 3 条②）与它们映成的回话方向。
+#: 四个固定选项（所有宿主一样；第三个不叫"稍后再说"——不再问第二次，裁定 64；第四个"已经做过了"记「已做」：
+#: 到时限没看到做时提醒反馈不写、账上记中性，裁定 91）与它们映成的回话方向。
 OPTIONS = ("现在就做", "这次不用", "知道了", "已经做过了")
 POLARITY_OF_OPTION = {"现在就做": "正", "这次不用": "负", "知道了": "中", "已经做过了": SAID_DONE}
 #: 取走时刻与转写里人那句话的时刻可能差几秒（hook 在提交时跑，转写记的是宿主自己的时间）：窗口往前留一点。
@@ -250,7 +249,7 @@ class ReminderOutlet:
     # ── 活性与可取清单 ──────────────────────────────────────────────────────
 
     def alive(self, now: datetime) -> bool:
-        """最近 ``liveness`` 内有宿主来取过（方案 32 第 3.3 条）。"""
+        """最近 ``liveness`` 内有宿主来取过。"""
 
         since = now - self.liveness
         return any(seen >= since for seen in self.store.hosts().values())
@@ -308,7 +307,7 @@ class ReminderOutlet:
         self, host: str, session: str, at: datetime, limit: int, *, hold: Hold | None = None
     ) -> tuple[ClaimedReminder, ...]:
         """宿主来取：去掉过了时限的、别的会话租着的、放回到上限的；按时限由近到远取 ``limit`` 条；同一会话租约内重取拿回自己手里的。
-        ``hold`` 只问这一次新交出的：判出不给就跳过这一条，什么都不写、不占 ``limit``，下一次再取（裁定 104 第 2 条）；全部判完才写取走记录，判的时候出错一条都不写。"""
+        ``hold`` 只问这一次新交出的：判出不给就跳过这一条，什么都不写、不占 ``limit``，下一次再取（裁定 104）；全部判完才写取走记录，判的时候出错一条都不写。"""
 
         for label, value in (("host", host), ("session", session)):
             if not value.strip():
@@ -318,7 +317,7 @@ class ReminderOutlet:
         if not 1 <= limit <= self.claim_limit:
             raise ForesightError(f"limit must be an integer between 1 and {self.claim_limit}")
         if host not in {tool.host for tool in self.tools}:
-            # 没有提问工具的宿主问不了他：不给、也不算它活着（方案 36 第四节），免得它占租约、把放回次数耗到上限
+            # 没有提问工具的宿主问不了他：不给、也不算它活着，免得它占租约、把放回次数耗到上限
             return ()
         with self._lock:
             self.store.touch_host(host, at)
@@ -343,7 +342,7 @@ class ReminderOutlet:
                 mine = next((one for one in claim.history if one.session == session and one.ended == "expired"), None)
                 if mine is not None and (holder is None or holder.session == session):
                     # 同一会话租约过期后再来取（一轮跑了半小时、转写还没回来）：续租、``claimed_at`` 不变——宿主按它判是不是
-                    # 同一次，不再注入；换 ``claimed_at`` 只在真正放回之后（方案 32 第 3.4、4.1 条）
+                    # 同一次，不再注入；换 ``claimed_at`` 只在真正放回之后
                     claim.history.remove(mine)
                     claim.holder = _Holder(host, session, mine.claimed_at, min(at + self.lease, request.deadline))
                     taken.append(claim)
@@ -479,7 +478,7 @@ class ReminderOutlet:
         return pairs
 
     def _score(self, claim: _Claim, question: _Question, *, single: bool) -> float | None:
-        """一条取走的提醒与一题配不配、配得多像。先看选项：带着选项却不是我们那三个的，是 agent 自己的问题，不配。然后：
+        """一条取走的提醒与一题配不配、配得多像。先看选项：带着选项却不是我们的固定选项的，是 agent 自己的问题，不配。然后：
         我们的选项 + 题目含类名最强（2 + 相似度）；与那句话相似度过线次之（相似度本身；没带选项的提问只能走这条）；这个会话只剩
         一条没说出口时，带着我们固定选项的那一题兜底（0.5——题目被 agent 改写了也认得）。"""
 
@@ -740,7 +739,7 @@ def _similarity(a: str, b: str) -> float:
 
 
 def _turn_passed(messages: Sequence[HostMessage], claimed_at: datetime) -> bool:
-    """取走之后他那句话开的那一轮已经过了：有一条取走前后（容差）人说的话，后面跟着**取走之后**助手的答复——上一轮的转写晚到
+    """取走之后他那句话开的那一轮已经过了：有一条取走前后（容差）人说的话，后面跟着取走之后助手的答复——上一轮的转写晚到
     （他前两分钟那句话、取走前就答完了）不算这一轮过了。"""
 
     since = claimed_at - _CLAIM_TOLERANCE

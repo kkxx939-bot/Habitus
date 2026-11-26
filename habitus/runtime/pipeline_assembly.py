@@ -58,7 +58,7 @@ def assemble_pipeline(
     lane = branch.lane.value
     observer = LaneObserver(observer, branch.lane)
     root = scene_branch_root(config, lane)
-    # 换代的完成标记与本地 trace：换代写标记，这一支的结算读它（裁定 94 第 9 条）；trace 换代与预测拍都写
+    # 换代的完成标记与本地 trace：换代写标记，这一支的结算读它（裁定 94）；trace 换代与预测拍都写
     marks, traces = generation_marks(root), generation_traces(root, span_backend)
     # 这一支的预测根租约：预测 worker 每槽替这一支持一次，在它里面先看一眼换代、再做预测拍（没开预测层时只看换代）
     lease = foresight_ledger_lease(config, lock_store, lane)

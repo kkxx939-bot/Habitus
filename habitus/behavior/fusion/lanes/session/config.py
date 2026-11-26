@@ -9,13 +9,11 @@ from dataclasses import dataclass, fields
 class SessionLaneConfig:
     """给模型的材料与每轮写出来的量的上限。
 
-    - ``max_turn_chars``：一轮材料的总字数上限。依据（本机 5,684 轮）：指令 + 全部答复 + 每次调用一行，
-      中位 1,585 字、九成以内 5,128 字，不超过 8,000 字的轮占 95.5%。
+    - ``max_turn_chars``：一轮材料（指令 + 全部答复 + 每次调用一行）的总字数上限。
     - ``max_instruction_chars``：人的那条指令最多留多少字（留头尾）。
     - ``tool_argument_chars`` / ``tool_error_chars``：每次工具调用留参数开头多少字、失败时留报错多少字。
     - ``kept_tool_lines``：超出总上限时工具调用留头尾共几行。
-    - ``kept_reply_lines``：超出总上限时助手中途说的话留头尾共几条（依据：本机最长的一轮 989 个动作，
-      中途的话逐条各留一点仍会超上限，落到整段盲截；改为只留头尾几条）。
+    - ``kept_reply_lines``：超出总上限时助手中途说的话留头尾共几条（逐条各留一点仍会超上限、落到整段盲截）。
     - ``max_steps`` / ``max_summary_chars`` / ``max_step_chars``：每轮写出来的步骤条数、概要与每条步骤的字数上限。
     """
 

@@ -1,4 +1,4 @@
-"""一条 lane 的先验：两份缓存的读写与归题（实时化阶段 2「先验混合问法」）。
+"""一条 lane 的先验：两份缓存的读写与归题（先验混合问法）。
 
 - 旧问法的答案按后果存（``advice/priors``，格式不变，盘上已有的照用）；新问法的按前因另存一份
   （``advice/priors-by-antecedent``）。取一对的档：新问法那份里有就用它，否则用旧问法那份。
@@ -123,7 +123,7 @@ class LanePriors:
 
     async def ask(self, signals: list[str]) -> None:
         """把现在要问的题都问了、写缓存：先旧问法（按后果），再新问法（按前因）。一题没答成，这一题这一回不写，下次再问。
-        有题因为这一条输入有问题没答成（裁定 108）：别的题照问，问完抛 ``DeterministicFailure``，队列的重试账据它这一晚不再重发。"""
+        有题因为这一条输入有问题没答成（裁定 108）：别的题照问，问完抛 ``DeterministicFailure``，队列的重试账据它这一天不再重发。"""
 
         questions = self.questions()
         rejected = 0

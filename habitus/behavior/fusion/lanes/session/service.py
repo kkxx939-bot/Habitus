@@ -32,25 +32,25 @@ from habitus.model_client import (
     StructuredChatClient,
 )
 
-# 重试一轮（就近重试、时窗末当场重读，裁定 67、68）与白天描述一轮的失败归哪一类：模型调用失败只按模型层统一的三条规则分组
+# 重试一轮（就近重试、时窗末当场重读，裁定 67、68）与第一次描述一轮的失败归哪一类：模型调用失败只按模型层统一的三条规则分组
 # （``model_client.MODEL_UNAVAILABLE`` / ``MODEL_DETERMINISTIC`` / ``MODEL_REFUSED``，裁定 108），这里不另认异常类型；
 # 答得不合格（结构化输出校验用尽 ``ModelStructuredOutputError``）不是调用失败，单列为格式不合。
 #: 同一份输入再问也一样：这一版处理下必然写不成，或模型对这份输入必然拒绝。
 RETRY_DETERMINISTIC: tuple[type[BaseException], ...] = (DeterministicFailure, *MODEL_DETERMINISTIC)
-#: 白天第一次描述一轮时模型此刻用不了（"等一等可能好"用尽、"要人处理"、熔断开着）：不抛给会话源等它重做，先落「错误」进夜里待处理的堆，
-#: 那天照常按时定稿、结算读到"看不到"而不是"没做"（裁定 80 第 5 条、94 第 3 条）。
+#: 第一次描述一轮时模型此刻用不了（"等一等可能好"用尽、"要人处理"、熔断开着）：不抛给会话源等它重做，先落「错误」进重试堆，
+#: 那天照常按时定稿、结算读到"看不到"而不是"没做"（裁定 80、94）。
 DESCRIBE_UNAVAILABLE: tuple[type[BaseException], ...] = MODEL_UNAVAILABLE
-#: 白天描述一轮时模型答了但格式不合（结构化校验用尽）：放一边、换代里的重试收尾再试一次（裁定 94 错误分类）。
+#: 描述一轮时模型答了但格式不合（结构化校验用尽）：放一边、换代里的重试收尾再试一次（裁定 94）。
 DESCRIBE_INVALID: tuple[type[BaseException], ...] = (ModelStructuredOutputError,)
-#: 这一条触发了内容安全：只这一条记「错误」，不重试（裁定 94 错误分类）。确定性失败（``BehaviorFusionRefusedError``）的起因。
+#: 这一条触发了内容安全：只这一条记「错误」，不重试（裁定 94）。确定性失败（``BehaviorFusionRefusedError``）的起因。
 CONTENT_REFUSED: tuple[type[BaseException], ...] = MODEL_REFUSED
-#: 模型此刻用不了：放一边，留给时窗末重读与换代里的重试收尾（裁定 94 第 4、8 条）；重试收尾碰到它就不再试
+#: 模型此刻用不了：放一边，留给时窗末重读与换代里的重试收尾（裁定 94）；重试收尾碰到它就不再试
 #: 别的项、这一代跳过结算（下一代补结），换代照常往下做。
 RETRY_UNAVAILABLE: tuple[type[BaseException], ...] = MODEL_UNAVAILABLE
-#: 锁被另一进程拿着（文件锁、sqlite 锁库等不到）：不是错误、更不是模型调不通，还没准备好（裁定 94 第 8、9 条）。
+#: 锁被另一进程拿着（文件锁、sqlite 锁库等不到）：不是错误、更不是模型调不通，还没准备好（裁定 94）。
 RETRY_BUSY: tuple[type[BaseException], ...] = (TimeoutError,)
-#: 格式不合：模型答了、结构化校验用尽仍不合格（裁定 94 错误分类）。我们自己写入出的错（``ValueError``、``BehaviorFusionError``
-#: 这类校验不过）不在这里：那是 bug，由重试编排按"我们自己处理不了"拦住这一项、报出（裁定 94 第 9 条）。
+#: 格式不合：模型答了、结构化校验用尽仍不合格（裁定 94）。我们自己写入出的错（``ValueError``、``BehaviorFusionError``
+#: 这类校验不过）不在这里：那是 bug，由重试编排按"我们自己处理不了"拦住这一项、报出（裁定 94）。
 RETRY_INVALID: tuple[type[BaseException], ...] = (ModelStructuredOutputError,)
 
 

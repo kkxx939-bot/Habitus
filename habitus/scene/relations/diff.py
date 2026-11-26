@@ -1,12 +1,12 @@
-"""两晚关系表之间的变化（只给观测：换代的每代报告与 ``scene.b4`` span 的计数）。纯函数，不读盘、不改状态。
+"""相邻两代关系表之间的变化（只给观测：换代的每代报告与 ``scene.b4`` span 的计数）。纯函数，不读盘、不改状态。
 
-- **新增**：上一晚的表里没有这一行（样本不够的不逐条存，它们变成已检、候选……也算新增）；
-- **消失**：上一晚有、这一晚没有（退回样本不够、或行被清掉）；
-- **状态变**：两晚都有、状态不同。
+- 新增：上一代的表里没有这一行（样本不够的不逐条存，它们变成已检、候选……也算新增）；
+- 消失：上一代有、这一代没有（退回样本不够、或行被清掉）；
+- 状态变：两代都有、状态不同。
 
-族与进族路径从两张表推（表里不存检验族）：长跨度、不带条件的短跨度、带条件的三族；带条件的这一行当晚进了族时，父关系
-（少一个条件的键）当晚过了第 1 道是"父关系"，父关系在上一晚是候选 / 成立（跨夜带着）是"带着"，都不是就是"按组"。
-跨夜带着的候选 / 成立本身不进族（状态折叠各管各的），记"不进族"。
+族与进族路径从两张表推（表里不存检验族）：长跨度、不带条件的短跨度、带条件的三族；带条件的这一行这一代进了族时，父关系
+（少一个条件的键）这一代过了第 1 道是"父关系"，父关系在上一代是候选 / 成立（跨代带着）是"带着"，都不是就是"按组"。
+跨代带着的候选 / 成立本身不进族（状态折叠各管各的），记"不进族"。
 """
 
 from __future__ import annotations
@@ -26,12 +26,12 @@ class RelationChange:
     kind: str
     before: Status | None
     after: Status | None
-    #: 这一晚的那一行（消失的是 None）：当晚读数从它的 ``tonight`` 取。
+    #: 这一代的那一行（消失的是 None）：这一代的读数从它的 ``tonight`` 取。
     relation: Relation | None
 
 
 def diff_states(before: LaneState | None, after: LaneState) -> tuple[RelationChange, ...]:
-    """``before`` 是这条 lane 上一晚的表（没有就是第一晚），``after`` 是这一晚的；按键的文本排序。"""
+    """``before`` 是这条 lane 上一代的表（没有就是第一代），``after`` 是这一代的；按键的文本排序。"""
 
     old = {} if before is None else {relation.key: relation for relation in before.relations}
     new = {relation.key: relation for relation in after.relations}
@@ -56,8 +56,8 @@ def family_of(key: RelationKey) -> str:
 
 
 def entry_paths(keys: Iterable[RelationKey], before: LaneState | None, after: LaneState) -> dict[RelationKey, str]:
-    """这些关系当晚怎么进的族：``parent`` / ``carried`` / ``group``（只对带条件的），``family``（另两族直接进），``outside``（跨夜
-    带着的候选 / 成立，不进族），``none``（当晚没进族）。"""
+    """这些关系这一代怎么进的族：``parent`` / ``carried`` / ``group``（只对带条件的），``family``（另两族直接进），``outside``（跨代
+    带着的候选 / 成立，不进族），``none``（这一代没进族）。"""
 
     tonight = {relation.key: relation for relation in after.relations}
     held = (

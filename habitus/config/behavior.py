@@ -1,8 +1,7 @@
 """行为管线（观测 → 融合 → 归约 → 行为树）的运行配置。
 
-本模块只有纯标量、不 import ``behavior``：上下文窗口的**默认值**唯一出处仍是
-``behavior/fusion/config.py``（此处留 ``None``，由 Runtime 组合根解析）——组合根用同一份
-数值喂融合与归约两处，这正是 BHV-FUSION-003 点名要关死的分叉之门。
+本模块只有纯标量、不 import ``behavior``：上下文窗口的默认值唯一出处是 ``behavior/fusion/config.py``
+（此处留 ``None``，由 Runtime 组合根解析），组合根用同一份数值喂融合与归约两处，避免两处各配一份而分叉。
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ from typing import Any
 from habitus.config.loader import construct_config, require_override_types
 
 # 按前缀派生到领域配置的覆盖项（字段名 = 前缀 + 领域配置的同名字段）。这里只查类型；值域只在领域配置，组合根构造时拒
-# （带配置键）——同一条边界只定义一处。
+# （带配置键），同一条边界只定义一处。
 OVERRIDE_PREFIXES = (
     "session_",
     "physical_",
@@ -30,31 +29,31 @@ OVERRIDE_PREFIXES = (
 class BehaviorConfig:
     """行为侧的产品事实与运行节奏。
 
-    ``primary_subject`` 是这套系统跟踪谁的**产品事实**（两条 lane 写的判断都记在他名下）；
+    ``primary_subject`` 是这套系统跟踪谁的产品事实（两条 lane 写的判断都记在他名下）；
     留空表示行为侧未启用，组合根将完全跳过行为组件的组装与 Worker 启动。
     """
 
     primary_subject: str = ""
     # 归约的封口视界（秒）：一条判断的证据齐备之后过了这么久才封口落树；留空取 behavior/fusion/config.py 的默认。
     context_lookback_seconds: float | None = None
-    # 归约 sweep 节奏（用户裁定 5 分钟）；纯运维数，不影响正确性。
+    # 归约 sweep 节奏；纯运维数，不影响正确性。
     # Worker 优雅停止的等待上界也在这里（运维参数不藏 Python 构造器）。
     reduction_sweep_interval_seconds: float = 300.0
-    # 归约 sweep 的租约时长；留空取 behavior/reduction 的默认（600s）。周尺度回填（万级小文件写入把
-    # fseventsd 顶到 240% CPU、单篇 publish 被文件系统拖到秒级）需要更长的租约——运维参数，不是常量。
+    # 归约 sweep 的租约时长；留空取 behavior/reduction 的默认（600s）。周尺度回填写入大量小文件时，
+    # 单篇 publish 可能被文件系统拖到秒级，需要更长的租约，所以是运维参数而不是常量。
     reduction_sweep_lock_ttl_seconds: int | None = None
     worker_shutdown_timeout_seconds: float = 30.0
     # 融合覆盖索引 / 回执 / 消费账本的过期窗口（天）：同一个单位在这么多天之内再送来认得出来。
-    # 它是：重做去重的判据、覆盖记录/回执/账本的过期期限。覆盖记录在其凭据仍在存储里时**不**过期
+    # 它是：重做去重的判据、覆盖记录/回执/账本的过期期限。覆盖记录在其凭据仍在存储里时不过期
     # （否则会被当成没判过重做），所以它不限制下游停机时长、不丢数据。
     # 树上的数据不受它影响（撞车消歧的占用集合以树上既有地址为最终真相，不依赖账本窗口）。
     coverage_window_days: int = 7
-    # 每晚重试的堆每一支最多留几项（裁定 67 第 8 条，保护闸）：满了新来的只落「没读懂」、不进堆，计数留信号。
+    # 重试的堆每一支最多留几项（保护闸，裁定 67）：满了新来的只落「没读懂」、不进堆，计数留信号。
     # 量级按一天的轮数给：模型断一整天也大多装得下，又不至于让一晚的重试把刚恢复的额度一下烧光。
     retry_backlog_max: int = 500
-    # 基础词表（裁定 6：门槛做成配置）：全部可调字段，留空取 ``behavior/kinds/config.py`` 的默认值
+    # 基础词表的门槛（裁定 6）：全部可调字段，留空取 ``behavior/kinds/config.py`` 的默认值
     # （默认值只在领域模块）。字段名 = ``kinds_`` + BehaviorKindConfig 的同名字段，组合根按前缀派生注入。
-    # 会话 lane 的保护上限（方案第五节）：留空取 ``behavior/fusion/lanes/session/config.py`` 的默认值。
+    # 会话 lane 的保护上限：留空取 ``behavior/fusion/lanes/session/config.py`` 的默认值。
     # 字段名 = ``session_`` + SessionLaneConfig 的同名字段，组合根按前缀派生注入。
     session_max_turn_chars: int | None = None
     session_max_instruction_chars: int | None = None
@@ -88,7 +87,7 @@ class BehaviorConfig:
     kinds_candidate_slots: int | None = None
     kinds_retire_days: int | None = None
     kinds_max_level: int | None = None
-    # 存储的容量闸（26 号清单 8.2：生命周期相关、原来写死在各存储的默认值里；只挪不改值，不写就是领域模块的默认值）。
+    # 存储的容量闸，不写就是领域模块的默认值。
     # 字段名 = 前缀 + 那份配置的同名字段：``observation_`` → BehaviorObservationConfig、``fusion_`` → BehaviorFusionConfig、
     # ``tree_`` → BehaviorTreeConfig。
     observation_max_files: int | None = None

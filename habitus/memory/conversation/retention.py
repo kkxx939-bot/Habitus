@@ -159,8 +159,7 @@ class ConversationRetentionPlan:
         return self.through_sequence is not None
 
 
-# TODO(conversation-source): 修改此规划算法语义时，必须同步提升
-# memory/workflow/conversation_consumer.py 中 retention_planner_version。
+# TODO(conversation-source): 改此规划算法语义时须人工提升 conversation_consumer.py 的 retention_planner_version。
 class ConversationRetentionPlanner:
     """只输出非重叠且可安全回收的历史前缀规划。"""
 

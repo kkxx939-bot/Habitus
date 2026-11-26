@@ -36,7 +36,7 @@ from habitus.foundation.integrity import canonical_digest
 from habitus.infrastructure.store.contracts.path_lock import LeaseGuard
 from habitus.infrastructure.tree.metadata import DocumentMetadata
 
-#: stage 里出了错误的一条：判断、原因、进夜里待处理堆的原因（定夜里试不试，裁定 94 错误分类）。
+#: stage 里出了错误的一条：判断、原因、进重试堆的原因（定重试试不试，裁定 94）。
 Failed = tuple[ReducibleJudgement, str, RetryCause]
 _TRUNCATED_HEAD = 20
 _TRUNCATED_TAIL = 5
@@ -112,8 +112,7 @@ class ReductionStager:
                 "documents": documents,
             }
             encoded = self.checkpoints.encode(checkpoint)
-            # 写入与重放共用同一上界：写得进读不回的检查点 = 永久卡死（对齐融合层
-            # "作业放得下而回执放不下"的既有教训）。超限发生在 stage 前，缩批可自愈。
+            # 写入与重放共用同一上界：写得进读不回的检查点 = 永久卡死。超限发生在 stage 前，缩批可自愈。
             if self.checkpoints.fits(encoded):
                 return StagedBatch(
                     documents, dropped, failed, checkpoint, encoded, active_indexes, active_gaps, shrink_rounds
@@ -150,9 +149,8 @@ class ReductionStager:
         ready = [(index, pending.occurrences[index]) for index in ready_indexes]
 
         ledger_uris = frozenset(entry.uri for entry in entries)
-        # 占用集合 = 账本地址（可能已按窗口过期）∪ **树上已有地址** ∪ 本批。树是最终真相；但"树上有没有"
-        # 必须按天整体问一次——逐条 ``tree.exists`` 每次都重新枚举整个日目录（周尺度实测 9,270 次
-        # ≈ 133 秒，而整天列举全树只要 0.33 秒），那是周尺度踩满 sweep 锁 TTL 的主因之一。
+        # 占用集合 = 账本地址（可能已按窗口过期）∪ 树上已有地址 ∪ 本批。树是最终真相；但"树上有没有"
+        # 必须按天整体问一次：逐条 ``tree.exists`` 每次都重新枚举整个日目录，大批量下会踩满 sweep 锁的租约。
         occupied = set(ledger_uris) | self._addresses_on_tree(
             {record.started_at.date() for _, record in ready} | {record.started_at.date() for record in ready_gaps}
         )
@@ -194,8 +192,8 @@ class ReductionStager:
             envelope = self.observations.read(source_ref)
             if envelope is None:
                 # 交付已不在存储里（运维删除、隔离窗口）：不整轮失败。带 basis 的链在物化时会因
-                # "步骤引用的观测已不存在"按链跳过；**没有 basis 的链照常发布**（判断本体自带
-                # summary/goal，不依赖观测），所以这里留信号是唯一的可见痕迹（审计 NEW-8）。
+                # "步骤引用的观测已不存在"按链跳过；没有 basis 的链照常发布（判断本体自带
+                # summary/goal，不依赖观测），所以这里留信号是唯一的可见痕迹。
                 signals.append(f"source_delivery_missing {source_ref}")
                 continue
             for observation in envelope.batch.observations:
@@ -214,9 +212,9 @@ def _name_occurrences(
     dropped: list[str],
     guard: LeaseGuard | None,
 ) -> _Naming:
-    """撞车消歧（死规则②）：按 (evidence_ready_at, 身份) 定序，后序加确定性序号后缀，原始名照存语义面。
+    """撞车消歧：按 (evidence_ready_at, 身份) 定序，后序加确定性序号后缀，原始名照存语义面。
 
-    **先物化再占位**：payload 物化失败（坏名字、basis 引用已丢观测）的只跳过、不占地址——否则它占了基名，幸存者却带着
+    先物化再占位：payload 物化失败（坏名字、basis 引用已丢观测）的只跳过、不占地址，否则它占了基名，幸存者却带着
     -2/original_name 落盘，被预测源当"已知重复"整条丢掉。占用集合 = 账本地址 ∪ 树上已存在的地址（账本按窗口过期，树不会）∪ 本批。
     """
 
@@ -225,8 +223,7 @@ def _name_occurrences(
         sorted(ready, key=lambda pair: (pair[1].evidence_ready_at, pair[1].judgement_id))
     ):
         if guard is not None and position % 50 == 0:
-            # 周尺度实测：9,270 条的命名+物化是一个单阶段长循环，只在阶段边界续约会踩满
-            # 600s 租约 TTL（另一条线的冻结周重放实测）。长循环内按条数周期性续约。
+            # 大批量下命名+物化是一个单阶段长循环，只在阶段边界续约会踩满租约；长循环内按条数周期性续约。
             guard.checkpoint()
         token = stamps.tokens.get(record.chain_digest)
         if token is None:
@@ -250,15 +247,15 @@ def _name_occurrences(
 
 
 def _set_aside(record: ReducibleJudgement, stamps: KindStamps, failed: list[Failed], dropped: list[str]) -> None:
-    """选词没给出 token 的链：换成「错误」、进夜里待处理的堆。"""
+    """选词没给出 token 的链：换成「错误」、进重试堆。"""
 
     if record.kind_token is None and record_material(record, max_steps=0) is None:
-        # 没有可给归类看的内容：我们自己处理不了，换成「错误」、进夜里待处理的堆但不白试（2.4.2；裁定 67、94）
+        # 没有可给归类看的内容：我们自己处理不了，换成「错误」、进重试堆但不白试（裁定 67、94）
         failed.append((record, "behavior name is not addressable", RetryCause.DETERMINISTIC))
         dropped.append(f"chain {record.chain_digest} isolated: behavior name is not addressable")
     else:
-        # 有内容、选词这一轮没给出结论：不再"下轮再选"拖住那天——换成「错误」、放一边（裁定 94 第 3 条）。
-        # 进堆的原因按错误分类定（``kinds_step.SET_ASIDE``）：模型整个用不了的夜里放回去再归一次，内容安全与
+        # 有内容、选词这一轮没给出结论：不拖住那天，换成「错误」、放一边（裁定 94）。
+        # 进堆的原因按错误分类定（``kinds_step.SET_ASIDE``）：模型整个用不了的重试时放回去再归一次，内容安全与
         # 输入超长不重试，bug 当场报
         failure = stamps.set_aside.get(record.chain_digest, CallFailure.BUG)
         failed.append((record, f"classification {failure.value}", SET_ASIDE[failure]))
@@ -277,9 +274,7 @@ def _materialize(
     """先以基名物化一次（坏名字、死引用在这里抛），再挑第一个没被占的后缀地址物化最终 payload。"""
 
     base = str(record.behavior)
-    # TODO(BHV-PROMPTED-BY-001)：谁发起的（裁定 54）——宿主助手先发了通知（包裹到了、账单到期）他才去做的，要由融合从会话里
-    # 认出来交到这里（``occurrence_payload(prompted_by="host_agent")``）；事件融合按 lane 重做之前不改上游，这里只传系统提醒
-    # （reminded → system），其余不写这个字段。详见 ``待办.md``「行为树"谁发起的"标识由上游产出」。
+    # TODO(BHV-PROMPTED-BY-001): 融合还不认"宿主助手先通知了他"，这里只传系统提醒（reminded → system）。
     occurrence_payload(
         record,
         name=base,
@@ -307,8 +302,8 @@ def _materialize(
 def _gap_documents(
     ready_gaps: tuple[ReducibleJudgement, ...], occupied: set[str], staged_at: str, dropped: list[str], *, lane: str
 ) -> list[dict[str, Any]]:
-    """gap 先落。gap 地址的叶名是枚举类型、无法加后缀：批内**同一微秒同偏移**起点的空白机械合并成
-    一个节点（溯源并集、终点取最大）；撞上账本里既有空白时，本段记账指向既有节点——
+    """gap 先落。gap 地址的叶名是枚举类型、无法加后缀：批内同一微秒同偏移起点的空白机械合并成
+    一个节点（溯源并集、终点取最大）；撞上账本里既有空白时，本段记账指向既有节点：
     空白事实已在树上有代表，不重复、不丢账、不卡队列。"""
 
     documents: list[dict[str, Any]] = []
@@ -386,7 +381,7 @@ def _publishable(
     dropped: list[str],
     guard: LeaseGuard | None = None,
 ) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
-    """stage 末端的干跑校验：落盘期只允许**已验证会成功**的确定性动作。
+    """stage 末端的干跑校验：落盘期只允许已验证会成功的确定性动作。
 
     任何会在 publish 期抛错的文档（schema 校验），若放进检查点就会变成"检查点已写、重放永败"的
     永久卡死；在这里按文档剔除并留信号，其余照常落。返回（留下的文档，剔掉的行为文档消费的判断与原因）。

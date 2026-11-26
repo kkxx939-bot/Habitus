@@ -1,7 +1,7 @@
-"""语义树与换代在组合根的组装（语义树新方案 ``13`` 第 11 步另一半；实时化方案阶段 1）。
+"""语义树与换代在组合根的组装。
 
 一支一份 ``SceneNightlyRun``：词表口是行为树那一支的词表（``VocabularyCatalog``），概念集、命中记录、关系表、先验建议都住
-这一支的语义树根 ``<scene_root>/<lane>``（裁定 42：``scene/<lane>/``，两支各一整套，不共用任何东西）；模型触点（先验、调节条件）走同一个 ``StructuredChatClient``；关系检验的时间尺子只认
+这一支的语义树根 ``<scene_root>/<lane>``（裁定 42：``scene/<lane>/``，两支各一整套，不共用任何东西）；模型触点（先验）走同一个 ``StructuredChatClient``；关系检验的时间尺子只认
 ``config.temporal``（``relation_config``）。未启用时返回 None。
 
 换代的串法（重读放假数据 → 重试收尾 → 结算 → 读序列 → 数在用的词 → 语义树 → 机会表 → 单元历史 → 压实 → 当天的日子预期 →
@@ -152,7 +152,7 @@ def build_generation(
         ),
         scene=scene,
         zone=config.locale.zone(),
-        # 每一代开头重读放假数据（用户 10-18：节假日在换代时判断）；两支与预测层读的是同一份，换了一起换
+        # 每一代开头重读放假数据（节假日在换代时判断）；两支与预测层读的是同一份，换了一起换
         refresh_calendar=scene.calendar.refresh if isinstance(scene.calendar, SharedCalendar) else None,
         closed_days=closed_days,
         vocabulary=VocabularyCounter(kind_store, kind_store.config),
@@ -229,7 +229,7 @@ def assemble_branch(
     unsealed: UnsealedFromJudgements | None = None,
     tick: ForesightTick | None = None,
 ) -> ScenePipeline | None:
-    """组合根的那一段，一支一份（裁定 42 两条独立管线）：这一支的语义树 + 换代 + 模型队列，与预测 worker 替这一支做的那一槽（换代的
+    """组合根的那一段，一支一份（裁定 42：两条独立管线）：这一支的语义树 + 换代 + 模型队列，与预测 worker 替这一支做的那一槽（换代的
     那一眼、预测拍 ``tick``、预测根租约）。根、锁、租约、完成标记、重试账、队列状态都是这一支的，重试的堆只编排这一支的。"""
 
     lane = branch.lane.value
@@ -318,7 +318,7 @@ def build_model_queue(
     clock: Callable[[], datetime] | None = None,
     scene_lock: SceneWriteLock | None = None,
 ) -> ModelQueue:
-    """一支的模型队列（实时化方案第 4 节）：与这一支的换代读同一棵行为树、同一份语义树存储、同一个重试堆编排；"已封口的日子的活
+    """一支的模型队列：与这一支的换代读同一棵行为树、同一份语义树存储、同一个重试堆编排；"已封口的日子的活
     能不能做"问这一支的换代（``Generation.sealed_day``）。序列读者是它自己的一份（读者名 ``model_queue``，脏日水位各记各的）；
     队列租约与语义树写锁不同键、都由这一支的根派生，租期与续约间隔共用 ``scene.generation_lease_*`` 那两个数。"""
 
@@ -445,7 +445,7 @@ def build_generation_runner(
     traces: TraceFiles,
     observer: Observer | None = None,
 ) -> GenerationRunner:
-    """一支换代的那一眼：连续定稿到昨天、预测拍水位过了余量，就做今天这一代（实时化方案第 3 节）。预测 worker 每槽调它。
+    """一支换代的那一眼：连续定稿到昨天、预测拍水位过了余量，就做今天这一代。预测 worker 每槽调它。
     报告写在这一支的根下，关系表的双向变化读这一支的关系表。"""
 
     return GenerationRunner(

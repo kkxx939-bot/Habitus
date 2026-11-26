@@ -58,7 +58,7 @@ class SessionTurn:
     """一轮对话 = 宿主的一轮：他开口的那句话，到助手给出最终答复为止助手做的全部事，以及这中间他又说的话。
 
     助手还在干活时他说的话——对助手提问的作答（翻成"（回答助手的提问）…"）、补一句、叫停——都在这一轮里，不另开一轮
-    （用户 2026-10-22：一件事被切成碎片是设计哲学的问题，记忆与行为两边按同一个"一轮"）。``messages`` 里第一条之后的
+    （记忆与行为两边按同一个"一轮"）。``messages`` 里第一条之后的
     人说的话就是这些中途的话。助手停下之后被后台任务叫醒又做的那一段自己算一轮，打头的是叫醒它的那条通知。
 
     ``instructed_at`` 是人开口的时刻，``completed_at`` 是这一轮最后一条消息的时刻（助手做完的时刻）。
@@ -104,7 +104,7 @@ class SessionTurn:
     @property
     def notice_only(self) -> bool:
         """后台通知轮：打头的是叫醒通知，整轮没有他说的话（他在这一轮里开了口——答了助手的提问、补了一句——就不是）。
-        后台任务回来不算一件事（用户 2026-11-14），由代码写一条「非事件」，不调模型。"""
+        后台任务回来不算一件事，由代码写一条「非事件」，不调模型。"""
 
         return self.woken and not any(item.role is SessionMessageRole.PROMPT for item in self.messages[1:])
 
@@ -120,7 +120,7 @@ class SessionTurn:
 
 
 def encode_turn(turn: SessionTurn) -> dict[str, Any]:
-    """一轮编成 JSON 对象（每晚重试的堆里存它，裁定 67）：与输入同形，重试走同一个描述器。"""
+    """一轮编成 JSON 对象（重试堆里存它，裁定 67）：与输入同形，重试走同一个描述器。"""
 
     return {
         "conversation_id": turn.conversation_id,

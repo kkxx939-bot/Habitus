@@ -1,7 +1,6 @@
-"""模型的问法、schema 与核对。提示词对着真实模型调（sonnet / codex），版本随正文指纹走。
+"""模型的问法、schema 与核对。提示词对着真实模型调，版本随正文指纹走。
 
-- **到了该说的时候**（每拍、只问到了提醒档的候选）：像不像、先说哪个、一句话。
-  原来还有一问"这本账的重轻（代价比）"，随急缓这一版不做删掉（裁定 58 第 1 条）。
+- 到了该说的时候（每拍、只问到了提醒档的候选）：像不像、先说哪个、一句话。
 
 schema 只说"有哪些字段、取值属于哪个集合"（真实后端不认 minItems / maxItems）；条数与引用由 ``assemble`` 核对。
 """
@@ -18,11 +17,6 @@ from habitus.foresight.judge.package import Candidate, Package
 from habitus.foundation.integrity import canonical_digest
 from habitus.model_client import ChatMessage, ChatRequest
 
-# v8 → v9（2026-10-17，裁定 56 第 12 条）：候选是一个行为单元，小包多一节"此刻对这件事的全部输入"（每个输入从它出发说中几次、
-# 事件输入的有它 / 没它发生率）。系统提示词一字未改，只多了材料；**未对着真实模型调过**（方案 19 第九节 6g）。
-# v9 → v10（2026-10-18，裁定 59）：钟面、几号两种触发删了，多了「情境」（今天处在语义树上成立的日历情境里）；第 1 问去掉
-# "历史都在同一个周几 / 时段而今天不是"（那是钟面账的病，情境触发按日历情境建、周几天然对得上），加上"日型未知"怎么读。
-# **未对着真实模型调过，合入前待用户做新旧对照**（25 号清单 4.10）。
 JUDGE_PROMPT_VERSION = "foresight_judge_prompt_v10"
 
 JUDGE_SYSTEM_PROMPT = """你是一个跟在这个人身边的助手，认得他的惯例。算法已经从他的历史里挑出了几件此刻"按往常该做"的事，
@@ -89,7 +83,7 @@ SCHEMA_FINGERPRINT = canonical_digest(judge_json_schema((1,)))[:12]
 JUDGE_VERSION = f"{JUDGE_PROMPT_VERSION}+prompt{PROMPT_FINGERPRINT}+schema{SCHEMA_FINGERPRINT}+asked-twice"
 MAX_TEXT_CHARS = 40
 #: 话里不许出现的说法：材料支撑不了的全称（"每次""每周""每月""每逢""每天""总是""都会"：账上是 7 次说中 5 次，不是每周）与
-#: 系统内部的说法（"时窗""已隔""到期""情境""日型"）。情境候选最自然的全称说法就是"每周三你会……"（2026-10-18 四方评审）。
+#: 系统内部的说法（"时窗""已隔""到期""情境""日型"）。情境候选最自然的全称说法就是"每周三你会……"。
 BANNED_PHRASES = ("每次", "每周", "每月", "每逢", "每天", "总是", "都会", "时窗", "已隔", "到期", "情境", "日型")
 
 

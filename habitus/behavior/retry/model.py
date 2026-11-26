@@ -1,11 +1,11 @@
-"""夜里待处理的堆里一项（裁定 67；裁定 94 第 3、4 条）：白天出了错误、先落了「错误」的东西，留着它重来所需的那一份，
-等当晚线最前面的前置处理统一看一次。
+"""重试堆里一项（裁定 67、94）：出了错误、先落了「错误」的东西，留着它重来所需的那一份，
+等模型队列就近重试或换代的重试收尾处理。
 
-- **会话轮**（``TURN``）：会话 lane 一轮写不成（确定性失败），或会话源的重试账放弃了；载荷是这一轮本身（与会话 lane 的输入
+- 会话轮（``TURN``）：会话 lane 一轮写不成（确定性失败），或会话源的重试账放弃了；载荷是这一轮本身（与会话 lane 的输入
   同形，``session.model.encode_turn``），重试走同一个描述器。
-- **链**（``CHAIN``）：归约里没有可读名 / 物化失败的链；载荷是它的判断原记录。同一份代码再归约几乎必败，只当"推迟一晚再删"。
+- 链（``CHAIN``）：归约里没有可读名 / 物化失败的链；载荷是它的判断原记录。同一份代码再归约几乎必败，只当"推迟到重试收尾再删"。
 
-``cause`` 记它为什么进来，也定换代里的重试收尾试不试（``RetryCause.retried``，裁定 94 第 4 条后的错误分类）：模型此刻用不了、答了格式
+``cause`` 记它为什么进来，也定换代里的重试收尾试不试（``RetryCause.retried``，裁定 94）：模型此刻用不了、答了格式
 不合、重试账放弃了、会话源账坏了（材料完好）的再试一次；内容安全拦下的、我们自己处理不了的（链无可读名 / 物化失败、这一版写不成、
 输入超长）不白试，原样保持「错误」、进健康面。重试收尾的结果另按"模型用不了 / 内容不合格 / 确定性失败 / 内容安全 / 成功"计数。
 """
@@ -33,15 +33,15 @@ class RetryKind(str, Enum):
 
 class RetryCause(str, Enum):
     GIVEN_UP = "given_up"  # 重试账放弃了（模型连不上、额度满、输出一直不合格）
-    DETERMINISTIC = "deterministic"  # 我们自己处理不了：这一版处理下必然写不成（含输入超长，裁定 94 错误分类）
-    UNAVAILABLE = "unavailable"  # 白天读时模型用不了（额度、鉴权、权限、连不上、没配好），裁定 80 第 5 条
-    INVALID = "invalid"  # 模型答了但格式不合（``ModelStructuredOutputError``）：白天放一边，夜里再试一次
+    DETERMINISTIC = "deterministic"  # 我们自己处理不了：这一版处理下必然写不成（含输入超长，裁定 94）
+    UNAVAILABLE = "unavailable"  # 读时模型用不了（额度、鉴权、权限、连不上、没配好），裁定 80
+    INVALID = "invalid"  # 模型答了但格式不合（``ModelStructuredOutputError``）：先放一边，再试一次
     REFUSED = "refused"  # 这一条触发了内容安全：不重试
-    DAMAGED = "damaged"  # 会话源"处理完了没有"的账坏了、材料本身完好（裁定 67 第 5 条）
+    DAMAGED = "damaged"  # 会话源"处理完了没有"的账坏了、材料本身完好（裁定 67）
 
     @property
     def retried(self) -> bool:
-        """夜里前置处理要不要再试它（裁定 94 错误分类）：内容安全与我们自己处理不了的不白试。"""
+        """重试时要不要再试它（裁定 94）：内容安全与我们自己处理不了的不白试。"""
 
         return self not in (RetryCause.DETERMINISTIC, RetryCause.REFUSED)
 
@@ -56,7 +56,7 @@ class Admission(str, Enum):
     KEPT = "kept"
     PRESENT = "present"
     FULL = "full"
-    LATE = "late"  # 那一天的夜批已经跑过
+    LATE = "late"  # 那一天的重试收尾已经做过
     DISABLED = "disabled"  # 没接重试堆
 
     @property

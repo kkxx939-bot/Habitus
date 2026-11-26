@@ -1,4 +1,4 @@
-"""一条 lane 一晚的检验：时间线、对照、每个前因的链与块都只算一次（``LaneTests``），量哪些交 ``candidates``、怎么量交
+"""一条 lane 一代的检验：时间线、对照、每个前因的链与块都只算一次（``LaneTests``），量哪些交 ``candidates``、怎么量交
 ``evaluation``。关系的身份、读数与第 3 道的判法在 ``engine``。
 """
 
@@ -26,7 +26,7 @@ from habitus.temporal.intervals import common_interval_days
 
 
 class LaneTests:
-    """一条 lane 一晚的检验：时间线、对照、每个前因的链与块都只算一次。"""
+    """一条 lane 一代的检验：时间线、对照、每个前因的链与块都只算一次。"""
 
     def __init__(
         self,
@@ -37,7 +37,7 @@ class LaneTests:
         *,
         established: Iterable[RelationKey] = (),
     ) -> None:
-        """``established``：接的那一晚已成立的关系——第二个条件起只在已成立的带条件关系上加一个（裁定 62 第 1 条）。"""
+        """``established``：上一代已成立的关系——第二个条件起只在已成立的带条件关系上加一个（裁定 62）。"""
 
         self.line = line
         self.concepts = concepts
@@ -55,7 +55,7 @@ class LaneTests:
         self.candidates = RelationCandidates(self)
         self.evaluator = RelationEvaluator(self)
         #: 最近一次 ``night`` 的结果（还没算过是 None）：换代里关系那一步的观测（``scene.b4.lane`` span）从这里读各族的分解，
-        #: 不再算第二遍。
+        #: 不必算第二遍。
         self.last_night: LaneNight | None = None
 
     # ── 量哪些（``candidates``） ──────────────────────────────────────────────
@@ -80,7 +80,7 @@ class LaneTests:
         outside: frozenset[RelationKey] = frozenset(),
         keep: frozenset[RelationKey] = frozenset(),
     ) -> LaneNight:
-        """当晚的检验族（``RelationEvaluator.night``）。最近一次的结果留在 ``last_night``（只给观测读各族的分解）。"""
+        """这一代的检验族（``RelationEvaluator.night``）。最近一次的结果留在 ``last_night``（只给观测读各族的分解）。"""
 
         result = self.evaluator.night(weights, since=since, outside=outside, keep=keep)
         self.last_night = result
@@ -110,7 +110,7 @@ class LaneTests:
 
         return self.evaluator.assess(test, measure, previously_large=previously_large)
 
-    # ── 一晚只算一次的材料 ────────────────────────────────────────────────────
+    # ── 一代只算一次的材料 ────────────────────────────────────────────────────
 
     def episodes(self, antecedent: str, segment: Segment) -> tuple[Episode, ...]:
         cache = (antecedent, segment)
@@ -123,7 +123,7 @@ class LaneTests:
                 block_days=blocks.days if blocks is not None else 1.0,
                 first_seen=(self.config.thresholds.first_seen_min_days, self.config.thresholds.first_seen_min_blocks),
                 alpha=self.config.thresholds.forward_alpha,
-                # 下级来过的日子对前因是"不知道"：当截尾的一次（裁定 105 第 2 条）
+                # 下级来过的日子对前因是"不知道"：当截尾的一次（裁定 105）
                 visits=(
                     *(Visit(chain.day, prompted=chain.anchor.reminded) for chain in self.chains(antecedent)),
                     *(Visit(mark.day, prompted=True) for mark in self.line.shadows.get(antecedent, [])),
@@ -167,7 +167,7 @@ class LaneTests:
 
     def sides_reachable(self, key: RelationKey) -> bool:
         """带条件的关系有没有可能过开测门的第 1 道（条件下与每组对照各至少 ``MIN_PER_SIDE`` 层，``conditions.split``）：
-        按同样的分组数这一段合并后的**链**，层只会比链少（窗口判不了的那一次没有层），所以链数都不够时，换哪个后果都不够——
+        按同样的分组数这一段合并后的链，层只会比链少（窗口判不了的那一次没有层），所以链数都不够时，换哪个后果都不够——
         这一组（前因, 条件, 段）的键不必逐条量，读数必是"到不了"。只取决于前因、条件与段，与后果无关。"""
 
         cache = (key.antecedent, key.condition, key.segment)
@@ -213,7 +213,7 @@ def examine_night(
     *,
     weights: Mapping[RelationKey, float] | None = None,
 ) -> dict[str, LaneNight]:
-    """第 ``series.cutoff`` 晚：每条 lane 一个检验族。"""
+    """截到 ``series.cutoff`` 的这一代：每条 lane 一个检验族。"""
 
     lines = build_timelines(series, concepts, hits, config)
     return {

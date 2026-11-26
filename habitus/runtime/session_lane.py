@@ -9,11 +9,10 @@
 
 失败怎么办：某一轮的模型调用失败就让异常抛出去，这份源不落终态，由会话源的恢复按重试账之后重做；重做时已经写过判断的
 轮会被认出来，不重复写。重试账放弃了（怎么失败的都一样）就走 ``abandon``：还没写进树的轮写成没读懂空白、落终态
-（23 号第一节第 6 条：缺失必须记录，否则下游把"看了没读懂"读成"没做"）。
-
-TODO(BHV-SESSION-LANE-001)：只收本人在交互界面里说话的会话（裁定 37）——现在只挡得住子代理的会话
-（会话身份带 ``.subagent.``）。脚本调起、定时触发的会话在信封上没有任何标识，要插件与服务入口先把来源带上来。
+（缺失必须记录，否则下游把"看了没读懂"读成"没做"）。
 """
+
+# TODO(BHV-SESSION-LANE-001): 只挡得住子代理的会话，脚本调起、定时触发的会话还认不出来（裁定 37）。
 
 from __future__ import annotations
 
@@ -77,7 +76,7 @@ _BUILTIN_QUESTION_TOOLS = answered_question_tools(ConversationAdapterRegistry.wi
 
 
 def unwatched_writer(lane: SessionLane | None) -> Callable[[datetime, datetime], object] | None:
-    """预测拍写"没在看的时段"的口（实时化方案第 6 节）：用会话一支同一套判断、回执与覆盖存储写一条「未观测」空判断，由会话一支的
+    """预测拍写"没在看的时段"的口：用会话一支同一套判断、回执与覆盖存储写一条「未观测」空判断，由会话一支的
     归约落树。行为侧没开就没有。"""
 
     if lane is None:
@@ -238,7 +237,7 @@ def session_salvager(
     question_tools: Callable[[str], tuple[str, ...]] = _BUILTIN_QUESTION_TOOLS,
 ) -> Callable[[ConversationSourceEnvelope], None]:
     """会话源"处理完了没有"的账坏了时由会话源那一侧调（``conversation.source.salvage``）：把这份源拆成轮，交给会话 lane
-    逐轮补救（裁定 67 第 5、16 条；"写没写过"的判法、那一天收不收都在行为侧）。行为侧没启用就什么都不做。"""
+    逐轮补救（裁定 67；"写没写过"的判法、那一天收不收都在行为侧）。行为侧没启用就什么都不做。"""
 
     if lane is None:
         return lambda _envelope: None

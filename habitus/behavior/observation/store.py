@@ -22,9 +22,9 @@ from habitus.infrastructure.store.filesystem import (
 
 _SOURCE_FILE = re.compile(r"^(?P<source_id>[0-9a-f]{64})\.json$")
 
-# 生命周期（26 号清单 L2、6.2）：观测在所属判断发布到行为树、且被回执覆盖之后由归约释放（``discard``），不按保留期堆积；
+# 生命周期：观测在所属判断发布到行为树、且被回执覆盖之后由归约释放（``discard``），不按保留期堆积；
 # ``list()`` 每次都列目录、按身份缓存解码好的信封（文件只创建、不改写），释放时一起淘汰。``max_files`` 是保护闸。
-# 本存储自己的一份读不出来（坏了、不是规范编码、文件名对不上）：数据坏了（裁定 94 错误分类）——把坏的那一份挪进
+# 本存储自己的一份读不出来（坏了、不是规范编码、文件名对不上）：数据坏了（裁定 94）：把坏的那一份挪进
 # ``observations/isolated/``、记下身份（``take_isolated``，归约留信号报出），枚举照常往下走：它钉不住封口视界、挡不住定稿。
 # 读不出它的时间，所以树上落不成「错误」空白；这一点只能报出、等人看。
 
@@ -44,7 +44,7 @@ class BehaviorObservationStore:
         self.isolated_root = self.root / "observations" / "isolated"
         #: 这一次 ``take_isolated`` 以来挪进隔离区的身份（坏了挪不动的也在里面：照样跳过、每次都报）。
         self._isolated: list[str] = []
-        #: 交付文件只创建、不改写：按身份缓存解码好的信封（26 号清单 6.2），释放时一起淘汰。列目录照旧每次都列。
+        #: 交付文件只创建、不改写：按身份缓存解码好的信封，释放时一起淘汰。列目录照旧每次都列。
         self._decoded: dict[str, BehaviorObservationEnvelope] = {}
 
     def put(self, envelope: BehaviorObservationEnvelope) -> BehaviorObservationEnvelope:
@@ -118,7 +118,7 @@ class BehaviorObservationStore:
                 envelopes.append(self._required_read(source_id))
             except (BehaviorObservationError, DurablePathIntegrityError):
                 if self._path(source_id).is_file():
-                    self._isolate(source_id)  # 坏了：放一边，不挡后面（裁定 94 错误分类）
+                    self._isolate(source_id)  # 坏了：放一边，不挡后面（裁定 94）
                     continue
                 raise
         return tuple(sorted(envelopes, key=lambda item: (item.batch.started_at, item.recorded_at, item.source_id)))

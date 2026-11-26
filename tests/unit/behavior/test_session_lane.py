@@ -774,10 +774,10 @@ def test_coverage_is_read_once_for_a_batch_of_turns(tmp_path: Path, monkeypatch:
     reads = 0
     original = stores.coverage.covered_observation_ids
 
-    def counted(now: datetime | None = None) -> frozenset[str]:
+    def counted() -> frozenset[str]:
         nonlocal reads
         reads += 1
-        return original(now)
+        return original()
 
     monkeypatch.setattr(stores.coverage, "covered_observation_ids", counted)
     checks: list[int] = []

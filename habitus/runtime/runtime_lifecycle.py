@@ -23,7 +23,7 @@ _SINGLE_BRANCH_SCENE = ("concepts", "occurrences", "relations", "advice", "gener
 
 
 class SingleBranchLayoutError(RuntimeError):
-    """盘上还有两支分根之前的语义树目录（不迁移，裁定 102 第 8 条）。"""
+    """盘上还有两支分根之前的语义树目录（不迁移，裁定 102）。"""
 
 
 def refuse_single_branch_layout(config: HabitusConfig) -> None:
@@ -53,7 +53,7 @@ def refuse_vector_layout(config: HabitusConfig) -> None:
 
 
 class WriteLayoutError(RuntimeError):
-    """盘上还有已删的多文件事务日志或变更回执目录（裁定 111 去掉，不迁移、不读）。"""
+    """盘上还有已删的多文件事务日志或变更回执目录（不迁移、不读，裁定 111）。"""
 
 
 def refuse_write_layout(config: HabitusConfig) -> None:
@@ -117,7 +117,7 @@ class RuntimeLifecycle:
         self.components.workflow.lifecycle.retirement_store.initialize()
         if self.components.behavior is not None:
             # 这一支的事件与空白目录；幂等，重复初始化零写入。
-            # 此处失败**允许**阻断整个 Runtime（对"行为失败不阻断"哲学的边界取舍）：
+            # 此处失败允许阻断整个 Runtime：
             # 同一 storage root 下建不了目录，几乎必然意味着记忆侧同样不可用；
             # 静默跳过反而会让 RUNNING 状态掩盖一个坏掉的存储根。
             for branch in self.components.behavior:
@@ -129,7 +129,7 @@ class RuntimeLifecycle:
             # 语义树按支分根（裁定 42：``scene/<lane>/``）之前的旧布局不迁移：盘上还有就在启动时报错、点出目录
             refuse_single_branch_layout(self.config)
         for item in self.components.pipelines:
-            # 已删的候选条件提议簿（2026-11-15）同样不迁移：盘上还有就在启动时报错、点出文件
+            # 已删的候选条件提议簿同样不迁移：盘上还有就在启动时报错、点出文件
             advice = item.scene.advice
             if advice is not None:
                 advice.store.refuse_proposal_books()
@@ -138,7 +138,7 @@ class RuntimeLifecycle:
     async def start(self, started: float) -> None:
         """恢复交付，依次启动 Job Worker、生命周期维护 Worker 与可选的后台循环。"""
 
-        # 恢复失败不阻断启动（裁定 60 第 6 条），只降级出事的那个地址：有序的 Memory 对同地址后面的源报"等前序"或
+        # 恢复失败不阻断启动（裁定 60），只降级出事的那个地址：有序的 Memory 对同地址后面的源报"等前序"或
         # "前序已坏"，别的地址照常；可重试的由周期恢复按退避再试，放弃了的等人工修复。失败都计入 gauge。
         # 整轮恢复本身出错（读不了账）同样不挡启动：记一条失败事件，交给周期恢复再来。
         try:
@@ -159,8 +159,7 @@ class RuntimeLifecycle:
             finally:
                 await self.components.workflow.worker.stop()
             raise
-        # 行为管线（可选启用）：启动失败不阻断 Runtime——沿既有"Behavior 失败不阻断"
-        # 哲学，失败经观测记录，行为侧下次启动自愈（存储都是耐久幂等的）。
+        # 行为管线（可选启用）：启动失败不阻断 Runtime：失败经观测记录，行为侧下次启动自愈（存储都是耐久幂等的）。
         if self.components.behavior is not None:
             # 两支各起各的：一支起不来不连累另一支。
             for branch in self.components.behavior:
@@ -215,7 +214,7 @@ class RuntimeLifecycle:
         """关闭前停全部 Worker；Source Consumer 的有界排空由 Runtime 的 close 自己做（超时要显式失败）。"""
 
         # 行为 Worker 与主链 Worker 对称停机：``async with`` 的退出走的是 close 不是
-        # stop——漏掉这里会让融合/归约循环带着已关闭的模型客户端继续跑（评审实测泄漏）。
+        # stop——漏掉这里会让融合/归约循环带着已关闭的模型客户端继续跑。
         await self.stop_background_workers()
         try:
             await self.components.workflow.lifecycle_worker.stop()

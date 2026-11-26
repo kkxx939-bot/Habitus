@@ -1,8 +1,7 @@
 """按声明的字段类型把原始载荷规范化为强类型领域值。
 
-时间纪律（用户裁定）：occurrence 上**全部时间统一为本地时间 + 显式偏移**，``available_at``
-也不例外——带偏移的本地时间就是完整瞬时，混用两种约定才是"取错时间"的事故源。UTC 归一保持在
-观测/判断层的入口，不进树；时序比较一律先解析为瞬时。
+occurrence 上全部时间统一为本地时间 + 显式偏移，``available_at`` 也不例外：带偏移的本地时间就是
+完整瞬时，混用两种约定是取错时间的事故源。UTC 归一只在观测/判断层的入口，不进树；时序比较一律先解析为瞬时。
 """
 
 from __future__ import annotations
@@ -157,7 +156,7 @@ def kind_token(value: Any, label: str) -> str:
 def basis_steps(value: Any, label: str) -> tuple[dict[str, Any], ...]:
     """构成一件事的行为事实步骤；每步的时间在写入时从观测物化（观测之后会释放）。"""
 
-    # 步骤不再内联 observation_ids：原料在发布后即释放，那些 id 只会是死引用（实测占文档 1/3）。
+    # 步骤不内联 observation_ids：原料发布后即释放，那些 id 只会是死引用；
     # 步骤的起止与可知时刻在写入时已从观测物化，语义面自足。
     expected = {"semantics", "started_at", "ended_at", "available_at"}
     resolved: list[dict[str, Any]] = []

@@ -1,7 +1,7 @@
-"""生命周期骨架自己的状态也要有退出（26 号清单 L10.10；裁定 67）：重试账是改造新加的，原先只进不出。
+"""生命周期骨架自己的状态也要有退出（裁定 67）。
 
 - 重试账：放弃了超过 ``lifecycle.retry.given_up_days`` 的条目回收（键里带口径的，口径一变旧键再也不会被 ``clear``）；
-- 每晚重试的堆：自己每晚试完就删（``behavior.retry.stage``），这里只报还剩几项、到上限没有、累计拒收了几项；
+- 重试的堆：试完就删、换代的重试收尾丢掉剩下的（``behavior.retry.stage``），这里只报还剩几项、到上限没有、累计拒收了几项；
 - 都报容量，到告警线时健康面看得见。
 
 重试账与重试的堆由各层组合时建好、交到这里；这里只按统一的寿命清，不认识它们装的是什么。
@@ -54,7 +54,7 @@ class LifecycleHousekeepingParticipant:
             ctx.assert_owned()
             name = backlog.root.name
             readings.append(CapacityReading(f"retry_backlog_{name}", backlog.count(), backlog.max_items))
-            # 拒收累计（满了 / 那天已做过重试收尾）：这些项树上照旧是「错误」（看不到）、不会再补（裁定 68 第 3、4 条，94 第 3 条）
+            # 拒收累计（满了 / 那天已做过重试收尾）：这些项树上照旧是「错误」（看不到）、不会再补（裁定 68、94）
             readings.extend(
                 CapacityReading(f"retry_backlog_{name}_refused_{reason}", count)
                 for reason, count in sorted(backlog.refused().items())

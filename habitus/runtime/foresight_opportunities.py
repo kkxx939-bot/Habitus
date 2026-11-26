@@ -1,4 +1,4 @@
-"""机会表的落盘：一条 lane 一晚一份规范 JSON，整张重写，只留最近几晚（目录与字节的规矩见 ``runtime.foresight_nightly_files``）。
+"""机会表的落盘：一条 lane 一代一份规范 JSON，整张重写，只留最近几代（目录与字节的规矩见 ``runtime.foresight_nightly_files``）。
 
     <root>/opportunities/<lane>/<YYYY-MM-DD>.json
 
@@ -41,8 +41,8 @@ class OpportunityStore:
         self.root = self._files.root
         self.directory = self._files.directory
         self.retained_nights = retained_nights
-        #: 某一晚那一代做完了没有（换代的完成标记）：删旧表时留下最晚那张做完了的——连着几天表写出了、完成标记没成时，
-        #: 预测拍还有一张做完了的表可用（用户 2026-11-16）。没接就只按晚数删。
+        #: 某一天那一代做完了没有（换代的完成标记）：删旧表时留下最晚那张做完了的——连着几天表写出了、完成标记没成时，
+        #: 预测拍还有一张做完了的表可用。没接就只按代数删。
         self.finished = finished
 
     def write(self, table: OpportunityTable) -> Path:
@@ -54,7 +54,7 @@ class OpportunityStore:
         )
 
     def _finished(self, night: date) -> bool:
-        """删旧表时这一晚算不算做完了：与预测拍取表同一个判法（``usable_tables``），标记坏了的不算。"""
+        """删旧表时这一代算不算做完了：与预测拍取表同一个判法（``usable_tables``），标记坏了的不算。"""
 
         assert self.finished is not None
         try:
@@ -72,7 +72,7 @@ class OpportunityStore:
         return self._files.latest_night(lane)
 
     def read(self, lane: str, night: date) -> OpportunityTable:
-        """读一晚的表；坏了明确报错、点出是哪个文件。"""
+        """读一代的表；坏了明确报错、点出是哪个文件。"""
 
         try:
             return decode_table(self._files.read(lane, night), lane=lane, night=night)
@@ -80,7 +80,7 @@ class OpportunityStore:
             raise type(exc)(f"{self._files.lane_directory(lane) / f'{night.isoformat()}.json'}: {exc}") from exc
 
     def latest(self, lane: str, *, accept: Callable[[date], bool] | None = None) -> OpportunityTable | None:
-        """盘上最晚一晚读得出来的表（最晚那一份坏了往前退一晚，坏的计入观测）；给了 ``accept`` 就只看它认的那几晚
+        """盘上最晚一代读得出来的表（最晚那一份坏了往前退一代，坏的计入观测）；给了 ``accept`` 就只看它认的那几代
         （预测拍建预期只认那一代做完了的）；没有是 None。"""
 
         return self._files.latest(lane, lambda text, night: decode_table(text, lane=lane, night=night), accept=accept)

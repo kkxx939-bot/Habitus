@@ -1,12 +1,12 @@
-"""当天的日子预期：换代的必须成的最后几步之一（实时化方案第 3 节；裁定 94 第 1 条）。
+"""当天的日子预期：换代的必须成的最后几步之一（裁定 94）。
 
 连续定稿到昨天 → 重试收尾 → 结算 → 词表 → 读序列 → 语义树 → 机会表 → 单元历史 → 这一步 → 完成标记（``runtime.generation``）。
 这一步用的就是这一代刚写的、含昨天的那张机会表：间隔、簇、命中、时窗只有这一个来源。盘上最晚那张表不是今天这一代的（这一代
-的表没写成）就不建，换代据此判今天没有这一代。今天这一代做成之前，预测拍已经用旧表把"表那一晚之后一次都没再出现过"的类建上
+的表没写成）就不建，换代据此判今天没有这一代。今天这一代做成之前，预测拍已经用旧表把"表那一代之后一次都没再出现过"的类建上
 （``ExpectationForming.days_unchanged``）：那几类旧表与这张表算出同一个身份，这里按身份查重、不再写一份；别的类在这里第一次建。
 
-每天都建、从当天零点起算（裁定 94 第 2 条）：这一步看的是零点以来的整段（``looked_since`` = 零点），所以时窗在换代做完之前
-就已关掉的也照建——做了照常结，没做结过期待决（时窗已过，递送本来不说）；不许只建做了的一侧（裁定 49 第 1 条）。
+每天都建、从当天零点起算（裁定 94）：这一步看的是零点以来的整段（``looked_since`` = 零点），所以时窗在换代做完之前
+就已关掉的也照建——做了照常结，没做结过期待决（时窗已过，递送本来不说）；不许只建做了的一侧（裁定 49）。
 读材料与落账同预测拍（``runtime.foresight_forming``），未封口的读口也是同一个：模型此刻用不了只是这一次没选上词，不抛。
 """
 
@@ -104,7 +104,7 @@ class DayExpectationStage:
         if table is None or table.night != now.date():
             return DayReport(now, Formed(), NO_TABLE if table is None else STALE_TABLE)
         recent = await self.forming.read(now)
-        # 从零点起看：零点到这一步之间关掉的时窗也算赶上了，没做的那次照样进账（裁定 94 第 2 条）
+        # 从零点起看：零点到这一步之间关掉的时窗也算赶上了，没做的那次照样进账（裁定 94）
         midnight = datetime.combine(now.date(), clock_time(0), tzinfo=now.tzinfo)
         return DayReport(now, self.forming.form(recent, table, batch=Batch.DAYS, looked_since=midnight))
 

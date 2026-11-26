@@ -563,7 +563,7 @@ def test_a_half_written_segment_that_upstream_then_corrects_is_replaced_not_left
     (wash,) = [item for item in readable(stores) if item["behavior"] == "洗手"]
     assert wash["last_observed_at"].startswith(f"{DAY}T09:13:30")
     # 没有留下没被回执覆盖的凭据
-    covered = stores.coverage.covered_observation_ids(stores.now)
+    covered = stores.coverage.covered_observation_ids()
     stored = {item.observation_id for envelope in stores.observations.list() for item in envelope.batch.observations}
     assert stored <= covered
 

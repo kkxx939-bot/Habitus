@@ -29,7 +29,7 @@ class SetupChoice:
 
 @dataclass(frozen=True)
 class SetupField:
-    """一个 Profile 可编辑字段；paths 允许一次写入共享向量配置。"""
+    """一个 Profile 可编辑字段；paths 允许一个字段同时写入多处配置。"""
 
     key: str
     label: str

@@ -1,6 +1,6 @@
-"""预测层在组合根的组装（``19-预测层方案.md`` 第九节，按步接）。
+"""预测层在组合根的组装。
 
-现在接上的：账本（``ForesightLedgerStore``）与结算这一拍（``SettlementStage``，换代里的一步）；机会表的存储
+组装的部件：账本（``ForesightLedgerStore``）与结算这一拍（``SettlementStage``，换代里的一步）；机会表的存储
 （``OpportunityStore``）与算它的那一拍（``ForesightNightlyRun``，由 ``build_foresight_nightly`` 装、挂在
 ``runtime.generation.Generation`` 的语义树之后，同一拍重标单元的历史 ``HistoryStage``，换代由预测 worker 每槽先看一眼、在连续
 定稿到昨天之后做）；当天的日子预期（``DayExpectationStage``，由 ``build_foresight_days`` 装，换代必须成的一步）；
@@ -94,9 +94,9 @@ class ForesightRuntimeComponents:
     settlement: SettlementStage
     opportunities: OpportunityStore
     history: HistoryStage
-    #: 换代里的账本压实（26 号清单 4.8）；不给就不压。
+    #: 换代里的账本压实；不给就不压。
     compaction: LedgerCompaction | None = None
-    #: 提醒出口（方案 32）：宿主来取、从转写认提问写「说了」；递送那一拍按它的活性决定问不问模型。两支共用这一个，账按支记。
+    #: 提醒出口：宿主来取、从转写认提问写「说了」；递送那一拍按它的活性决定问不问模型。两支共用这一个，账按支记。
     outlet: ReminderOutlet | None = None
     #: 换代里建当天日子预期的那一步（必须成）；与 ``worker`` 一起在未封口的桥装好之后接上。
     days: DayExpectationStage | None = None
@@ -126,7 +126,7 @@ class ForesightRuntimeComponents:
             raise ValueError("the day expectations are built from and written to this branch's table and ledger")
 
     def assert_attached_to(self, *, behavior: BehaviorRuntimeComponents) -> None:
-        """实例同一性：预测层必须读**这个** Runtime 的那棵行为树、按它的定稿日结算。"""
+        """实例同一性：预测层必须读这个 Runtime 的那棵行为树、按它的定稿日结算。"""
 
         if self.read_side.behavior_tree is not behavior.tree:
             raise ValueError("foresight must read the assembled behaviour tree")
@@ -167,7 +167,7 @@ def build_outlet(
     question_tools: Sequence[QuestionTool] | None = None,
     observer: Observer | None = None,
 ) -> ReminderOutlet:
-    """提醒出口（方案 32）：两支共用一个（出口只有宿主里的会话，裁定 102 第 3 条），传输状态按支存在 ``<foresight_root>/<lane>/outlet``；
+    """提醒出口：两支共用一个（出口只有宿主里的会话，裁定 102），传输状态按支存在 ``<foresight_root>/<lane>/outlet``；
     每条请求带是哪一支，「说了」与回话写回那一支的账本，类名按那一支的词表（``kind_stores``）取。"""
 
     foresight = config.foresight
@@ -224,7 +224,7 @@ def build_foresight_components(
         hierarchy=None if kind_store is None else kind_hierarchy(kind_store),
     )
     limits = config.foresight.store
-    generations = 1 + config.lifecycle.fallback_generations  # 派生物留当前一代与几代备用（26 号清单 6.12）
+    generations = 1 + config.lifecycle.fallback_generations  # 派生物留当前一代与几代备用
     opportunities = OpportunityStore(root, retained_nights=generations, limits=limits, finished=finished)
     history_store = HistoryStore(root, retained_nights=generations, limits=limits)
     settlement = SettlementStage(
@@ -269,7 +269,7 @@ def build_foresight_nightly(
     unseen_day_types: str = "skip",
 ) -> ForesightNightlyRun:
     """机会表那一拍：读语义树的关系表（``relations``）、按关系检验同一份时间参数（``relation_config``，由
-    ``runtime.scene_config.relation_config`` 换算）、写进这一支的机会表存储；同一拍重标这一支的单元历史（裁定 55 新版第 2 条）。
+    ``runtime.scene_config.relation_config`` 换算）、写进这一支的机会表存储；同一拍重标这一支的单元历史（裁定 55）。
     交给 ``runtime.generation.Generation`` 的 ``foresight``。"""
 
     return ForesightNightlyRun(
@@ -303,7 +303,7 @@ def build_foresight_tick(
 ) -> ForesightTick:
     """预测拍：读这一支的机会表、今天的日历条件、行为树今天与前 7 天、还没封口的判断（``unsealed``），把此刻对得上历史的预期写进
     这一支的账本；再把到了时窗的按账的级决定说不说（``structured_chat`` 给了就带模型四问，不给就按算法与模板）。``shadow_uses_unestablished``
-    开着时候选关系也进影子账；``trace`` 给了每拍一个 ``foresight.tick`` span。送达走提醒出口（方案 32）：最近一段有宿主
+    开着时候选关系也进影子账；``trace`` 给了每拍一个 ``foresight.tick`` span。送达走提醒出口：最近一段有宿主
     来取过才写话、记「待取」，否则记「不可达」；每拍末尾把这一支可取的请求交给出口（只换这一支的那几行，另一支的照留）。
     往回看读落盘的水位，没在看的那一段交 ``unwatched`` 写成「未观测」（只有会话一支给；物理一支在没在看是上游的逻辑，
     裁定 43，只推水位），整拍持这一支的预测根租约（``lease``）。"""
@@ -356,7 +356,7 @@ def build_foresight_days(
     observer: Observer | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> DayExpectationStage:
-    """当天的日子预期：换代写完这一代的机会表与单元历史之后，用这张含昨天的表建（裁定 94 第 1 条）；读材料与预测拍同一套
+    """当天的日子预期：换代写完这一代的机会表与单元历史之后，用这张含昨天的表建（裁定 94）；读材料与预测拍同一套
     （行为树今天与前 7 天、还没封口的判断 ``unsealed``）。交给 ``runtime.generation.Generation`` 的 ``days``。"""
 
     return DayExpectationStage(
@@ -394,7 +394,7 @@ def foresight_ledger_lease(config: HabitusConfig, lock_store: LockStore, lane: s
 
 
 def build_reminded_lookup(components: ForesightRuntimeComponents) -> RemindedLookup:
-    """归约封口时盖 ``reminded`` 的查法（第 0 步）：交给 ``BehaviorReductionRunner.attach_reminder_lookup``。"""
+    """归约封口时盖 ``reminded`` 的查法：交给 ``BehaviorReductionRunner.attach_reminder_lookup``。"""
 
     return RemindedLookup(components.ledger, components.read_side.hierarchy)
 
@@ -406,7 +406,7 @@ def build_outlet_consumer(
     observer: Observer | None = None,
     host_of: Callable[[str], str | None] | None = None,
 ) -> OutletObservingConsumer:
-    """会话源的行为侧消费者外面包出口那一层（方案 32 第 4.2 条）：同一份会话先过 ``outlet.observe``，再进会话 lane。出口两支共用。"""
+    """会话源的行为侧消费者外面包出口那一层：同一份会话先过 ``outlet.observe``，再进会话 lane。出口两支共用。"""
 
     return OutletObservingConsumer(inner, outlet, observer=observer, host_of=host_of)
 
@@ -414,8 +414,8 @@ def build_outlet_consumer(
 def build_reminder_responses(
     branches: Sequence[ForesightRuntimeComponents], *, config: HabitusConfig, observer: Observer | None = None
 ) -> BranchReminders:
-    """会话 lane 每轮带开着的提醒、写回回应的那座桥（方案 30 第五节）：交给 ``SessionLane.attach_reminders``。两支的提醒都从
-    宿主里的会话说出口，所以会话 lane 看两支的账；回应写回提醒所属的那一支（裁定 102 第 3 条，共用的是出口不是数据）。"""
+    """会话 lane 每轮带开着的提醒、写回回应的那座桥：交给 ``SessionLane.attach_reminders``。两支的提醒都从
+    宿主里的会话说出口，所以会话 lane 看两支的账；回应写回提醒所属的那一支（裁定 102，共用的是出口不是数据）。"""
 
     return BranchReminders(
         tuple(

@@ -1,4 +1,4 @@
-"""一晚的关系检验：每条 lane 全部两两都量，数据说了算（语义树新方案 ``13`` ①③）。
+"""一代的关系检验：每条 lane 全部两两都量，数据说了算。
 
 ```
 每条 lane：
@@ -9,13 +9,13 @@
            区间下限够不够大               第 3 道
 ```
 
-两条 lane 各成一个检验族（裁定 21：两条 lane 相互独立、不干扰）。不比的对（机械排除）：自己对自己（那是复现节律，
-归 ``scene.recurrence``），以及上下级（上下级关系只在选词时用，上下级之间不量关系；裁定 105 第 5 条）。
+两条 lane 相互独立，各成一个检验族（裁定 21）。不比的对（机械排除）：自己对自己（那是复现节律，
+归 ``scene.recurrence``），以及上下级（上下级之间不量关系，裁定 105）。
 
-本模块只算"今晚的数据说什么"。候选要在之后的新数据上复现才成立（前向验证）、成立后按段看新数据（维持检验，从上一次判过起不重叠地攒满一段）——
-这两步要跨夜的状态，由状态折叠（第 5 步）调 ``evaluate`` 在对应的子集上做。先验权重由第 7 步给，这里只收。
+本模块只算"这一代的数据说什么"。候选要在之后的新数据上复现才成立（前向验证）、成立后按段看新数据（维持检验，从上一次判过起不重叠地攒满一段）——
+这两步要跨代的状态，由状态折叠调 ``evaluate`` 在对应的子集上做。先验权重由外部给，这里只收。
 
-本模块是关系的身份、读数与第 3 道的判法；一条 lane 一晚的检验在 ``lane_tests``（量哪些在 ``candidates``、怎么量在 ``evaluation``）。
+本模块是关系的身份、读数与第 3 道的判法；一条 lane 一代的检验在 ``lane_tests``（量哪些在 ``candidates``、怎么量在 ``evaluation``）。
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from habitus.scene.relations.spans import (
 class RelationKey:
     """关系身份 = （lane, 前因, 后果, 跨度段, 条件）。条件为空 = 不带条件；带条件的是"在这些条件下 A → B 比少一个条件时
     更强 / 更弱"（调节；组合前因"A 与 C 一起"也是一种条件），条件是一个集合，写成 ``conditions.join_conditions`` 的键
-    （几个 ``Condition.text`` 排序后用 ``+`` 拼起来；裁定 61 第 6 条）。"""
+    （几个 ``Condition.text`` 排序后用 ``+`` 拼起来；裁定 61）。"""
 
     lane: str
     antecedent: str
@@ -84,7 +84,7 @@ class Verdict(str, Enum):
     SPARSE = "sparse"
     #: 进了检验族，没过第 1 道。
     TESTED = "tested"
-    #: 过了第 1 道（今晚的数据上显著）；前向验证由状态折叠接着做。
+    #: 过了第 1 道（这一代的数据上显著）；前向验证由状态折叠接着做。
     SIGNIFICANT = "significant"
 
 
@@ -198,8 +198,7 @@ def gone(
 
 
 def comparable(concepts: ConceptSet, antecedent: str, consequent: str) -> bool:
-    """这一对要不要比：不比自己，也不比上下级（裁定 105 第 5 条）。
-    兄弟、不相干的照常比。"""
+    """这一对要不要比：不比自己，也不比上下级（裁定 105）；兄弟、不相干的照常比。"""
 
     return antecedent != consequent and not concepts.related(antecedent, consequent)
 

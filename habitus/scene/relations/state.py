@@ -1,35 +1,29 @@
-"""关系的状态逐晚累积（语义树新方案 ``13`` ③）：第 N 晚 = 第 N−1 晚 + 当晚检验（+ 预测层反馈，第 9 步接）。
+"""关系的状态逐代累积：第 N 代 = 第 N−1 代 + 这一代的检验。
 
-```
-样本不够 / 已检 ──当晚过第 1 道──▶ 候选（记发现的那晚 N₀）
+样本不够 / 已检 ──这一代过第 1 道──▶ 候选（记发现的那一代 N₀）
 候选 ──N₀ 之后新到的独立 A 攒够按功效定的次数（至少 2 块）：单侧检验──┬─ 过 ─▶ 等第 2、3 道（全部数据）都过 ─▶ 成立
-                                                                    └─ 不过 ─▶ 前向未复现（记那晚 R）
-成立 ──维持检验：从上一次判过起不重叠地攒满一段（成立那晚按功效算好的次数、至少 2 块），连续两段区间都够不上第 3 道
-      ──▶ 失效（记那晚 R）
+                                                                    └─ 不过 ─▶ 前向未复现（记那一代 R）
+成立 ──维持检验：从上一次判过起不重叠地攒满一段（成立那一代按功效算好的次数、至少 2 块），连续两段区间都够不上第 3 道
+      ──▶ 失效（记那一代 R）
 失效 / 前向未复现 ──只用 R 之后的数据又过第 1 道──▶ 候选（数据变了还能回来）
 候选 / 失效 / 前向未复现 ──上一代就是这样、这一代没迁移，前因或后果久没来──▶ 退休（记那一代 T）
 退休 ──只用 T 之后的数据又过第 1 道──▶ 候选
-```
 
-- **又回来要靠新数据**：失效与前向未复现之后，第 1 道只看 R 之后的数据。不然旧数据里那段强关系会让它每晚都"又过第 1 道"、
-  每次都在前向验证上被否（合成数据实测：埋 25 天后撤掉的关系，失效后两个月里被"重新发现"了 12 次），而每一次都是又给了
-  自己一次碰运气的机会。所以"前向未复现"要跨夜记着，不能退回成"已检"就忘了。
-- **候选与成立不进当晚的检验族**：它们各走各的（前向验证、维持检验），成立之后不再进全局 FDR。
-
-- **前向验证只判一次**：在新数据第一次攒够按功效算的次数、跨了不止一个块、并且这几层全中能到 α 的那一晚判（方案："攒够没有，次数与块数
-  两维都要够"；真实数据上一个高频前因一天就能来 5 次，那不是 5 个独立样本），过就是过、不过就退回。每晚拿越攒越多的新数据反复验，
-  等于给自己很多次机会碰出一晚显著——这正是前向验证要防的事（评审模拟：58 晚里"至少一晚过线"的概率是单晚的 5–12 倍）。
-- **成立之后不再进全局检验族**：每晚只做维持检验。失效不数晚数：只是不显著（证据弱）不算失效。
-- 关系身份 = （lane, 前因, 后果, 跨度段）；条件（调节）由第 6 步加。几个条件合起来的只长在已成立的带条件关系上
-  （裁定 61 第 6 条、62 第 1 条）：这一晚之后少任意一个条件的父关系没有一条还成立的，组合整行清掉（迁移写原因）。
-- 成立的关系每晚也判第 2、3 道（``assess``）：``large_enough`` 是预测层分"原因"与"巧合"的依据（裁定 62 第 3 条），
+- 又回来要靠新数据：失效与前向未复现之后，第 1 道只看 R 之后的数据。不然旧数据里那段强关系会让它每代都"又过第 1 道"、
+  每次都在前向验证上被否，而每一次都是又给了自己一次碰运气的机会。所以"前向未复现"要跨代记着，不能退回成"已检"就忘了。
+- 前向验证只判一次：在新数据第一次攒够按功效算的次数、跨了不止一个块、并且这几层全中能到 α 的那一代判，过就是过、
+  不过就退回。次数与块数两维都要够：一个高频前因一天能来好几次，那不是几个独立样本。每代拿越攒越多的新数据反复验，
+  等于给自己很多次机会碰出一代显著——这正是前向验证要防的事。
+- 候选与成立不进这一代的全局检验族（FDR）：候选走前向验证，成立的每代只做维持检验。失效不数代数：只是不显著（证据弱）不算失效。
+- 关系身份 = （lane, 前因, 后果, 跨度段）加条件（调节）。几个条件合起来的只长在已成立的带条件关系上（裁定 61、62）：
+  这一代之后少任意一个条件的父关系没有一条还成立的，组合整行清掉（迁移写原因）。
+- 成立的关系每代也判第 2、3 道（``assess``）：``large_enough`` 是预测层分"原因"与"巧合"的依据（裁定 62），
   不能成立之后就一直是 None。
-- 样本不够与已检两种不跨夜保留任何东西（每晚从数据重算），只有候选、成立、失效带着历史。
-- 当晚测不了的关系（概念从概念集里没了）原样带着，不改状态。
-- **退休**（方案 ``19`` §8，用户 11-10、11-12）：候选、失效、前向未复现在前因或后果久没来时退休（``retirement``：账的久别
-  同一把尺，日历情境当前因只判后果），只留键与退休那一代，不再每代存读数、不做前向验证；以后只能靠退休之后的数据重新过
-  第 1 道回到候选。成立的不退。一条键一代只迁移一次：这一代刚迁移过的下一代才判。
-  退休行不算"带着的行"（``carried``），从 ``LaneState.of(Status.RETIRED)`` 取。
+- 样本不够与已检两种不跨代保留任何东西（每代从数据重算），只有候选、成立、失效带着历史。
+- 这一代测不了的关系（概念从概念集里没了）原样带着，不改状态。
+- 退休：候选、失效、前向未复现在前因或后果久没来时退休（``retirement``：与账的久别同一把尺，日历情境当前因只判后果），
+  只留键与退休那一代，不再每代存读数、不做前向验证；以后只能靠退休之后的数据重新过第 1 道回到候选。成立的不退。
+  一条键一代只迁移一次：这一代刚迁移过的下一代才判。退休行不算"带着的行"（``carried``），从 ``LaneState.of(Status.RETIRED)`` 取。
 """
 
 from __future__ import annotations
@@ -68,7 +62,7 @@ class Status(str, Enum):
 
     @property
     def carried(self) -> bool:
-        """跨夜带着历史、每一代要完整读数的四种（不含退休）。"""
+        """跨代带着历史、每一代要完整读数的四种（不含退休）。"""
 
         return self in (Status.CANDIDATE, Status.ESTABLISHED, Status.EXPIRED, Status.REJECTED)
 
@@ -81,7 +75,7 @@ class Status(str, Enum):
 
 @dataclass(frozen=True)
 class Relation:
-    """一条关系在第 ``night`` 晚的样子。``tonight`` 是当晚的检验读数（候选的第 2、3 道按它的方向判过）。"""
+    """一条关系在第 ``night`` 代的样子。``tonight`` 是这一代的检验读数（候选的第 2、3 道按它的方向判过）。"""
 
     key: RelationKey
     status: Status
@@ -92,18 +86,18 @@ class Relation:
     established_on: date | None = None
     expired_on: date | None = None
     rejected_on: date | None = None
-    #: 只靠先验才过的第 1 道（不加权就过不了）：打标签给人看，回测时单独比（先验有没有用要单变量验）。
+    #: 只靠先验才过的第 1 道（不加权就过不了）：打标签，便于单独比较先验有没有用。
     prior_only: bool = False
     #: 前向验证（只在候选上）：发现之后新数据上的读数。
     forward: Subset | None = None
     #: 维持检验（只在成立 / 刚失效的上）：上一次判过之后攒的这一段新数据的读数。
     maintenance: Subset | None = None
-    #: 前向验证要攒几次独立的前因（发现那晚按功效算定，之后不变）。
+    #: 前向验证要攒几次独立的前因（发现那一代按功效算定，之后不变）。
     forward_needed: int | None = None
-    #: 维持检验判到哪一晚（下一段只看这之后的新数据）；连续几段说没了。
+    #: 维持检验判到哪一代（下一段只看这之后的新数据）；连续几段说没了。
     maintained_through: date | None = None
     misses: int = 0
-    #: 维持检验每段要攒几次独立的前因（成立那晚按功效算定，之后不变；None = 还没成立）。
+    #: 维持检验每段要攒几次独立的前因（成立那一代按功效算定，之后不变；None = 还没成立）。
     maintenance_needed: int | None = None
     #: 退休那一代（只在退休行上）。
     retired_on: date | None = None
@@ -119,7 +113,7 @@ class Relation:
 
 @dataclass(frozen=True)
 class Transition:
-    """状态迁移日志的一条：哪条关系哪晚从什么到什么、为什么。"""
+    """状态迁移日志的一条：哪条关系哪一代从什么到什么、为什么。"""
 
     night: date
     key: RelationKey
@@ -130,8 +124,8 @@ class Transition:
 
 @dataclass(frozen=True)
 class LaneState:
-    """一条 lane 一晚的关系表。样本不够的只记各段的条数：它们不跨夜带任何东西、每晚从数据重算，逐条存会让一晚的文件
-    以兆计（真实会话 lane 带长跨度与条件约 7,800 个检验，九成以上样本不够，一晚 2.8 MB）。"""
+    """一条 lane 一代的关系表。样本不够的只记各段的条数：它们不跨代带任何东西、每代从数据重算，
+    逐条存会让一代的文件以兆计（九成以上的检验样本不够）。"""
 
     lane: str
     night: date
@@ -139,11 +133,11 @@ class LaneState:
     relations: tuple[Relation, ...]
     #: 样本不够的条数，按跨度段。
     sparse: Mapping[str, int] = field(default_factory=dict)
-    #: 这份状态按哪一版词表算的。下一晚据它算"这之间哪些类的成员变了"——不读概念集的同步进度：同一晚重跑时同步进度早已推进，
-    #: 读它会让第二趟看不到变化、接回没退回的旧状态，把退回悄悄撤销（2026-10-18 四方评审）。
+    #: 这份状态按哪一版词表算的。下一代据它算"这之间哪些类的成员变了"——不读概念集的同步进度：同一代重跑时同步进度早已推进，
+    #: 读它会让第二趟看不到变化、接回没退回的旧状态，把退回悄悄撤销。
     vocabulary: int = 0
     #: 各段量法的版本（键是段名）。判据一改只清那一段的行：关系键里不含段的边界，不清的话旧行会换到新判据下的段上
-    #: 接着做维持检验（26 号清单 3.5）。没写的段按版本 1。
+    #: 接着做维持检验。没写的段按版本 1。
     measure_versions: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -177,7 +171,7 @@ def fold(
     *,
     watching: Watching,
 ) -> tuple[LaneState, tuple[Transition, ...]]:
-    """第 ``tests.cutoff`` 晚的状态与这一晚的迁移。``previous`` 是这条 lane 之前最近的一晚（没有就是第一晚）；``watching`` 是
+    """第 ``tests.cutoff`` 代的状态与这一代的迁移。``previous`` 是这条 lane 之前最近的一代（没有就是第一代）；``watching`` 是
     这条 lane 的观测材料（覆盖、日型、空白算到哪天），判退休用。"""
 
     if previous is not None:
@@ -192,7 +186,7 @@ def fold(
     outside = frozenset(
         key for key, relation in carried.items() if relation.status in (Status.CANDIDATE, Status.ESTABLISHED)
     )
-    # 跨夜带着的每晚都要完整读数（``keep``）；同一份读数同时判不加权的：只靠先验才过第 1 道的，发现时打"靠先验"
+    # 跨代带着的每代都要完整读数（``keep``）；同一份读数同时判不加权的：只靠先验才过第 1 道的，发现时打"靠先验"
     night = tests.night(weights, since=since, outside=outside, keep=frozenset(carried))
     unweighted = night.plain_significant
     tonight = {test.key: test for test in night.tests}
@@ -244,7 +238,7 @@ _RETIRABLE = (Status.CANDIDATE, Status.EXPIRED, Status.REJECTED)
 
 def _cleared(before: Relation, measured: bool, tests: LaneTests, night: date) -> tuple[Transition, ...] | None:
     """这一行这一代清不清掉：清就返回要留的迁移（可以没有），留着是 None。概念被词表停用的退休行有没有读数都清；
-    别的行当晚没读数、再也用不上（``_expired_row``，26 号清单 5.6、5.7）时清，清掉还在用的行时留一条迁移说清楚为什么。"""
+    别的行这一代没读数、再也用不上（``_expired_row``）时清，清掉还在用的行时留一条迁移说清楚为什么。"""
 
     if before.status is Status.RETIRED and _retired(before.key, tests):
         return ()
@@ -262,7 +256,7 @@ def _cleared(before: Relation, measured: bool, tests: LaneTests, night: date) ->
 def _retire(
     before: Relation, after: Relation, tests: LaneTests, night: date, away: Callable[[str], Absence | None]
 ) -> tuple[Relation, str | None]:
-    """这一代没迁移的行判不判退休、退不退（裁定 98 第 1、3 条）。只判上一代带进来、这一代之后仍是候选 / 失效 / 前向未复现的；
+    """这一代没迁移的行判不判退休、退不退（裁定 98）。只判上一代带进来、这一代之后仍是候选 / 失效 / 前向未复现的；
     发现日是这一代的不判（一条键一代只迁移一次），下一代才判。"""
 
     if before.status not in _RETIRABLE or after.status not in _RETIRABLE or before.discovered_on == night:
@@ -274,7 +268,7 @@ def _retire(
 
 
 def _drop_orphaned_combinations(relations: list[Relation], night: date) -> tuple[list[Relation], list[Transition]]:
-    """几个条件合起来的关系，这一晚之后少任意一个条件的父关系没有一条还成立的，整行清掉（组合只长在成立的关系上，
+    """几个条件合起来的关系，这一代之后少任意一个条件的父关系没有一条还成立的，整行清掉（组合只长在成立的关系上，
     父退回它跟着退回）。按条件个数从少到多判，三层的组合随两层的一起清。"""
 
     kept = list(relations)
@@ -301,8 +295,8 @@ def _drop_orphaned_combinations(relations: list[Relation], night: date) -> tuple
 
 
 def _drop_stale_measures(previous: LaneState) -> LaneState:
-    """某一段（或带条件的同一条链，``longspan.measure_name``）的量法改了版本：那一份带着的行清掉，在新判据下从数据重新发现。关系键里不含段的边界，不清的话旧行会
-    换到新判据下的段上接着做维持检验（26 号清单 3.5）。其余段原样带着。"""
+    """某一段（或带条件的同一条链，``longspan.measure_name``）的量法改了版本：那一份带着的行清掉，在新判据下从数据重新发现。
+    关系键里不含段的边界，不清的话旧行会换到新判据下的段上接着做维持检验。其余段原样带着。"""
 
     stale = {
         segment for segment, version in MEASURE_VERSIONS.items() if previous.measure_versions.get(segment, 1) < version
@@ -320,10 +314,10 @@ def _drop_stale_measures(previous: LaneState) -> LaneState:
 def _step(
     before: Relation | None, test: RelationTest | None, tests: LaneTests, night: date
 ) -> tuple[Relation, str | None]:
-    """一条关系这一晚怎么走；返回（新样子, 迁移原因——不迁移是 None）。"""
+    """一条关系这一代怎么走；返回（新样子, 迁移原因——不迁移是 None）。"""
 
     if _retired(test.key if test is not None else before.key if before is not None else None, tests):
-        # 前因或后果的行为概念停用了（它的词退出在用或被删，裁定 101 第 7 条）：这条关系随之停用（裁定 27 第 9 条）——不是"效应没了"
+        # 前因或后果的行为概念停用了（它的词退出在用或被删，裁定 101）：这条关系随之停用（裁定 27）——不是"效应没了"
         if before is not None and before.status in (Status.CANDIDATE, Status.ESTABLISHED):
             return replace(
                 before, status=Status.EXPIRED, expired_on=night, maintenance=None
@@ -357,8 +351,8 @@ def _step(
 
 
 def _forward_needed(test: RelationTest, tests: LaneTests) -> int:
-    """前向验证要攒几次：按发现那晚效应区间里离 0 近的那一端（没有区间就用点估计）算功效（裁定 27 第 3 条）。
-    用离 0 近的一端，是不让发现那晚的运气把要攒的次数算少。"""
+    """前向验证要攒几次：按发现那一代效应区间里离 0 近的那一端（没有区间就用点估计）算功效（裁定 27）。
+    用离 0 近的一端，是不让发现那一代的运气把要攒的次数算少。"""
 
     thresholds = tests.config.thresholds
     point = test.effect.treated_rate - test.effect.control_rate
@@ -378,8 +372,8 @@ def _forward_needed(test: RelationTest, tests: LaneTests) -> int:
 
 
 def _maintenance_needed(test: RelationTest, tests: LaneTests) -> int:
-    """维持检验每段要攒几次（26 号清单 5.3）：零假设是"效应还像成立那晚那么大"，备择是"回落到对照率"，方向朝回落那一侧；
-    功效与 α 与前向验证同一对。成立那晚算好存进 ``Relation.maintenance_needed``，之后每段按它判——不再借固定的块数与前向的次数。
+    """维持检验每段要攒几次：零假设是"效应还像成立那一代那么大"，备择是"回落到对照率"，方向朝回落那一侧；
+    功效与 α 与前向验证同一对。成立那一代算好存进 ``Relation.maintenance_needed``，之后每段按它判。
     功效按二项检验算、实际判"没了"用 ``gone()`` 的区间，两者不是同一条规则：模拟测试兜底（``test_relation_power_thresholds``）。"""
 
     thresholds = tests.config.thresholds
@@ -397,8 +391,8 @@ def _maintenance_needed(test: RelationTest, tests: LaneTests) -> int:
 
 
 def _candidate(before: Relation, test: RelationTest, tests: LaneTests, night: date) -> tuple[Relation, str | None]:
-    """前向验证、第 2 道、第 3 道**同一晚只判一次**（裁定 27 第 3 条）：新数据攒够那一晚判，过了成立，任何一道没过就退回。
-    每晚重判等于给自己很多次碰运气的机会（第四轮评审算法 4：一条关系成立那晚异质性恰好过线，全量数据上 p = 0.004）。"""
+    """前向验证、第 2 道、第 3 道同一代只判一次（裁定 27）：新数据攒够那一代判，过了成立，任何一道没过就退回。
+    每代重判等于给自己很多次碰运气的机会。"""
 
     thresholds = tests.config.thresholds
     judged = tests.assess(replace(test, upward=before.upward))
@@ -411,8 +405,7 @@ def _candidate(before: Relation, test: RelationTest, tests: LaneTests, night: da
         return current, None  # 新数据还不够（次数与块数两维都要够：一天里的几次不是几个独立样本），接着等
     if forward.minimum_p >= thresholds.forward_alpha:
         # 次数够了，但每层对照太少，这几层就算全中也到不了 α（例：每层 2 个对照、攒 2 次，全中也只有 (1/3)² ≈ 0.11）：
-        # 判了必输，再攒，不判。要攒的次数按"对照很多"的二项算，不知道以后每层有几个对照；匹配设计的样本量本该带每层对照数
-        # （L10.15，用户 10-19 定；文献见 27 号调研）。
+        # 判了必输，再攒，不判。要攒的次数按"对照很多"的二项算，不知道以后每层有几个对照。
         return current, None
     if forward.p_value >= thresholds.forward_alpha:
         rejected = replace(current, status=Status.REJECTED, rejected_on=night)
@@ -437,11 +430,10 @@ def _candidate(before: Relation, test: RelationTest, tests: LaneTests, night: da
 
 
 def _established(before: Relation, test: RelationTest, tests: LaneTests, night: date) -> tuple[Relation, str | None]:
-    """维持检验：上一次判过之后攒的新数据满一段（成立那晚按功效算好的次数、至少 2 块）才判一次；连续两段都说没了才失效
-    （裁定 27 第 3 条）。每晚看最近几块等于每晚给它一次被运气判掉的机会（第四轮评审算法 5：效应恒定的真关系 120 晚里最多
-    58% 被判失效）。成立在 v4 之前、没存次数的，按这一晚的读数补算一次存上。
-    当晚的读数带第 2、3 道（``assess``）：``large_enough`` 要每晚都有（裁定 62 第 3 条），带滞回——昨晚够大的今晚要远端也掉线才
-    翻成不够（裁定 63 第 3 条），免得线附近的关系一晚是原因、一晚是巧合，机会表与单元跟着进出。"""
+    """维持检验：上一次判过之后攒的新数据满一段（成立那一代按功效算好的次数、至少 2 块）才判一次；连续两段都说没了才失效
+    （裁定 27）。每代看最近几块等于每代给它一次被运气判掉的机会。没存次数的成立行，按这一代的读数补算一次存上。
+    这一代的读数带第 2、3 道（``assess``）：``large_enough`` 要每代都有（裁定 62），带滞回——上一代够大的这一代要远端也掉线才
+    翻成不够（裁定 63），免得线附近的关系一代是原因、一代是巧合，机会表与单元跟着进出。"""
 
     config = tests.config
     thresholds = config.thresholds
@@ -470,7 +462,7 @@ def _established(before: Relation, test: RelationTest, tests: LaneTests, night: 
 
 
 def _expired_row(before: Relation, tests: LaneTests) -> bool:
-    """冻住的行（当晚没有读数）还留不留：停用概念的休眠行永远不会再用（停用概念的退休行在 ``_cleared`` 里先清掉）；依赖的段或条件
+    """冻住的行（这一代没有读数）还留不留：停用概念的休眠行永远不会再用（停用概念的退休行在 ``_cleared`` 里先清掉）；依赖的段或条件
     已经不在的行也不会，退休行同样。只是前因这阵子没有新链的照旧冻着（久没来的由退休规则处理）；休眠行与退休行的 ``reset_on``
     留着，重新显著时从它之后的新数据算。"""
 

@@ -1,4 +1,4 @@
-"""释放会话源：信封、两份 Outcome、两种输出、两把源锁行、两样标记一起退出（裁定 60，26 号清单 2.1）。
+"""释放会话源：信封、两份 Outcome、两种输出、两把源锁行、两样标记一起退出（裁定 60）。
 
 门槛，三条同时满足：
 1. 同一地址后面有一份 start_sequence 更大、有序 Consumer（``ordered_within_conversation``，现在是 Memory）都已

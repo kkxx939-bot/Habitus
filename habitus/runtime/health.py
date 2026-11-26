@@ -91,10 +91,10 @@ class RuntimeHealthService:
         return RuntimeHealthReport(status, ready, datetime.now(UTC), tuple(checks), recall_ready)
 
     def _behavior_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
-        """行为管线的健康面；**non-critical**——行为失败不阻断记忆主链的既定哲学在健康面同样成立。
+        """行为管线的健康面；non-critical：行为失败不阻断记忆主链。
 
         未启用时如实报 disabled（healthy）；启用后暴露两条循环的存活与最近错误——否则
-        "启动失败不阻断"+"循环异常只进 last_error"的组合等于死活无人知（评审点名）。
+        "启动失败不阻断"+"循环异常只进 last_error"的组合等于死活无人知。
         """
 
         behavior = self.components.behavior
@@ -107,7 +107,7 @@ class RuntimeHealthService:
         for branch in behavior:
             pinned = branch.reduction_runner.pinned
             if pinned:
-                # 封口视界被哪几份观测钉住：比它晚的观测已被回执覆盖、它没有（裁定 94 第 8 条）——那天及以后定不了稿；逐份列出
+                # 封口视界被哪几份观测钉住：比它晚的观测已被回执覆盖、它没有（裁定 94）——那天及以后定不了稿；逐份列出
                 checks.append(
                     RuntimeHealthCheck(
                         f"behavior_seal_horizon_{branch.lane.value}",
@@ -122,11 +122,11 @@ class RuntimeHealthService:
         return checks
 
     def _generation_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
-        """换代的健康面；同样 non-critical。换代不做不会让任何请求出错——它只是让语义树和机会表停在昨天，而这**恰恰是最难自己发现的故障**：白天照常递送，只是依据
+        """换代的健康面；同样 non-critical。换代不做不会让任何请求出错——它只是让语义树和机会表停在昨天，而这恰恰是最难自己发现的故障：白天照常递送，只是依据
         越来越旧、新的预期一条都不建。两支各一条管线（裁定 42）：下面每一项按支各报一份、名字带支（``generation_physical``……）。
         换代没有自己的循环（预测 worker 每槽按支先看一眼，循环存活在 ``foresight_worker``、没开预测层时在 ``generation_slots``）；
         这里报：那一眼出了错、今天没有这一代、走了退路的步、卡住的那一天、日期回退、完成标记读不了、这一支模型队列要人看的；
-        接了预测层时再看这一支机会表最晚一晚有多旧（清单 5.3）。"""
+        接了预测层时再看这一支机会表最晚一代有多旧。"""
 
         pipelines = self.components.pipelines
         if not pipelines:
@@ -159,7 +159,7 @@ class RuntimeHealthService:
     ) -> RuntimeHealthCheck:
         """机会表有多旧。循环活着不等于换代在产出——这正是上面那段 docstring 说最难自己发现的故障。
 
-        不写死周期（裁定 68 第 4 条）：换代在前一天定稿之后做，所以该有的最晚一代是"最后定稿日 + 1"；盘上最晚那张表比它早就是
+        不写死周期（裁定 68）：换代在前一天定稿之后做，所以该有的最晚一代是"最后定稿日 + 1"；盘上最晚那张表比它早就是
         陈旧（换代没做、没做成）。还没写过任何一代、还没有定稿日都不算故障：行为侧刚接入、第一代还没到。
         """
 
@@ -362,8 +362,8 @@ class RuntimeHealthService:
 
 
 def timezone_checks(zone: ZoneInfo, system: datetime) -> list[RuntimeHealthCheck]:
-    """系统时区与配置时区（non-critical；用户 11-10 换时区，方案 19 第 6.1 节；不管换代接没接都比，用户 11-10）：运行时一切按
-    配置的 ``locale.timezone`` 算（今天、槽、闸），``system`` 是此刻按系统本地时区的读法，系统时区只影响人在系统上看到的钟点——``system``（此刻、按系统本地时区）与它
+    """系统时区与配置时区（non-critical；不管换代接没接都比）：运行时一切按
+    配置的 ``locale.timezone`` 算（今天、槽、闸），系统时区只影响人在系统上看到的钟点——``system``（此刻、按系统本地时区）与它
     此刻的 UTC 偏移不一致时报出两边的名字与偏移，人可能改了一边忘了另一边。只比此刻的偏移：名字不同、偏移相同（Asia/Shanghai
     与 Asia/Singapore）不报。"""
 

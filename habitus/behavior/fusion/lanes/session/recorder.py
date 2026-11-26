@@ -3,7 +3,7 @@
 一轮一条判断，不带任何续接关系（裁定 32）：落到行为树上也是一轮一条。落盘序列与"写到一半"的认法与物理 lane 共用
 （``fusion/writing.py``），之后由同一个归约封口落树。
 
-每一轮留两条凭据观测——人开口的时刻一条、助手做完的时刻一条——只存时刻和指向会话源的引用，不存内容（裁定 33）。
+每一轮留两条凭据观测（人开口的时刻一条、助手做完的时刻一条），只存时刻和指向会话源的引用，不存内容（裁定 33）。
 判断的开始与最后所见由这两条派生：开始是人开口的时刻，最后所见是助手做完的时刻（裁定 31）。
 """
 
@@ -38,7 +38,7 @@ from habitus.behavior.observation import (
     BehaviorObservationStore,
 )
 
-# v2：判断带选词结果（裁定 101）；版本里带上选词提示词的版本，判断上看得出是哪版选词写的。
+# 版本里带上选词提示词的版本，判断上看得出是哪版选词写的（裁定 101）。
 SESSION_FUSION_VERSION = f"behavior_session_fusion_v2+{SESSION_PROMPT_VERSION}+{PICK_PROMPT_VERSION}"
 _OBSERVER_PREFIX = "session/"
 
@@ -93,7 +93,7 @@ class SessionTurnRecorder:
     def covered(self) -> frozenset[str]:
         """已经被回执覆盖的观测。读一次要扫全部覆盖记录，一批轮只读一次，不要每轮读。"""
 
-        return self.coverage.covered_observation_ids(self.clock())
+        return self.coverage.covered_observation_ids()
 
     def is_recorded(self, turn: SessionTurn, covered: frozenset[str] | None = None) -> bool:
         """这一轮是不是已经写完了（崩溃后重做同一份会话源时用）。
@@ -117,7 +117,7 @@ class SessionTurnRecorder:
         return self._first(self._written(turn))
 
     def readable_unfinished(self, turn: SessionTurn) -> InterruptedRecord | None:
-        """这一轮已经写下、还没归约的可读判断（上一次重试写到一半就断了；每晚重试先接着写完它，不重问模型）。"""
+        """这一轮已经写下、还没归约的可读判断（上一次重试写到一半就断了；重试先接着写完它，不重问模型）。"""
 
         return self._first([item for item in self._written(turn) if item["behavior"] is not None])
 
@@ -130,7 +130,7 @@ class SessionTurnRecorder:
 
     def withdraw(self, turn: SessionTurn) -> None:
         """撤回这一轮写到一半的重试，回到重试之前的样子：没归约的可读判断撤下；凭据没被任何回执覆盖的，凭据一起撤
-        （否则一组没被覆盖的凭据会把封口视界永远钉在这一轮那一刻）。原来那条「没读懂」与它的覆盖不动。"""
+        （否则一组没被覆盖的凭据会把封口视界永远钉在这一轮那一刻）。原来那条「错误」与它的覆盖不动。"""
 
         for item in self._written(turn):
             if item["behavior"] is not None:
@@ -226,11 +226,11 @@ class SessionTurnRecorder:
         self, turn: SessionTurn, *, sources: tuple[str, ...] = (), versions: FusionVersions | None = None
     ) -> str:
         """这一轮系统出了问题没读成（模型调不通、答了格式不合、内容安全拦下、我们自己写不成、会话源账坏）：写成一段「错误」
-        （空判断、依据 ``error``，裁定 94 第 3 条；会话 lane 的模型要么给出描述、要么失败，没有"读了给不出结论"的那一种），
+        （空判断、依据 ``error``，裁定 94；会话 lane 的模型要么给出描述、要么失败，没有"读了给不出结论"的那一种），
         返回那条判断的编号。
 
-        已经落盘、但回执没落的可读判断一并撤下——否则它照样会被归约落树；这一轮整轮进了夜里待处理的堆（裁定 67），撤下的那条
-        不必另存。凭据由这份回执覆盖，封口前沿不再被钉住（26 号清单 2.4.4）。判定时刻取这一轮做完的时刻，重来时身份不变、幂等。
+        已经落盘、但回执没落的可读判断一并撤下，否则它照样会被归约落树；这一轮整轮进了重试堆（裁定 67），撤下的那条
+        不必另存。凭据由这份回执覆盖，封口前沿不再被钉住。判定时刻取这一轮做完的时刻，重来时身份不变、幂等。
         """
 
         for stale in self._written(turn):

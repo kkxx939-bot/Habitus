@@ -1,4 +1,4 @@
-"""``habitus-server init`` 定主体所在地（``locale.timezone``、``locale.region``）：检测系统时区，交互时请用户确认（W3）。
+"""``habitus-server init`` 定主体所在地（``locale.timezone``、``locale.region``）：检测系统时区，交互时请用户确认。
 
 为什么 init 要问：时区决定"今天是哪一天"——记忆抽取按它定 Event 落在哪一天，行为侧与预测层按它定本地日界与槽位；
 地区决定读哪一份当地放假安排。默认值（新加坡）只是兜底，装在别处的人不该悄悄按新加坡算。
@@ -98,7 +98,7 @@ def canonical_timezone(text: str) -> str | None:
 
 def choose_locale(*, interactive: bool, output: TextIO, previous: LocaleChoice | None = None) -> LocaleChoice:
     """``previous`` 是重建前配置里写着的所在地（没写过就是 None）。交互时它是默认值：回车保留，要换得自己输入；
-    检测结果只作参考显示，不会因为人在外地跑了一次 ``--force`` 就被悄悄换掉（用户 2026-11-06 定）。"""
+    检测结果只作参考显示，不会因为人在外地跑了一次 ``--force`` 就被悄悄换掉。"""
 
     detected = detect_system_timezone()
     if not interactive:
@@ -176,7 +176,7 @@ def with_locale(payload: Mapping[str, object], choice: LocaleChoice, output: Tex
     """把定下来的时区与地区写进待写配置；``locale`` 里别的项（名义周末等）原样留着。
 
     例外是 ``calendar_path``：它指向的放假数据是某一个地区的，地区换了还留着，读日历时会因地区对不上而整年未知、
-    且没有提示。所以地区变了就清掉它、改读随包数据，并在输出里说一声；地区没变就保留（用户 2026-11-06 定）。
+    且没有提示。所以地区变了就清掉它、改读随包数据，并在输出里说一声；地区没变就保留。
     """
 
     existing = payload.get("locale")
@@ -233,11 +233,11 @@ def recorded_locale(existing: Path | None) -> LocaleChoice | None:
 
 
 def locale_change_notice(previous: LocaleChoice, choice: LocaleChoice) -> str:
-    """所在地换了：写清换了什么、会影响什么（11-06 读码核实过的后果，只写核实过的）。
+    """所在地换了：写清换了什么、会影响什么。
 
     - 已存的行为 occurrence、记忆 Event、观测都在写入时把日期与偏移定死，换了不改写（``behavior/model.py``、
       ``memory/model.py`` 的地址带本地日期）；
-    - 夜批每晚从行为树全量重读算统计：节律与槽位按记录自带的偏移（``temporal/profile.py``），所以换时区前后
+    - 每代从行为树全量重读算统计：节律与槽位按记录自带的偏移（``temporal/profile.py``），所以换时区前后
       是两段墙钟接在一起；
     - 日型不存盘、读时现算，"那天人在哪个地区"还没接（``runtime/conditions.py`` 模块说明的待办），所以换地区后
       过去的日子按新地区重新打日型。

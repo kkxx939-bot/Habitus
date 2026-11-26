@@ -1,4 +1,4 @@
-"""配置里的 ``network`` 一组：调模型服务时的证书库、额外 CA 与代理（W18）。
+"""配置里的 ``network`` 一组：调模型服务时的证书库、额外 CA 与代理。
 
 值对象是 ``foundation.network.OutboundSettings``（各层共用）；这里只负责从 YAML 严格构造它，并在加载时就核实
 ``ca_bundle`` 指向的文件读得出 PEM 证书。整组可以省略，省略 = 系统证书库、无额外 CA、不配代理。

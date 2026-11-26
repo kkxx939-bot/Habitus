@@ -1,8 +1,8 @@
-"""B4 关系：每条 lane 全部两两检验 → 接上盘上之前最近的一晚折叠 → 这一晚的关系表与迁移日志落盘（``run``：纯算法、零模型，
+"""B4 关系：每条 lane 全部两两检验 → 接上盘上之前最近的一代折叠 → 这一代的关系表与迁移日志落盘（``run``：纯算法、零模型，
 模型建议只读缓存，换代调）；先验的补问是另一段（``RelationAdvice.ask_priors``：按输入摘要缓存，模型队列调）。
 
-B4 读的是盘上**全部**已封好的命中（不只今天）：关系每晚全量重算，不做增量统计。模型建议（``RelationAdvice``）每次从
-夜批现读——组合根与运维可以在构造后换掉它。
+B4 读的是盘上全部已封好的命中（不只今天）：关系每代全量重算，不做增量统计。模型建议（``RelationAdvice``）每次从
+换代现读——组合根与运维可以在构造后换掉它。
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ from habitus.temporal.coverage import coverage_of
 
 @dataclass(frozen=True)
 class _Examined:
-    """一条 lane 这一晚折叠前备好的：盘上接的那一晚、检验对象。"""
+    """一条 lane 这一代折叠前备好的：盘上接的那一代、检验对象。"""
 
     previous: LaneState | None
     tests: LaneTests
@@ -74,12 +74,12 @@ class RelationStage:
         now: datetime | None = None,
         lines: dict[str, LaneTimeline] | None = None,
     ) -> tuple[dict[str, dict[str, int]], int, dict[str, LaneTimeline]]:
-        """第 ``series.cutoff`` 晚：每条 lane 检验、接上盘上之前最近的一晚折叠、落盘。返回各 lane 的计数、迁移条数与时间线。
+        """第 ``series.cutoff`` 代：每条 lane 检验、接上盘上之前最近的一代折叠、落盘。返回各 lane 的计数、迁移条数与时间线。
         模型建议只读缓存（补问在模型队列）；``lines`` 是已经算好的时间线（不给就现算）。
 
-        ``vocabulary`` 是这一晚同步到的词表版本（在用状态的修订号），记在关系状态上。词表没有拆分、合并（裁定
+        ``vocabulary`` 是这一代同步到的词表版本（在用状态的修订号），记在关系状态上。词表没有拆分、合并（裁定
         101）；在用的词退出或被删时它的概念停用，关系行在折叠里随之退休（``_retired``）。折叠之后，同一件事有两个以上
-        单个取值（周几、几号、日型）的日历关系处在候选或成立的，补一个取值集合的日历情境，下一晚起一起检验。"""
+        单个取值（周几、几号、日型）的日历关系处在候选或成立的，补一个取值集合的日历情境，下一代起一起检验。"""
 
         if lines is None:
             lines = await self.timelines(series, concepts)
@@ -114,10 +114,10 @@ class RelationStage:
     def _examine(
         self, lane: str, line: LaneTimeline, series: EventSeries, concepts: ConceptSet, signals: list[str]
     ) -> _Examined:
-        """这条 lane 的检验对象：接盘上之前最近的一晚；纯计算。"""
+        """这条 lane 的检验对象：接盘上之前最近的一代；纯计算。"""
 
         previous = self._previous(lane, series.cutoff, signals)
-        # 第二个条件起只长在接的那一晚已成立的带条件关系上（裁定 62 第 1 条）
+        # 第二个条件起只长在接的那一代已成立的带条件关系上（裁定 62）
         established = tuple(item.key for item in previous.of(Status.ESTABLISHED)) if previous is not None else ()
         tests = LaneTests(line, concepts, self.relation_config, series.cutoff, established=established)
         return _Examined(previous, tests)
@@ -132,7 +132,7 @@ class RelationStage:
         *,
         vocabulary: int,
     ) -> tuple[LaneState, tuple[Transition, ...]] | None:
-        """一条 lane 这一晚：检验、折叠、落盘；这一晚不写（沿用上一晚的）时返回 None。模型建议只读
+        """一条 lane 这一代：检验、折叠、落盘；这一代不写（沿用上一代的）时返回 None。模型建议只读
         缓存：缓存里没有的按没有先验处理（没补问完的是"不知道"）。"""
 
         examined = self._examine(lane, line, series, concepts, signals)
@@ -153,8 +153,8 @@ class RelationStage:
         try:
             self.relations.write(state, transitions)
         except RelationStoreError as exc:
-            # 这条 lane 这一晚写不出（超限、盘上已有更晚一晚）：只让它这一晚失败、明天的预测层读上一代的表，
-            # 不让整晚停、别的 lane 照常（26 号清单 2.5.2）
+            # 这条 lane 这一代写不出（超限、盘上已有更晚一代）：只让它这一代失败、预测层读上一代的表，
+            # 不让整代停、别的 lane 照常
             signals.append(f"relations: {lane} 这一晚的关系表写不出（{exc}），沿用上一晚的")
             return None
         annotate(lane_attributes(tests.last_night, previous, state, transitions, weights))
@@ -183,8 +183,8 @@ class RelationStage:
             signals.append(f"vocabulary: 补上日历取值集合「{definition.name}」，下一晚起一起检验（裁定 59）")
 
     def _previous(self, lane: str, night: date, signals: list[str]) -> LaneState | None:
-        """这一晚要接的那一晚。最近那一晚的文件坏了：接在更早一个读得了的晚上之后，并报出来（第四轮评审 E10）——
-        不然夜批永远写不出新的一晚，预测层也一直读着坏文件硬拒，两边互相卡死，只能人工恢复。新的一晚写出来，预测层下一拍就好了。"""
+        """这一代要接的那一代。最近那一代的文件坏了：接在更早一个读得了的一代之后，并报出来——
+        不然换代永远写不出新的一代，预测层也一直读着坏文件硬拒，两边互相卡死，只能人工恢复。新的一代写出来，预测层下一拍就好了。"""
 
         try:
             return self.relations.previous(lane, night)
@@ -195,7 +195,7 @@ class RelationStage:
                 try:
                     state = self.relations.read(lane, earlier)
                 except RelationStoreError:
-                    # 这一晚也读不了：接着往更早找；都读不了时下面整体报一次
+                    # 这一代也读不了：接着往更早找；都读不了时下面整体报一次
                     continue
                 signals.append(f"relations: {lane} 更晚的关系表读不了（{exc}），这一晚接在第 {earlier} 晚之后折叠")
                 return state
@@ -210,9 +210,9 @@ def lane_attributes(
     transitions: tuple[Transition, ...],
     weights: Mapping[RelationKey, float],
 ) -> dict[str, object]:
-    """一条 lane 这一晚的读数（``scene.b4.lane`` span）：要量的键数、逐条量的 / 跳过的（按段）、四族的族大小与过第 1 道数、
-    进族路径计数、各状态的新增与消失（对上一晚的表）、先验权重数与"靠先验"数、带着要读数的行数与这一代退休了几条。
-    逐条的变化不进 span，在每晚报告里。"""
+    """一条 lane 这一代的读数（``scene.b4.lane`` span）：要量的键数、逐条量的 / 跳过的（按段）、四族的族大小与过第 1 道数、
+    进族路径计数、各状态的新增与消失（对上一代的表）、先验权重数与"靠先验"数、带着要读数的行数与这一代退休了几条。
+    逐条的变化不进 span，在每代报告里。"""
 
     found: dict[str, object] = {
         "transitions": len(transitions),

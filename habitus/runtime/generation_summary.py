@@ -20,7 +20,7 @@ from habitus.runtime.foresight_settlement import SettlementReport
 from habitus.runtime.scene_night import NightReport
 
 #: 只进本地每代报告、不进 span 属性（OTLP 与本地 trace）的报告键：信号是给人看的句子，带概念名、关系两端名、迁移原因这类
-#: 用户派生文字（codex R3）；loss 按行为的明细（裁定 114）以行为编号为键，摊开会让每个词成一个属性名。
+#: 用户派生文字；loss 按行为的明细（裁定 114）以行为编号为键，摊开会让每个词成一个属性名。
 LOCAL_ONLY_KEYS = frozenset({"signals", "by_kind"})
 #: 失败原因里"模型调不通"后面跟的是异常文字（可能带供应商返回的内容）：span 上只留这个原因码，全文在每代报告里。
 #: ``runtime.generation`` 记"模型调不通"用的就是这一句。
@@ -156,7 +156,7 @@ def day_summary(report: DayReport) -> dict[str, object]:
 
 
 def kept_errors(retried: object) -> str | None:
-    """重试收尾之后仍保持「错误·看不到」、要人看的（裁定 94 第 4 条）：我们自己处理不了的是 bug，内容安全拦下的单独列，格式不合
+    """重试收尾之后仍保持「错误·看不到」、要人看的（裁定 94）：我们自己处理不了的是 bug，内容安全拦下的单独列，格式不合
     再试仍不合的也列出来；都没有是 None。读的是这一代重试收尾那一步报告的重试计数（含模型队列就近试出的）。"""
 
     if not isinstance(retried, dict):
@@ -175,7 +175,7 @@ def flatten(value: object, prefix: str = "") -> dict[str, object]:
     if isinstance(value, dict):
         for key, item in value.items():
             if key in LOCAL_ONLY_KEYS:
-                continue  # 带用户派生文字（概念名、关系两端、迁移原因）：只进本地每代报告，不进 span（codex R3）
+                continue  # 带用户派生文字（概念名、关系两端、迁移原因）：只进本地每代报告，不进 span
             found.update(flatten(item, f"{prefix}.{key}" if prefix else str(key)))
     elif isinstance(value, list | tuple):
         found[f"{prefix}.count"] = len(value)

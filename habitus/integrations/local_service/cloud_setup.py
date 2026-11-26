@@ -59,15 +59,6 @@ def selection_from_mapping(
     return CloudSetupSelection(chat=_current_selection(resolved, "chat", chat_document))
 
 
-def selection_from_config(
-    config: HabitusConfig,
-    registry: SetupRegistry | None = None,
-) -> CloudSetupSelection:
-    """兼容类型化调用者；向导应优先使用无损 YAML 映射入口。"""
-
-    return selection_from_mapping(_config_mapping(config), registry)
-
-
 def apply_cloud_selection(
     payload: Mapping[str, object],
     selection: CloudSetupSelection,
@@ -199,36 +190,6 @@ def _normalized_route_document(
     return result
 
 
-def _config_mapping(config: HabitusConfig) -> dict[str, object]:
-    """只服务类型化旧调用者；保留全部公开运行字段。"""
-
-    from dataclasses import fields, is_dataclass
-    from pathlib import Path
-
-    def plain(value: object) -> object:
-        if isinstance(value, Path):
-            return str(value)
-        if isinstance(value, Mapping):
-            return {str(key): plain(item) for key, item in value.items()}
-        if isinstance(value, tuple):
-            return [plain(item) for item in value]
-        if is_dataclass(value):
-            return {item.name: plain(getattr(value, item.name)) for item in fields(value)}
-        return value
-
-    result = plain(config)
-    if not isinstance(result, dict):
-        raise TypeError("config serialization must produce an object")
-    credentials = result.get("credentials")
-    if not isinstance(credentials, dict):
-        raise TypeError("config credentials serialization must produce an object")
-    entries = credentials.get("entries")
-    if not isinstance(entries, dict):
-        raise TypeError("config credential entries serialization must produce an object")
-    result["credentials"] = entries
-    return result
-
-
 def _mapping(parent: Mapping[str, object], name: str) -> Mapping[str, object]:
     value = parent.get(name)
     if not isinstance(value, Mapping):
@@ -251,6 +212,5 @@ __all__ = [
     "apply_cloud_selection",
     "default_cloud_selection",
     "profile_selection",
-    "selection_from_config",
     "selection_from_mapping",
 ]

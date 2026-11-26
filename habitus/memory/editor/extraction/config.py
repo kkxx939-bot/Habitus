@@ -11,7 +11,7 @@ from habitus.memory.editor.page_id import EXISTING_PAGE_ID_MAX
 class MemoryExtractionConfig:
     """限制受控 ReAct、关系扩展和候选生成的资源消耗。
 
-    ``max_retrieval_iterations`` 默认 3 按逻辑下限定：开头不再有预取，找到再读最多要"列目录或搜内容一次、读一次、
+    ``max_retrieval_iterations`` 默认 3 按逻辑下限定：找到再读最多要"列目录或搜内容一次、读一次、
     结束"三步（名字清单已在第一轮输入里，常态是读一次就结束；搜到的地址直接可读，不必先列目录）。
     ``max_listing_tokens`` 是名字清单在输入里占的固定预算。``max_search_results`` 默认与 ``max_reads_per_action``
     相同：搜一次给出的卡片，下一轮一次就能全部读进来。

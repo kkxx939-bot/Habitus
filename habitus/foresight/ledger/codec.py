@@ -24,8 +24,7 @@ from habitus.foresight.ledger.model import (
 )
 from habitus.foresight.reliability import Reliability
 
-#: v9（裁定 64）：递送多了「待取」「宿主没取」两种原因、「说了」带 ``via`` / ``turn``（谁说的、在哪一轮）、「待取」可带话。
-#: v8 及更早一律按不支持拒（项目没上线，不留读回的双轨）。
+#: 只认这一版（裁定 64）；更早的版本一律按不支持拒，不留读回的双轨。
 LEDGER_SCHEMA_VERSION = "foresight_ledger_v9"
 
 

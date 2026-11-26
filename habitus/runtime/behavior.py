@@ -12,7 +12,7 @@
 两支不共用任何存储、词表、归约或 Worker：一支上的记录、空白、词表的词，另一支看不到（裁定 35）；树是同一棵，每一支一个
 只看得到自己那支的视图（裁定 112）。
 
-模型路由与 memory 共用同一个 structured chat client（用户裁定）。锁沿组合根现状共享
+模型路由与 memory 共用同一个 structured chat client。锁沿组合根现状共享
 （SQLite 锁库；取舍与观测盲区记录在 ``behavior/reduction/runner.py`` 的 sweep 锁 docstring）。
 归约是无队列的定拍 sweep，Worker 只保留循环存活与可观测事件。
 """
@@ -86,7 +86,7 @@ class BehaviorRuntimeComponents:
     """一条 lane 这一支的全部已组装部件：它自己的存储、融合、归约、树视图与词表。
 
     ``fusion`` 是这条 lane 的融合前端（会话 lane 或物理 lane），与 ``lane`` 对得上。
-    ``__post_init__`` 按仓库既有纪律做**实例同一性**校验：融合、归约、Worker 引用的存储必须
+    ``__post_init__`` 按仓库既有纪律做实例同一性校验：融合、归约、Worker 引用的存储必须
     就是组件字段那一份——这些是"自己产物自洽"类约束，违反只可能是接线错误。
     """
 
@@ -162,7 +162,7 @@ class BehaviorRuntimeComponents:
 
     @property
     def physical_ledger(self) -> PhysicalSegmentLedger | None:
-        """物理一支的小账（生命周期按补发跨度整日释放，26 号清单 6.4）；会话一支没有。"""
+        """物理一支的小账（生命周期按补发跨度整日释放）；会话一支没有。"""
 
         return self.fusion.recorder.ledger if isinstance(self.fusion, PhysicalLane) else None
 
@@ -213,10 +213,9 @@ class BehaviorBranches:
 
 
 class BehaviorReductionWorker(ResidentWorker):
-    """归约 sweep 的常驻节拍（用户裁定 5 分钟一轮）；正确性全在 runner，这里只管节奏。
+    """归约 sweep 的常驻节拍；正确性全在 runner，这里只管节奏。
 
-    sweep 内部的同步 IO 会短暂占用事件循环；原料随消费释放、读法按天缓存之后（26 号清单 L2、L6）量级不再随历史涨，
-    节拍是 5 分钟一次。
+    sweep 内部的同步 IO 会短暂占用事件循环；原料随消费释放、读法按天缓存，量级不随历史涨。
     """
 
     _task_name = "habitus-behavior-reduction"
@@ -257,7 +256,7 @@ class BehaviorReductionWorker(ResidentWorker):
             else:
                 self._succeeded()
                 if report.bugs:
-                    # 归约拦住了我们自己的 bug（这批链已换成「错误」、那天照常定稿）：当场挂到健康面（裁定 94 第 8 条）
+                    # 归约拦住了我们自己的 bug（这批链已换成「错误」、那天照常定稿）：当场挂到健康面（裁定 94）
                     self.last_error = RuntimeError("; ".join(report.bugs)[:1_000])
             await self._wait(self.interval_seconds)
 
@@ -319,7 +318,7 @@ def build_behavior_components(
     source_settled: Callable[[str], bool] | None = None,
 ) -> BehaviorBranches | None:
     """组装行为管线的两支；``primary_subject`` 未配置时返回 None（行为侧未启用）。``source_settled`` 答"这份会话源的
-    Behavior 到终态了没有"（会话 lane 的覆盖记录据它释放，26 号清单 6.1）；behavior 不 import conversation，由这里注入。
+    Behavior 到终态了没有"（会话 lane 的覆盖记录据它释放）；behavior 不 import conversation，由这里注入。
 
     无存储写入、无模型请求——与 ``build_runtime`` 同一纪律。
     """
@@ -353,8 +352,8 @@ def _build_branch(
     clock: Callable[[], datetime] | None,
     source_settled: Callable[[str], bool] | None = None,
 ) -> BehaviorRuntimeComponents:
-    """一条 lane 的那一支。全部存储传**这一支的根**（各存储按自己的契约派生子路径——传子目录会造成
-    目录二次嵌套与锁键漂移，评审实测过）；事件与空白在 habitus 树里这一支的视图下；归约的 sweep 锁按支派生，两支互不相抢。"""
+    """一条 lane 的那一支。全部存储传这一支的根（各存储按自己的契约派生子路径，传子目录会造成
+    目录二次嵌套与锁键漂移）；事件与空白在 habitus 树里这一支的视图下；归约的 sweep 锁按支派生，两支互不相抢。"""
 
     behavior_config = config.behavior
     domain = behavior_domain_configs(behavior_config)
@@ -367,7 +366,7 @@ def _build_branch(
         else FUSION_CONTEXT_LOOKBACK_SECONDS
     )
 
-    # 存储的容量闸从 Config 边界进来（26 号清单 8.2）；没写的是各领域配置的默认值
+    # 存储的容量闸从 Config 边界进来；没写的是各领域配置的默认值
     observations = BehaviorObservationStore(root, config=domain.observation)
     judgements = BehaviorJudgementStore(root, config=domain.fusion)
     receipts = BehaviorFusionReceiptStore(root, lock_store=lock_store, config=domain.fusion)
@@ -481,7 +480,7 @@ def retry_stage_of(branches: Iterable[BehaviorRuntimeComponents]) -> RetryStage 
 
 
 def rereader_of(branch: BehaviorRuntimeComponents) -> Callable[[datetime, datetime], Awaitable[bool]] | None:
-    """时窗末当场重读的口（裁定 68 第 1 条）：会话一支的重试堆 + 会话轮处理器；没有重试堆或不是会话一支就是 None。"""
+    """时窗末当场重读的口（裁定 68）：会话一支的重试堆 + 会话轮处理器；没有重试堆或不是会话一支就是 None。"""
 
     if branch.retry_backlog is None or not isinstance(branch.fusion, SessionLane):
         return None
@@ -493,7 +492,7 @@ _UNREACHABLE: tuple[type[BaseException], ...] = (ModelUnreachable, *MODEL_UNAVAI
 
 
 def _reduce(branch: BehaviorRuntimeComponents) -> Callable[[], Awaitable[Reduction]]:
-    """就近重试里这一支的那一次归约（裁定 94 第 9 条）：锁被另一进程拿着 = ``BUSY``（写回的项留着等下一次）；归类时模型
+    """就近重试里这一支的那一次归约（裁定 94）：锁被另一进程拿着 = ``BUSY``（写回的项留着等下一次）；归类时模型
     用不了 = ``UNREACHABLE``（抛的、或归约自己吞了只在报告里记的；没补回的项留着等下一次）；别的异常是 bug，原样抛出。"""
 
     async def reduce() -> Reduction:

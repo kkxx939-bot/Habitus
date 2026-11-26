@@ -1,6 +1,6 @@
-"""预测层的常驻 worker：每个槽边界按支依次（会话在前、物理在后，裁定 42 两条独立管线；worker 不翻倍）做这一支的一槽——
+"""预测层的常驻 worker：每个槽边界按支依次（会话在前、物理在后，裁定 42：两条独立管线；worker 不翻倍）做这一支的一槽——
 先看一眼这一支要不要换代、要就先做这一代，再跑这一支的一拍 ``ForesightTick``（建预期 → 到了时窗的决定说不说）。同一支的两件事在
-这一支的同一次预测根租约之内串行（实时化阶段 2 第二小步：换代并进这个 worker，账本只有一个写者）：换代那一槽的预测拍顺延到换代
+这一支的同一次预测根租约之内串行（账本只有一个写者）：换代那一槽的预测拍顺延到换代
 做完、同一槽里做，从当天零点起补建；换代没成（必须成的那一步失败、这一眼抛了）也不挡这一拍——今天这一代还没有，不建预期、递送
 照常，换代按它的退避在之后的槽再试。
 
@@ -8,9 +8,9 @@
 
 只开语义树、没开预测层时没有预测拍（``SlotBranch.tick`` 是 None）：这一支那一槽自己持预测根租约看一眼换代。
 
-拍点对齐槽边界（实时化方案第 5 节：全系统一个时间刻度）：从当地零点起每 ``interval_seconds`` 一个边界，等到下一个边界再跑；
+拍点对齐槽边界（全系统一个时间刻度）：从当地零点起每 ``interval_seconds`` 一个边界，等到下一个边界再跑；
 一拍拖过了几个边界，下一拍从此刻之后的那个边界接着走（不补跑错过的边界——那一段由下一拍按水位往回看补上）。等用墙钟、分小段
-等：Mac 合盖时单调时钟不走，醒来后照墙钟重新算离边界还有多久（裁定 68 第 4 条）。边界按绝对时间推进：夏令时那天相邻两拍
+等：Mac 合盖时单调时钟不走，醒来后照墙钟重新算离边界还有多久（裁定 68）。边界按绝对时间推进：夏令时那天相邻两拍
 的真实间隔仍是一个槽（拨回那天重复的那一小时照样每槽一拍，拨快那天不出现空当）；槽号按墙钟（``temporal.slots``）。
 
 正确性全在换代与那一拍里，这里只管节奏与"循环别死"：一支一拍失败记 ``last_error``（带是哪一支）与观测事件，另一支与下一拍照跑；
@@ -95,7 +95,7 @@ class ForesightWorker(ResidentWorker):
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
     async def run_once(self) -> dict[str, TickReport]:
-        """手动跑一槽（运维、测试与回放用）：与常驻循环的一槽同一个入口，只是不带槽边界。有一支抛了：别的支照常做完，再抛
+        """手动跑一槽（运维与测试用）：与常驻循环的一槽同一个入口，只是不带槽边界。有一支抛了：别的支照常做完，再抛
         ``SlotFailed``（带着做成了的那几支）。"""
 
         if self.running:
@@ -114,7 +114,7 @@ class ForesightWorker(ResidentWorker):
         for branch in self.branches:
             try:
                 reports[branch.lane] = await self.branch_slot(branch, scheduled)
-            except Exception as exc:  # noqa: BLE001 - 一支抛了不挡另一支这一槽（裁定 42 两条独立管线）
+            except Exception as exc:  # noqa: BLE001 - 一支抛了不挡另一支这一槽（裁定 42：两条独立管线）
                 failures[branch.lane] = exc
         return reports, failures
 

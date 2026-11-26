@@ -187,7 +187,7 @@ def question_calls(turn: SessionTurn) -> frozenset[str]:
 
 def without_answered(turn: SessionTurn, answered: frozenset[str]) -> SessionTurn:
     """出口已按固定选项记过回话的那几次提问（``answered`` 是它们的调用身份）不进材料：调用、工具结果、翻成人话的作答都剔掉，
-    一次调用里有几题的整次剔（裁定 64 第 7 条：固定选项由出口直接写回话、不经模型；留在材料里，模型会把作答配到别的开着的
+    一次调用里有几题的整次剔（裁定 64：固定选项由出口直接写回话、不经模型；留在材料里，模型会把作答配到别的开着的
     提醒上、或把这次提问写成这一轮做的事）。开这一轮的就是这样一条作答时，"他说"换成 ``ANSWERED_LABEL``。轮的身份、开口与
     做完的时刻不变——记录照旧记在原来那一轮上。"""
 
@@ -218,7 +218,7 @@ def render_turn(turn: SessionTurn, *, config: SessionLaneConfig | None = None) -
 
 
 def render_reminders(reminders: Sequence[PendingReminder], *, zone: tzinfo) -> str:
-    """还开着的提醒那一节（方案 30 第五节）：按带进来的顺序编号，模型按编号答回应的是哪一条。没有就是空串。"""
+    """还开着的提醒那一节：按带进来的顺序编号，模型按编号答回应的是哪一条。没有就是空串。"""
 
     if not reminders:
         return ""

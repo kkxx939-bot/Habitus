@@ -32,7 +32,7 @@ class WizardCancelled(RuntimeError):
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """先处理 init/doctor，再延迟导入 HTTP 与 Runtime。插件生命周期在 npm 命令 ``habitus`` 里（方案 36）。"""
+    """先处理 init/doctor，再延迟导入 HTTP 与 Runtime。插件生命周期在 npm 命令 ``habitus`` 里。"""
 
     args = _parser().parse_args(list(argv) if argv is not None else None)
     values = _environment(args.config)
@@ -119,7 +119,7 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
                 sys.stdout.write("Habitus cloud setup cancelled.\n")
                 return 0
             configured = apply_cloud_selection(payload, selection, catalog.setup)
-            if not existed or args.force:  # 只有新建或重建时定所在地；已有配置的 locale 不碰（W3）
+            if not existed or args.force:  # 只有新建或重建时定所在地；已有配置的 locale 不碰
                 configured = settle_locale(configured, interactive=True, existing=destination)
             result = initialize_config_from_mapping(destination, configured, force=existed or args.force)
         elif source is None and (not existed or args.force):
@@ -358,7 +358,7 @@ def _configure_missing_credentials(path: Path) -> None:
 def _write_missing_credentials_hint(path: Path) -> None:
     from habitus.integrations.local_service.initialization import missing_credential_fields, unfilled_setup_hints
 
-    for hint in unfilled_setup_hints(path):  # 非交互 init 写出的 Chat 模板：列出还要填的项（W7）
+    for hint in unfilled_setup_hints(path):  # 非交互 init 写出的 Chat 模板：列出还要填的项
         sys.stdout.write(f"Not configured yet: {hint}\n")
     missing = missing_credential_fields(path)
     if missing:
@@ -401,8 +401,7 @@ def _maybe_offer_init(explicit: str | None, values: dict[str, str]) -> bool:
 
 
 def _install_plugins(harnesses: Sequence[str]) -> None:
-    """插件装在 npm 包 ``habitus`` 里（方案 36）：装了就替用户跑 ``habitus plugin install``，没装就说怎么装。服务这一侧
-    不再带插件、不再自己调 Node 安装器。"""
+    """插件装在 npm 包 ``habitus`` 里：装了就替用户跑 ``habitus plugin install``，没装就说怎么装。"""
 
     command = _npm_habitus()
     arguments = [part for harness in harnesses for part in ("--harness", harness)]

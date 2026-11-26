@@ -1,4 +1,4 @@
-"""模型队列的常驻 worker（实时化方案第 4 节）：两支各一个队列（裁定 42 两条独立管线；worker 不翻倍），每一轮按支依次做（会话在前）。
+"""模型队列的常驻 worker：两支各一个队列（裁定 42：两条独立管线；worker 不翻倍），每一轮按支依次做（会话在前）。
 有活连着做、没活按间隔看（``scene.model_queue_poll_seconds``）；某一支的模型整个调不通时，这一支等到它的退避到点再看，另一支照常。
 正确性全在 ``ModelQueue`` 里（欠账每一轮从盘上现算），这里只管节奏与"循环别死、停得下来"。
 
@@ -44,7 +44,7 @@ class ModelQueueWorker(ResidentWorker):
         self.last_drain: dict[str, DrainReport] = {}
 
     async def drain(self) -> dict[str, DrainReport]:
-        """手动把各支做到没有欠账或进入整体退避为止（回放、运维与测试用；常驻循环在跑时不能并着调）。有一支抛了：别的支照常
+        """手动把各支做到没有欠账或进入整体退避为止（运维与测试用；常驻循环在跑时不能并着调）。有一支抛了：别的支照常
         做完，再抛 ``DrainFailed``。"""
 
         if self.running:

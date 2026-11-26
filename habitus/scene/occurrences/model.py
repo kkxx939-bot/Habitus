@@ -1,13 +1,13 @@
 """命中记录：一条 occurrence 在概念层的读法，与行为树同构、叶名相同；封口时由代码直接生成，不经模型。
 
 - ``kind_token`` 是封口时这条在行为树上的编号；``classified`` 说它是不是类编号（「待定」不是）。
-  **行为概念的命中不存**：类编号本身就是那个行为概念的身份（``base_concept`` 从编号现读，裁定 20）；
-- ``situation_hits`` 是那一刻成立的**日历情境**，由算法直接得出；``situations_checked`` 是**判过**的日历情境（含成立的）——
-  没判过（那天日历答不出这个键）与判过不成立在盘上要分得开（2026-09-30 裁定八）。日历情境多了，这一天的摘要就变了，
+  行为概念的命中不存：类编号本身就是那个行为概念的身份（``base_concept`` 从编号现读，裁定 20）；
+- ``situation_hits`` 是那一刻成立的日历情境，由算法直接得出；``situations_checked`` 是判过的日历情境（含成立的）——
+  没判过（那天日历答不出这个键）与判过不成立在盘上要分得开。日历情境多了，这一天的摘要就变了，
   封口按现在的概念集整天重封，所以判过的总是封口那一刻概念集里日历答得出的全部；
 - ``lane`` 是这条记录所在的 lane（编号前缀读出来）：时间线、叙事、结算都只在同一条 lane 里看；
 - ``started_at`` / ``last_observed_at`` 来自行为树，落在这里让 ``occurrences/`` 对下游自足：窗锚在
-  ``started_at``（2026-09-26 裁定，不锚"结束时刻"——树上没有结束时刻，``last_observed_at`` 是我们停止
+  ``started_at``（不锚"结束时刻"——树上没有结束时刻，``last_observed_at`` 是我们停止
   观测的那一刻，会随观测覆盖动）；
 - ``hits_version`` 是生成它的命中记录口径（``daily.HITS_VERSION``），``sealed_at`` 是封口写下它的时刻。
 """
@@ -94,7 +94,7 @@ class ConceptHits:
     @cached_property
     def address(self) -> BehaviorAddress:
         """地址解析一次存着：结算对每条开着的承诺扫窗内全部记录、每次比较都取 ``started_at``，逐次重解析 URI
-        是平方级的活（评审 B-10：第 120 夜解析 50,533 次）。"""
+        是平方级的活。"""
 
         return BehaviorURI.parse(self.occurrence_uri).to_address()
 

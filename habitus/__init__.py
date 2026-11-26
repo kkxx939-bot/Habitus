@@ -1,8 +1,5 @@
 """Habitus：单主体的长期记忆与行为模型。
 
-子包按层排列：foundation / infrastructure 是无领域语义的底座；model_client 是模型能力契约；
-pre 是 Conversation 数据契约；conversation、memory、behavior 是领域，series / temporal / conditions 是行为侧的纯值与纯算法，
-scene（语义树）与 foresight（预测层）是行为树的派生层；
-config 是唯一外部配置边界；runtime 是唯一组合根；integrations 是本地服务与 HTTP 外壳；
-benchmark 是评测工具。依赖方向由 tests/architecture 守住。
+子包分层：底座 foundation / infrastructure，契约 model_client / pre，领域 conversation / memory / behavior，行为侧纯算法
+series / temporal / conditions，派生层 scene / foresight；config 是配置边界，runtime 是组合根，依赖方向由 tests/architecture 守住。
 """

@@ -356,7 +356,6 @@ class ConversationMessageJournal:
                 known = self._known_for_append(
                     address,
                     batch,
-                    state,
                     references,
                     latest,
                     live_messages,
@@ -1115,7 +1114,6 @@ class ConversationMessageJournal:
         self,
         address: ConversationAddress,
         batch: ConversationBatch,
-        state: ConversationJournalState,
         references: tuple[_HistoryReference, ...],
         latest: ConversationSegment | None,
         live_messages: list[ConversationMessage],

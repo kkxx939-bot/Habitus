@@ -1,6 +1,6 @@
-"""行为树上一条 occurrence 算不算数的唯一规则（第二轮评审 D5：两处各写一遍写反过）：撞车消歧的已知重复（``original_name``
+"""行为树上一条 occurrence 算不算数的唯一规则：撞车消歧的已知重复（``original_name``
 非空）、「非事件」与「续话」不算（裁定 101：续话与非事件同一种待遇，原来那条记录不改）。事件序列
-（``series.reader.skip_reason``）、按天读树（经它注入的 ``admits``）、每天的语义概览判空白作废（裁定 68 第 5 条）都按这一条。
+（``series.reader.skip_reason``）、按天读树（经它注入的 ``admits``）、每天的语义概览判空白作废（裁定 68）都按这一条。
 """
 
 from __future__ import annotations

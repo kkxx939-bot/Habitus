@@ -1,11 +1,11 @@
-"""一刻的装配（方案第四节前半）：最近几天的行 → 时间线 → 触发出草稿 → 每条附反向前因清单 → 账本的预期。
+"""一刻的装配：最近几天的行 → 时间线 → 触发出草稿 → 每条附反向前因清单 → 账本的预期。
 
-一次装配建哪几种触发由 ``Batch`` 定（裁定 94 第 1 条）：白天那一拍（``Batch.MOMENT``）只在换代定下的关系与日历上实例化——
+一次装配建哪几种触发由 ``Batch`` 定（裁定 94）：白天那一拍（``Batch.MOMENT``）只在换代定下的关系与日历上实例化——
 事件、情境；当天的日子预期（``Batch.DAYS``）由换代的最后几步之一用这一代刚写的、含昨天的那张表建，今天这一代做成之前由预测拍
-用上一张做完了的表只为表那一晚之后没再出现过的类建（组合根筛好表再交进来，用户 2026-11-16）。
+用上一张做完了的表只为表那一晚之后没再出现过的类建（组合根筛好表再交进来）。
 
 读口：行为树经 ``scene.views`` 的 ``DayIndexCache``（已封口的行），还没封口的判断经 ``UnsealedReader`` 读好传进来。
-回看 7 天（第 2–7 天那一段最远看到 7 天前）。预期身份 = 类 + 触发种类 + 触发身份 + 触发实例，**不含机会表那一晚、不含日子**：
+回看 7 天（第 2–7 天那一段最远看到 7 天前）。预期身份 = 类 + 触发种类 + 触发身份 + 触发实例，不含机会表那一晚、不含日子：
 同一个触发实例（同一条前因、同一个上次的同一簇、同一天）全账本只建一条，哪一晚的表只记在 ``night`` 字段上；跨天的触发
 （次日、第 2–7 天、离上次够久）第二天重算出同一个身份，账本按身份查重、不再写一份。事件触发的实例是前因的开始时刻：
 前因封口时开始可能被更正挪了一点，那还是同一次机会——这本账上已经建过、落在这一行里的实例照旧用（``known_instances``）。
@@ -97,7 +97,7 @@ def form_expectations(
 ) -> tuple[Expectation, ...]:
     """此刻对得上历史的、``batch`` 那几种触发的预期。``table`` 为 None 就一条也不建（三种触发都从机会表读）。``recent`` 是证据的窗口 M：
     「离上次够久」的时窗只看最近 M 次命中，每条预期的依据只列最近 M 次（窗外的分量已低于 α；账本单条也不会越写越大）。
-    ``line`` 是账的那条线 θ：「离上次够久」的时窗往后接几天由它定（``temporal.cluster_at``，裁定 89 第 1 条）。
+    ``line`` 是账的那条线 θ：「离上次够久」的时窗往后接几天由它定（``temporal.cluster_at``，裁定 89）。
     ``calendar_of`` 给某一天的日历条件（带条件的关系里日历情境条件白天判它要；不给就只有今天的，取 ``moment.calendar``）。
     ``known_instances`` 按账给这本账上已经建过的事件预期的触发实例（不给就是没有）：前因的开始被更正后，同一次机会沿用它。"""
 
@@ -109,22 +109,7 @@ def form_expectations(
         raise ForesightError("moment.slot must be mapped with the opportunity table's slot width")
     done_today = moment.kinds.done(row.kind_token for row in rows if row.day == moment.day and not row.abandoned)
     statuses = relation_statuses(shadow_unestablished)
-    # TODO(FORESIGHT-EVENT-FIRST-001)：触发以行为事件与语义树的关系为主、时间与天气等是外部条件（裁定 53）。本 TODO 是
-    # 代码侧唯一规格来源，另两处只引用它。
-    # 为什么：零模型全年盘上挂在钟点上的账准度低（周几 18%、几号 13%），从前因出发的事件触发最准（days_2_7 41%）；
-    # 钟面账在节假日照样给"周二跑步"开窗。
-    # 已做（裁定 59）：钟面、几号两种触发随预测树删了；周几 / 几号 / 日型成了语义树的日历情境关系，走「情境」触发
-    # （triggers/situations.py）——锚在工作日的规律节假日自然不建；「离上次够久」读语义树登记的复现。哪本账可靠由账自己
-    # 分出来（裁定 49），不另判"外部约束类"。
-    # 已做（裁定 61、62）：成立的带条件关系进机会表（opportunities/build.py），账键就是带条件的关系键（"到家 → 跑步｜不下雨"
-    #    各记一本），触发时判此刻条件成不成立（triggers/conditions.py）；条件合的那本账自己攒得起来就开口，不另写公式。
-    # 还没做：
-    # ② 天气接进外部条件包（habitus/conditions，同一个 FactProvider 协议）：必须答得出"那天那时是多少"（有历史），只有
-    #    预报的源不能用；语义树的调节条件按字段读（scene/relations/conditions.py）。
-    # 影响：conditions.Field、组合根注入事实源。
-    # 风险：每多一个条件切一刀，跑步全年 68 次，调节检验开不开由每条关系自己的最小可达 p 定（每边至少 2 次，``conditions.ready_to_test``），带条件的账要攒
-    # 几个月；条件源越多候选越多，交并检验不管总共试了多少条，接源时一起定是否做多重比较校正；现有造的数据没有天气，
-    # 测不了这一步，要先造天气调节的习惯。
+    # TODO(FORESIGHT-EVENT-FIRST-001): 天气还没接进外部条件包，带条件的关系判不了天气条件。
     marks = timeline_of(
         rows,
         lane=table.lane,
@@ -193,7 +178,7 @@ def _same_chance(draft: Draft, rows: Sequence[Seen], known_instances: Callable[[
 
 
 def relation_statuses(shadow_unestablished: bool) -> tuple[str, ...]:
-    """建预期与重标单元历史认哪几种关系状态（同一份，裁定 56 第 6 条）：成立的；``shadow_uses_unestablished`` 开着时加候选。"""
+    """建预期与重标单元历史认哪几种关系状态（同一份，裁定 56）：成立的；``shadow_uses_unestablished`` 开着时加候选。"""
 
     return ("established", "candidate") if shadow_unestablished else ("established",)
 

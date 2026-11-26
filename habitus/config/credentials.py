@@ -56,17 +56,6 @@ class CredentialRegistry:
             raise ConfigError(f"credential reference does not exist: {name}")
         return credential
 
-    def require_fields(self, reference: str, fields: set[str], *, path: str) -> None:
-        """只校验引用和字段结构，不要求示例模板中的秘密已经填写。"""
-
-        name = _optional_reference(reference)
-        if not name:
-            return
-        credential = self.resolve(name)
-        missing = sorted(fields - set(credential))
-        if missing:
-            raise ConfigError(f"'{path}' credential '{name}' is missing fields: {missing}")
-
     def __repr__(self) -> str:
         return f"CredentialRegistry(names={self.names!r})"
 

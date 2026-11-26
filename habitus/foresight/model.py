@@ -15,7 +15,7 @@ from habitus.foresight.hierarchy import FLAT, KindHierarchy
 class Moment:
     """ "此刻"：本地时刻、在第几槽、今天的日历条件。
 
-    契约：``at`` 必须是**主体的本地时刻**（与行为树上 occurrence 同一偏移）。今天是哪一天、
+    契约：``at`` 必须是主体的本地时刻（与行为树上 occurrence 同一偏移）。今天是哪一天、
     此刻在哪个槽，全部从它的本地时分算——传 UTC 进来会读错一天、也会读错槽。``slot`` 由装配层用
     ``temporal`` 的槽运算映射出来，不在这里重算。``calendar`` 是今天的日历条件（周几、几号、日型；裁定 59）：
     没有放假数据时日型取名义值，只给建预期用。

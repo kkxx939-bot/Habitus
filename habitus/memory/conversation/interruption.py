@@ -1,4 +1,4 @@
-"""会话中断时的收尾（裁定 107 第 2 条）：照通行的"修补悬空的工具调用"（LangChain deepagents ``PatchToolCallsMiddleware``、
+"""会话中断时的收尾（裁定 107）：照通行的"修补悬空的工具调用"（LangChain deepagents ``PatchToolCallsMiddleware``、
 Eino ``PatchToolCalls``），闲置到点、封存之前由系统如实补上没完成的地方，之后 live 就全是完整的轮、走现有的封存与抽取。
 
 - 没有结果的 tool_call：补一条同名的终态 tool_result，状态记失败，内容说明对话中断、没有结果；

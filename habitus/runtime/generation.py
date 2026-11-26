@@ -1,20 +1,20 @@
-"""换代（实时化方案第 3 节，阶段 1）：一天定稿之后，把"截至昨天的历史"算好、发布给预测层。取代夜线。
+"""换代：一天定稿之后，把"截至昨天的历史"算好、发布给预测层。
 
-**触发**（``ready``）：今天的完成标记还没有，且
+触发（``ready``）：今天的完成标记还没有，且
 
 - 当地今天不早于最晚完成标记的日子：往西改时区、当地日期回到已换代的日子之前时不换代、不算失败、不退避（那一天的表不能早于
-  盘上最晚一晚，做了也写不成），报出 ``rewound``，日期追上后自然消掉（用户 11-10 换时区，方案 19 第 6.1 节）；
-- 定稿日从最早一天起**连续**到昨天（只看"最后定稿日 + 1"会越过还没定稿的日子，实时化缺陷 4）；不连续正常只持续一轮归约，
+  盘上最晚一代，做了也写不成），报出 ``rewound``，日期追上后自然消掉；
+- 定稿日从最早一天起连续到昨天（只看"最后定稿日 + 1"会越过还没定稿的日子）；不连续正常只持续一轮归约，
   一直不连续就是有判断封不了口——``ready`` 把卡住的那一天交给 worker 去报健康面；
-- 预测拍水位过了 max(今天零点, 最后一段跨过零点的「未观测」的结尾) 再 ``margin`` 那么久（用户 11-10「按槽留余量」）：没在看的
+- 预测拍水位过了 max(今天零点, 最后一段跨过零点的「未观测」的结尾) 再 ``margin`` 那么久（裁定 99）：没在看的
   空白先写成判断、再给归约留几槽把它落树，结算与读序列才看得到它（必须边"没在看的空白写进树 → 读那天的记录、结算"）。这一代只读
-  到昨天，所以只等伸进昨天的那一段；今天白天合盖写的空白不让等待重来（用户 2026-11-16）。
+  到昨天，所以只等伸进昨天的那一段；今天合盖写的空白不让等待重来。
 
-**换代里没有模型调用**（实时化阶段 2）：出错重试、先验的补问都归模型队列
+换代里没有模型调用：出错重试、先验的补问都归模型队列
 （``runtime.model_queue``），模型多慢、调不通都不影响这里写出今天这一代。换代不等队列：队列没做完的按"不知道"算（缺的先验
 权重按 1），下一代补上。
 
-**先后**（各步一个子 span ``generation.<步>``，挂在 ``generation.run`` 下；每步记它读到的输入是哪一代）：
+先后（各步一个子 span ``generation.<步>``，挂在 ``generation.run`` 下；每步记它读到的输入是哪一代）：
 
 =====  ==================================================  ==========  ==================================================
  #      步                                                  必须成      没做成时
@@ -41,8 +41,8 @@
 ``sealed_day`` 是"已封口的日子的活现在可以做了"的那一天：触发条件里除了"今天的完成标记还没有"之外的那几条都满足时是今天。
 模型队列据它认已封口的日子的欠账（早于这一刻读序列，「未观测」的空白可能还没落树）；完成标记有没有不影响欠账。
 
-**锁**（阶段 2 第二小步）：整代在预测 worker 那一槽的预测根租约之内做（``runtime.foresight_worker``：先看一眼换代、再做预测拍），
-账本只有一个写者，各步不再各自拿它。语义树一步整步持语义树写锁（``runtime.scene_lock``）：模型队列的落盘等它做完，读到的语义树是
+锁：整代在预测 worker 那一槽的预测根租约之内做（``runtime.foresight_worker``：先看一眼换代、再做预测拍），
+账本只有一个写者，各步不各自拿它。语义树一步整步持语义树写锁（``runtime.scene_lock``）：模型队列的落盘等它做完，读到的语义树是
 一份停住的样子；等一个租期还拿不到（另一个进程的队列正写着）是还没准备好，这一代到此为止、下一槽再看，不算失败、不退避。
 换代在做时立一个标志（``generating``），同一进程的模型队列在两项之间看到就先不取下一项。
 
@@ -146,7 +146,7 @@ class Generation:
         self.behavior_tree = behavior_tree
         #: 这一代是哪一支的（span、报告、健康面读；两支各一个 ``Generation``，裁定 42）。
         self.lane = lane
-        #: 常驻的序列读者：按天缓存行为树文档，跨代复用（26 号清单 6.7）。
+        #: 常驻的序列读者：按天缓存行为树文档，跨代复用。
         self.series = series if series is not None else SeriesReader(behavior_tree, name="generation")
         self.scene = scene
         self.zone = zone
@@ -201,7 +201,7 @@ class Generation:
         if latest is not None and today < latest:
             return Readiness(None, f"{REWOUND}（今天 {today}，最晚 {latest}）", rewound=(today, latest))
         yesterday = today - timedelta(days=1)
-        # 只看昨天及以前的定稿日：今天不会定稿，也不能拿它顶昨天（codex R3）
+        # 只看昨天及以前的定稿日：今天不会定稿，也不能拿它顶昨天
         closed = frozenset(day for day in self.closed_days() if day <= yesterday)
         if not closed:
             return Readiness(None, "一天都还没定稿到昨天")
@@ -221,7 +221,7 @@ class Generation:
         return Readiness(today, "")
 
     def clean_leftovers(self) -> int:
-        """进程起来后第一眼调：上一次中途被杀剩下的重试项撤回、删掉（裁定 68 第 3 条）。"""
+        """进程起来后第一眼调：上一次中途被杀剩下的重试项撤回、删掉（裁定 68）。"""
 
         return 0 if self.retry is None else self.retry.clean_leftovers()
 
@@ -250,7 +250,7 @@ class Generation:
         day = result.day
         deferred: list[str] = []
         await self._step(result, CALENDAR, lambda report: steps.calendar_step(self, report, result))
-        await self._step(result, RETRY, lambda report: steps.retry_step(self, report, day, deferred, result))
+        await self._step(result, RETRY, lambda report: steps.retry_step(self, report, day, deferred))
         await self._step(result, SETTLE, lambda report: steps.settle_step(self, report, deferred, result))
         holder: list[EventSeries] = []
         await self._step(result, SERIES, lambda report: steps.series_step(self, report, day, result, holder))

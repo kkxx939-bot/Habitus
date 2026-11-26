@@ -1,23 +1,23 @@
-"""预测拍（方案第四节；实时化方案第 5、6 节），三步：读材料 → 此刻对得上历史的事件、情境预期建好、落账（不管说不说）→ 到了
+"""预测拍，三步：读材料 → 此刻对得上历史的事件、情境预期建好、落账（不管说不说）→ 到了
 时窗的按账的级决定说不说（``runtime.foresight_delivery``，没接时只建不递）。
 
-预测拍只走事实（裁定 94 第 1 条）：结算、回话、账的读数，事件与情境在换代定下的关系与日历上实例化。读材料与落账的那一段与换代
+预测拍只走事实（裁定 94）：结算、回话、账的读数，事件与情境在换代定下的关系与日历上实例化。读材料与落账的那一段与换代
 共用（``runtime.foresight_forming``）。
 
-**不等今天这一代**（用户 2026-11-16「预测不要被换代卡住」，取代原来的白天那道闸）：建预期用盘上最晚一张那一代做完了的表
+不等今天这一代：建预期用盘上最晚一张那一代做完了的表
 （``usable_tables``），今天这一代没做成就用上一张，多旧都用；今天这一代一做完，下一拍起换用今天的表。递送照用盘上最晚那张。
-用的是旧表时，这一拍还把今天的日子预期建上——只建表那一晚之后一次都没再出现过的类（``days_unchanged``：旧表算出的身份与时窗
+用的是旧表时，这一拍还把今天的日子预期建上——只建表那一代之后一次都没再出现过的类（``days_unchanged``：旧表算出的身份与时窗
 与今天的表相同，别的类旧表会把做过的当成久没做）；今天的表下日子预期仍由换代那一步建（``runtime.foresight_days``）。旧表下建
 的不撤不改：说过的照旧，没说的照它自己的时窗走；同一身份只建一次，换表以后不会再建一份。
 
-**往回看的起点是落盘的水位**（``runtime.generation_watermark``，实时化缺陷 1；取代原来只在内存里的 ``now - 一拍``）：用的表换了
-一代（含今天第一次用旧表、换到今天的表）的那一拍从今天零点起看（补建，裁定 94 第 2 条、裁定 49：零点到这一拍之间关掉的时窗也算赶上了，做了的和没做的都建），
+往回看的起点是落盘的水位（``runtime.generation_watermark``）：用的表换了
+一代（含今天第一次用旧表、换到今天的表）的那一拍从今天零点起看（补建，裁定 94、49：零点到这一拍之间关掉的时窗也算赶上了，做了的和没做的都建），
 之后从上一次建预期看到的那一刻（``formed_through``）起看——中间合盖、关机几个小时，醒来那一拍照样把那几个小时里关掉的时窗
 两边都建上。补建抓不回来的：「同一条链」那一段的事件预期只认此刻离前因做完不超过转移窗口的链（``triggers.events``），零点后
 做完、到补建那一拍已经过了转移窗口的前因，那一段的预期补不回来（这条链此刻落在「当天剩下的」那一段：那一段另有成立的关系才建，
 是另一条预期）。「当天剩下的」「次日」「第 2–7 天」与情境（日历）的都按天或按今天的链判，补建时抓得回来。
 
-**没在看的时段**（实时化方案第 6 节）：每拍开头读水位，离系统确知在看的那一刻（``ticked_at`` 与最后一段空白的结尾里晚的那个）
+没在看的时段：每拍开头读水位，离系统确知在看的那一刻（``ticked_at`` 与最后一段空白的结尾里晚的那个）
 超过容差（``unwatched_tolerance_slots`` 槽），就把这一段交会话一支写成一条「未观测」空判断（由归约落树，这里不碰行为树）；写不成
 这一拍报出、水位不推（下一拍再写，不会漏）。第一次启动、盘上没有水位时不写（不知道之前在不在跑）。
 
@@ -38,7 +38,7 @@ from datetime import time as clock_time
 
 from habitus.behavior.schema.vocabulary import UNSEEN_GAPS
 from habitus.conditions import day_note
-from habitus.foresight import Batch, Seen, UnsealedReader, UnsealedRow
+from habitus.foresight import Batch, Seen, UnsealedReader
 from habitus.foresight.delivery import done_since
 from habitus.foresight.ladder import Tolerance
 from habitus.foresight.ledger import Expectation
@@ -64,7 +64,7 @@ from habitus.runtime.generation_marks import GenerationMarkError
 from habitus.runtime.generation_watermark import TickTrack, TickWatermark
 from habitus.scene.views import DayIndexCache
 
-#: 递送只为「没读懂」与「错误」不说（都是在看却看不到；「未观测」照常说，裁定 68 第 2 条、94 第 3 条）。
+#: 递送只为「没读懂」与「错误」不说（都是在看却看不到；「未观测」照常说，裁定 68、94）。
 _UNREADABLE = UNSEEN_GAPS
 #: 预测根租约被另一个持有者（另一个进程的换代与预测拍）拿着、等到时限也没拿到：这一槽不换代、这一拍不做，水位不推。
 LEDGER_BUSY = "预测根租约被占"
@@ -159,13 +159,13 @@ class ForesightTick:
         self.tick = timedelta(seconds=float(tick_seconds)) if tick_seconds is not None else None
         self.observer: Observer = observer if observer is not None else NullObserver()
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
-        #: 时窗末当场重读那段「没读懂」「错误」的口（会话一支的重试堆，裁定 68 第 1 条）；没接就是 None。
+        #: 时窗末当场重读那段「没读懂」「错误」的口（会话一支的重试堆，裁定 68）；没接就是 None。
         self.reread = reread
         #: 这一拍的 span 落哪儿（``runtime.generation_trace.TraceFiles.sink``，按当地日子一天一份）；没接就不记 span。
         self.trace = trace
         #: 落盘的水位与没在看的时段（``TickTrack``）；没接就按一拍的宽度往回看、不写没在看的时段。预测根租约整拍持有。
         self.track, self.lease = track, lease
-        #: 某一天那一代完成了没有（完成标记）：建预期只用做完了的那一代的表（F5）；没接就用盘上最晚那张。
+        #: 某一天那一代完成了没有（完成标记）：建预期只用做完了的那一代的表；没接就用盘上最晚那张。
         self.finished = finished
         #: 某一天那一代数词时的词表版本（完成标记里记的）：旧表下的日子预期要它与此刻的词表版本相同才建（词表换算口变了，
         #: 旧记录会改读成别的类，旧表的历史就与今天的表不同）；没接就不比。
@@ -194,7 +194,7 @@ class ForesightTick:
         traced = open_trace(self.trace(now.date())) if self.trace is not None else nullcontext()
         with traced, span("foresight.tick", {"at": now.isoformat(), "lane": self.lane}) as attributes:
             if scheduled is not None:
-                # 这一拍离它该开始的槽边界晚了多少（实时化方案第 10 节：预测拍不被卡；换代那一槽含换代用时）
+                # 这一拍离它该开始的槽边界晚了多少（换代那一槽含换代用时）
                 attributes["lateness_seconds"] = max(0.0, (now - scheduled).total_seconds())
             try:
                 report = (
@@ -285,7 +285,7 @@ class ForesightTick:
         days = self.forming.days_unchanged(materials.recent, table) if self._same_vocabulary(table.night) else None
         if days is None:
             return formed, looked_since, None
-        # 旧表下今天的日子预期：同换代那一步，从零点起看（裁定 94 第 2 条），同一身份只建一次
+        # 旧表下今天的日子预期：同换代那一步，从零点起看（裁定 94），同一身份只建一次
         midnight = datetime.combine(now.date(), clock_time(0), now.tzinfo)
         built = self.forming.form(materials.recent, days, batch=Batch.DAYS, looked_since=midnight)
         merged = Formed(
@@ -349,7 +349,7 @@ class ForesightTick:
             now,
             JudgeMaterials(
                 materials.tables.latest,
-                lambda uris: _rows_for(uris, materials.recent.cache, materials.recent.unsealed, seen, now),
+                lambda uris: _rows_for(uris, materials.recent.cache, seen),
                 lambda item: done_since(item, seen, now=now, kinds=materials.recent.kinds),
                 lambda day: day_note(self.read_side.calendar, day),
                 lambda item: _unobserved(item, materials.recent, now),
@@ -370,9 +370,7 @@ def _summed(first: dict[str, int], second: dict[str, int]) -> dict[str, int]:
 def _rows_for(
     uris: Iterable[str],
     cache: DayIndexCache,
-    unsealed: Sequence[UnsealedRow],
     seen: Sequence[Seen],
-    now: datetime,
 ) -> dict[str, Seen]:
     """按出处取行：最近几天的在 ``seen`` 里已经填全（按出处，也按开始时刻——事件触发的实例是前因的开始时刻）；
     更早的已封口记录按 URI 里的日子到行为树取。"""
@@ -405,12 +403,12 @@ def _rows_for(
 
 def delivery_since(now: datetime, previous: datetime | None, reach: timedelta | None) -> datetime | None:
     """递送这一拍的区间从哪一刻起（UTC）：max(上一拍落盘的系统确知在看到的那一刻, 此刻 − ``reach``)，``reach`` = 「未观测」
-    容差槽数 × 一拍（``foresight.unwatched_tolerance_slots``，默认 2；用户 11-10「跟着容差走」）。
+    容差槽数 × 一拍（``foresight.unwatched_tolerance_slots``）。
 
     正常一拍隔一槽，起点就是上一拍；上一拍被模型拖过了槽边界、后面几拍没跑时，这一拍把被挤掉的那几拍的区间一起看了——在那几拍
     里开、又在那几拍里关的时窗照现有判法决定（过了最晚时限的不说、只记账，结算照常）。最多往回多看「容差 − 1」拍：在看 / 没在看
     用同一条容差线划分（空当 ≤ 容差算在看，都补得到；超过就写「未观测」，不补）。不知道上一拍（第一次启动、没接水位）、或这一拍
-    开头刚写了「未观测」（tick 交 None）时是 None：递送从此刻 − 1 拍起，没在看的时段不补说（21 号提示词第 4 节第 7 条）。"""
+    开头刚写了「未观测」（tick 交 None）时是 None：递送从此刻 − 1 拍起，没在看的时段不补说。"""
 
     if previous is None or reach is None:
         return None
@@ -427,9 +425,9 @@ def _reread_for(
 
 
 def _unobserved(item: Expectation, recent: Recent, now: datetime) -> bool:
-    """说中的范围（起算 → 此刻）里有没有「没读懂」或「错误」（都是看不到；「未观测」照常说，裁定 68 第 2 条、94 第 3 条）：已落树的（被行为作废的
-    已去掉，与结算同一个读法），加上还没封口的「没读懂」判断；还没封口的可读行为从那段里开头的，也把它作废——白天当场
-    重读补回来、还没归约的那一条就是这样（裁定 68 第 1 条）。作废用的是空白的那一个读法（``foundation.intervals.standing_pieces``：
+    """说中的范围（起算 → 此刻）里有没有「没读懂」或「错误」（都是看不到；「未观测」照常说，裁定 68、94）：已落树的（被行为作废的
+    已去掉，与结算同一个读法），加上还没封口的「没读懂」判断；还没封口的可读行为从那段里开头的，也把它作废——预测拍当场
+    重读补回来、还没归约的那一条就是这样（裁定 68）。作废用的是空白的那一个读法（``foundation.intervals.standing_pieces``：
     按天切开，每天那段由那一天的行为判）。"""
 
     start, end = item.observed_from.astimezone(UTC), now.astimezone(UTC)

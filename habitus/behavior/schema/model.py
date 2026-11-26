@@ -1,9 +1,9 @@
 """行为语义树的声明式 Schema 模型。
 
-字段按**面**声明角色（``TODO(BHV-TREE-REBUILD-001)`` 的双面设计）：``address`` 构成身份，
+字段按面声明角色：``address`` 构成身份，
 ``numeric`` 是数字面（经 ``series`` 读成事件序列，``temporal`` 与语义树用；机器类型白名单、全部必填），``semantic`` 是语义面
 （语义关联读，允许可空与自由文本），``system`` 是溯源（不渲染进正文）。分组的唯一权威在
-schema 声明——物理 JSON 块保持扁平，数据不重复承载分组信息。
+schema 声明，物理 JSON 块保持扁平，数据不重复承载分组信息。
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ class BehaviorFieldRole(str, Enum):
     SYSTEM = "system"
 
 
-# 数字面只准机器类型：无可空、无自由复合结构——它是给夜批逐字段扫的。
+# 数字面只准机器类型：无可空、无自由复合结构，它是给换代逐字段扫的。
 _NUMERIC_FIELD_TYPES = frozenset(
     {
         BehaviorFieldType.STRING,
@@ -74,7 +74,7 @@ _NUMERIC_FIELD_TYPES = frozenset(
 
 
 class BehaviorOperationMode(str, Enum):
-    """整棵树纯 add-only；追加/修改模式随 Outcome 通道一并退役。"""
+    """整棵树纯 add-only，没有追加或修改模式。"""
 
     ADD_ONLY = "add_only"
 

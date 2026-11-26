@@ -107,7 +107,7 @@ class SettlementDiagnosis:
         return diagnose(misses, settled_rows, alpha=self.evidence.alpha)
 
     def _standing_at(self, item: Expectation, history: UnitHistory | None, tolerance: Tolerance) -> Standing:
-        """这次落空那一刻（最晚时限）这条边的位置：单元历史（``history``，夜里按当晚语义树重标的最晚一晚，一次诊断只读一回）里
+        """这次落空那一刻（最晚时限）这条边的位置：单元历史（``history``，换代按那一代语义树重标的最晚一代，一次诊断只读一回）里
         这条边在那一刻之前的那几刻，按那时生效的设置与上一次的级。拿此刻的位置去判一个月前的落空，过了断点又恢复的会被说成
         预算内，正在断的会把之前的也拖成说不清；按刻的时刻截到那一刻（``edge_reading(visible_at=)``），之后的刻不算。"""
 

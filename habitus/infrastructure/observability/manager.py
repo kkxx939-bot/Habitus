@@ -127,10 +127,6 @@ class ManagedObservability:
         except Exception as exc:
             self._degraded_reason = f"otel_span_record:{type(exc).__name__}"
 
-    @property
-    def tracing_enabled(self) -> bool:
-        return self.otel is not None and self.otel.initialized
-
     def health(self) -> tuple[str, str]:
         if not self._initialized:
             return "degraded", "not_initialized"

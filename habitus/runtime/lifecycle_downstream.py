@@ -1,4 +1,4 @@
-"""行为侧、语义树、预测层与生命周期骨架自己的参与者（26 号清单 6.14），从 ``build_runtime`` 搬出来按配置组装。"""
+"""行为侧、语义树、预测层与生命周期骨架自己的参与者，按配置组装。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def downstream_participants(
     *,
     source_retries: RetryLedger,
 ) -> tuple[LifecycleParticipant, ...]:
-    """语义树、预测层一支一个；行为侧一个；最后是重试账与每晚重试的堆的统一回收（L10.10；裁定 67）。"""
+    """语义树、预测层一支一个；行为侧一个；最后是重试账与重试的堆的统一回收（裁定 67）。"""
 
     participants: list[LifecycleParticipant] = [
         SceneParticipant(item.scene.relations, lane=item.lane) for item in pipelines

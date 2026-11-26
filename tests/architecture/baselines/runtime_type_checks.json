@@ -24,7 +24,7 @@
   "habitus/infrastructure/observability/config.py": 1,
   "habitus/infrastructure/observability/logging.py": 1,
   "habitus/integrations/http_api/body_limit.py": 1,
-  "habitus/integrations/local_service/cloud_setup.py": 9,
+  "habitus/integrations/local_service/cloud_setup.py": 6,
   "habitus/memory/conversation/layout.py": 1,
   "habitus/memory/editor/extraction/model.py": 2,
   "habitus/memory/editor/mutation/model.py": 1,

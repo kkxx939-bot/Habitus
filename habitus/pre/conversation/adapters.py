@@ -333,15 +333,14 @@ class CodexRolloutConversationAdapter:
 
     protocol = "codex_rollout"
     host = "codex"
-    # CLI 的同步提问；Desktop 的异步提问作答以一条 <send_user_message_question_reply> 用户消息晚来（方案 32 第 5.3 条）
+    # CLI 的同步提问；Desktop 的异步提问作答以一条 <send_user_message_question_reply> 用户消息晚来
     question_tools = (
         QuestionTool("codex", "request_user_input", "title"),
         QuestionTool("codex", "request_user_input_async", "title", replies_later=True),
     )
     # Codex 以 role=user 写进转写、但不是人说的话的上下文消息：会话开头和中途都会写，当成人话会自成一轮、没有回复，
-    # 整批转写被保留规则拒收。与 developer 消息一样不收。前三个是本机 CLI 0.147 与 Desktop 0.153–0.162 真实转写里见到的
-    # （2026-10-22 扫了 15 份；见到的是 ``<external_codex_apps_open_page``，收 ``<external_codex`` 整族）；
-    # 其余是 Codex 的其他合成消息（技能、内置浏览器、被打断的轮、他在终端里跑的命令）。会话 lane 没有自己的前缀表，靠这里去掉。
+    # 整批转写被保留规则拒收。与 developer 消息一样不收。前三个是 Codex 写的上下文消息
+    # （``<external_codex`` 按前缀收整族）；其余是 Codex 的其他合成消息（技能、内置浏览器、被打断的轮、他在终端里跑的命令）。会话 lane 没有自己的前缀表，靠这里去掉。
     # Desktop 的作答 ``<send_user_message_question_reply>`` 与后台任务叫醒的 ``<subagent_notification>`` 不在此列。
     host_context_prefixes = (
         "<environment_context",
@@ -358,7 +357,7 @@ class CodexRolloutConversationAdapter:
     def adapt(self, payload: object, context: ConversationAdapterContext) -> ConversationAdaptation:
         builder = _Builder(self.protocol, context)
         ignored = 0
-        # Codex 自己分轮（每轮以 task_started 开始，本机 25 份真实转写里每句人话前都有）：一轮里第一句人话之后再来的人话
+        # Codex 自己分轮（每轮以 task_started 开始）：一轮里第一句人话之后再来的人话
         # （他作答、补一句、叫停）是插在这一轮中间的。一批不一定从一轮开头切起（插件在一轮中途的答复处、压缩前都会送一批），
         # 所以这一批里第一个 task_started 之前的人话，属于开头在更早一批里的那一轮——也是插在中间的。
         human_in_turn = True
@@ -664,8 +663,7 @@ class OpenCodeConversationAdapter:
     - 助手的消息：文本段 → 答复；工具段只收已结束的（``completed`` / ``error``），一段拆成调用 + 结果；没结束的连调用也不收（调用与结果
       不闭合就进不了 Conversation）。思考、步骤、快照、补丁、文件等段不收。
     - 提问工具 ``question`` 的作答：工具自己把他点了什么记在 ``state.metadata.answers``（每题一组标签，与 ``state.input.questions``
-      对齐）；据此把结果写成 ``"<题目>"="<作答>"`` 一行一题，和 Claude Code 的作答同一个形状，提醒出口与会话 lane 都按这个认
-      （方案 32 第 4.2 条、方案 36 第四节）。
+      对齐）；据此把结果写成 ``"<题目>"="<作答>"`` 一行一题，和 Claude Code 的作答同一个形状，提醒出口与会话 lane 都按这个认。
     - 压缩写的摘要（``summary`` 为真 / ``mode`` 是 compaction 的助手消息）不收；压缩后重放的那句人话插件镜像时就去掉了。
     - 宿主报错结束的助手消息（``info.error``，如限流、额度用完）：报错写成这条消息最后一条答复 ``[host error] <类型>: <信息>``
       （抹掉凭据），这一轮照常封口；"继续"之后直接报错、这一轮只有他那句话的也一样。
@@ -836,8 +834,7 @@ def _dsh_answers(arguments: Mapping[str, object] | None, result: str) -> str | N
 class ZCodeConversationAdapter(OpenCodeConversationAdapter):
     """适配 ZCode（zai-org/ZCode）：真会话在它的 SQLite 库里，一条消息 ``{info, parts}`` 与 OpenCode 同形，插件从库里镜像出来送来。
     与 OpenCode 的两处不同：提问工具是 ``AskUserQuestion``，作答直接写在结果文字里（``"<题目>"="<作答>"``，与 Claude Code 同形）；
-    hook 注入的上下文 ZCode 前面加一行 ``<事件> hook additional context:``——插件剥掉回执块之后剩下的这行不是他说的话，不收
-    （它在库里存成什么样待真实 ZCode 实测）。"""
+    hook 注入的上下文 ZCode 前面加一行 ``<事件> hook additional context:``——插件剥掉回执块之后剩下的这行不是他说的话，不收。"""
 
     protocol = "zcode"
     host = "zcode"

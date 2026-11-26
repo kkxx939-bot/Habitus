@@ -37,7 +37,7 @@ class KindHierarchy:
         return frozenset({kind_token}) | frozenset(kind for kind, items in self.below.items() if kind_token in items)
 
     def done(self, kind_tokens: Iterable[str]) -> frozenset[str]:
-        """这几条记录（的编号）涉及的全部节点：每一条自己加它的每一个上级（"今天做过没有"、"表那晚之后再出现过没有"：
+        """这几条记录（的编号）涉及的全部节点：每一条自己加它的每一个上级（"今天做过没有"、"表那一代之后再出现过没有"：
         做了的、说不清做没做的都不再当"没做"）。"""
 
         return frozenset(kind for token in kind_tokens for kind in self.counted_for(token))

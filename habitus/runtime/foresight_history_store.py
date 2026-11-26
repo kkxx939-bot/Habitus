@@ -1,12 +1,12 @@
-"""单元历史的落盘（26 号清单 4.9）：每刻一份记录、记过的日子、每晚一份快照。住在组合根：``foresight`` 不许 import
+"""单元历史的落盘：每刻一份记录、记过的日子、每代一份快照。住在组合根：``foresight`` 不许 import
 infrastructure，形状与编解码在 ``foresight.history``，这里只管目录与字节；读账本、重标、退出在 ``runtime.foresight_history``。
 
     <root>/unit_moments/<lane>/<预期身份>.json        一条结完的预期在预测轴上的结果（原始强度）
     <root>/unit_moments/<lane>/_recorded.json        记过的日子
-    <root>/unit_history/<lane>/<YYYY-MM-DD>.json      这一晚重标过的快照
+    <root>/unit_history/<lane>/<YYYY-MM-DD>.json      这一代重标过的快照
 
 坏文件按预测层各 store 的同一个总则（``runtime.foresight_files``）：一份读不出来（解析不了、旧 schema）的每刻记录跳过、计入观测
-（``take_unreadable``），快照照写、压实照常——它那一刻从读数里少了，不让整晚停；"记过的日子"读不出来就当没记过，结完的日子
+（``take_unreadable``），快照照写、压实照常——它那一刻从读数里少了，不让整代停；"记过的日子"读不出来就当没记过，结完的日子
 整天重记（同一条预期的记录整份替换，幂等）。
 """
 
@@ -71,7 +71,7 @@ class HistoryStore:
         return decode_history(self._files.read(lane, night), lane=lane, night=night)
 
     def stamp(self, lane: str, night: date) -> tuple[int, int, int] | None:
-        """这一晚快照文件此刻的样子（inode、修改时刻、大小）：同一晚被重写后不一样，读侧的缓存据它失效；没有文件是 None。"""
+        """这一代快照文件此刻的样子（inode、修改时刻、大小）：同一代被重写后不一样，读侧的缓存据它失效；没有文件是 None。"""
 
         try:
             info = (self._files.lane_directory(lane) / f"{night.isoformat()}.json").stat()
@@ -80,7 +80,7 @@ class HistoryStore:
         return info.st_ino, info.st_mtime_ns, info.st_size
 
     def latest(self, lane: str) -> UnitHistory | None:
-        """盘上最晚一晚读得出来的快照（最晚那一份坏了往前退一晚，坏的计入观测）；没有是 None。"""
+        """盘上最晚一代读得出来的快照（最晚那一份坏了往前退一代，坏的计入观测）；没有是 None。"""
 
         return self._files.latest(lane, lambda text, night: decode_history(text, lane=lane, night=night))
 

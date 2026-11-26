@@ -1,17 +1,16 @@
-"""关系检验的统计（语义树新方案 ``13`` ③），纯函数、纯 Python。
+"""关系检验的统计，纯函数、纯 Python。
 
-**层内精确检验（病例交叉的条件检验）**：每次 A 是一层，层里有 A 那一刻与 ``m`` 个对照时刻，其中阳性共 ``T`` 个。
+层内精确检验（病例交叉的条件检验）：每次 A 是一层，层里有 A 那一刻与 ``m`` 个对照时刻，其中阳性共 ``T`` 个。
 零假设下 A 那一刻只是这 ``m + 1`` 个时刻里随便一个，它是阳性的概率 ``q = T / (m + 1)``；各层独立，实验组阳性总数
-服从以 ``q_i`` 为参数的泊松二项分布。对照因此是样本、不是已知数（第三轮评审 P0-2：把对照当已知数会让 58 天里成立过
-23 条、其中 18 条后来失效）。有信息的层（0 < q < 1）不多时 p 值精确算；很多时用正态近似，带连续性校正。
+服从以 ``q_i`` 为参数的泊松二项分布。对照因此是样本、不是已知数：把对照当已知数会让大量关系先成立、后失效。有信息的层（0 < q < 1）不多时 p 值精确算；很多时用正态近似，带连续性校正。
 
-**剔除不可能显著的检验**（Tarone；FDR 版按 Gilbert 2005）：一个检验在它自己的层结构下能达到的最小 p 值，若连
-最宽松的线都过不了，就不进当晚的检验族、标"样本不够"、不给区间（用户 09-26：少样本不出数）。
+剔除不可能显著的检验（Tarone；FDR 版按 Gilbert 2005）：一个检验在它自己的层结构下能达到的最小 p 值，若连
+最宽松的线都过不了，就不进这一代的检验族、标"样本不够"、不给区间（少样本不出数）。
 
-**第 1 道**：剩下的检验做加权 Benjamini–Hochberg（权重是先验，归一到平均 1；没有先验就全是 1）。
+第 1 道：剩下的检验做加权 Benjamini–Hochberg（权重是先验，归一到平均 1；没有先验就全是 1）。
 
-**区间**：按块重抽样（块随前因自己的节奏缩放，``blocks``），百分位区间；随机只用在这里，种子由调用方按
-（关系身份, 第几晚, 用途）给，可回放。块长 1 天的高频行为相邻几天往往相关，区间偏窄——已知限制。
+区间：按块重抽样（块随前因自己的节奏缩放，``blocks``），百分位区间；随机只用在这里，种子由调用方按
+（关系身份, 第几代, 用途）给，可复现。块长 1 天的高频行为相邻几天往往相关，区间偏窄——已知限制。
 """
 
 from __future__ import annotations
@@ -106,10 +105,10 @@ def minimum_one_sided(strata: Sequence[Stratum], *, upward: bool) -> float:
 
 
 def assumed_extreme(strata: Sequence[Stratum], *, upward: bool) -> float:
-    """假设实验组全中（``upward``）或全不中时，这个结果在零假设下的概率：每层的零假设概率按**假设的**结果重算——全中时
+    """假设实验组全中（``upward``）或全不中时，这个结果在零假设下的概率：每层的零假设概率按假设的结果重算——全中时
     (阳性 + 1) / (对照 + 1)，全不中时 1 − 阳性 / (对照 + 1)——不看实测的实验组。没有层时是 1。
 
-    调节条件的开测门用它估条件外那一边（裁定 60 第 9 条、L10.17、裁定 94 第 5 条：按"分得最干净"估，不看实测）。它与
+    调节条件的开测门用它估条件外那一边（裁定 60、94：按"分得最干净"估，不看实测）。它与
     ``minimum_p`` / ``minimum_one_sided`` 口径不同：那两个按实测的层算，是层内条件检验在已观测的阳性数下够得着的最小 p
     （自己没来、对照也一个没有的层在那个检验里确实没信息）；条件外"当天从不出现 B"的层在这里假设全中时是有信息的。
     """
@@ -153,9 +152,8 @@ def heterogeneity(strata: Sequence[Stratum]) -> float:
     observed: dict[int, float] = {}
     for item in strata:
         observed[item.block] = observed.get(item.block, 0.0) + item.treated
-    # 方差按**估出的共同效应**算（裁定 27 第 3 条）：用零假设的 q(1−q) 只在效应接近 0 时对，一条真关系各块同样强也会被判"不稳"
-    # （第四轮评审算法 4：效应恒定时 16–20% 判不稳，名义 5%）。共同效应取一个对数优势比 θ（每层在自己的 q 上抬同样多，
-    # 永远落在 0–1 之间；差值尺度在 q 高的层会顶出 1），θ 使拟合的阳性数等于实测；再看各块实测与拟合之差。
+    # 方差按估出的共同效应算（裁定 27）：用零假设的 q(1−q) 只在效应接近 0 时对，一条真关系各块同样强也会被判"不稳"。
+    # 共同效应取一个对数优势比 θ（每层在自己的 q 上抬同样多，永远落在 0–1 之间；差值尺度在 q 高的层会顶出 1），θ 使拟合的阳性数等于实测；再看各块实测与拟合之差。
     items = [(item.block, item.treated, min(1.0 - 1e-9, max(1e-9, item.null_probability))) for item in strata]
     target = sum(treated for _block, treated, _q in items)
     theta = _common_log_odds(items, target)
@@ -232,7 +230,7 @@ def leave_one_block_out(strata: Sequence[Stratum]) -> bool:
 
 def simes(p_values: Sequence[float]) -> float:
     """Simes 合并 p（Simes 1986）：k 个 p 升序，``min_i(k · p_(i) / i)``，封顶 1。在独立与正相关下控制"全都为零假设"的
-    一类错误；裁定 95 第 2 条拿它给（前因, 后果, 段）这一组判"组里有没有东西"。"""
+    一类错误；裁定 95 拿它给（前因, 后果, 段）这一组判"组里有没有东西"。"""
 
     ordered = sorted(p_values)
     count = len(ordered)
@@ -285,7 +283,7 @@ def tarone_bh(
     if untestable_may_enter(list(raw.values()), untestable, q=q):
         raise ValueError("untestable tests could enter the family after normalisation; measure them instead")
     weight = {key: raw[key] * scale for key in keys}
-    # c(K) = 门槛 q / K 以内的检验数随 K 不增：按比值排好序，每个 K 二分数一次（O(n log n)，不再每个 K 扫一遍全部键）
+    # c(K) = 门槛 q / K 以内的检验数随 K 不增：按比值排好序，每个 K 二分数一次（O(n log n)）
     ratios = {key: minimum[key] / weight[key] for key in keys}
     ordered = sorted(ratios.values())
     family: list[str] = keys

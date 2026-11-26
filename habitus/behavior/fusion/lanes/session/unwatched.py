@@ -1,4 +1,4 @@
-"""会话一支的「未观测」：系统没在跑的那一段（关机、合盖、进程没起来）写成一条空判断（实时化方案第 6 节）。
+"""会话一支的「未观测」：系统没在跑的那一段（关机、合盖、进程没起来）写成一条空判断（裁定 99）。
 
 预测拍发现离上一拍超过容差，就把 ``[上一拍, 这一拍)`` 交到这里：一条 behavior 为空、依据写着"没在看"（``unobserved``）的
 判断，两条凭据（这一段的开头与结尾），回执与覆盖照常落——与物理一支写没在看的时段同一种写法（``fusion/writing.py``），
@@ -67,7 +67,7 @@ class SessionUnwatchedRecorder:
             raise ValueError("an unwatched span must end after it starts")
         key = f"unwatched#{_instant(started_at)}#{_instant(ended_at)}"
         evidence = self._evidence(key, started_at, ended_at)
-        if {item.observation_id for item in evidence} <= self.coverage.covered_observation_ids(self.clock()):
+        if {item.observation_id for item in evidence} <= self.coverage.covered_observation_ids():
             return None
         envelope = BehaviorObservationEnvelope.create(
             observer_id=UNWATCHED_OBSERVER,

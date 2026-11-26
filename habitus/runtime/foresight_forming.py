@@ -1,4 +1,4 @@
-"""建预期、落账的那一段，两处共用（裁定 94 第 1 条）：预测拍（``runtime.foresight_tick``，事件与情境）与换代末尾的
+"""建预期、落账的那一段，两处共用（裁定 94）：预测拍（``runtime.foresight_tick``，事件与情境）与换代末尾的
 当天日子预期（``runtime.foresight_days``）。
 
 取材料：此刻是主体本地时刻（``read_side.zone``），今天的日历条件从 ``read_side.calendar`` 取；行为树经 ``scene.views`` 只读今天
@@ -6,8 +6,8 @@
 同一个身份已经在账上的不再写（身份不含槽号、时刻与日子，账本按身份索引，跨天重算得到同一条）；人说过「以后别提了」的行为不再建
 （裁定 50、61）。进程不留内存状态：重启后重扫得到的都是已有的身份。
 
-预测拍用哪张表也在这里（``usable_tables``，用户 2026-11-16「预测不要被换代卡住」）：建预期用盘上最晚一张那一代做完了的表，
-多旧都用；递送照用盘上最晚那张。旧表下的日子预期只建表那一晚之后一次都没再出现过的类（``days_unchanged``）。观测怎么记
+预测拍用哪张表也在这里（``usable_tables``，预测不被换代卡住）：建预期用盘上最晚一张那一代做完了的表，
+多旧都用；递送照用盘上最晚那张。旧表下的日子预期只建表那一代之后一次都没再出现过的类（``days_unchanged``）。观测怎么记
 （``observe_foresight``）两处共用。
 """
 
@@ -86,16 +86,16 @@ class ExpectationForming:
         self.unsealed = unsealed
         #: 证据的窗口 M：「离上次够久」的时窗与预期的依据只看最近 M 次（``Evidence.window``）。
         self.recent = recent
-        #: 账的那条线 θ：「离上次够久」的时窗往后接几天由它定（裁定 89 第 1 条，与递送、结算同一条线）。
+        #: 账的那条线 θ：「离上次够久」的时窗往后接几天由它定（裁定 89，与递送、结算同一条线）。
         self.tolerance = tolerance
         self.shadow_unestablished = bool(shadow_unestablished)
         self.vocabulary_version = vocabulary_version
 
     async def read(self, now: datetime) -> Recent:
-        """此刻往回看的几天。还没封口的判断读到与行为树同一个回看窗（今天与前 7 天）：过了零点、归约又落后时，昨晚还没封口的
+        """此刻往回看的几天。还没封口的判断读到与行为树同一个回看窗（今天与前 7 天）：过了零点、归约又落后时，昨天还没封口的
         「没读懂」与可读的前因也在里面（``rows`` 本来就把全部未封口判断读进来，按窗过滤不省开销）。"""
 
-        kinds = hierarchy_of(self.read_side)  # 这一拍开头取一份，之后长出来的候选这一拍不认（C27）
+        kinds = hierarchy_of(self.read_side)  # 这一拍开头取一份，之后长出来的候选这一拍不认
         cache = day_cache(self.read_side)
         since = datetime.combine(now.date() - timedelta(days=LOOKBACK_DAYS), clock_time(0), tzinfo=now.tzinfo)
         await self.unsealed.prepare(until=now)
@@ -162,13 +162,13 @@ class ExpectationForming:
         return Formed(len(expectations), recorded, by_source, recorded_by_source)
 
     def days_unchanged(self, recent: Recent, table: OpportunityTable) -> OpportunityTable | None:
-        """旧表下能建日子预期的那几类（用户 2026-11-16）：日子预期的身份与时窗全从表里"上次是哪天、哪条"算，旧表与今天的表
+        """旧表下能建日子预期的那几类：日子预期的身份与时窗全从表里"上次是哪天、哪条"算，旧表与今天的表
         对这一类读到的历史不同，就会算出不同的身份、把做过的当成久没做（说错）。所以只留历史没变的类：
 
-        - 表那一晚到昨天，行为树与还没封口的判断里一次都没出现过（下级出现过的也算上级出现过：对上级是"不知道"，裁定 105；
+        - 表那一代到昨天，行为树与还没封口的判断里一次都没出现过（下级出现过的也算上级出现过：对上级是"不知道"，裁定 105；
           表里一类的日子同样含"只有下级来过"的那些天，``scene.recurrence``）；
-        - 表那一晚之前的 ``LOOKBACK_DAYS`` 天里，此刻树上出现的日子与表里记的相同——表写成之后才落进这几天的记录（就近重试写回、
-          物理一支的映射）会让它对不上（阶段 C 问题 1）。
+        - 表那一代之前的 ``LOOKBACK_DAYS`` 天里，此刻树上出现的日子与表里记的相同——表写成之后才落进这几天的记录（就近重试写回、
+          物理一支的映射）会让它对不上。
 
         这几天里有还没定下是哪一类的（「待定」、还没选上词）就认不出，返回 None、这一拍不建日子预期。词表换算口变了（删词后旧记录
         改读成上级）由调用方比词表版本挡（``ForesightTick``）。"""
@@ -224,7 +224,7 @@ AHEAD_TABLE = "最晚那张机会表在今天之后"
 
 @dataclass(frozen=True)
 class Tables:
-    """这一拍用的表（用户 2026-11-16「预测不要被换代卡住」）：``latest`` 是盘上最晚那张，递送照用它；``forming`` 是建预期用的
+    """这一拍用的表：``latest`` 是盘上最晚那张，递送照用它；``forming`` 是建预期用的
     那张——盘上最晚一张读得出来、那一代做完了（有完成标记）的，多旧都用；没有时是 None，``skipped`` 说为什么。"""
 
     latest: OpportunityTable | None
@@ -240,8 +240,8 @@ def usable_tables(
     finished: Callable[[date], bool | None] | None = None,
 ) -> Tables:
     """递送用的表与建预期用的表（``Tables``）。建预期只认那一代做完了的：今天的表写出了、日子预期或完成标记没成（下一眼重做
-    整代会重写它）不用，往前找上一张；某一晚的完成标记坏了也不用那一张、往前找（坏标记健康面另报）。最晚那张在今天之后（往西
-    改了时区，裁定 96 第 11 条）不建。没给 ``finished``（没接换代）就用最晚那张。"""
+    整代会重写它）不用，往前找上一张；某一代的完成标记坏了也不用那一张、往前找（坏标记健康面另报）。最晚那张在今天之后（往西
+    改了时区，裁定 96）不建。没给 ``finished``（没接换代）就用最晚那张。"""
 
     latest = store.latest(lane)
     if latest is None:

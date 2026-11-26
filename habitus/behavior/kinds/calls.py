@@ -4,7 +4,7 @@
 这一次调用本身答不了时（校验用尽，或这一条输入有问题）抛 ``KindModelOutputError``，调用方按"没答好"降级；
 模型此刻用不了（全流程统一规则里的"等一等可能好"用尽、"要人处理"、熔断开着）原样抛出。
 
-调用方要按错误分类分开处理时（裁定 94 错误分类）用 ``call_failure``：它只按模型层统一的判定入口
+调用方要按错误分类分开处理时（裁定 94）用 ``call_failure``：它只按模型层统一的判定入口
 （``model_client.model_failure``）分派，行为侧别处不直接认模型客户端的异常类型。
 """
 
@@ -33,7 +33,7 @@ class KindModelOutputError(RuntimeError):
 
 
 class CallFailure(str, Enum):
-    """一次词表调模型失败属于哪一类（裁定 94 错误分类）。"""
+    """一次词表调模型失败属于哪一类（裁定 94）。"""
 
     INVALID = "invalid"  # 答复重问之后仍不合格：选词记「待定」，不硬归
     UNAVAILABLE = "unavailable"  # 模型此刻用不了（"等一等可能好"用尽、"要人处理"、熔断开着）：放一边等下一次

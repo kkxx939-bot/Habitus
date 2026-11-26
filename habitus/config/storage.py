@@ -43,11 +43,10 @@ class StorageConfig:
 
 
 def _platform_root(resolved: Path) -> Path:
-    """Windows 上把存储根换成 ``\\\\?\\`` 扩展长度形式（用户 2026-11-07 定）。
+    """Windows 上把存储根换成 ``\\\\?\\`` 扩展长度形式；POSIX 原样返回。
 
-    默认 Windows 没开长路径支持（LongPathsEnabled=0），而且公司机器常改不了注册表；存储根下的会话、记忆、SQLite 文件
-    加上长会话 ID 很容易超过 260 字符。耐久写入层自己会加这个前缀，但列目录、实例锁、SQLite 等直接用路径的地方不经它；
-    在根上换一次，其下拼出来的所有路径都带上前缀，统一越过 MAX_PATH。POSIX 原样返回。
+    Windows 默认没开长路径支持且常改不了注册表，存储根下的路径加上长会话 ID 很容易超过 260 字符；列目录、实例锁、SQLite
+    等直接用路径的地方不经耐久写入层加前缀，所以在根上换一次，其下拼出来的路径都越过 MAX_PATH。
     """
 
     if sys.platform != "win32":

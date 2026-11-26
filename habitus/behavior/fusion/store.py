@@ -1,19 +1,19 @@
-"""行为判断存储：内容身份命名、只创建不覆盖，**归约发布后释放**。
+"""行为判断存储：内容身份命名、只创建不覆盖，归约发布后释放。
 
 判断按内容身份命名，所以同一条判断重复落盘天然幂等——不需要撞车比对，因为身份就是内容。
 
 ## 生命周期：发布即删
 
-判断是原料不是数据——真正的数据只在行为树上。一条判断被归约链发布成 occurrence/gap、消费账本
+判断是原料不是数据，真正的数据只在行为树上。一条判断被归约链发布成 occurrence/gap、消费账本
 写完之后，代码里再没有任何读者（融合上下文只回看封口窗口内的、归约只读未消费的），于是由归约
-在同一轮里 ``discard``。本存储因此只保有**尚未封口的最近一个窗口**，全量枚举本来就该是这个规模；
+在同一轮里 ``discard``。本存储因此只保有尚未封口的最近一个窗口，全量枚举本来就该是这个规模；
 "当日实况"的读者已封口部分读树、未封口部分读这里，不得假设这里有全天。
 
 ## 不能走 canonical_json
 
 ``foundation.integrity.canonicalize`` 会把 datetime 折成 UTC，而 ``started_at`` /
-``last_observed_at`` 带的是**本地偏移**：东八区凌晨 00:30 折成 UTC 就掉到前一天，归约层按"人的
-一天"做的任何聚合都会错。所以这里用固定键序 + 保留偏移的时间文本自行序列化——字节仍然确定
+``last_observed_at`` 带的是本地偏移：东八区凌晨 00:30 折成 UTC 就掉到前一天，归约层按"人的
+一天"做的任何聚合都会错。所以这里用固定键序 + 保留偏移的时间文本自行序列化，字节仍然确定
 （``sort_keys`` + 固定分隔符），只是不折 UTC。
 
 ``judged_at`` 与 ``evidence_ready_at`` 相反，它们是"我们什么时候知道的"，没有本地日历含义，
@@ -25,7 +25,6 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -71,8 +70,7 @@ _JUDGEMENT_KEYS = frozenset(
 )
 _JUDGEMENT_FILE = re.compile(r"^(?P<judgement_id>[0-9a-f]{64})\.json$")
 
-# BHV-LIFECYCLE-001（判断部分已落地，2026-08-30）：释放门槛不是保留期而是**消费**——归约发布
-# 后 ``discard``；"当日实况"改为已封口读树、未封口读这里，双消费者门槛随之消失。观测同理在链
+# 释放门槛不是保留期而是消费：归约发布后 ``discard``；"当日实况"已封口部分读树、未封口部分读这里。观测同理在链
 # 发布后释放（``behavior/reduction/runner.py``），"已释放的观测均有覆盖记录"由融合覆盖索引
 # （``behavior/fusion/coverage.py``，写在回执落盘同一步）保证。
 
@@ -208,10 +206,6 @@ class BehaviorJudgementStore:
         if len(encoded) > self.config.max_judgement_file_bytes:
             raise BehaviorFusionLimitError("judgement exceeds its configured file bound")
         return encoded
-
-
-def _parse_instant(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 __all__ = ["JUDGEMENT_SCHEMA_VERSION", "BehaviorJudgementStore"]

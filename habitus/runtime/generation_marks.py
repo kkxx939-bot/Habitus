@@ -1,10 +1,10 @@
-"""换代的完成标记（实时化方案第 3 节）：``<scene_root>/generation/<日子>.json``，一天一份，原子写入。取代夜线的 Job 账。
+"""换代的完成标记：``<scene_root>/generation/<日子>.json``，一天一份，原子写入。
 
 标记存在、读得出来就是"这一天的换代做完了"：同一代不再做（中途被杀的那一代没有标记，下一眼从头做）。标记坏了明确报错，
 不当"做过"（换代把它当没做、重做时整份重写；健康面报出）。内容只放给健康面与报告看的东西：
-日子、完成时刻、这一代用的序列截止日 / 词表版本 / 各 lane 关系表那一晚 / 已盖章天数、各步的结局、各个退路的计数。
+日子、完成时刻、这一代用的序列截止日 / 词表版本 / 各 lane 关系表那一代 / 已盖章天数、各步的结局、各个退路的计数。
 
-**"这天处理了没有"**（``finished``，结算的后补截止读它，三值照旧）：有标记 True；晚于留存里第一个标记、没有标记 False；更早
+"这天处理了没有"（``finished``，结算的后补截止读它，三值）：有标记 True；晚于留存里第一个标记、没有标记 False；更早
 （或一个标记都没有）None——认不出，调用方各按各的保守口径。问到的那一天的标记要读出、校验，坏了抛错。
 """
 
@@ -108,7 +108,7 @@ class GenerationMarks:
         return tuple(sorted(found))
 
     def exists(self, day: date) -> bool:
-        """这一天有没有完成标记；有就读出、校验——坏的抛 ``GenerationMarkError``（不吞成"做过"，F6）。"""
+        """这一天有没有完成标记；有就读出、校验——坏的抛 ``GenerationMarkError``（不吞成"做过"）。"""
 
         return day in self.days() and self.read(day) is not None
 
@@ -229,7 +229,7 @@ def decode_mark(raw: bytes, *, day: date) -> GenerationMark:
 
 
 def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """JSON 对象里同一个键写了两次：不收（不让后一个悄悄盖掉前一个，F7）。"""
+    """JSON 对象里同一个键写了两次：不收（不让后一个悄悄盖掉前一个）。"""
 
     found: dict[str, object] = {}
     for key, value in pairs:

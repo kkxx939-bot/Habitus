@@ -1,7 +1,7 @@
 """词的编号与四个占位标记。
 
 编号是词的身份：写进树上 occurrence 的 ``kind_token``，写死在初始词表的数据文件里，永不改。
-形状 ``<lane 前缀>-k<四位以上序号>``（``s-k0007`` 会话 lane、``p-k0003`` 物理 lane）——不用 ``:``，
+形状 ``<lane 前缀>-k<四位以上序号>``（``s-k0007`` 会话 lane、``p-k0003`` 物理 lane）；不用 ``:``，
 仓库的安全路径规则不允许它（``foundation/ids.py``）。
 
 四个占位标记不是词、不进词表（裁定 101）：
@@ -61,7 +61,7 @@ class ClassId:
     @classmethod
     def parse(cls, text: object) -> ClassId:
         """只认规范写法：``s-k0000``（序号 0）与 ``s-k00007``（多补了 0）都不是编号——前者让下游解析时崩，
-        后者会和 ``s-k0007`` 被当成两个词（第二轮评审 P2-5）。"""
+        后者会和 ``s-k0007`` 被当成两个词。"""
 
         match = _CLASS_ID.match(text) if isinstance(text, str) else None
         if match is None or match["prefix"] not in _LANE_OF_PREFIX:

@@ -278,7 +278,7 @@ class ConversationMemoryEnqueuer:
 def _after_interruption(
     journal: ConversationMessageJournal, address: ConversationAddress, batch: ConversationBatch
 ) -> tuple[ConversationMessage, ...]:
-    """闲置封存补过收尾消息之后（裁定 107 第 2 条），宿主送来的这一批怎么接上：
+    """闲置封存补过收尾消息之后（裁定 107），宿主送来的这一批怎么接上：
 
     - 开头的序号落在系统收尾消息上（插件编好序号、还没送出，会话就闲置封存了）：整批顺延到那一串收尾消息之后；
     - 系统已经替某个调用补过终态结果、而且补在这一批之前，这一批里它的结果就是迟到的：丢掉、记一条观测，后面的消息

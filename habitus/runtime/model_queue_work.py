@@ -126,7 +126,7 @@ class SceneWork:
 
     def generated(self, current: Round) -> bool:
         """今天这一代做完了没有（没接完成标记就不等）。"昨天及以前"的先验补问、记同步到的版本，
-        都在今天这一代完成之后才算欠着（实时化阶段 2「生效时点」）。"""
+        都在今天这一代完成之后才算欠着。"""
 
         if current.generated is None:
             current.generated = self._generated(current.today)

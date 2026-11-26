@@ -19,9 +19,7 @@ class MemoryTurnContext:
     - ``earlier_summaries``：这一轮前面各段的段摘要（各段 Job 生成的那份），按先后排；
     - ``earlier_segment_count``：这一轮前面一共几段，摘要没读到或因预算没带上的按差额如实告诉模型。
 
-    前面各段的事实由它们各自的 Job 抽取。带上开头的人话借鉴了 OpenViking ``session/retention.py`` 的
-    ``_partial_latest_turn_plan`` 的设计（一轮超预算时前半归档，并附开轮那条用户消息）；带上前面各段的段摘要是
-    Habitus 自己加的，OpenViking 的抽取提示里不带归档概览。
+    前面各段的事实由它们各自的 Job 抽取。
     """
 
     opening_prompts: tuple[ConversationMessage, ...]

@@ -1,13 +1,13 @@
-"""机会表的形状（``19-预测层方案.md`` 第九节 N1）：一条 lane 一晚，对每条成立（或候选）关系列出历史每次机会，
+"""机会表的形状：一条 lane 一代，对每条成立（或候选）关系列出历史每次机会，
 外加每个行为类按天的日历。
 
-- **机会** = 前因的一条（合并后的）链：锚那条记录、链里全部记录、做完的时刻；这一段窗口里后果来没来（None = 结果未知：
+- 机会 = 前因的一条（合并后的）链：锚那条记录、链里全部记录、做完的时刻；这一段窗口里后果来没来（None = 结果未知：
   人不在场、伸过截止日、或只有"判不了"），来了的话是哪条、几点开始。时窗要从这些"几点开始"取，依据要指向这些 URI。
-- **日历** = 一个类的复现（语义树登记、由 ``temporal`` 算，裁定 59）：按天的发生（那天第一次的记录、几点、当天几次、几次自然）
+- 日历 = 一个类的复现（语义树登记、由 ``temporal`` 算，裁定 59）：按天的发生（那天第一次的记录、几点、当天几次、几次自然）
   与相邻间隔（漏看的权重、被提醒结尾的截尾）。「离上次够久」与补做强度从这里读。
-- **看着的日子** = 这条 lane 每天有多大比例在看（``temporal.Coverage``）与那天的日型：账的久别按它算间隔的有效长度
-  （人不在、设备没上传的日子不算长度；只数这本账有过机会的日型，26 号清单 3.3）。
-- 表是夜里从同一份序列重算出来的派生物，第二晚整张重写；不是账本，不只增。
+- 看着的日子 = 这条 lane 每天有多大比例在看（``temporal.Coverage``）与那天的日型：账的久别按它算间隔的有效长度
+  （人不在、设备没上传的日子不算长度；只数这本账有过机会的日型）。
+- 表是换代时从同一份序列重算出来的派生物，下一代整张重写；不是账本，不只增。
 
 本模块对 scene、存储零知识；时刻一律带时区。
 """
@@ -26,7 +26,7 @@ from habitus.temporal import DayInterval, OccurrenceDay
 SEGMENTS = ("chain", "rest_of_day", "next_day", "days_2_7", "situation")
 #: 列进表的关系状态：成立的开口用，候选的只给影子账（``shadow_uses_unestablished`` 开着时）。
 STATUSES = ("established", "candidate")
-#: 没见过的日型怎么办：不外推 / 按外接数据的官方含义归组（待用户定，默认不外推）。
+#: 没见过的日型怎么办：不外推 / 按外接数据的官方含义归组（默认不外推）。
 UNSEEN_DAY_TYPES = ("skip", "official")
 
 
@@ -91,8 +91,8 @@ class Opportunity:
 
 @dataclass(frozen=True)
 class TreeReading:
-    """语义树这一晚对这条关系的读数（``RelationTest``）：有前因时后果的发生率、没前因时的（同一天人在场的对照时刻）、效应够不够大
-    （成立时要过的第 3 道）。它回答"是不是原因"；"从它出发预测准不准"由账回答（裁定 56 第 10 条：开不开口看账，依据看它）。"""
+    """语义树这一代对这条关系的读数（``RelationTest``）：有前因时后果的发生率、没前因时的（同一天人在场的对照时刻）、效应够不够大
+    （成立时要过的第 3 道）。它回答"是不是原因"；"从它出发预测准不准"由账回答（裁定 56：开不开口看账，依据看它）。"""
 
     treated: float
     control: float
@@ -144,7 +144,7 @@ class RelationOpportunities:
     """一条关系的全部历史机会。``key`` 是语义树的关系身份；前因、后果是概念身份（行为概念 = 类编号，日历情境是自己的名字），
     ``antecedent_classes`` / ``consequent_classes`` 是两头概念管的编号：第一个是那一头的节点自己，其余是它全部活着的下级
     （裁定 105：下级的记录对上级是"不知道"；预期、触发与结算只认第一个）。
-    ``conditions`` 是这条关系挂的条件（裁定 61 第 6 条：成立的带条件关系各是单元的一个输入）；机会只列条件全成立的链。"""
+    ``conditions`` 是这条关系挂的条件（裁定 61：成立的带条件关系各是单元的一个输入）；机会只列条件全成立的链。"""
 
     key: str
     antecedent: str
@@ -157,12 +157,12 @@ class RelationOpportunities:
     status: str
     upward: bool
     items: tuple[Opportunity, ...]
-    #: 语义树这一晚的读数（这一晚没检验到的为 None）。
+    #: 语义树这一代的读数（这一代没检验到的为 None）。
     reading: TreeReading | None = None
     #: 日历情境关系（``situation`` 段）盯的日历键与成立的取值；别的段没有。
     calendar_key: str | None = None
     calendar_values: tuple[str, ...] = ()
-    #: 周几、几号、月末这类关系是在哪几种日型上见过他做的（检验时日型是固定住的，裁定 59 第 7 条）：建预期时今天的日型也要在里面——
+    #: 周几、几号、月末这类关系是在哪几种日型上见过他做的（检验时日型是固定住的，裁定 59）：建预期时今天的日型也要在里面——
     #: 只在工作日的周三做过，国庆的周三就不建。空 = 历史上日型都答不出（没有放假数据），不约束。日型关系自己不用这个。
     within_day_types: tuple[str, ...] = ()
     #: 这条关系挂的条件（按文本排序；不带条件为空）。关系身份的末尾就是它们拼成的键。
@@ -200,7 +200,7 @@ class RelationOpportunities:
 
     def calendar_holds(self, conditions: Mapping[str, str], *, official: bool = False) -> bool:
         """这条日历关系在这一天成不成立（``conditions`` 是那天的日历条件）。``official`` 开着时，没见过的日型按外接数据的官方含义
-        归组（调休上班算上班、节假日算休息；待用户定的那一条，裁定 59 第 7 条）：日型关系的取值、其余关系见过的日型都放宽到同一类。
+        归组（调休上班算上班、节假日算休息，裁定 59）：日型关系的取值、其余关系见过的日型都放宽到同一类。
         那天日型答不出时不拿日型约束（建预期用的条件总有名义日型，统计用的可能没有）。"""
 
         if self.calendar_key is None:
@@ -230,13 +230,13 @@ class RelationOpportunities:
     @property
     def base_key(self) -> str:
         """去掉条件之后的关系身份：同一（前因, 后果, 段）的不带条件的那条与它的各个带条件版本是一族，此刻只取最具体的
-        一条（裁定 61 第 6 条）。"""
+        一条（裁定 61）。"""
 
         return self.key[: -len(self.condition_text) - 1] if self.conditions else self.key
 
     @property
     def coincidental(self) -> bool:
-        """语义树已判它效应不够大（巧合）：不进"同一组"的签名与"同样多"的计数，权重照数（方案第六节第 1 条）。"""
+        """语义树已判它效应不够大（巧合）：不进"同一组"的签名与"同样多"的计数，权重照数。"""
 
         return self.reading is not None and self.reading.large_enough is False
 
@@ -299,7 +299,7 @@ class DayWatch:
 
 @dataclass(frozen=True)
 class OpportunityTable:
-    """一条 lane 第 ``night`` 晚的机会表。``relation_night`` 是用的哪一晚的关系表（夜批正常时就是 ``night``）。"""
+    """一条 lane ``night`` 那一代的机会表。``relation_night`` 是用的哪一代的关系表（换代正常时就是 ``night``）。"""
 
     lane: str
     night: date
@@ -308,7 +308,7 @@ class OpportunityTable:
     window_slots: int
     relations: tuple[RelationOpportunities, ...]
     kinds: tuple[KindDays, ...]
-    #: 这一晚日历情境用的放假数据版本（裁定 59 第 4 条）；没接日历是 None。
+    #: 这一代日历情境用的放假数据版本（裁定 59）；没接日历是 None。
     calendar_version: str | None = None
     #: 没见过的日型怎么办（``config.foresight.unseen_day_types``）："skip" 不外推，"official" 按官方含义归组。建预期、重标、结算重核都读它。
     unseen_day_types: str = "skip"

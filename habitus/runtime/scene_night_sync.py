@@ -49,7 +49,7 @@ class SyncStage:
 
         if words is None:
             words = await asyncio.to_thread(self.catalog.current)
-        # 日历情境的取值从数据里攒出来：序列里出现过的日子，日历给了哪些（键, 取值）就长哪些（裁定 59 第 7 条）
+        # 日历情境的取值从数据里攒出来：序列里出现过的日子，日历给了哪些（键, 取值）就长哪些（裁定 59）
         observed = {
             item for day in sorted({record.day for record in series.records}) for item in self.calendar.of_day(day)
         }
@@ -64,7 +64,7 @@ class SyncStage:
     async def run(
         self, series: EventSeries, now: datetime, signals: list[str], *, plan: SyncPlan | None = None
     ) -> Synced:
-        """B1 同步词表：概念落盘、记下同步到的版本。顺带算一晚只算一次的覆盖。``plan`` 是刚算好的那一份（不给就现算）。"""
+        """B1 同步词表：概念落盘、记下同步到的版本。顺带算一代只算一次的覆盖。``plan`` 是刚算好的那一份（不给就现算）。"""
 
         if plan is None:
             plan = await self.plan(series, now)

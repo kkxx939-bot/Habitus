@@ -1,8 +1,8 @@
 """把已经校验完成的领域字段确定性渲染为人类可读的 L2 正文。
 
 正文只呈现语义面与一行数字面摘要；system（溯源）角色不进正文，只存在于末尾结构块。
-守卫测试保证每个非 system 字段都出现在渲染结果里——防止将来加字段忘了进正文。唯一的例外是
-``kind_token``：它是统计用的词编号或占位标记，人看不懂；正文不写它（裁定 19）。
+守卫测试保证每个非 system 字段都出现在渲染结果里。唯一的例外是 ``kind_token``：它是统计用的
+词编号或占位标记，正文不写它（裁定 19）。
 """
 
 from __future__ import annotations
@@ -65,8 +65,7 @@ def _render_occurrence(payload: Mapping[str, Any]) -> str:
     if payload["basis"]:
         steps = payload["basis"]
         lines.extend(["", f"## 步骤（共 {len(steps)} 步）"])
-        # 正文只是字段的可读投影，字段才是真相：长链（实测 283 步）只渲染首尾，中间留计数，
-        # 不再把每一步复制一遍撑大文档。
+        # 正文只是字段的可读投影，字段才是真相：长链只渲染首尾，中间留计数，不把每一步复制一遍撑大文档。
         shown = (
             list(enumerate(steps, start=1))
             if len(steps) <= _RENDERED_STEPS_HEAD + _RENDERED_STEPS_TAIL

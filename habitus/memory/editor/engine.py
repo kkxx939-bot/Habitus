@@ -130,11 +130,6 @@ class MemoryEditor:
             commit=commit,
         )
 
-    async def edit(self, segment: ConversationSegment) -> MemoryCommitResult:
-        """先完成全部语义规划，再逐个写进记忆树。"""
-
-        return self.commit(await self.plan(segment))
-
     def commit(self, plan: MemoryEditorPlan) -> MemoryCommitResult:
         """写入已经完成语义提取和关系规划的统一计划。"""
 

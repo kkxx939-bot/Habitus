@@ -59,7 +59,7 @@ class Candidate:
     antecedents: tuple[str, ...]
     level: int
     today_note: str | None = None
-    #: 这一刻这个行为单元的全部输入（裁定 56 第 12 条），每条一句：是什么、它那本账从它出发说中几次、语义树上有它 / 没它时的发生率。
+    #: 这一刻这个行为单元的全部输入（裁定 56），每条一句：是什么、它那本账从它出发说中几次、语义树上有它 / 没它时的发生率。
     inputs: tuple[str, ...] = ()
     #: 在场的事件前因里成了依据的那几件的原话（两件以上时话里一起说出来："你订了机票、也订了酒店"）。
     causes: tuple[str, ...] = ()
@@ -324,7 +324,7 @@ def _history(
 
 
 def _today_in(relation: RelationOpportunities, now: datetime) -> str:
-    """ "今天是周三"；周几集合说今天是哪一天、属于哪个集合——"今天是周一、周三、周六"不对，今天只是其中一天（2026-10-18 四方评审）。"""
+    """ "今天是周三"；周几集合说今天是哪一天、属于哪个集合——"今天是周一、周三、周六"不对，今天只是其中一天。"""
 
     if relation.calendar_key == WEEKDAY_KEY and len(relation.calendar_values) > 1:
         return f"今天是{WEEKDAY_NAMES[now.weekday()]}（属于「{relation.antecedent_label}」）"
@@ -349,7 +349,7 @@ def _trigger_text(
     if item.source == "情境":
         today = _today_in(relation, now) if relation is not None else "今天处在这个日历情境里"
         if relation is not None and relation.calendar_key == DAY_TYPE_KEY and today_note == UNKNOWN_DAY_NOTE:
-            # 缺放假数据时日型是按名义周末给的：照实说，不让触发句与抬头的"日型未知"自相矛盾（2026-10-18 四方评审）
+            # 缺放假数据时日型是按名义周末给的：照实说，不让触发句与抬头的"日型未知"自相矛盾
             today = f"今天按名义周末算是{relation.antecedent_label}（缺放假数据，日型未知）"
         return (
             f"处在情境里：{today}；关系说当天会{_label(None, item, relation)}，"

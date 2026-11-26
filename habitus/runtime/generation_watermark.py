@@ -1,14 +1,13 @@
-"""预测拍的水位（实时化方案第 5、6 节；缺陷 1）：一个文件 ``<预测根>/<支>/tick_watermark.json``，原子替换。
+"""预测拍的水位：一个文件 ``<预测根>/<支>/tick_watermark.json``，原子替换。
 
 - ``ticked_at``：上一拍跑到哪一刻（每拍跑完推进）。下一拍离它超过容差，中间那段就是
   没在看的时段（写成会话一支的「未观测」）；
 - ``unwatched_until``：最后一段写成「未观测」的空白的结尾。"上次看到哪一刻"取 ``ticked_at`` 与它里面晚的那个（写了空白、这一拍
   又没跑完时，空白之后到下一拍之间系统是在看的）；
 - ``overnight_until``：最后一段跨过当地零点（从零点之前开始）的空白的结尾。换代要等水位过了 max(今天零点, 它) 再留几槽余量
-  （用户 11-10「按槽留余量」）：换代只读到昨天，只有伸进昨天的那段空白要等归约落树；今天白天合盖写的空白与昨天无关，不再让
-  等待重来（用户 2026-11-16）；
+  （裁定 99）：换代只读到昨天，只有伸进昨天的那段空白要等归约落树；今天合盖写的空白与昨天无关，不让等待重来；
 - ``formed_through`` 与 ``formed_generation``：上一次建预期看到了哪一刻、用的是哪一天那一代的表。这一拍从哪一刻起看：用的表换了
-  一代时从今天零点起（补建，裁定 94 第 2 条），否则从 ``formed_through`` 起——取代原来只在内存里的 ``now - 一拍``。
+  一代时从今天零点起（补建，裁定 94），否则从 ``formed_through`` 起。
 
 进程不留这几样的内存副本：重启后照盘上的接着看。
 """
@@ -91,7 +90,7 @@ class TickWatermarkStore:
         try:
             return decode_watermark(raw)
         except TickWatermarkError as exc:
-            # 点出是哪个文件：升级后留着上一个版本形状的水位时，人要知道删哪一个（裁定 99 第 4 条）
+            # 点出是哪个文件：升级后留着上一个版本形状的水位时，人要知道删哪一个（裁定 99）
             raise TickWatermarkError(f"{self.path}: {exc}") from exc
 
     def write(self, watermark: TickWatermark) -> None:
@@ -148,7 +147,7 @@ class TickTrack:
 
     @staticmethod
     def looked_since(now: datetime, mark: TickWatermark, generation: date) -> datetime:
-        """这一拍从哪一刻起看：用的表（``generation`` 那一天那一代）与上一次建预期时不是同一张时从零点起（补建，裁定 94 第 2 条；
+        """这一拍从哪一刻起看：用的表（``generation`` 那一天那一代）与上一次建预期时不是同一张时从零点起（补建，裁定 94；
         旧表下建过的同一身份不再建），之后从上一次建预期看到的那一刻起（落盘的 ``formed_through``，中间关机、合盖几个小时也接得上）。"""
 
         midnight = datetime.combine(now.date(), clock_time(0), tzinfo=now.tzinfo)
@@ -203,7 +202,7 @@ def decode_watermark(raw: bytes) -> TickWatermark:
 
 
 def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """JSON 对象里同一个键写了两次：不收（F7）。"""
+    """JSON 对象里同一个键写了两次：不收。"""
 
     found: dict[str, object] = {}
     for key, value in pairs:

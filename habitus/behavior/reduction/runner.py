@@ -1,11 +1,10 @@
 """归约写入层的编排：扫描 → 封口 → 定格（stage）→ 确定性落盘 → 消费账本。
 
-抄融合 ``StagedFusion`` 的检查点形状（死规则⑤）：选词、时间戳这些会随时间漂移的输入全部
-发生在 stage 之前；stage 之后只有确定性落盘——检查点里存的就是将要落盘的最终 payload（时间已是
+选词、时间戳这些会随时间漂移的输入全部
+发生在 stage 之前；stage 之后只有确定性落盘：检查点里存的就是将要落盘的最终 payload（时间已是
 ISO 字符串）与文档时间戳，崩溃重试逐字节重放，落盘器的同字节幂等保证不撞车。
 
-运行节奏是运维决定（用户裁定 5 分钟一轮 sweep，由组合根/调度器调用 ``run_once``，本层不自带
-定时器）；同样的存储内容，无论哪一轮扫到，产出的文档逐字节相同。
+运行节奏是运维决定（由组合根/调度器调用 ``run_once``，本层不自带定时器）；同样的存储内容，无论哪一轮扫到，产出的文档逐字节相同。
 
 树的单一写入口：新文档只由本 runner 经 ``BehaviorDocumentWriter`` 发布，已落树的文档不改——观测 → 融合 → 归约，没有旁路。
 
@@ -57,8 +56,7 @@ from habitus.infrastructure.store.contracts.path_lock import LeaseGuard, PathLoc
 from habitus.infrastructure.tree.lock_key import root_lock_prefix
 
 # sweep 锁的默认租约时长；实际值由 ``Config.behavior.reduction_sweep_lock_ttl_seconds`` 注入。
-# 周尺度回填（万级小文件写入会把 fseventsd 顶到 240% CPU，单篇 publish 可能被文件系统卡住数分钟）
-# 需要更长的租约——那不该靠改代码或猴子补丁，所以它是运维参数而不是常量。
+# 大批回填时单篇 publish 可能被文件系统卡住很久、需要更长的租约，所以它是运维参数而不是常量。
 DEFAULT_SWEEP_LOCK_TTL_SECONDS = 600
 
 
@@ -74,7 +72,7 @@ class BehaviorReductionReport:
     # 词表侧的事件与信号（新建/命中/过期/降级），与归约本身的丢边、隔离分开列——面板数"异常"时
     # 不把"新建了一个 kind"这种正常事件数进去。
     kind_signals: tuple[str, ...] = ()
-    #: 这一轮因为模型整个用不了、换成「错误」放一边的链（换代的重试收尾据它记"归约时模型整个用不了"、这一代跳过结算，裁定 94 第 8 条）。
+    #: 这一轮因为模型整个用不了、换成「错误」放一边的链（换代的重试收尾据它记"归约时模型整个用不了"、这一代跳过结算，裁定 94）。
     unavailable: int = 0
     #: 这一轮拦住的我们自己的 bug（归类抛了模型之外的异常）：常驻节拍把它挂到健康面，当场报出。
     bugs: tuple[str, ...] = ()
@@ -152,8 +150,8 @@ class BehaviorReductionRunner:
         self.sweep_lock_ttl_seconds = sweep_lock_ttl_seconds
         self.kinds = kinds
         self.ledger = ledger
-        #: 改树改到的日子记一笔增量，按天缓存的读侧据此只重读变过的日子（26 号清单 6.7）；全仓只有这里记。
-        #: 没开语义树的支不给，不记——没人截，记了只会一直长（L10.3）。
+        #: 改树改到的日子记一笔增量，按天缓存的读侧据此只重读变过的日子；全仓只有这里记。
+        #: 没开语义树的支不给，不记——没人截，记了只会一直长。
         self.dirty_days = dirty_days
         if failed_chains.judgements is not judgements or failed_chains.ledger is not ledger:
             raise ValueError("failed chains must set aside judgements from the runner's own store and ledger")
@@ -169,7 +167,7 @@ class BehaviorReductionRunner:
         self._sweep_lock_key = f"{root_lock_prefix('behavior-reduction', tree.root)}:{tree.lane}"
         self.observer: Observer = observer or NullObserver()
         self.reminded: Callable[[str, datetime], bool] = reminded if reminded is not None else _never_reminded
-        #: 最近一轮认出的"封口视界被哪几份观测钉住"（按钉住的时刻排，没有是空），健康面读它（裁定 94 第 8 条）。
+        #: 最近一轮认出的"封口视界被哪几份观测钉住"（按钉住的时刻排，没有是空），健康面读它（裁定 94）。
         self.pinned: tuple[PinnedFrontier, ...] = ()
         self._build_collaborators()
 
@@ -189,13 +187,12 @@ class BehaviorReductionRunner:
     async def run_once(self) -> BehaviorReductionReport:
         """执行一轮归约；先重放遗留检查点，再归约新封口的链与空白段。
 
-        全程持一把这一支的**租约**：单写入方是机械保证不是运维假设——两个归约
+        全程持一把这一支的租约：单写入方是机械保证不是运维假设，两个归约
         进程并跑会各自 stage 出时间戳不同的同址文档，互相把对方的检查点变成永久撞车。锁被
         占用时本轮直接让路（``BehaviorReductionBusyError``），下一轮 sweep 自然重试。
 
-        刻意**不**把整轮包进 fenced：SQLite 锁实现的 fenced 会跨整个临界区持一个未提交写事务
-        ——里面的 writer 文档锁 acquire 撞它即死锁，且共享锁库被占住整轮（评审实测的接线级
-        阻塞）。互斥由租约承担、阶段间 ``guard.checkpoint()`` 续约；围栏只围检查点文件的两次
+        刻意不把整轮包进 fenced：SQLite 锁实现的 fenced 会跨整个临界区持一个未提交写事务，
+        里面的 writer 文档锁 acquire 撞它即死锁，且共享锁库被占住整轮。互斥由租约承担、阶段间 ``guard.checkpoint()`` 续约；围栏只围检查点文件的两次
         小写；树文档的写入由 writer 自己的逐文档 fenced 保护。
         """
 
@@ -227,13 +224,12 @@ class BehaviorReductionRunner:
             self._record_dirty(replayed_days)
             self.checkpoints.clear(guard)
         now = self._now()
-        # 以下每一段在周尺度都可能跑很久且**不写任何东西**（另一条线实测：stage 前段静默 16 分钟即把
-        # 600s 租约耗死，续约点再多也救不了已过期的租约）。因此每段边界都续，长循环内部按条数续。
+        # 以下每一段在大批量下都可能跑很久且不写任何东西，可能把租约耗死；因此每段边界都续，长循环内部按条数续。
         guard.checkpoint()
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_expire") as attributes:
             attributes.update(self._expire(now, guard))
         guard.checkpoint()
-        # 消费账本这一轮只读一次、在过期之后读：扫描与物化共用（之前各读一遍，账本一长就是三遍全量读，26 号清单 6.3）。
+        # 消费账本这一轮只读一次、在过期之后读：扫描与物化共用。
         # 这之后到物化之前没有任何一步写账本。
         entries = self.ledger.load()
         # "哪些判断还没归约"只有一种答法（``pending``），此刻场景的未封口读口也用它。
@@ -292,7 +288,7 @@ class BehaviorReductionRunner:
         documents = batch.documents
         self._record_dirty(document_days(documents))
         # 这一轮没落树的链所在的日子也不能定稿：缩批留下的要下一轮才发布；隔离的换成了「没读懂」判断，下一轮才归约成
-        # 空白——先定稿，派生层就把那一段读成"没做"（L10.5）
+        # 空白——先定稿，派生层就把那一段读成"没做"
         held_back = _unsealed_days(pending, batch.active_indexes, batch.active_gaps) | {
             record.started_at.date() for record, _reason, _cause in batch.failed
         }
@@ -324,7 +320,7 @@ class BehaviorReductionRunner:
                 f"seal horizon pinned by observation delivery {pinned.source_id[:12]} since {pinned.since.isoformat()}"
                 for pinned in self.pinned
             )
-            # 读不出来的交付被存储放进了隔离区（数据坏了，裁定 94 错误分类）：不钉住视界、不挡定稿，在这里报出
+            # 读不出来的交付被存储放进了隔离区（数据坏了，裁定 94）：不钉住视界、不挡定稿，在这里报出
             self._sweep_signals.extend(
                 f"observation delivery {source_id[:12]} unreadable; isolated"
                 for source_id in self.observations.take_isolated()
@@ -354,7 +350,7 @@ class BehaviorReductionRunner:
 
     def _hold_sweep_lock(self, held: ExitStack) -> LeaseGuard:
         """取 sweep 租约、挂到 ``held`` 上（随它退出释放）。``PathLock.acquire`` 是上下文管理器，真正取锁发生在进入时，
-        所以进入本身包在 try 里：只有**这里**的超时是"锁被占"（``BehaviorReductionBusyError``，调用方让路）；持锁之后正文里
+        所以进入本身包在 try 里：只有这里的超时是"锁被占"（``BehaviorReductionBusyError``，调用方让路）；持锁之后正文里
         的 TimeoutError（续约失败、文档锁竞争）是真故障，不许被归因成让路。"""
 
         try:
@@ -404,9 +400,9 @@ class BehaviorReductionRunner:
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "kind_pick") as attributes:
             try:
                 stamps = await self.kinds.classify(records, checkpoint=guard.checkpoint)
-            except Exception as exc:  # noqa: BLE001 - 选词失败不拖住那天：这批链换成「错误」放一边（裁定 94 第 3 条）
+            except Exception as exc:  # noqa: BLE001 - 选词失败不拖住那天：这批链换成「错误」放一边（裁定 94）
                 guard.checkpoint()  # 租约丢了（另一进程接手）照常整轮失败，不当成选词失败
-                # 按错误分类分开（裁定 94 第 8 条）：模型整个用不了的放一边等换代里的重试收尾（它据报告这一代跳过结算），
+                # 按错误分类分开（裁定 94）：模型整个用不了的放一边等换代里的重试收尾（它据报告这一代跳过结算），
                 # 别的是我们自己的 bug，当场报出（``bugs``，常驻节拍据它挂到健康面）、不白试
                 failure = call_failure(exc)
                 if failure is CallFailure.BUG:
@@ -430,7 +426,7 @@ class BehaviorReductionRunner:
     # ── 落盘：stage 之后只有确定性动作 ────────────────────────────────────────────────
 
     def _isolate_failed_chains(self, failed: Sequence[Failed], guard: LeaseGuard, *, consumed: frozenset[str]) -> None:
-        """stage 里出了错误的判断进夜里待处理的堆，换成一条「错误」判断，下一轮归约成空白（``failed.py``）；当晚重试又失败的
+        """stage 里出了错误的判断进重试堆，换成一条「错误」判断，下一轮归约成空白（``failed.py``）；重试又失败的
         直接撤下。"""
 
         for record, reason, cause in failed:
@@ -471,8 +467,8 @@ class BehaviorReductionRunner:
             raise BehaviorReductionError("reduction checkpoint is missing documents")
         writer = BehaviorDocumentWriter(self.tree, self.lock_store, clock=lambda: staged_at, config=self.write_config)
         for index, item in enumerate(documents):
-            # 每 10 篇续一次：一次续约远比一篇文档的写入便宜，而周尺度下单篇 publish 会被文件系统
-            # 拖到秒级（万级小文件 + fseventsd 放大），间隔太疏时一段慢写就能把租约耗光。
+            # 每 10 篇续一次：一次续约远比一篇文档的写入便宜，而大批量下单篇 publish 会被文件系统
+            # 拖到秒级，间隔太疏时一段慢写就能把租约耗光。
             if index % 10 == 0:
                 guard.checkpoint()
             if not isinstance(item, Mapping):
@@ -509,7 +505,7 @@ class BehaviorReductionRunner:
         """
 
         guard.checkpoint()
-        covered = self.coverage.covered_observation_ids(self._now())
+        covered = self.coverage.covered_observation_ids()
         guard.checkpoint()
         still_referenced: set[str] = set()
         for position, raw in enumerate(self.judgements.list()):
@@ -557,19 +553,19 @@ class BehaviorReductionRunner:
     def _frontier_cutoff(self, guard: LeaseGuard | None = None) -> datetime | None:
         """还没写成判断的观测把封口视界往回拉到哪里；一切观测都已融合完成时为 None。
 
-        判据：**尚未被任何融合回执覆盖的观测**的最早 ``available_at``。两条 lane 都是先落凭据（观测）、再落判断、
+        判据：尚未被任何融合回执覆盖的观测的最早 ``available_at``。两条 lane 都是先落凭据（观测）、再落判断、
         最后落回执与覆盖记录，凭据已在而回执未落的（正在判、做到一半崩了）都没有覆盖记录，一网打尽。
-        每轮列一遍观测存储与覆盖记录：两者都随释放保持小量（观测发布即释放，覆盖按释放条件删，26 号清单 L2、6.1），
-        解码按文件缓存（6.2）。释放的顺序保证"已释放的观测都已有覆盖记录"，否则旧观测会被误判为未融合、把封口视界
+        每轮列一遍观测存储与覆盖记录：两者都随释放保持小量（观测发布即释放，覆盖按释放条件删），
+        解码按文件缓存。释放的顺序保证"已释放的观测都已有覆盖记录"，否则旧观测会被误判为未融合、把封口视界
         永远拖在过去。
 
-        顺手认出"封口视界被哪几份观测钉住"（``pinned``，裁定 94 第 8 条）：一份交付里没被覆盖的观测，比它晚的观测已有被回执覆盖
+        顺手认出"封口视界被哪几份观测钉住"（``pinned``，裁定 94）：一份交付里没被覆盖的观测，比它晚的观测已有被回执覆盖
         的——正在判的那一轮之后不会有更晚的已覆盖观测，所以不是"还在判"，而是它的回执不会来了。几份各卡在不同时刻的逐份都报；
         比所有已覆盖观测都晚、还没覆盖的（还在判）不报。不加时限、不隔离（两条 lane 逐份都落回执由融合保证），只报出是哪份、
         从哪一刻起钉住，交健康面等人看。
         """
 
-        covered = self.coverage.covered_observation_ids(self._now())
+        covered = self.coverage.covered_observation_ids()
         #: 每份交付里最早一条没被覆盖的观测
         waiting: dict[str, datetime] = {}
         latest_covered: datetime | None = None

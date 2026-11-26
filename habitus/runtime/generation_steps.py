@@ -72,12 +72,10 @@ async def calendar_step(gen: Generation, report: dict[str, object], result: Gene
     report["refreshed"] = True
 
 
-async def retry_step(
-    gen: Generation, report: dict[str, object], day: date, deferred: list[str], result: GenerationResult
-) -> None:
+async def retry_step(gen: Generation, report: dict[str, object], day: date, deferred: list[str]) -> None:
     """重试收尾（through = 昨天，裁定 67、68）：不试——能重试的由模型队列就近试过了；这里只把"重试到哪一天"推到昨天，那一天
     及以前还在堆里的丢弃、写到一半的撤回、按类计数（``RetryStage.close``，不调模型、不跑归约）。抛了、或就近重试写回的判断
-    还在等归约（重试收尾没动）——这一代跳过结算（守住"那天的重试收尾 → 那天的结算"，裁定 68 第 3 条），下一代补结。"""
+    还在等归约（重试收尾没动）——这一代跳过结算（守住"那天的重试收尾 → 那天的结算"，裁定 68），下一代补结。"""
 
     if gen.retry is None:
         raise Skip("没接重试")
@@ -92,7 +90,7 @@ async def retry_step(
     report["retry"] = retry_summary(closed)
     if not closed.ready:
         # 就近重试写回的判断还在等归约（归约正做到一半、或它的锁被占）：重试收尾没动那几天的项。现在结算，那条判断可能
-        # 落进已经结算的日子（裁定 68 第 3 条）——这一代的结算留到下次（阶段 1 已有的退路），其余各步照做、照写完成标记：
+        # 落进已经结算的日子（裁定 68）——这一代的结算留到下次，其余各步照做、照写完成标记：
         # 归约里要调模型，换代不等它
         deferred.append(RETRY_UNFINISHED)
         raise Degrade(RETRY_REDUCING)
@@ -114,7 +112,7 @@ async def settle_step(
         raise Skip(deferred[0])
     try:
         table = settlement.opportunities.latest(settlement.lane) if settlement.opportunities else None
-        # 结算读到的机会表是哪一晚（必须边"结算 → 写新机会表"：它早于这一代要写的那一晚）
+        # 结算读到的机会表是哪一代（必须边"结算 → 写新机会表"：它早于这一代要写的那一代）
         report["opportunity_night"] = None if table is None else table.night.isoformat()
         outcome = await asyncio.to_thread(settlement.run_once)
         still = await asyncio.to_thread(
@@ -137,7 +135,7 @@ async def series_step(
     if gen.unreduced_gaps is not None:
         result.unreduced_gaps = await asyncio.to_thread(gen.unreduced_gaps, day)
         report["unreduced_gaps"] = result.unreduced_gaps
-    # 全量扫行为树是同步 IO：下沉到线程，不卡预测拍与同一个循环上的在线请求（2026-10-18 四方评审）
+    # 全量扫行为树是同步 IO：下沉到线程，不卡预测拍与同一个循环上的在线请求
     series = await asyncio.to_thread(gen.series.read, cutoff=day)
     holder.append(series)
     result.series_cutoff = series.cutoff
@@ -168,7 +166,7 @@ async def active_step(
     gen: Generation, report: dict[str, object], series: EventSeries, day: date, result: GenerationResult,
     holder: list[Counted],
 ) -> None:  # fmt: skip
-    """数词表（裁定 101 第 7 条）：按这一代的序列先退出、删掉久没被选中的，再转在用，词表状态落盘，在用的集合
+    """数词表（裁定 101）：按这一代的序列先退出、删掉久没被选中的，再转在用，词表状态落盘，在用的集合
     交给这一代的语义树。纯计数、不调模型。没做成走退路：语义树按盘上已有的在用状态（下一代重数补上）。"""
 
     try:
@@ -206,8 +204,8 @@ async def scene_step(
     holder: list[NightReport],
 ) -> None:
     """语义树那一步（``SceneNightlyRun.generate``，没有模型调用）尽力而为：同步词表或关系判定没做成的走退路，时间线与材料
-    照样交给机会表。换代那一刻模型队列正在整体退避（模型整个调不通），关系判定这一代不做、沿用上一代（实时化方案第 2 节，
-    裁定 96）：不拿这一代没长成的词表与先验判出一张新表——同一代不重写，判出来就一直留着。模型只是慢（没在退避）时
+    照样交给机会表。换代那一刻模型队列正在整体退避（模型整个调不通），关系判定这一代不做、沿用上一代（裁定 96）：
+    不拿这一代没长成的词表与先验判出一张新表——同一代不重写，判出来就一直留着。模型只是慢（没在退避）时
     照判，缺的先验权重按 1。"""
 
     failures: list[tuple[str, BaseException]] = []

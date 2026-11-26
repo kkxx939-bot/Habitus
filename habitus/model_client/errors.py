@@ -1,15 +1,14 @@
 """模型调用失败的唯一一套类别、三条处理规则和给人看的话（裁定 108）。
 
-借 OpenViking 的思路（错误先归成固定类别、每类处理定死；只重试等一等可能好的；连着失败就熔断、定时试探），类别按
-Habitus 自己的协议定。归类只在 ``model_client.failures.classify_failure`` 一处做；这里只放类别、规则与异常类型。
+归类只在 ``model_client.failures.classify_failure`` 一处做；这里只放类别、规则与异常类型。
 
 三条规则：
 
-- **等一等可能好**（服务故障、网络故障、限流、认不出的）：客户端有界重试，仍失败交回调用方；连着失败到阈值熔断。
-- **要人处理**（认证、权限、额度、模型或地址不存在、不支持、网络设置）：不重试，熔断直接打开、降到试探的节奏，
+- 等一等可能好（服务故障、网络故障、限流、认不出的）：客户端有界重试，仍失败交回调用方；连着失败到阈值熔断。
+- 要人处理（认证、权限、额度、模型或地址不存在、不支持、网络设置）：不重试，熔断直接打开、降到试探的节奏，
   健康检查显示原因；服务那边恢复（额度恢复、权限开通）下一次试探成功就自己接上；改了配置文件要重启服务（配置只在启动时
   读一次），给人看的话里写明。
-- **这一条输入有问题**（请求不合法、太长、内容安全）：同一份输入不重发，不计入熔断；调用方按"这一条做不成"处理。
+- 这一条输入有问题（请求不合法、太长、内容安全）：同一份输入不重发，不计入熔断；调用方按"这一条做不成"处理。
 """
 
 from __future__ import annotations
@@ -186,7 +185,7 @@ TLS_UNTRUSTED_HINT = (
     "the model server's TLS certificate is not trusted; if Habitus runs behind a corporate proxy that inspects TLS, "
     "set network.ca_bundle to the corporate root certificate (PEM file)"
 )
-#: 代理对 CONNECT 回 407 时的去处（用户 11-06 定：NTLM / Kerberos / PAC 不实现，只提示本机转发代理）。
+#: 代理对 CONNECT 回 407 时的去处（NTLM / Kerberos / PAC 不实现，只提示本机转发代理）。
 PROXY_AUTH_HINT = (
     "the proxy requires authentication (HTTP 407). Basic authentication (user name and password) can go into the "
     "HTTPS_PROXY environment variable; Windows domain sign-in (NTLM / Kerberos) and PAC auto-configuration are not "
@@ -270,7 +269,7 @@ MODEL_DETERMINISTIC: tuple[type[ModelClientError], ...] = (
     ModelInputTooLargeError,
     ModelContentSafetyError,
 )
-#: ``MODEL_DETERMINISTIC`` 里"这一条触发了内容安全"的那一种：行为侧单列（裁定 94 错误分类）。
+#: ``MODEL_DETERMINISTIC`` 里"这一条触发了内容安全"的那一种：行为侧单列（裁定 94）。
 MODEL_REFUSED: tuple[type[ModelClientError], ...] = (ModelContentSafetyError,)
 
 

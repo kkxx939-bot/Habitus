@@ -36,7 +36,7 @@ class ScenePipeline:
     unsealed: UnsealedFromJudgements | None = None
 
     def __post_init__(self) -> None:
-        """实例同一性：这一支的换代、队列、预测层读的都是**这一支**的行为树、定稿日、完成标记与写锁。接错了进程照常、健康全绿，
+        """实例同一性：这一支的换代、队列、预测层读的都是这一支的行为树、定稿日、完成标记与写锁。接错了进程照常、健康全绿，
         一处都不报错。"""
 
         generation = self.generation.generation
@@ -64,7 +64,7 @@ class ScenePipeline:
         # 接线漏了的话，进程照常启动、health 全绿、结算一代都不会跑。结算是换代里的一步
         if generation.settlement is not foresight.settlement:
             raise ValueError("the settlement stage must be a step of the generation")
-        # 机会表那一步漏接：白天永远停在"还没有机会表"（2026-10-18 四方评审）
+        # 机会表那一步漏接：白天永远停在"还没有机会表"
         if generation.foresight is None or generation.foresight.store is not foresight.opportunities:
             raise ValueError("the generation must write the opportunity table the foresight layer reads")
         # 结算认"那天有没有这一代"读的必须是这一支换代写的那一份完成标记

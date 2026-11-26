@@ -205,7 +205,7 @@ class ChatClient:
 
     async def health_check_async(self) -> dict[str, object]:
         """只调用 Provider 显式提供的异步探针，保证调用方可真正取消。探针不经过熔断；"等一等可能好"的错按路由的次数与退避
-        再探，一次超时不当成整个用不了（裁定 94 第 8 条）。"""
+        再探，一次超时不当成整个用不了（裁定 94）。"""
 
         probe = getattr(self.provider, "health_check_async", None)
         if not callable(probe):

@@ -1,49 +1,6 @@
-"""在仓库最外层组装完整记忆主链。
+"""在仓库最外层组装完整记忆主链。"""
 
-## TODO(PLUGIN-NO-SQLITE-001)：插件化交付下三处 SQLite 文件的去向（用户 2026-09-11 要求登记；怎么处理、怎么改逻辑由他决定）
-
-**背景与裁定**：项目以插件形式交付（``plugins/habitus-memory*``：宿主 hooks 是短命 Node 进程，背后是本地
-Python 运行时）。用户裁定：插件不该在本地建数据库表；各层权威数据只能是文件树（行为树/语义树/预测层账本/
-记忆树，按天目录 + 原子替换 + 回读核对），"表"只允许是读时在内存里投影出来的形状。JS 侧
-``plugins/memory-plugin-shared/lib``（state-store / atomic-file / operation-log）已经按这条走原子 JSON/JSONL。
-
-**现状**：Python 侧仍有三处 SQLite，文件全在 ``config.workflow_root`` 下，都由本模块装配：
-
-1. ``memory_recall_lifecycle.sqlite3`` —— ``memory/recall/store.py`` 的
-   ``SQLiteMemoryRecallLifecycleStore``，表 ``memory_recall_lifecycle``，主键 uri。一行 = 一篇 L2 记忆的
-   使用/冷热/退休事实（useful_recall_count、last_useful_recall_at、cold2_probe_count、compacted_at、
-   retire_candidate_at、retired_at、version）。写入方是 ``memory/compaction/lifecycle.py``
-   （record_use / mark_retire_candidate / mark_retired），检索排名经 ``read_many`` 读。
-   ``config.memory.recall_lifecycle.enabled`` 可整体关掉。
-2. ``conversation_summary_use.sqlite3`` —— ``memory/conversation/access.py`` 的
-   ``SQLiteConversationSummaryUseStore``，表 ``conversation_summary_use``，主键 identity
-   （started_on / conversation_id / stage / summary_id）。一行 = 一份 Summary 的实际使用回执与
-   退休候选/退休中状态。写入方是 Summary 压缩器与检索服务的 use recorder；Summary 文件仍是内容真相源。
-3. ``locks.sqlite3`` ——
-   ``infrastructure/store/sqlite/lock_store.py`` 的 ``SQLiteLockStore``，表 ``locks``
-   （lock_key、token、expires_at、owner、created_at、fence）。这是跨进程租约锁：**行为归约 runner、
-   行为写入器、情景刷新器、记忆提交事务全靠它**。进程内实现只在测试里
-   （``tests/lock_store.py``），不跨进程。
-
-**性质区分**：1、2 是派生状态（从使用回执可重建，丢了只是冷热判断退回默认）；3 是协调机制
-（不存数据，但跨进程 fence 必须正确）。改造时两类分开定。
-
-**候选方案（供决定，未裁定）**：
-
-- A. 1、2 改成与 ``scene/refresh/progress.py`` 同形态的原子 JSON 文件：按 uri / identity 分片成小文件
-  （每篇一份），version 的 CAS 用"读 → 比 version → 原子替换"实现，写入前持 PathLock。调用契约
-  （Protocol / 构造器注入）不变，只换 store 实现与本模块的装配；要补损坏降级与并发写测试。
-- B. 3 改成文件锁：``O_EXCL`` 创建租约文件（token、expires_at、fence 写在文件里），过期抢占；fence 单调性
-  靠一个 counter 文件原子替换。acquire / renew / fenced / release 语义不变，但崩溃后过期抢占与时钟
-  偏差要专门测。或者保留 SQLite 只作锁（它不存数据），由用户裁定"锁文件算不算建表"。
-- C. 全部保留，只把三个 .sqlite3 移到插件的状态目录并声明"可删除重建"。改动最小，但与裁定相悖。
-
-**具体场景**：hook 每次触发起一个短命进程写回执；两个 hook 并发写同一篇记忆的使用计数（方案 A 靠
-PathLock + version CAS）；用户把数据目录放在 iCloud/Dropbox（SQLite 单文件被部分同步易损坏，小文件安全）。
-
-**影响面**：不动记忆树/行为树/情景树的 schema 与写入逻辑；只换三个存储实现与本模块的装配；
-``tests/unit`` 里对应 store 的测试与 ``tests/architecture`` 的边界登记要跟着改。
-"""
+# TODO(PLUGIN-NO-SQLITE-001): 插件化交付下 Python 侧仍有三处 SQLite（召回冷热、Summary 使用回执、跨进程租约锁），去向待定。
 
 from __future__ import annotations
 
@@ -455,9 +412,9 @@ def build_runtime(
     # 两支各一条下游管线（裁定 42：两条 lane 彻底分开，三棵树各有会话、物理两支）：代码一套，按支各装一份、各用各的根；
     # 两支只共用两个常驻 worker（每一槽 / 每一轮依次做两支，会话在前）、当地日历与提醒出口。
     branches = () if behavior_components is None else tuple(behavior_components)
-    # 当地日历只建一份：两支的语义树与预测层读同一份，换代开头重读放假数据时一起换（2026-10-18 四方评审）
+    # 当地日历只建一份：两支的语义树与预测层读同一份，换代开头重读放假数据时一起换
     calendar = None if behavior_components is None else local_calendar(config)
-    # 读账的两个值（裁定 49）：α 借关系检验前向验证的显著性；遗忘半衰期是几次机会（裁定 57，config.foresight 的临时值）
+    # 读账的两个值（裁定 49）：α 借关系检验前向验证的显著性；遗忘半衰期是几次机会（裁定 57）
     evidence = None if behavior_components is None or not config.foresight.enabled else evidence_of(config)
     # 各支的账本先建，提醒出口两支共用一个（出口只有宿主里的会话；「说了」与回话写回请求所属那一支的账本）
     ledgers = (
@@ -484,7 +441,7 @@ def build_runtime(
             pipeline := assemble_pipeline(
                 config,
                 branch,
-                # 没在看的时段写成会话一支的「未观测」空判断（实时化方案第 6 节），由会话一支的归约落树。物理一支不写：
+                # 没在看的时段写成会话一支的「未观测」空判断，由会话一支的归约落树。物理一支不写：
                 # 在没在看是上游的逻辑，融合不替上游补没报到的时间（裁定 43），这一支只推水位
                 unwatched=(
                     unwatched_writer(behavior_components.session_lane)
@@ -505,7 +462,7 @@ def build_runtime(
     )
     foresights = tuple(item.foresight for item in pipelines if item.foresight is not None)
     if foresights:
-        # 说那一半（方案 30 第五节）：会话 lane 每轮带上两支开着的提醒、把模型判出的回应写回提醒所属那一支的账本
+        # 说那一半：会话 lane 每轮带上两支开着的提醒、把模型判出的回应写回提醒所属那一支的账本
         assert behavior_components is not None
         behavior_components.session_lane.attach_reminders(
             build_reminder_responses(foresights, config=config, observer=operation_observer)
@@ -517,7 +474,7 @@ def build_runtime(
         question_tools=answered_question_tools(adapters),
     )
     if outlet is not None and foresights and isinstance(behavior_session_consumer, BehaviorSessionConsumer):
-        # 提醒出口（方案 32 第 4.2 条）：同一份会话先过出口（认出 agent 的提问、写「说了」与固定选项的回话），再进会话 lane
+        # 提醒出口：同一份会话先过出口（认出 agent 的提问、写「说了」与固定选项的回话），再进会话 lane
         behavior_session_consumer = build_outlet_consumer(
             outlet, behavior_session_consumer, observer=operation_observer, host_of=adapters.host
         )
@@ -540,7 +497,7 @@ def build_runtime(
         observer=operation_observer,
     )
     source_coordinator = ConversationSourceCoordinator(source_store, source_delivery)
-    # 行为侧的账坏了的会话源：逐轮补救（没写过的轮落「没读懂」、进每晚重试的堆，裁定 67 第 5 条、68 第 3 条）
+    # 行为侧的账坏了的会话源：逐轮补救（没写过的轮落「没读懂」、进换代重试的堆，裁定 67、68）
     source_salvage = SourceSalvage(
         config.conversation_root,
         salvagers={

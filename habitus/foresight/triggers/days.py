@@ -7,27 +7,27 @@
 全账本只建一条。
 
 每周的事跳一周照样接得住：历史上隔过 14 天，离上次 14 天时那一簇就有读数。锚在周三、每月 20 号这类日历上的规律不归这里，
-归日历情境关系（``triggers.situations``）。**今天已做的照建**（裁定 49）；上一次看的时候（``Moment.caught_from``）已经过了
-时窗而今天还没做的不建（退场）——换代建日子预期从零点起看（裁定 94 第 2 条），所以当天的日子预期不会退场。
+归日历情境关系（``triggers.situations``）。今天已做的照建（裁定 49）；上一次看的时候（``Moment.caught_from``）已经过了
+时窗而今天还没做的不建（退场）——换代建日子预期从零点起看（裁定 94），所以当天的日子预期不会退场。
 时窗只取这一簇里最近 M 次命中的时刻（证据的窗口，裁定 57）：在险间隔照旧数全历史，"几点做"跟着最近的习惯走。
-簇往后接几天看账的线 θ（``line``，裁定 89 第 1 条）：到离上次 e 天为止他自己来了的在险间隔占比已超过 θ，时窗就只在这一天——
+簇往后接几天看账的线 θ（``line``，裁定 89）：到离上次 e 天为止他自己来了的在险间隔占比已超过 θ，时窗就只在这一天——
 天天做的事偶尔漏过一天，以后单独漏的那天照常到时窗末提醒，不会因为历史上隔过一次 2 天就把时窗撑到次日。簇被线截成先后几段时，
 身份与时窗起点取盖住今天的那一段的第一天（``ClusterReading.opened``）：漏过几次的天天做的事连漏第 2 天是新的一条。
 
-**连漏、超过了历史**（裁定 90，``temporal.overdue_at``）：离上次已比历史上（够得上读数的）间隔都久、常规读法读不出时，按常见间隔
+连漏、超过了历史（裁定 90，``temporal.overdue_at``）：离上次已比历史上（够得上读数的）间隔都久、常规读法读不出时，按常见间隔
 继续——天天做的每天一条，每周一次的每 7 天一条，每条只管那一天、各是新的身份，照常递送与结算；什么时候不再开口交给账的
 "规律断了"与提醒反馈，这里不定第几天停。
 
-**间隔、簇、命中、时窗只从机会表读**（裁定 94 第 1 条）：日子预期是换代的最后几步之一（``runtime.foresight_days``），用这一代
+间隔、簇、命中、时窗只从机会表读（裁定 94）：日子预期是换代的最后几步之一（``runtime.foresight_days``），用这一代
 刚写的、含昨天的那张表。今天这一代做成之前，预测拍用上一张做完了的表只为"表那一晚之后一次都没再出现过"的类建
-（``runtime.foresight_forming.ExpectationForming.days_unchanged``，用户 2026-11-16）：那几类旧表算出的身份与时窗与今天的表相同；
-别的类旧表会把做过的当成久没做，不建。每天都建、从当天零点起算（``observed_from``，裁定 94 第 2 条）：零点到这一代
-写完之间做过的照建、照算；时窗整个落在这段里而没做的也照建，结过期待决（裁定 49 第 1 条：不许只建做了的一侧）。
+（``runtime.foresight_forming.ExpectationForming.days_unchanged``）：那几类旧表算出的身份与时窗与今天的表相同；
+别的类旧表会把做过的当成久没做，不建。每天都建、从当天零点起算（``observed_from``，裁定 94）：零点到这一代
+写完之间做过的照建、照算；时窗整个落在这段里而没做的也照建，结过期待决（裁定 49：不许只建做了的一侧）。
 """
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import timedelta
 
 from habitus.foresight.model import Moment
 from habitus.foresight.opportunities.model import KindDays, OpportunityTable
@@ -82,7 +82,7 @@ def _interval(
     end_day = last_day + timedelta(days=reading.cluster[-1])
     basis = sorted((item.following for item in reading.hits), key=lambda day: day.day)
     now = moment.at
-    # 时窗只看最近 M 次命中（裁定 57）：一年前从 19:00 改到 07:00 的跑步，时窗末不再拖在 19:00
+    # 时窗只看最近 M 次命中（裁定 57）：做事的钟点变了，时窗跟着最近的习惯走
     times = [item.natural_at for item in basis if item.natural_at is not None][-recent:]
     if not times:
         return None
@@ -114,16 +114,7 @@ def _interval(
     )
 
 
-def first_window_day(trigger_instance: str) -> date | None:
-    """「离上次够久」实例里这一簇的第一天；别的触发实例是 None。"""
-
-    _uri, separator, tail = trigger_instance.rpartition("@")
-    if not separator:
-        return None
-    try:
-        return date.fromisoformat(tail)
-    except ValueError:
-        return None
-
-
-__all__ = ["INTERVAL", "day_drafts", "first_window_day"]
+__all__ = [
+    "INTERVAL",
+    "day_drafts",
+]

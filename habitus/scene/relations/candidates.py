@@ -1,6 +1,6 @@
-"""一晚要量哪些关系（「量哪些」）：短跨度两两 × 四段、长跨度、够样本的前因 × 条件，以及冻住的行依赖的东西还在不在。
+"""一代要量哪些关系：短跨度两两 × 四段、长跨度、够样本的前因 × 条件，以及冻住的行依赖的东西还在不在。
 
-链、块、集中期这些材料由 ``LaneTests`` 一晚只算一次，这里只读它们；怎么量在 ``evaluation``。
+链、块、集中期这些材料由 ``LaneTests`` 一代只算一次，这里只读它们；怎么量在 ``evaluation``。
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ class RelationCandidates:
 
         line, concepts = self.tests.line, self.tests.concepts
         lane = line.lane
-        # 停用的概念不再量：它不会再有新记录，量出来只会是"它没了"（裁定 27 第 9 条）
+        # 停用的概念不量：它不会再有新记录，量出来只会是"它没了"（裁定 27）
         names = [name for name in line.concepts() if concepts.lane_of(name) == lane and not concepts[name].retired]
         found = [
             RelationKey(lane, antecedent, consequent, segment)
@@ -58,7 +58,7 @@ class RelationCandidates:
         return tuple(found)
 
     def _moderated(self, names: list[str]) -> list[RelationKey]:
-        """带条件的关系：单个条件对每个够样本的前因都列（裁定 62 第 1 条；列出来进不进检验族按层级定，裁定 95 第 2 条、
+        """带条件的关系：单个条件对每个够样本的前因都列（裁定 62；列出来进不进检验族按层级定，裁定 95、
         ``evaluation._families``）；第二个条件起只在已成立的带条件关系上
         加一个（{C1} 成立才列 {C1, C2}），条件池同样是机械列举的，最多 ``max_combined_conditions`` 个。
         同一个集合从几条父关系长出来只有一条键。"""
@@ -102,13 +102,13 @@ class RelationCandidates:
         return sorted(grown)
 
     def still_defined(self, key: RelationKey) -> bool:
-        """这条关系依赖的东西还在不在（冻住的行的寿命，26 号清单 5.6）：前因与后果成了上下级；集中期 / 停了一阵随变点重算整段没了、带的条件有一个
+        """这条关系依赖的东西还在不在（冻住的行的寿命）：前因与后果成了上下级；集中期 / 停了一阵随变点重算整段没了、带的条件有一个
         不在机械列举里了（消失），就是不在了。只是前因这阵子没有新链的照样算在——它会回来。
-        几个条件合起来的还要求父关系仍然成立，那一条由状态折叠按当晚的结果判（``state._drop_orphaned_combinations``）。"""
+        几个条件合起来的还要求父关系仍然成立，那一条由状态折叠按这一代的结果判（``state._drop_orphaned_combinations``）。"""
 
         line = self.tests.line
         if self.tests.concepts.related(key.antecedent, key.consequent):
-            # 上下级之间不量关系（裁定 105 第 5 条）：之前一代留下的这一对的行不再带着，由状态折叠清掉
+            # 上下级之间不量关系（裁定 105）：之前一代留下的这一对的行不再带着，由状态折叠清掉
             return False
         if key.segment in (Segment.HIGH_STATE, Segment.LOW_STATE) and key.antecedent in line.concepts():
             if not self.tests.episodes(key.antecedent, key.segment):
@@ -127,7 +127,7 @@ class RelationCandidates:
 
 
 def _circular(concepts: ConceptSet, condition: Condition, consequent: str) -> bool:
-    """ "B 刚出现过"不是调节：条件里的那一类就是后果、或是后果的上级 / 下级（上下级之间不量关系，裁定 105 第 5 条）时，
+    """ "B 刚出现过"不是调节：条件里的那一类就是后果、或是后果的上级 / 下级（上下级之间不量关系，裁定 105）时，
     它说的是 B 自己扎堆，不是 A 被什么左右。"""
 
     return condition.template is Template.TIMELINE and (

@@ -123,9 +123,8 @@ async def _ask[T](
     validator: Callable[[object], T],
     name: str = "foresight_judge",
 ) -> tuple[T, str, tuple[str, ...]] | str:
-    """调模型用各触点共用的那一段（``model_client.asking.ask``）：调用失败的重试只在模型客户端一层（裁定 108），答复不合格由结构层带着错误重问；
-    都没成返回信号文本。判决在白天那一拍：模型此刻用不了（``ModelUnreachable``）也只是这一次没判成，调用方按算法顺序、模板
-    措辞递；模型调不通在哪儿都不停下什么，换代里也只是调模型的那一步走退路（裁定 94 第 8 条）。"""
+    """调模型用各触点共用的 ``model_client.asking.ask``：调用失败的重试只在模型客户端一层（裁定 108），答复不合格由结构层
+    带着错误重问；都没成返回信号文本。模型此刻用不了（``ModelUnreachable``）只是这一次没判成，调用方按算法顺序、模板措辞递（裁定 94）。"""
 
     try:
         answer = await ask(client, request, schema=schema, name=name, validator=validator)

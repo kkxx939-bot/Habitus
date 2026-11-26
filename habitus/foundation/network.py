@@ -1,4 +1,4 @@
-"""出站网络的共用底：回环地址判定，以及调模型服务时的证书库、额外 CA 与代理设置（W18）。"""
+"""出站网络的共用底：回环地址判定，以及调模型服务时的证书库、额外 CA 与代理设置。"""
 
 from __future__ import annotations
 
@@ -58,10 +58,10 @@ class OutboundSettings:
     """调模型服务（chat）时的出站设置；不可变、可哈希，SSL context 按设置缓存。
 
     - ``trust_store``：见 ``TRUST_STORES``。
-    - ``ca_bundle``：在证书库之上**额外**信任的 PEM 文件（公司代理做 TLS 解密时的根证书）。
+    - ``ca_bundle``：在证书库之上额外信任的 PEM 文件（公司代理做 TLS 解密时的根证书）。
     - ``proxy``：配了就用它、覆盖 ``HTTPS_PROXY`` 等环境变量；没配就照 httpx 默认读环境变量。
       回环地址（``is_loopback_host``）不论代理来自配置还是环境变量都直连：公司代理到不了用户电脑上的
-      回环地址，自部署在本机的模型服务不能被送进去（用户 2026-11-06 定）。
+      回环地址，自部署在本机的模型服务不能被送进去。
     """
 
     trust_store: str = "system"
@@ -122,8 +122,8 @@ def build_ssl_context(
 ) -> ssl.SSLContext:
     """不经缓存现建一个客户端 SSL context（doctor 用它查"此刻建得出来吗"）。
 
-    W18 之前 httpx 用默认 ``verify=True``，会读 ``SSL_CERT_FILE``（没有时 ``SSL_CERT_DIR``）；有人靠它让公司根证书生效。
-    这里照同样的先后读这两个环境变量，叠加在证书库之上，旧做法升级后仍然有效。
+    httpx 默认 ``verify=True`` 会读 ``SSL_CERT_FILE``（没有时 ``SSL_CERT_DIR``），有人靠它让公司根证书生效；
+    这里照同样的先后读这两个环境变量，叠加在证书库之上，让这种做法仍然有效。
     """
 
     if ca_bundle is not None:

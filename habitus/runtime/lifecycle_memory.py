@@ -1,6 +1,6 @@
 """memory 侧挂在 LifecycleWorker 上的两个参与者：会话链维护、L2 记忆冷热维护。
 
-两样的逻辑一行不改（memory 的生命周期本轮待定），只是从 Worker 里搬出来、包成参与者：
+两个参与者：
 - 会话链：按耐久游标有界轮转全部 Conversation，逐个 ``maintain_once``，单会话失败隔离；游标只以日期与
   conversation_id 写入 ``workflow/lifecycle/state.json``，写入受本轮全局 lease 的 fence 保护。
 - L2：调一次 ``MemoryLifecycleManager.maintain``。

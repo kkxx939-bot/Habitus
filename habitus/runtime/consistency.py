@@ -90,7 +90,7 @@ class MemoryConsistencyService:
         elif abandonment is not None:
             state = MemoryConsistencyState.ABANDONED
         else:
-            # 任务已过保留期删掉了（裁定 111 去掉回执后不再有更长期的记录），看不出当时的结果
+            # 任务已过保留期删掉了（没有更长期的记录，裁定 111），看不出当时的结果
             state = MemoryConsistencyState.UNKNOWN
         return MemoryConsistencySnapshot(
             state=state,

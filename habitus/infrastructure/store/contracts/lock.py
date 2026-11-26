@@ -47,7 +47,7 @@ class LockStore(Protocol):
         """删掉这把锁的那一行，只在它空闲（已释放或租约已过期）时删；返回删没删。
 
         删空闲行是安全的：fence 只和 uuid token 一起比，重新加锁时 fence 从头数也不会误放行。
-        锁行原来只增不删（每份会话源信封两行、每个行为树文档一行），这是它们唯一的退出。"""
+        锁行（每份会话源信封两行、每个行为树文档一行）只有这一个退出。"""
         ...
 
     def observability_snapshot(self, *, warning_seconds: float) -> LockStoreSnapshot: ...

@@ -127,7 +127,7 @@ class HabitusConfig:
     locale: LocaleConfig = field(default_factory=LocaleConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     http: HTTPAPIConfig = field(default_factory=HTTPAPIConfig)
-    network: OutboundSettings = field(default_factory=OutboundSettings)  # 调模型服务的证书库、额外 CA 与代理（W18）
+    network: OutboundSettings = field(default_factory=OutboundSettings)  # 调模型服务的证书库、额外 CA 与代理
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def __post_init__(self) -> None:
@@ -242,22 +242,22 @@ class HabitusConfig:
 
 
 def _require_layer_dependencies(config: HabitusConfig) -> None:
-    # 语义树从行为树派生（每封口日一次封口），行为侧没开就没有输入。这是**配置自相矛盾**（我们自己的两组配置
+    # 语义树从行为树派生（每封口日一次封口），行为侧没开就没有输入。这是配置自相矛盾（我们自己的两组配置
     # 互相打架），不是现实世界的形状，所以硬拒：放过去的下场是启动一切正常、什么都没发生、无处可查。
     if config.scene.enabled and not config.behavior.enabled:
         raise ConfigError(
             "config.scene is enabled but config.behavior.primary_subject is empty; "
             "the semantic layer reads sealed days of the behaviour tree and has no input without it"
         )
-    # 预测层的机会表、复现与关系全从语义树那一晚来，结算也是整晚那一趟的第一步（裁定 59：预测树删了）。
-    # 语义树没开就没有整晚、没有机会表——同一类配置自相矛盾，硬拒。
+    # 预测层的机会表、复现与关系全从语义树那一代来，结算也是换代里的一步（裁定 59）。
+    # 语义树没开就没有换代、没有机会表——同一类配置自相矛盾，硬拒。
     if config.foresight.enabled and not config.scene.enabled:
         raise ConfigError(
             "config.foresight is enabled but config.scene is not; "
             "the foresight layer reads its opportunity table from the semantic layer's generation "
             "and has nothing to build expectations from without it"
         )
-    # 预测拍一拍一槽、对齐槽边界（实时化方案第 5 节）：两个数各配一份迟早对不上，对不上就硬拒。
+    # 预测拍一拍一槽、对齐槽边界：两个数各配一份迟早对不上，对不上就硬拒。
     if config.foresight.enabled and config.foresight.tick_interval_seconds != config.temporal.slot_minutes * 60:
         raise ConfigError(
             f"config.foresight.tick_interval_seconds ({config.foresight.tick_interval_seconds:g}) must equal "

@@ -1,6 +1,6 @@
 """FAILED MemoryJob 的人工运维：重试与显式放弃（裁定 111）。
 
-FAILED 已是终态、不挡后面的任务，处置不再要求 Worker 被挡住：重试把它按序号排回队列，由正在跑的单并发 Worker
+FAILED 已是终态、不挡后面的任务，处置不要求 Worker 被挡住：重试把它按序号排回队列，由正在跑的单并发 Worker
 照常执行（Runtime 在 RUNNING 时顺手唤醒 Worker）；原文已经释放的不能重试。入口仍在 Runtime 门面。
 """
 

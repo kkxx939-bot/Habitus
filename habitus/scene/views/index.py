@@ -1,6 +1,6 @@
 """按日读一次、多次查：一天的 occurrence（按行）、观测空白。
 
-一个 ``DayIndexCache`` 只服务**一次查询**：在它的生命周期里同一天只读一次，不论那天有没有归组——
+一个 ``DayIndexCache`` 只服务一次查询：在它的生命周期里同一天只读一次，不论那天有没有归组——
 "今天必须新鲜"靠每次查询新建缓存保证，"历史不会变"靠已归组的日子本来就不再改保证。跨查询复用
 同一个缓存会读到过期的今天，所以不要那样做。
 """
@@ -20,13 +20,13 @@ from habitus.conditions import DayTypeCalendar, LocalCalendar
 from habitus.scene.views.model import FlowRow, ObservationGap
 from habitus.series.model import GapKind, KindResolution, SeriesGap, standing_parts
 
-#: 空白文档只落在**起始日**目录，而一段"未观测"可以横跨好几天（出差一周）。读某一天的空白时往前
+#: 空白文档只落在起始日目录，而一段"未观测"可以横跨好几天（出差一周）。读某一天的空白时往前
 #: 回看这么多天的起始目录，把延续到本日的裁进来；比这更长的空白从它中间那些天看不见。
 GAP_LOOKBACK_DAYS = 31
 
 
 class DayIndex:
-    """一天的只读索引。行为侧跳过撞车消歧的重复（与预测夜批同口径）；情景侧只读当前一代。
+    """一天的只读索引。行为侧跳过撞车消歧的重复（与事件序列同口径）；情景侧只读当前一代。
 
     ``day_note`` 是当地日历对这一天的说法，读时算、不落盘（见 ``conditions.calendar``）。
 
@@ -64,7 +64,7 @@ class DayIndex:
         self._uri_of = behavior_tree.uri_for
         documents = behavior_tree.read_day(BehaviorKind.OCCURRENCE, day)
         #: 这一天一条记录都没有（算不算数的都没有）：这一支的视图那天没来过东西（会话 lane 没开会话、物理 lane 上游一点数据都
-        #: 没送来，裁定 89 第 2 条）。
+        #: 没送来，裁定 89）。
         self.silent = not documents
         for document in documents:
             if not admits(document):
@@ -177,13 +177,13 @@ class DayIndexCache:
 
     def has_gap(self, start: datetime, end: datetime, *, kinds: frozenset[str] | None = None) -> bool:
         """``start`` → ``end`` 这一段里有没有观测空白（被那天的行为作废的「没读懂」已经去掉）：那段没看到，"没做"就说不准。
-        结算判"窗里有空白记中性"两种都认；递送判"窗里有空白不说"只认「没读懂」（``kinds``，裁定 68 第 2 条）。"""
+        结算判"窗里有空白记中性"两种都认；递送判"窗里有空白不说"只认「没读懂」（``kinds``，裁定 68）。"""
 
         return bool(self.gaps_within(start, end, kinds=kinds))
 
     def silent_within(self, start: datetime, end: datetime) -> bool:
         """``start`` → ``end`` 这一段碰到的日子里有没有一整天一条记录都没有的（``DayIndex.silent``）：那天算没在看
-        （裁定 89 第 2 条，两条 lane 同一个规矩），由结算判。"""
+        （裁定 89，两条 lane 同一个规矩），由结算判。"""
 
         if end <= start:
             return False

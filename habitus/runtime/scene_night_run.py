@@ -1,4 +1,4 @@
-"""``SceneNightlyRun.generate`` 的那一段串法（从 ``runtime.scene_night`` 拆出来的）：同步词表 → 封口 → 按缓存折叠 → 材料。
+"""``SceneNightlyRun.generate`` 的那一段串法：同步词表 → 封口 → 按缓存折叠 → 材料。
 没有模型调用（调模型的那几段归模型队列）。
 
 ``failures`` 给了的时候一步抛了就记下、走退路接着做。

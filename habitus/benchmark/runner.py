@@ -311,7 +311,7 @@ class BenchmarkRunner:
                 )
             )
             summary_ids = tuple(item.reference.identity for item in search.summaries)
-            # 检索不再有单独的"够不够"评估与 Summary 后备：会话摘要第一轮就能查，交出了就算用到了
+            # 检索没有单独的"够不够"评估与 Summary 后备：会话摘要第一轮就能查，交出了就算用到了
             summaries_used = bool(search.summaries)
             sufficient = None
         except Exception as exc:

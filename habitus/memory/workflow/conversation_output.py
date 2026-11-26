@@ -37,8 +37,7 @@ from habitus.memory.workflow.ingest import ConversationMemoryIngestResult
 from habitus.memory.workflow.jobs import MemoryJob, MemoryJobStatus
 from habitus.pre.conversation import ConversationBatch, ConversationMessage
 
-# TODO(conversation-source): 修改 ConversationMemoryIngestResult Codec 或输出记录结构时，
-# 必须同步提升本版本，避免新旧快照共享同一 output_id 身份空间。
+# TODO(conversation-source): 版本靠人工提升，改 Codec 或输出记录结构时须同步提升，否则新旧快照共用 output_id 空间。
 MEMORY_CONVERSATION_OUTPUT_SCHEMA_VERSION = "memory_conversation_output_v3"
 MEMORY_CONVERSATION_OUTPUT_KIND = "memory_conversation_output"
 _OUTPUT_FILE = re.compile(r"^(?P<output_id>[0-9a-f]{64})\.json$")

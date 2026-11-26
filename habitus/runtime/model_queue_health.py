@@ -36,7 +36,7 @@ def queue_problems(state: ModelQueueState, settings: QueueSettings, now: datetim
 
 
 def queue_pending(state: ModelQueueState) -> str:
-    """先验要问的题各有几份（实时化阶段 2「先验混合问法」；不是故障，健康面上记一项读数）：先验两种问法各要问几题。
+    """先验要问的题各有几份（不是故障，健康面上记一项读数）：先验两种问法各要问几题。
     一样都没有是空串。"""
 
     labels = (

@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any
 
-from habitus.behavior.reduction.errors import BehaviorReductionBusyError, BehaviorReductionError
+from habitus.behavior.reduction.errors import BehaviorReductionError
 from habitus.infrastructure.store.contracts.path_lock import LeaseGuard
 from habitus.infrastructure.store.filesystem import atomic_replace_bytes, read_regular_bytes
 
@@ -73,32 +73,6 @@ class CheckpointStore:
         replayed = sum(1 for item in documents if isinstance(item, Mapping) and item.get("kind") != "ledger-only")
         return replayed, days
 
-    def require_none(self, operation: str) -> None:
-        """运维动作不许压在悬挂的检查点上：先让 sweep 把它重放干净（否则重打 token 后重放撞冲突）。"""
-
-        if not self.path.exists():
-            return
-        try:
-            encoded = read_regular_bytes(self.path, artifact_root=self.root, max_bytes=_MAX_CHECKPOINT_BYTES)
-            checkpoint = json.loads(encoded.decode("utf-8"))
-            # 判据与 ``_publish_checkpoint`` 的必需字段对齐：两者缺一都不可重放，否则"sweep 报缺
-            # staged_at、运维动作却让你先跑 sweep"就是死锁（审计 NEW-6）。
-            replayable = (
-                isinstance(checkpoint, Mapping)
-                and isinstance(checkpoint.get("documents"), list)
-                and _is_instant(checkpoint.get("staged_at"))
-            )
-        except Exception:  # noqa: BLE001 - 只为给出准确的运维指引
-            replayable = False
-        if replayable:
-            raise BehaviorReductionBusyError(
-                f"{operation} refused: a staged reduction checkpoint is pending; run a sweep first"
-            )
-        raise BehaviorReductionError(
-            f"{operation} refused: the staged reduction checkpoint at {self.path} is not "
-            "replayable (corrupt); inspect and delete it manually before retrying"
-        )
-
 
 def document_days(documents: list) -> set[date]:
     """检查点文档触及的本地日历日；ledger-only 条目不改树、不触发刷新。"""
@@ -111,12 +85,3 @@ def document_days(documents: list) -> set[date]:
         if isinstance(payload, Mapping) and isinstance(payload.get("occurred_on"), str):
             days.add(date.fromisoformat(payload["occurred_on"]))
     return days
-
-
-def _is_instant(value: object) -> bool:
-    if not isinstance(value, str):
-        return False
-    try:
-        return datetime.fromisoformat(value).utcoffset() is not None
-    except ValueError:
-        return False

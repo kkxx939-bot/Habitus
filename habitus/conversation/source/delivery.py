@@ -59,7 +59,7 @@ class ConversationDurableConsumer(Protocol):
     # 是否要求同一 Conversation 内严格按 Source 顺序处理。声明为 True 时，交付前
     # 必须确认同会话内所有更早 Source 都已形成终态 Outcome，并额外持有一把会话级
     # 顺序锁。排序需求属于 Consumer 自身语义，由它自己声明；交付层与执行栅栏都
-    # 不再按 Consumer 名字分支。
+    # 不按 Consumer 名字分支。
     ordered_within_conversation: bool
 
     # 地址水位已盖住这份源（它和它的输出已经被释放过）时，能不能不执行、直接记 SKIPPED。只有执行不能幂等重放的
@@ -78,8 +78,8 @@ class ConversationDurableConsumer(Protocol):
 
 
 class ConversationAbandoningConsumer(ConversationDurableConsumer, Protocol):
-    """能"放弃"的 Consumer：重试账对一份源放弃时，不再做原来的处理，按自己的方式记下"这份没读懂"并落终态（Behavior：
-    还没写进树的轮写成没读懂空白，23 号第一节第 6 条）。没有这个能力的 Consumer（Memory）放弃后等人工修复。"""
+    """能"放弃"的 Consumer：重试账对一份源放弃时，不做正常处理，按自己的方式记下"这份没读懂"并落终态（Behavior：
+    还没写进树的轮写成没读懂空白）。没有这个能力的 Consumer（Memory）放弃后等人工修复。"""
 
     async def abandon(
         self,
@@ -152,8 +152,7 @@ class ConversationConsumerDelivery:
         """确保交付到达终态，并把结果记为一条观察事件。
 
         观察挂在这里而不是某个调用方，因为前台写入、启动恢复和显式恢复三条
-        路径全都汇合于此；挂在调用方就必然漏掉没挂的那条（启动恢复曾经因此
-        把 Behavior 的失败整个丢掉）。
+        路径全都汇合于此；挂在调用方就必然漏掉没挂的那条。
         """
 
         return await self._observed(source, consumer, _execute)

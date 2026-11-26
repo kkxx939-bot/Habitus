@@ -339,7 +339,6 @@ class MemoryIdentityPlanner:
                 )
             target_document, target_fields, target_kind = self._target_state(
                 mutations,
-                target,
                 proposal.target_page_id,
             )
             if source_document.kind is not target_kind:
@@ -383,7 +382,6 @@ class MemoryIdentityPlanner:
     def _target_state(
         self,
         mutations: MemoryMutationPlan,
-        target: MemoryFinalIdentity,
         target_page_id: int,
     ) -> tuple[MemoryDocument | None, Mapping[str, object], MemoryKind]:
         mutation = next(

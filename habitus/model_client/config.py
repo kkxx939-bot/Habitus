@@ -137,9 +137,9 @@ CapabilityConfig: TypeAlias = ChatModelConfig
 class CallFailureConfig:
     """模型调用失败的处理数（裁定 108）：限流的重试间隔与熔断。对话能力带一个熔断，用这组数。
 
-    - 限流的重试间隔照 OpenViking（5 秒起、120 秒封顶）；其余"等一等可能好"的重试次数与间隔用各路由的
+    - 限流的重试间隔 5 秒起、120 秒封顶；其余"等一等可能好"的重试次数与间隔用各路由的
       ``max_retries`` / ``retry_*_delay_seconds``。
-    - 熔断的数沿用原模型队列整体退避的数：连着 ``breaker_failure_threshold`` 次调用失败（每次已按路由重试过）打开，
+    - 熔断：连着 ``breaker_failure_threshold`` 次调用失败（每次已按路由重试过）打开，
       ``breaker_reset_base_seconds`` 后放一个请求试探，试探失败等待加倍、封顶 ``breaker_reset_max_seconds``。
     """
 

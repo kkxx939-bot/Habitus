@@ -1,7 +1,7 @@
-"""「开始前有没有被提醒过」——归约封口时盖 ``reminded`` 的查法（方案第九节第 0 步）。
+"""「开始前有没有被提醒过」——归约封口时盖 ``reminded`` 的查法。
 
-一条记录这一类在它开始之前被提醒过 = 账本里有一条**说出口的**递送（话已经带给他了），这条记录的编号是它的预期的节点或那个节点的
-下级（裁定 105 第 2 条，用户 2026-11-19 定照旧：说了"写文档"之后他写了周报，这条记录算被带出来的）、决定在这条记录开始之前、而且这条记录落在那条预期说中的
+一条记录这一类在它开始之前被提醒过 = 账本里有一条说出口的递送（话已经带给他了），这条记录的编号是它的预期的节点或那个节点的
+下级（裁定 105：说了"写文档"之后他写了周报，这条记录算被带出来的）、决定在这条记录开始之前、而且这条记录落在那条预期说中的
 范围里（形成之后、最晚时限之前）——判法在 ``foresight.delivery.reminded_before``，这里只读账。只看账本里还没结完的日子（``open_days``：说中的范围还没过完的预期都在那里）。
 端口由组合根注入归约 runner（``BehaviorReductionRunner.attach_reminder_lookup``），behavior 对 foresight 零知识。
 
@@ -37,7 +37,7 @@ class RemindedLookup:
             raise ForesightError("started_at must be a timezone-aware datetime")
         open_days = self.ledger.open_days()
         kinds: KindHierarchy | None = None
-        # 结完的日子不会再被问到：它们的缓存淘汰掉（26 号清单 6.13）
+        # 结完的日子不会再被问到：它们的缓存淘汰掉
         for stale in [day for day in self._spoken if day not in open_days]:
             del self._spoken[stale]
         for day in open_days:

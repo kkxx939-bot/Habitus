@@ -8,8 +8,8 @@
 结算与裁决落账时顺手往这本账上写事实（裁定 48、50、51、58、61）：准时 / 早到 / 晚了但做了是好、过期待决是坏，
 后补再写一条打折的坏覆盖它（补做那天离上一次发生隔了几天，在这一类历史间隔里的位置）；提醒后才做的是中性（提醒的功劳不算
 习惯本身）。强度按这本账自己的历史分布算（``foresight.strength``）：偏差在历史偏差里的位置、补做那天离上次多久在这一类历史
-间隔里的位置。**提醒反馈**挂在行为单元上、一个行为一份：依据那条说出口的预期结算时写一笔——做了是好、没做（没回应或回了负）
-是坏、回了中又没做的不写、回了「已做」又没看到做的不写且账上那一笔记中性（裁定 91 第 3 条②；``foresight.feedback``）；同一单元一并决定的几条按依据的说出时刻结算（「单元已选」引它）。
+间隔里的位置。提醒反馈挂在行为单元上、一个行为一份：依据那条说出口的预期结算时写一笔——做了是好、没做（没回应或回了负）
+是坏、回了中又没做的不写、回了「已做」又没看到做的不写且账上那一笔记中性（裁定 91；``foresight.feedback``）；同一单元一并决定的几条按依据的说出时刻结算（「单元已选」引它）。
 账本里读不出来的文件跳过、条数进观测，不让一个坏文件停掉整代。
 
 结算是换代里尽力而为的一步：失败自己留观测，下一代补结
@@ -78,8 +78,7 @@ from habitus.series.model import KindResolution
 @dataclass(frozen=True)
 class Asked:
     """这条预期递送上发生过什么：第一次说出口的时刻（没说过是 None），以及是不是它自己说的（依据）——单元替它一并决定的
-    （「单元已选」）按依据的说出时刻结算，但提醒反馈只由依据那条写一笔（裁定 61 第 1 条："同一单元一起开口的几条按同一个
-    说出时刻结算"）。"""
+    （「单元已选」）按依据的说出时刻结算，但提醒反馈只由依据那条写一笔（裁定 61）。"""
 
     spoken_at: datetime | None
     own: bool = False
@@ -181,7 +180,7 @@ class SettlementStage:
         #: 单元历史（换代里重标过的快照）：诊断重建"落空那一刻这条边的位置"从它读（裁定 61：权重归单元）；没给就按没有历史算。
         self.history = history
         #: 换代的完成标记记的"这一天的换代做完了没有"（``runtime.generation_marks.GenerationMarks.finished``）：没有这一代的
-        #: 那天后补只看到它开始为止（裁定 94 第 9 条）；没给就不认那天。
+        #: 那天后补只看到它开始为止（裁定 94）；没给就不认那天。
         self.finished = finished
         self._facts_cache: dict[str, list[AccountFact]] | None = None
         self._kinds: KindHierarchy = FLAT  # 这一次结算的上下级（开头取一份）
@@ -288,7 +287,7 @@ class SettlementStage:
         by_id = {item.expectation_id: item for item in self.ledger.expectations_on(day)}
         # 过期待决按账上现在的那条预测轴事实认，不按结算记录：重结可能把它改成了别的（作废、准时），也可能改回了过期待决。
         # 强度 0 的是没在看的中性（``facts.short_circuit_fact``：观测空白、会话 lane 整天没记录）：谈不上抓到缺失，不进待裁——
-        # 之后做了不改判成「后补」（裁定 54 第 3 条③、裁定 89 第 2 条；与 ``_resettle`` 只在强度 > 0 时重开同一口径）
+        # 之后做了不改判成「后补」（裁定 54、89；与 ``_resettle`` 只在强度 > 0 时重开同一口径）
         overdue = {
             expectation_id
             for expectation_id in settled - ruled
@@ -307,9 +306,9 @@ class SettlementStage:
                 waiting = waiting or not ruling_moot(item, table)
                 continue
             # 下一次机会从它开始看的那一刻（``observed_from``）起算：日子预期从当天零点起看、正好等于前一条的最晚时限，零点
-            # 之后做的归这一条，不再记成上一条的「后补」（裁定 94 第 1 条，D4）
+            # 之后做的归这一条，不记成上一条的「后补」（裁定 94）
             before = next((at for at in opened.get(item.account, ()) if at >= item.deadline), None)
-            # 没有这一代的那天按看不到：后补只看到它开始为止（裁定 94 第 9 条）——那天没有日子预期，不能把那天正常做的那次
+            # 没有这一代的那天按看不到：后补只看到它开始为止（裁定 94）——那天没有日子预期，不能把那天正常做的那次
             # 裁成上一条的「后补」
             stopped = None if self.finished is None else first_stopped_day(item.deadline, last_closed, self.finished)
             if stopped is not None and (before is None or stopped < before):
@@ -360,8 +359,8 @@ class SettlementStage:
         return settlement_fact(item, result, known=known, earlier_offsets=earlier)
 
     def _unobserved(self, item: Expectation, cache: DayIndexCache) -> bool:
-        """这条说中的范围里有没有说不清做没做的：上游报的空白，或一整天一条记录都没有的日子（等同上游报了全天「未观测」，裁定 89
-        第 2 条；两条 lane 同一个规矩，用户 2026-11-16），或它的下级做了（对它是"不知道"，裁定 105 第 2 条）。递送那一拍不看空白（裁定 68）。"""
+        """这条说中的范围里有没有说不清做没做的：上游报的空白，或一整天一条记录都没有的日子（等同上游报了全天「未观测」，两条 lane
+        同一个规矩，裁定 89），或它的下级做了（对它是"不知道"，裁定 105）。递送那一拍不看空白（裁定 68）。"""
 
         start, end = item.observed_from, item.deadline
         if cache.has_gap(start, end) or cache.silent_within(start, end):
@@ -369,7 +368,7 @@ class SettlementStage:
         return below_done(item, rows_between(cache, start.date(), end.date()), kinds=self._kinds)
 
     def _said_done(self, asked: Asked) -> bool:
-        """说给他的那句提醒（这条自己的，或单元一并决定时依据那条的）他回了「已做」（裁定 91 第 3 条②）。"""
+        """说给他的那句提醒（这条自己的，或单元一并决定时依据那条的）他回了「已做」（裁定 91）。"""
 
         if asked.basis is None:
             return False
@@ -393,8 +392,8 @@ class SettlementStage:
         return settle(item, rows, spoken_at=asked.spoken_at, settled_at=now)
 
     def resettle(self, days: Iterable[date]) -> int:
-        """修了 bug 之后：用当前代码把这些日子里已结的预期重结一遍，和账上现有的不一样的追加改判（机会的时刻不变，写下的时刻取
-        此刻，后写的覆盖先写的；旧记录不改，裁定 54）。只碰结算事实，不碰后补这类之后才有的改判，也不碰单元的提醒反馈。
+        """用当前代码把这些日子里已结的预期重结一遍，和账上现有的不一样的追加改判（机会的时刻不变，写下的时刻取
+        此刻，后写的覆盖先写的；已有记录不改，裁定 54）。只碰结算事实，不碰后补这类之后才有的改判，也不碰单元的提醒反馈。
         改回过期待决的日子若已标结完，重新打开，让之后每一代照常看有没有补做。返回改了几条预期。"""
 
         cache = day_cache(self.read_side)
@@ -437,8 +436,7 @@ class SettlementStage:
 
     @contextmanager
     def _caching_facts(self) -> Iterator[None]:
-        """一次结算里一本账的事实只从盘上读一次，之后写下的顺手加进缓存（2026-10-17 四方评审：原来每条预期把这本账整本读
-        两三遍，一晚的量是条数 × 事实数）。出了这一拍就不留。"""
+        """一次结算里一本账的事实只从盘上读一次，之后写下的顺手加进缓存。出了这一拍就不留。"""
 
         self._facts_cache = {}
         try:
@@ -488,7 +486,7 @@ class SettlementStage:
     # ── 账上的事实 ──────────────────────────────────────────────────────────
 
     def _opened_by_account(self, days: Sequence[date]) -> dict[str, list[datetime]]:
-        """账 → 这本账从最早一个还要看的日子起全部预期开始看的时刻（``observed_from``，升序），一晚读一遍：裁「后补」时找这本账
+        """账 → 这本账从最早一个还要看的日子起全部预期开始看的时刻（``observed_from``，升序），一代读一遍：裁「后补」时找这本账
         的下一次机会。"""
 
         found: dict[str, list[datetime]] = {}
@@ -510,7 +508,7 @@ class SettlementStage:
         found = 0
         if not closed:
             return 0
-        # 只走"查过漏报"水位以上的日子（26 号清单 6.11；定稿不按顺序，所以水位按连续前缀推）
+        # 只走"查过漏报"水位以上的日子（定稿不按顺序，所以水位按连续前缀推）
         start = min(closed)
         watermark = self.ledger.scan_watermark(start=start)
         for day in sorted(closed):
@@ -577,7 +575,7 @@ def first_stopped_day(
     """最晚时限之后、到最后一个定稿日为止，第一个没有这一代的日子从哪一刻开始（主体本地零点，取最晚时限的偏移）；没有是 None。
 
     读的是换代的完成标记（``finished``）：那天没有标记——必须成的那几步没成（读序列、机会表、日子预期、完成标记）、一整天都没
-    做成、没开机都一样，那天都没有日子预期（裁定 94 第 9 条）。标记够不着的那几天（None）不认。"""
+    做成、没开机都一样，那天都没有日子预期（裁定 94）。标记够不着的那几天（None）不认。"""
 
     day = deadline.date()
     while day <= last_closed:

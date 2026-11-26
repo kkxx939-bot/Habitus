@@ -1,13 +1,11 @@
 """把封口的判断物化成行为树 payload：一条可读判断一条 occurrence，一条空判断一段空白。
 
-纯函数、零发明：每个字段的取值规则都是 ``TODO(BHV-TREE-REBUILD-001)`` 的既定裁定——语义逐字来自
-判断；时间在这里做**唯一一次**换算（本地+偏移进树，树内与读侧零换算）。
+纯函数、零发明：语义逐字来自判断；时间在这里做唯一一次换算（本地+偏移进树，树内与读侧零换算）。
 产出为 JSON 可序列化的字典（时间全部是 ISO 字符串）：同一份 payload 既直接过 schema 校验，也
-能逐字节写进 staged 检查点——崩溃重试逐字节重放的前提。
+能逐字节写进 staged 检查点，这是崩溃重试逐字节重放的前提。
 
-已定但值得点名的取数规则：goal 与 basis 的空非空互不约束（WP4 随"一条 occurrence = 可提醒可代劳的单位"
-改定）；basis 每步的时间从观测物化：起止取覆盖观测 ``occurred_at`` 的最小/最大（按各自的本地偏移
-还原），``available_at`` 取覆盖观测的最大值、用末观测的偏移表达——判断存储会释放，这些时间必须在此自足。
+取数规则：goal 与 basis 的空非空互不约束；basis 每步的时间从观测物化：起止取覆盖观测 ``occurred_at`` 的最小/最大（按各自的本地偏移
+还原），``available_at`` 取覆盖观测的最大值、用末观测的偏移表达；判断存储会释放，这些时间必须在此自足。
 """
 
 from __future__ import annotations
@@ -29,7 +27,7 @@ UNOBSERVED_GAP_KIND = "未观测"
 ERROR_GAP_KIND = ERROR_GAP
 # 空判断上写着这个依据的，是上游说"这段时间没在看"（物理 lane 的覆盖时段），不是看了没读懂。
 _UNOBSERVED_BASIS = "unobserved"
-# 空判断上写着这个依据的，是系统出了问题没读成（裁定 94 第 3 条），不是模型读了给不出结论。
+# 空判断上写着这个依据的，是系统出了问题没读成（裁定 94），不是模型读了给不出结论。
 ERROR_BASIS = "error"
 
 
@@ -71,7 +69,7 @@ def occurrence_payload(
     # "何时可知"存储为 UTC；进树换算成行为开始时刻的本地偏移——occurrence 上只有一种时间约定。
     onset = record.evidence_ready_at.astimezone(record.started_at.tzinfo)
     basis = [_basis_step(semantics, observation_ids, observations) for semantics, observation_ids in record.basis]
-    # 溯源只留节点身份：原料在发布后即释放，逐条观测 id 只会是死引用（实测占文档 70%）
+    # 溯源只留节点身份：原料在发布后即释放，逐条观测 id 只会是死引用
     return {
         "occurred_on": record.started_at.date().isoformat(),
         "name": name,
@@ -81,7 +79,7 @@ def occurrence_payload(
         "status_basis": record.status_basis,
         "last_observed_at": _iso(record.last_observed_at),
         "onset_available_at": _iso(onset),
-        # 开始前窗口内是否提醒过：由 runner 经组合根注入的端口查预测层账本，在 stage 前定格（死规则⑤）。
+        # 开始前窗口内是否提醒过：由 runner 经组合根注入的端口查预测层账本，在 stage 前定格。
         "reminded": bool(reminded),
         "goal": record.goal,
         "summary": record.summary,

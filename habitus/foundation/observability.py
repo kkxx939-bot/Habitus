@@ -115,7 +115,7 @@ class ObservationEvent:
             elif isinstance(value, int | float):
                 if not math.isfinite(float(value)):
                     raise ValueError("observation numeric attributes must be finite")
-            else:  # 观测属性只放有界标量：进审计、指标与日志的数据形状契约，不是类型防御（W16 复核保留）
+            else:  # 观测属性只放有界标量：进审计、指标与日志的数据形状契约，不是类型防御
                 raise TypeError("observation attributes must contain scalar values")
             attributes[key] = value
         object.__setattr__(self, "attributes", attributes)

@@ -1,5 +1,5 @@
 """机会表的 JSON 形状。落盘与读回由组合根做（``runtime/foresight_opportunities.py``），这里只管编解码——
-同一晚重算得到同一份字节（规范 JSON），读回时严格校验，不"尽力解析"。"""
+同一代重算得到同一份字节（规范 JSON），读回时严格校验，不"尽力解析"。"""
 
 from __future__ import annotations
 
@@ -21,11 +21,7 @@ from habitus.foresight.opportunities.model import (
 from habitus.foundation.integrity import CanonicalSerializationError, canonical_json
 from habitus.temporal import DayInterval, OccurrenceDay
 
-#: v4（裁定 59）：日历换成 temporal 的复现（按天的发生 + 相邻间隔的漏看权重与截尾）、去掉 present_days、日历情境关系带键与取值。
-#: v5（2026-10-18 四方评审）：表上记这一晚用的放假数据版本（裁定 59 第 4 条）。
-#: v6（2026-10-18，S8）：日历关系带"见过的日型"、表上带"没见过的日型怎么办"。
-#: v7（26 号清单 3.3）：表上带每天看着的比例与日型（账的久别用）。表每晚整张重写，项目没上线，旧版不迁移。
-#: v8（裁定 61 第 6 条）：成立的带条件关系进表，每条关系带它挂的条件（文本 + 白天判它要的类编号 / 日历键）。
+#: 只认这一版：表每代整张重写，别的版本不迁移。
 OPPORTUNITY_SCHEMA = "habitus.foresight.opportunities/v9"
 
 
@@ -62,7 +58,7 @@ def decode_table(text: str, *, lane: str | None = None, night: date | None = Non
 
     payload = _parse(text)
     if payload.get("schema") != OPPORTUNITY_SCHEMA:
-        # 旧版本的表（语义树还有模型写的概念时算的）不支持：明确报错、点出是哪一张，不迁移
+        # 别的版本的表不支持：明确报错、点出是哪一张，不迁移
         raise OpportunitySchemaError(
             f"opportunity table {lane or payload.get('lane')!s} {night or payload.get('night')!s} has schema "
             f"{payload.get('schema')!r}, this build reads {OPPORTUNITY_SCHEMA!r}"

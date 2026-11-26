@@ -118,7 +118,7 @@ class RuntimeConversationProtocolIngestResult:
 class RuntimeObservabilityRefresh:
     """只读刷新队列、Worker 和锁聚合值并发布 gauge；采集失败不阻断业务或指标端点。
 
-    与门面同文件：锁快照的类型核对是这个文件已有的运行时类型检查（尺寸闸的类型检查基线按文件计），搬出去会变成新文件的新增条目。
+    与门面同文件：尺寸闸的类型检查基线按文件计，搬出去会成为新文件的新增条目。
     """
 
     def __init__(self, config: HabitusConfig, components: RuntimeComponents) -> None:
@@ -347,7 +347,7 @@ class Runtime:
     async def claim_reminders(
         self, *, host: str, session: str, at: datetime, limit: int
     ) -> tuple[ClaimedReminder, ...]:
-        """提醒出口的取口（方案 32 第 4.1 条）：宿主在他敲一句话时来取此刻可取的提醒（带租约），顺手留下活性。预测层没开就是空。
+        """提醒出口的取口：宿主在他敲一句话时来取此刻可取的提醒（带租约），顺手留下活性。预测层没开就是空。
         ``limit`` 是正整数；超过 ``config.foresight.outlet_claim_limit`` 的按这个上限取（宿主那边的上限各自配，不因为配得大就一条都取不到）。
         ``at`` 由宿主给、带时区。同步的文件读写下沉线程。"""
 
@@ -364,7 +364,7 @@ class Runtime:
         return await asyncio.to_thread(outlet.claim, host, session, at, capped, hold=hold)
 
     async def reminders(self, day: date | None = None) -> ReminderDay:
-        """``day``（省略是本地今天）进了提醒出口的每条提醒（两支的都在）走到了哪一步（方案 36 第 2 步）。没开预测层是空。只读。"""
+        """``day``（省略是本地今天）进了提醒出口的每条提醒（两支的都在）走到了哪一步。没开预测层是空。只读。"""
 
         self._require_initialized("reminder report")
         resolved = day if day is not None else datetime.now(self.config.locale.zone()).date()
@@ -426,7 +426,7 @@ class Runtime:
         )
         handle = self.components.conversation.source_coordinator.start(envelope)
         # 每个 Consumer 的成败由 ConversationConsumerDelivery 统一观察，覆盖前台、
-        # 启动恢复和显式恢复三条路径；这里不再为单个 Consumer 另挂回调。
+        # 启动恢复和显式恢复三条路径；这里不为单个 Consumer 另挂回调。
         result = await handle.wait(ConversationSourceConsumer.MEMORY)
         if not isinstance(result, ConversationMemoryIngestResult):
             raise RuntimeError("Memory Conversation Consumer completed without an ingest result")
@@ -614,7 +614,7 @@ class Runtime:
         return await self._failed_jobs.abandon(failed_job, reason=reason)
 
     async def list_memory(self, uri: MemoryURI | str | None = None) -> MemoryListing:
-        """浏览记忆树：列一个目录（省略是根）的子目录与文档，只给 ``habitus://`` 地址（方案 36 第 2 步）。"""
+        """浏览记忆树：列一个目录（省略是根）的子目录与文档，只给 ``habitus://`` 地址。"""
 
         self._require_initialized("memory browse")
         return await asyncio.to_thread(self.components.memory.browser.list, uri)
@@ -668,11 +668,6 @@ class Runtime:
         if manager is None:
             return ()
         return await asyncio.to_thread(manager.recent_audit, limit=limit)
-
-    def metrics_snapshot(self) -> ObservabilitySnapshot:
-        """返回进程内指标不可变快照，供 HTTP/OTel Adapter 导出。"""
-
-        return self.components.infrastructure.observability.snapshot()
 
     def prometheus_metrics(self) -> str:
         """返回 Prometheus exposition 文本，不启动 HTTP 服务。"""

@@ -1,9 +1,9 @@
 """放假安排的数据文件：格式与读取（裁定 59）。
 
-放假数据是**外接组件**：由 ``locale.calendar_path`` 指向的目录提供（每年一份 ``<年>.json``，照这个人所在地当年官方公布的放假
+放假数据是外接组件：由 ``locale.calendar_path`` 指向的目录提供（每年一份 ``<年>.json``，照这个人所在地当年官方公布的放假
 安排录入、注明出处）。没配目录时读随包附带的那一份（``holidays/<地区码>/``，目前有中国大陆 2025、2026 两年，照国务院办公厅
-当年的通知原文录入，``source`` 写文号与原文地址，裁定 80 第 2 条；新加坡 2025、2026 两年，照人力部公布的公共假期原文
-录入，``source`` 写原文地址，W3）；配了目录就只读配的那个。哪年没有数据就是那一年的日型答不出
+当年的通知原文录入，``source`` 写文号与原文地址，裁定 80；新加坡 2025、2026 两年，照人力部公布的公共假期原文
+录入，``source`` 写原文地址）；配了目录就只读配的那个。哪年没有数据就是那一年的日型答不出
 （未知），周几、几号、月末照常答。
 地区码与 ``locale.region`` 一致（``CN``、``SG``、``US-CA``）。格式严格，未知字段与重复日子都拒：
 
@@ -105,7 +105,7 @@ def load_holiday_table(region: str, directory: str | Path | None = None) -> Holi
 
 def read_holiday_table(region: str, directory: str | Path | None = None) -> tuple[HolidayTable, tuple[str, ...]]:
     """组合根用的宽松读法：读得了的年份进表，读不了的那一年跳过、问题交出去（那一年日型未知）。外接文件写错一个字
-    不许拖垮整个进程（2026-10-18 四方评审）；严格读法 ``load_holiday_table`` 留给录入时的自检。"""
+    不许拖垮整个进程；严格读法 ``load_holiday_table`` 留给录入时的自检。"""
 
     if directory is None:
         return HolidayTable(), ()

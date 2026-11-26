@@ -249,8 +249,8 @@ def _trace_attributes(event: ObservationEvent) -> dict[str, str | int | float | 
         }:
             result[f"habitus.{key}"] = value
         elif event.category in _OPEN_CATEGORIES and (not isinstance(value, str) or key in _CONTROLLED_TEXT_KEYS):
-            # 换代、语义树、预测层：计数、读数与布尔全放行，trace 上才看得到每一步的逻辑数据（用户 11-09：「otel 可以细一些，
-            # 对应逻辑数据要有」）；文字只放行受控键（段名、结局、枚举、原因码），用户派生文字不导出（codex R3）
+            # 换代、语义树、预测层：计数、读数与布尔全放行，trace 上才看得到每一步的逻辑数据；
+            # 文字只放行受控键（段名、结局、枚举、原因码），用户派生文字不导出
             result[f"habitus.{key}"] = value
         elif event.category == "behavior" and (not isinstance(value, str) or key == "job"):
             # 行为管线的属性全是各步骤自己算出的计数、时长与布尔，不含观测语义；放行数值面，

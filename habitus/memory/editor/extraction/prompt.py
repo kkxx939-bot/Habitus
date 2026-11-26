@@ -17,7 +17,7 @@ from habitus.memory.editor.extraction.turn import MemoryTurnContext
 from habitus.model_client import ChatMessage, ChatRequest
 from habitus.pre.conversation import ConversationMessage, ConversationSegment
 
-# 一轮太长、按段分开抽取时加在两种请求 system 提示末尾的一句；整轮抽取的请求不带它，与原来逐字相同。
+# 一轮太长、按段分开抽取时加在两种请求 system 提示末尾的一句；整轮抽取的请求不带它。
 _TURN_PART_RULE = (
     "这一轮对话太长，按段分开抽取：conversation_segment 只是这一轮里的一段，是本次唯一的事实来源。"
     "turn_context.opening_prompts 是这一轮开头用户说的话，turn_context.earlier_segment_summaries 是这一轮"

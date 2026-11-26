@@ -31,7 +31,7 @@ def _conversation_id_within_limit(value: str) -> str:
         size = len(value.encode("utf-8"))
     except UnicodeEncodeError as exc:
         raise ValueError("conversation_id must be valid Unicode text") from exc
-    with suppress(ValueError):  # 不能当路径段的会话号交给领域拒，报错与以前一样
+    with suppress(ValueError):  # 不能当路径段的会话号交给领域拒
         size = max(size, len(canonical_path_identity(value, "conversation_id").encode("utf-8")))
     if size > MAX_CONVERSATION_ID_UTF8_BYTES:
         raise ValueError(f"conversation_id must be at most {MAX_CONVERSATION_ID_UTF8_BYTES} UTF-8 bytes, got {size}")
@@ -148,7 +148,7 @@ class FlushRequest(StrictSchema):
 
 
 class ReminderClaimRequest(StrictSchema):
-    """宿主来取提醒（方案 32 第 4.1 条）。``session`` 与插件送转写时的 conversation_id 是同一个身份。"""
+    """宿主来取提醒。``session`` 与插件送转写时的 conversation_id 是同一个身份。"""
 
     host: Annotated[str, Field(pattern=r"^[a-z0-9](?:[a-z0-9-]{0,62})$")]
     session: Annotated[str, Field(min_length=1, max_length=256)]
@@ -239,7 +239,7 @@ class ReminderProgressResult(StrictSchema):
 
 
 class ReminderDayResult(StrictSchema):
-    """``habitus reminders``：某天进了提醒出口的每条提醒走到了哪一步，加上 R8 要看的几个数。"""
+    """``habitus reminders``：某天进了提醒出口的每条提醒走到了哪一步，加上各阶段的计数。"""
 
     day: date
     reminders: list[ReminderProgressResult]

@@ -74,10 +74,10 @@ class DrainReport:
 
 class ModelQueueState:
     """模型队列给别人看的那一面（换代与健康面读；只在进程里，重起后从盘上重新认）。"模型是不是整个用不了"不在这里记：读对话
-    这一种能力的熔断（``breaker``，裁定 108；原来队列自己的整体退避并进了熔断）。"""
+    这一种能力的熔断（``breaker``，裁定 108）。"""
 
     def __init__(self, breaker: CircuitBreaker | None = None) -> None:
-        #: 对话熔断（模型客户端的那一个，会话、选词、判官、记忆共用）；没接（离线回放）就当模型一直可用。
+        #: 对话熔断（模型客户端的那一个，会话、选词、判官、记忆共用）；没接就当模型一直可用。
         self.breaker = breaker
         #: 各类最近一次从盘上认出来还欠着几项。
         self.owed: dict[str, int] = {}
@@ -137,7 +137,7 @@ class ModelQueueState:
 @dataclass
 class Item:
     category: str
-    #: 重试账的键（带这一晚：下一晚重新给机会）；自己管重试的（出错重试）是 None。
+    #: 重试账的键（带这一天：下一天重新给机会）；自己管重试的（出错重试）是 None。
     key: str | None
     run: Callable[[dict[str, object], list[str]], Awaitable[str]]
     day: date | None = None

@@ -1,8 +1,7 @@
-"""模型队列里先验的补问（``runtime.model_queue`` 的 advice 一类；实时化阶段 2「生效时点」「先验混合问法」）。
+"""模型队列里先验的补问（``runtime.model_queue`` 的 advice 一类）。
 
 今天这一代完成之后才做，一条 lane 一项：先验对着"概念集 + 同步词表将要写的概念"问（``_prospect``），答案直接写缓存——
 只有换代读它，新类的行为概念进概念集的那一代先验已经备好。一对归哪一题只看两个概念出现的先后（``scene.advice.pairing``）。
-原来这一类还有"候选条件"那一问（2026-11-15 删）。
 """
 
 from __future__ import annotations

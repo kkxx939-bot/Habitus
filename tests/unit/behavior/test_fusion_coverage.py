@@ -53,7 +53,7 @@ def test_recorded_observations_are_covered_inside_the_window(tmp_path: Path) -> 
     first, second = observation(0, "人走到水池边"), observation(4, "人在洗手")
     judged = BASE + timedelta(minutes=5)
     index.record(receipt((first, second), judged_at=judged))
-    covered = index.covered_observation_ids(judged + timedelta(days=1))
+    covered = index.covered_observation_ids()
     assert covered == {first.observation_id, second.observation_id}
     # 记录按 judged_at 的 UTC 日期分目录——过期时整目录删除，不逐条扫描。
     day = judged.astimezone(UTC).date().isoformat()
@@ -65,7 +65,7 @@ def test_recording_the_same_receipt_twice_is_idempotent(tmp_path: Path) -> None:
     stored = receipt((observation(0, "人走到水池边"),), judged_at=BASE)
     index.record(stored)
     index.record(stored)  # 崩溃重试会再走一次同一步
-    assert len(index.covered_observation_ids(BASE)) == 1
+    assert len(index.covered_observation_ids()) == 1
 
 
 def test_records_are_read_until_expired_and_expiry_keeps_what_is_still_stored(tmp_path: Path) -> None:
@@ -80,13 +80,13 @@ def test_records_are_read_until_expired_and_expiry_keeps_what_is_still_stored(tm
     fresh = observation(4, "新观测")
     index.record(receipt((old,), judged_at=BASE - timedelta(days=10)))
     index.record(receipt((fresh,), judged_at=BASE))
-    assert index.covered_observation_ids(BASE) == {old.observation_id, fresh.observation_id}
+    assert index.covered_observation_ids() == {old.observation_id, fresh.observation_id}
     # 观测还在存储里（retain 含它）：窗口外也不删，仍读得到
     assert index.expire(BASE, retain={old.observation_id}) == 0
-    assert old.observation_id in index.covered_observation_ids(BASE)
+    assert old.observation_id in index.covered_observation_ids()
     # 交付释放之后才删；窗口内的不动，再过期一次是零
     assert index.expire(BASE) == 1
-    assert index.covered_observation_ids(BASE) == {fresh.observation_id}
+    assert index.covered_observation_ids() == {fresh.observation_id}
     remaining = sorted(path.name for path in (tmp_path / "fusion" / "coverage").iterdir())
     assert remaining == [BASE.astimezone(UTC).date().isoformat()]
     assert index.expire(BASE) == 0
@@ -106,12 +106,12 @@ def test_an_undecodable_record_is_expired_instead_of_blocking_every_sweep(tmp_pa
     fresh_day = BASE.astimezone(UTC).date().isoformat()
     next((tmp_path / "fusion" / "coverage" / fresh_day).iterdir()).write_text("not json", encoding="utf-8")
     with pytest.raises(BehaviorFusionError, match="not decodable"):
-        index.covered_observation_ids(BASE)
+        index.covered_observation_ids()
 
 
 def test_an_empty_index_covers_nothing_and_expires_nothing(tmp_path: Path) -> None:
     index = BehaviorCoverageIndex(tmp_path)
-    assert index.covered_observation_ids(BASE) == frozenset()
+    assert index.covered_observation_ids() == frozenset()
     assert index.expire(BASE) == 0
 
 

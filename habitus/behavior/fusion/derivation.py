@@ -4,34 +4,33 @@
 
 ## 两个时间，用途不同
 
-    judged_at          这次融合实际返回的时刻。**不可派生，必须存**。
+    judged_at          这次融合实际返回的时刻。不可派生，必须存。
                        用途：判断之间定序（谁修正谁）、系统真正能提醒的最早时刻。
 
-    evidence_ready_at  证据齐备的时刻 = 所覆盖观测 ``available_at`` 的 **max**。
-                       用途：**预测的可见性截断**。用它而不用 judged_at，是因为它只取决于
-                       观测本身——用 judged_at 的话，融合队列堵三天，训练数据就以为我们三天后
+    evidence_ready_at  证据齐备的时刻 = 所覆盖观测 ``available_at`` 的 max。
+                       用途：预测的可见性截断。用它而不用 judged_at，是因为它只取决于
+                       观测本身：用 judged_at 的话，融合队列堵三天，训练数据就以为我们三天后
                        才知道周一的事，那是把运维噪音喂给模型。
 
 两者之差就是融合滞后，是个天然的运维指标。
 
 ## 行为时间保留本地偏移
 
-``started_at`` / ``last_observed_at`` 取所覆盖观测的 ``local_occurred_at``，**带本地偏移**。
-不能折 UTC：行为的时间事实是它**实际发生的本地时刻**——树按本地日期分目录、``temporal`` 按本地
+``started_at`` / ``last_observed_at`` 取所覆盖观测的 ``local_occurred_at``，带本地偏移。
+不能折 UTC：行为的时间事实是它实际发生的本地时刻；树按本地日期分目录、``temporal`` 按本地
 钟面计数，东八区凌晨的行为折成 UTC 会掉到前一天、错一个钟面槽位。``foundation.integrity.canonicalize`` 会折 UTC，所以这些字段的序列化必须单独
 处理（见 ``store.py``）。
 
-注意 ``last_observed_at`` 是"**最后一条支持它的观测**发生在什么时候"，不是"行为在什么时候
-结束"——后者我们经常不知道，那正是 ``status_basis=observation_lost`` 要表达的事。
+注意 ``last_observed_at`` 是"最后一条支持它的观测发生在什么时候"，不是"行为在什么时候
+结束"；后者我们经常不知道，那正是 ``status_basis=observation_lost`` 要表达的事。
 
 ## 身份不含来源
 
-``judgement_id`` 由"它说了什么、依据哪些观测、什么时候"派生，**不含 source_refs**：它是"这些观测由哪几次交付送来的"，属于溯源而不是内容。同一批观测被重复
+``judgement_id`` 由"它说了什么、依据哪些观测、什么时候"派生，不含 source_refs：它是"这些观测由哪几次交付送来的"，属于溯源而不是内容。同一批观测被重复
 投递两次，得到的应当是同一条判断，而不是两条。代价是身份的输入是 payload 的真子集——理论上
 同内容、同 ``judged_at``、不同来源的两条会算出同一个身份却有不同的字节，写第二份时被存储的撞车
-检查硬失败。实测构造不出正常路径：同一段观测的 ``source_refs`` 由切段一次定死，而不同批次必然
-有不同的 ``judged_at``、身份本来就不同。所以这里保持现状，但把前提写下来——真要出现，说明有人
-绕过了排队层用同一个时间戳重放了不同来源的同一段观测。
+检查硬失败。正常路径构造不出这种情况：同一段观测的 ``source_refs`` 一次定死，而不同批次必然
+有不同的 ``judged_at``。真要出现，说明有人用同一个时间戳重放了不同来源的同一段观测。
 """
 
 from __future__ import annotations
@@ -53,9 +52,6 @@ from habitus.foundation.integrity import canonical_digest
 
 # 派生实现的版本：判断的身份怎么算、记录长什么样。哪条 lane、哪版提示词或转换规则写的，由各条 lane
 # 在派生时给（``fusion_version`` / ``prompt_version``），不在这里。
-# v2：同一主体同刻开始的同名行为只接受一条判断（判重守卫）。
-# v3：behavior=空（没读懂）的判断也进判断存储——归约层要把它物化成 gap 节点。
-# v5：逐帧融合（提示词、输出形状、装配）退役，版本不再含提示词与输出形状的摘要。
 FUSION_IMPLEMENTATION_VERSION = "behavior_judgement_fusion_v5"
 FUSION_VERSION = FUSION_IMPLEMENTATION_VERSION
 
@@ -114,7 +110,7 @@ def derive_judgements(
     这些观测由哪几次交付送来的，无法从片段自身推出；``fusion_version`` / ``prompt_version`` 是哪条 lane、
     哪版提示词或转换规则写的，由调用的那条 lane 给。
 
-    **前提：``fragments`` 里不能有重复的观测身份。** 片段编号在这里被换成观测身份；映射一旦不是单射，
+    前提：``fragments`` 里不能有重复的观测身份。片段编号在这里被换成观测身份；映射一旦不是单射，
     两条内容相同、编号不同的判断就会算出同一个 ``judgement_id`` 并在内容寻址的存储里静默合并。
     两条 lane 各自的凭据（开始、结束）时刻不同，身份不会重复。
     """
@@ -298,7 +294,7 @@ def _instant(value: datetime) -> str:
 
 
 def _local(value: datetime) -> str:
-    """行为时间，**保留本地偏移**；折 UTC 会改掉本地日历日。"""
+    """行为时间，保留本地偏移；折 UTC 会改掉本地日历日。"""
 
     return value.isoformat(timespec="microseconds")
 

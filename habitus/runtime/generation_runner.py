@@ -1,10 +1,10 @@
-"""换代的那一眼（实时化方案第 3、9、10 节；阶段 2 第二小步）：不是常驻 worker——预测 worker 每个槽边界、在预测根租约之内
+"""换代的那一眼：不是常驻 worker——预测 worker 每个槽边界、在预测根租约之内
 先调它看一眼，再做预测拍（``runtime.foresight_worker``）。没有自己的循环、没有自己的租约："同一个根同一天只换一次"由预测根租约
 加完成标记保证。
 
 一眼（``look``）：
 
-1. 进程起来后第一眼：上一次中途被杀剩下的重试项撤回（裁定 68 第 3 条，``clean_leftovers``；等锁的状态只在进程里）；
+1. 进程起来后第一眼：上一次中途被杀剩下的重试项撤回（裁定 68，``clean_leftovers``；等锁的状态只在进程里）；
 2. 看能不能换代（``Generation.ready``）：连续定稿到昨天、预测拍水位过了余量、今天的完成标记还没有。定稿日不连续的那一天连着
    ``generation_stuck_ticks`` 眼都没好，``stuck`` 记下它（健康面报出）；
 3. 能就做一代（``Generation.run``）。必须成的那一步没成：按退避（``scene.generation_retry_*``）在之后的槽再试；还没准备好（锁被
@@ -66,7 +66,7 @@ class GenerationSettings:
 
     kept_days: int = 366
     stuck_ticks: int = 3
-    #: 必须成的那一步没成之后的退避（用户 11-10 失败重试第 2 条：5 分钟起、逐次加倍、封顶 1 小时，同一天一直重试、不放弃）。
+    #: 必须成的那一步没成之后的退避：逐次加倍、有封顶，同一天一直重试、不放弃。
     retry_base_seconds: float = 300.0
     retry_max_seconds: float = 3_600.0
 
@@ -238,7 +238,7 @@ class GenerationRunner:
                 item.reason or "-",
                 item.duration_seconds,
             )
-        # 退路一个计数一条事件（零也记：验收要看得见"这一代没走退路"）
+        # 退路一个计数一条事件（零也记：看得见"这一代没走退路"）
         for kind in FALLBACKS:
             record_observation(
                 self.observer,
@@ -298,7 +298,7 @@ class GenerationRunner:
 
 
 class _Retries:
-    """必须成的那一步没成之后的退避（用户 11-10 失败重试第 2 条，F3）：哪一天、连着没成了几次、下一次最早什么时候再做。
+    """必须成的那一步没成之后的退避：哪一天、连着没成了几次、下一次最早什么时候再做。
     只在进程里，重启后从头；换了一天重新数；写成了清零；还没准备好（锁被占）不算失败、不退避。"""
 
     def __init__(self, backoff: BackoffPolicy) -> None:

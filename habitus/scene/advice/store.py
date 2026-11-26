@@ -1,12 +1,11 @@
-"""``scene/advice/`` 的存储：模型输出按输入摘要缓存，回放与回测只读缓存、不重新问模型（语义树新方案 ``13`` ②）。
+"""``scene/advice/`` 的存储：模型输出按输入摘要缓存，回放与回测只读缓存、不重新问模型。
 
 ```
-advice/priors/<缓存键>.json        一个后果的先验（旧问法：固定后果、列前因；缓存键 = 输入摘要 + 先验触点的版本与模型）
-advice/priors-by-antecedent/<缓存键>.json  一个前因的先验（新问法：固定前因、列后果；实时化阶段 2「先验混合问法」）
+advice/priors/<缓存键>.json        一个后果的先验（按后果问：固定后果、列前因；缓存键 = 输入摘要 + 先验触点的版本与模型）
+advice/priors-by-antecedent/<缓存键>.json  一个前因的先验（按前因问：固定前因、列后果）
 ```
 
-``advice/conditions/`` 是已删的提议簿（问模型提候选条件那一路，2026-11-15 删）：盘上还有就明确报错、点出文件，不迁移
-（``refuse_proposal_books``）。
+``advice/conditions/`` 是已不支持的提议簿目录：盘上还有就明确报错、点出文件，不迁移（``refuse_proposal_books``）。
 
 规范 JSON，读回逐字节比对；原子写、回读比对（``SceneStore``）。
 """
@@ -23,12 +22,12 @@ from habitus.scene.advice.model import PriorLevel
 from habitus.scene.storage import SceneStore
 
 ADVICE_SEGMENT = "advice"
-#: 先验缓存的格式版本：语义树只剩词表类与日历之后（2026-11-14）升了一版，旧版本的缓存读到明确报错、不迁移。
+#: 先验缓存的格式版本：别的版本的缓存读到明确报错、不迁移。
 PRIOR_SCHEMA = "habitus.scene.advice.prior/v2"
-#: 新问法的先验缓存目录（按前因存）。
+#: 按前因问的先验缓存目录。
 BY_ANTECEDENT = "priors-by-antecedent"
 MAX_RECORD_BYTES = 4 * 1024 * 1024
-#: 已删的提议簿目录。
+#: 已不支持的提议簿目录。
 RETIRED_BOOKS = "conditions"
 
 
@@ -93,7 +92,7 @@ class AdviceStore(SceneStore):
     def discard_prior(self, key: str) -> None:
         self._discard(self._prior_path(key))
 
-    # ── 先验（新问法：按前因存）────────────────────────────────────────────
+    # ── 先验（按前因问）────────────────────────────────────────────
 
     def prior_by_antecedent(self, key: str) -> Mapping[str, PriorLevel] | None:
         payload = self._read(self._prior_path(key, BY_ANTECEDENT))

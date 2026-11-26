@@ -15,7 +15,6 @@ import httpx
 
 from habitus.foundation.validation import is_nonblank_str
 from habitus.model_client.errors import ModelResponseError
-from habitus.model_client.json_parser import parse_json_response
 
 
 class HTTPStatusError(RuntimeError):
@@ -34,38 +33,6 @@ class HTTPStatusError(RuntimeError):
         self.status_code = status_code
         self.retry_after = retry_after
         self.provider_code = provider_code
-
-
-async def post_json_object(
-    client: httpx.AsyncClient,
-    endpoint: str,
-    *,
-    headers: Mapping[str, str],
-    payload: Mapping[str, object],
-    max_response_bytes: int,
-    label: str,
-) -> Mapping[str, object]:
-    """发一次 JSON POST，返回成功响应里的 JSON 对象；``label`` 只用来写报错。"""
-
-    async with client.stream("POST", endpoint, headers=dict(headers), json=dict(payload)) as response:
-        content = await read_bounded(response, max_response_bytes, label=label)
-        status_code = getattr(response, "status_code", None)
-        if not isinstance(status_code, int):
-            raise ModelResponseError(f"{label} provider response has no HTTP status")
-        if status_code >= 400:
-            raise HTTPStatusError(
-                error_message(content, status_code, label=label),
-                status_code=status_code,
-                retry_after=retry_after(getattr(response, "headers", None)),
-                provider_code=error_code(content),
-            )
-    try:
-        value = parse_json_response(content.decode("utf-8"), allow_repair=False).value
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise ModelResponseError(f"{label} provider returned malformed JSON") from exc
-    if not isinstance(value, Mapping):
-        raise ModelResponseError(f"{label} provider response must be a JSON object")
-    return value
 
 
 async def read_bounded(response: httpx.Response, maximum: int, *, label: str) -> bytes:
@@ -177,7 +144,6 @@ __all__ = [
     "error_code",
     "error_message",
     "is_remote_url",
-    "post_json_object",
     "raise_for_status",
     "read_bounded",
     "read_bounded_sync",

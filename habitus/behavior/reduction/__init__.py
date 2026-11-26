@@ -1,7 +1,7 @@
 """归约写入层：封口的判断 → 行为树文档。
 
-行为树唯一的生产入口（观测 → 融合 → **归约** → 落盘），零发明：语义逐字来自判断，唯一的
-LLM 触点是给没带选词结果的判断选词（``kinds_step``，物理 lane）。见 ``TODO(BHV-TREE-REBUILD-001)`` 与各模块 docstring。
+行为树唯一的生产入口（观测 → 融合 → 归约 → 落盘），零发明：语义逐字来自判断，唯一的
+LLM 触点是给没带选词结果的判断选词（``kinds_step``，物理 lane）。
 """
 
 from habitus.behavior.reduction.errors import BehaviorReductionBusyError, BehaviorReductionError

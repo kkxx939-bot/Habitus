@@ -1,18 +1,16 @@
-"""单元的历史（裁定 55 新版第 2 条）：每晚用当晚的语义树把每个行为历史上每一刻重标一遍在场的输入，单元白天拿它去数。
+"""单元的历史（裁定 55）：每代用这一代的语义树把每个行为历史上每一刻重标一遍在场的输入，单元平时拿它去数。
 纯函数、形状与编解码；落盘在组合根（``runtime/foresight_history.py``）。
 
-照 transformer 训练里"每一遍用最新的模型把全部数据重算一次"：旧数据不改标签、不回头改账，只是用今晚的关系表重新看历史上
-那一刻有哪些输入在场。一条新关系（"约游泳 → 压低健身"）长出来那一晚，它在场的那几刻从「离上次够久」换进「离上次够久 + 约游泳」，
-不再拖低平常那一组；下一次同样的组合出现，单元读低、不预测。
+旧数据不改标签、不回头改账，只是用这一代的关系表重新看历史上那一刻有哪些输入在场。一条新关系（"约游泳 → 压低健身"）
+长出来那一代，它在场的那几刻从「离上次够久」换进「离上次够久 + 约游泳」，不拖低平常那一组；下一次同样的组合出现，单元读低、不预测。
 
-**一刻在场的输入**：这一刻每条预期自己那本账，加上当晚关系表里以这个行为为后果、状态在 ``statuses`` 里的每条关系——前因在
+一刻在场的输入：这一刻每条预期自己那本账，加上这一代关系表里以这个行为为后果、状态在 ``statuses`` 里的每条关系——前因在
 那条预期形成的那一刻正处在关系那一段跨度里（与建预期同一把尺 ``chains_in_segment``）；情境段（日历情境，裁定 59）看那一天
-日历条件成不成立（时间线上那天的日历条件，与建预期同一个判法 ``calendar_holds``；日历答不出的那天不算在场）。抬高的记成它那本事件 / 情境账的身份，压低的记
-``↓`` + 关系身份。时间线是语义树这一晚的（按概念身份挂记号；行为概念的身份就是类编号）。新关系"周三 → 例会材料"长出来
-那一晚，过去的周三都换进这个输入。
+日历条件成不成立（与建预期同一个判法 ``calendar_holds``；日历答不出的那天不算在场）。抬高的记成它那本事件 / 情境账的身份，
+压低的记 ``↓`` + 关系身份。时间线是语义树这一代的（按概念身份挂记号；行为概念的身份就是类编号）。
 
-**带条件的关系与巧合**（裁定 61 第 6 条）：同一族（不带条件的 + 各带条件版本）里那一刻只记给条件全成立、条件最多的那一条
-（与建预期同一个取法 ``triggers.conditions.most_specific``，条件按语义树的 ``evaluator`` 在当晚的时间线上判）；组合成立那一晚，
+带条件的关系与巧合（裁定 61）：同一族（不带条件的 + 各带条件版本）里那一刻只记给条件全成立、条件最多的那一条
+（与建预期同一个取法 ``triggers.conditions.most_specific``，条件按语义树的 ``evaluator`` 在这一代的时间线上判）；组合成立那一代，
 历史上条件成立的各刻自动归到组合边。语义树已判成巧合（效应不够大）的输入不进签名，权重照数、只是不参与分组。
 """
 
@@ -35,11 +33,11 @@ from habitus.foundation.lifecycle import rank_by
 from habitus.scene.relations import LaneTimeline, Segment
 from habitus.temporal.slots import absolute_slot
 
-#: v2（裁定 61 第 7 条）：每刻的分量是原始强度，"规律断了"的打折读的时候算；签名按族取最具体的成立组合、不含巧合输入。
-#: v3：每刻带着它由哪几条预期组成——单元的提醒反馈时钟按这个行为的每一次机会推进（裁定 91 第 3 条①；原为裁定 60 第 4 条
-#: "到时窗末还没做"的机会，格式不变），要认出哪几刻已经作为提醒反馈记过、不再数一遍。
+#: 每刻的分量是原始强度，"规律断了"的打折读的时候算；签名按族取最具体的成立组合、不含巧合输入（裁定 61）。
+#: 每刻带着它由哪几条预期组成：单元的提醒反馈时钟按这个行为的每一次机会推进（裁定 91），要认出哪几刻已经作为提醒反馈记过、
+#: 不再数一遍。
 HISTORY_SCHEMA_VERSION = 3
-#: v2（裁定 81）：自然命中带着认出的那次发生，一次发生只算给一刻。
+#: 自然命中带着认出的那次发生，一次发生只算给一刻（裁定 81）。
 MOMENT_RECORD_SCHEMA = "foresight_unit_moment_v2"
 #: 看得见的落空（强度大于 0 才算：观测空白里的中性不算知道）。
 _MISSES = frozenset({"过期待决", "后补"})
@@ -47,7 +45,7 @@ _MISSES = frozenset({"过期待决", "后补"})
 
 @dataclass(frozen=True)
 class MomentRecord:
-    """单元历史的原料（26 号清单 4.9）：一条预期结完之后它在预测轴上的结果，一条一份落盘、不随账本压实而丢。
+    """单元历史的原料：一条预期结完之后它在预测轴上的结果，一条一份落盘、不随账本压实而丢。
 
     ``came``：自然命中为真，看得见的落空为假，其余（被提醒才做、观测空白、作废）为 None——不算知道，但照样参与"说中的范围
     连成一片"（它能把前后两条连成同一刻）。``strength`` 是原始强度：规律断了的打折在读的时候对正在读的那串刻算
@@ -150,7 +148,7 @@ class Moment:
 
 @dataclass(frozen=True)
 class UnitHistory:
-    """一条 lane 第 ``night`` 晚重标过的历史：行为类 → 它历史上的每一刻（连同每刻由哪几条预期组成）。"""
+    """一条 lane 在 ``night`` 那一代重标过的历史：行为类 → 它历史上的每一刻（连同每刻由哪几条预期组成）。"""
 
     lane: str
     night: date
@@ -170,7 +168,7 @@ class UnitHistory:
 def present_inputs(
     group: Sequence[MomentRecord], *, table: OpportunityTable, line: LaneTimeline, statuses: Iterable[str]
 ) -> frozenset[str]:
-    """历史上这一刻（同一个行为、说中的范围连成一片的几条预期）按当晚的关系表在场的输入。"""
+    """历史上这一刻（同一个行为、说中的范围连成一片的几条预期）按这一代的关系表在场的输入。"""
 
     if not group:
         raise ForesightError("a moment needs at least one expectation")
@@ -210,7 +208,7 @@ def present_inputs(
             if chosen.key not in coincidental:
                 found.add(_input_of(kind, "事件", chosen))
         # 这条记录自己那本账：事件源的账属于某一族、而这一族这一刻已判出最具体的那条时，就由那一条代表（同一次结果只记
-        # 一次，组合成立后旧刻自动归到组合边）；族不在表上（关系退回了）或日子源的照旧记自己
+        # 一次，组合成立后旧刻自动归到组合边）；族不在表上（关系退回了）或日子源的记自己
         if trigger not in coincidental and (source != "事件" or _base_of(trigger) not in decided):
             found.add(item.account)
     return frozenset(found)
@@ -270,7 +268,7 @@ def build_history(
     line: LaneTimeline,
     statuses: Iterable[str],
 ) -> tuple[UnitHistory, Mapping[str, tuple[Moment, ...]]]:
-    """这一晚每个行为历史上的每一刻（在场的输入按当晚的关系表重标）；连同每一刻由哪几条预期组成（退出用）。"""
+    """这一代每个行为历史上的每一刻（在场的输入按这一代的关系表重标）；连同每一刻由哪几条预期组成（退出用）。"""
 
     wanted = tuple(statuses)
     by_kind: dict[str, list[MomentRecord]] = {}
@@ -288,7 +286,7 @@ def build_history(
 
 @dataclass(frozen=True)
 class RelabelDelta:
-    """一晚重标相对上一份快照动了多少（裁定 55 新版第 2 条，只给观测用）：
+    """一代重标相对上一份快照动了多少（裁定 55，只给观测用）：
 
     - ``signature_changed_moments``：在场签名变了的刻数——按组成它的那几条预期（``expectation_ids``）在同一个行为里认同一刻，
       签名和上一份不同、或这一份新出现、或上一份有而这一份没有，都各算一刻。
@@ -300,7 +298,7 @@ class RelabelDelta:
 
 
 def relabel_delta(before: UnitHistory | None, after: UnitHistory) -> RelabelDelta:
-    """这一晚重标后的 ``after`` 和上一份 ``before`` 比，数签名变了的刻与受影响的行为；``before`` 为空时整份都算变。"""
+    """这一代重标后的 ``after`` 和上一份 ``before`` 比，数签名变了的刻与受影响的行为；``before`` 为空时整份都算变。"""
 
     old = before.moments if before is not None else {}
     changed = 0

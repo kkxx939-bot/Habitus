@@ -1,4 +1,4 @@
-"""提醒出口的传输状态落盘（方案 32 第 3.2 条）：此刻可取的请求清单、取走记录、问过的提问、宿主活性。这些是传输状态，
+"""提醒出口的传输状态落盘：此刻可取的请求清单、取走记录、问过的提问、宿主活性。这些是传输状态，
 不进账本；账本只记事实（请求发出了、宿主说了，``runtime/foresight_ledger.py``）。
 
 住在组合根、只管目录与字节：形状与规则在 ``runtime/foresight_outlet.py``。这里不认识账本的形状（写账本的只有账本门面）。
@@ -71,7 +71,7 @@ class OutletStore:
         return self._all(self._claims)
 
     def claimed(self, request_id: str) -> bool:
-        """这条请求被宿主取走过没有（有取走记录）：依据失效时取走过的不撤（实时化方案第 7 节）。"""
+        """这条请求被宿主取走过没有（有取走记录）：依据失效时取走过的不撤。"""
 
         return request_id in self.claims()
 

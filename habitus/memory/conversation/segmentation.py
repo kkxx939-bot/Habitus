@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import re
 from collections.abc import Callable
 from dataclasses import replace
@@ -13,13 +12,10 @@ from habitus.pre.conversation import (
     ConversationMessageRole,
 )
 
-logger = logging.getLogger(__name__)
-
 SEMANTIC_CHUNKER_VERSION = "conversation_semantic_chunker_v1"
 
 
-# TODO(conversation-source): 修改此拆分算法语义时，必须同步提升
-# memory/workflow/conversation_consumer.py 中 text_chunker_version。
+# TODO(conversation-source): 改此拆分算法语义时须人工提升 conversation_consumer.py 的 text_chunker_version。
 class ConversationMessageChunker:
     """在写入 live 前把单条超长文本拆成可重组的物理消息。"""
 

@@ -1,6 +1,6 @@
 """换代的结果与口径（``runtime.generation``）：各步与它们的先后、哪几步必须成、一步的结局、各个退路的计数名、做一代的结果。
 
-换代里没有模型调用（实时化阶段 2）：语义树里调模型的那几段都归模型队列
+换代里没有模型调用：语义树里调模型的那几段都归模型队列
 （``runtime.model_queue``），步骤表里没有它们；换代只记下"换代时模型队列各类还欠着几项"（``GenerationResult.queue_owed``）
 与"换代那一刻模型队列是不是在整体退避"（是就不判关系、沿用上一代）。"""
 
@@ -16,7 +16,7 @@ from habitus.runtime.generation_summary import UNREACHABLE, reason_code
 CALENDAR, RETRY, SETTLE = "calendar", "retry", "settle"
 SERIES, ACTIVE, SCENE, OPPORTUNITIES, DAYS, MARK = "series", "active", "scene", "opportunities", "days", "mark"
 HABITS, RELATION_CARDS = "habits", "relation_cards"
-#: 换代的各步，按先后。"数在用的词"在读序列之后、语义树之前（裁定 101 第 7 条：要按日子数就得先有序列；
+#: 换代的各步，按先后。"数在用的词"在读序列之后、语义树之前（裁定 101：要按日子数就得先有序列；
 #: 数出来的集合显式交给这一代的语义树）。单元历史与压实在机会表那一步里、跟在表后面（各自一个 ``foresight.*`` 子 span）。
 #: 习惯卡片（裁定 113）与关系卡片（裁定 115）只做记录、预测不读：排在必须成的几步之后、完成标记之前，这一代要写成了才更新卡片。
 STEPS = (CALENDAR, RETRY, SETTLE, SERIES, ACTIVE, SCENE, OPPORTUNITIES, DAYS, HABITS, RELATION_CARDS, MARK)
@@ -37,7 +37,7 @@ LABELS = {
 }
 
 #: 一步的结局：做成了、尽力的那一步没做成（走了退路）、这一代没轮到它（缺前提或这一代跳过）、必须成的那一步没成、
-#: 还没准备好（锁被另一进程拿着：这一眼到此为止、不写完成标记、不算失败，下一眼从头做，用户 11-10 失败重试第 1 条）。
+#: 还没准备好（锁被另一进程拿着：这一眼到此为止、不写完成标记、不算失败，下一眼从头做）。
 DONE, DEGRADED, SKIPPED, FAILED, HELD = "done", "degraded", "skipped", "failed", "held"
 #: 健康面与报告上的原因（与 ``generation_summary.UNREACHABLE`` 同一句）。
 MODEL_UNREACHABLE = UNREACHABLE

@@ -1,13 +1,13 @@
-"""预测层每晚的派生物落盘：一条 lane 一晚一份规范 JSON，整份重写，只留最近几晚。机会表与单元历史共用这一份。
+"""预测层每代的派生物落盘：一条 lane 一代一份规范 JSON，整份重写，只留最近几代。机会表与单元历史共用这一份。
 
     <root>/<segment>/<lane>/<YYYY-MM-DD>.json
 
-派生物每晚从同一份序列重算，不是账本：同一晚重跑整文件原子替换、回读比对；比盘上最晚一晚更早的晚不写（派生树按固定先后处理
-已封口的历史，不往回改）；写完把更早的晚删到只剩 ``retained_nights`` 晚。住在组合根：``foresight`` 不许 import infrastructure，
+派生物每代从同一份序列重算，不是账本：同一代重跑整文件原子替换、回读比对；比盘上最晚一代更早的代不写（派生树按固定先后处理
+已封口的历史，不往回改）；写完把更早的代删到只剩 ``retained_nights`` 代。住在组合根：``foresight`` 不许 import infrastructure，
 形状与编解码在 ``foresight`` 里，这里只管目录与字节。
 
-目录里只认 ``<YYYY-MM-DD>.json``：别的名字（编辑器备份、``copy``、写到一半的临时文件）不是哪一晚，跳过不报。读最晚一晚时
-那一份读不出来（解析不了、形状或版本不对）就往前退一晚（留的那几代备用就是为这个，26 号清单 6.12），坏的那一份计入观测
+目录里只认 ``<YYYY-MM-DD>.json``：别的名字（编辑器备份、``copy``、写到一半的临时文件）不是哪一代，跳过不报。读最晚一代时
+那一份读不出来（解析不了、形状或版本不对）就往前退一代（留的那几代备用就是为这个），坏的那一份计入观测
 （``take_unreadable``）。
 """
 
@@ -92,7 +92,7 @@ class NightlyFiles:
             try:
                 night = date.fromisoformat(entry.name[:-5])
             except ValueError:
-                continue  # 不是按晚起名的（备份、副本）：不是哪一晚
+                continue  # 不是按日子起名的（备份、副本）：不是哪一代
             if entry.name == f"{night.isoformat()}.json":
                 found.append(night)
         return tuple(sorted(found))
@@ -104,8 +104,8 @@ class NightlyFiles:
     def latest[T](
         self, lane: str, decode: Callable[[str, date], T], *, accept: Callable[[date], bool] | None = None
     ) -> T | None:
-        """最晚一晚读得出来的那一份（``decode`` 把一晚的文本解码，坏的抛 ``ForesightError``）：最晚那一份坏了就往前退一晚，
-        坏的计入观测；一晚都读不出来是 None。给了 ``accept`` 就只看它认的那几晚（不认的不读）。"""
+        """最晚一代读得出来的那一份（``decode`` 把一代的文本解码，坏的抛 ``ForesightError``）：最晚那一份坏了就往前退一代，
+        坏的计入观测；一代都读不出来是 None。给了 ``accept`` 就只看它认的那几代（不认的不读）。"""
 
         for night in reversed(self.nights(lane)):
             if accept is not None and not accept(night):
@@ -120,7 +120,7 @@ class NightlyFiles:
         return None
 
     def take_unreadable(self) -> tuple[str, ...]:
-        """上次 ``take`` 以来读最晚一晚时跳过的坏文件（路径），取走即清。"""
+        """上次 ``take`` 以来读最晚一代时跳过的坏文件（路径），取走即清。"""
 
         with self._lock:
             found = tuple(self._unreadable)
@@ -146,7 +146,7 @@ class NightlyFiles:
         return self.directory / lane
 
     def _prune(self, lane: str, keep: Callable[[date], bool] | None = None) -> None:
-        """删到只剩最近 ``retained_nights`` 晚；给了 ``keep`` 就另外留下它认的最晚那一晚（不在最近几晚里时多留这一份）。"""
+        """删到只剩最近 ``retained_nights`` 代；给了 ``keep`` 就另外留下它认的最晚那一代（不在最近几代里时多留这一份）。"""
 
         nights = self.nights(lane)
         kept = next((night for night in reversed(nights) if keep(night)), None) if keep is not None else None

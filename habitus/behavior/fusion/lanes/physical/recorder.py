@@ -126,7 +126,7 @@ class PhysicalSegmentRecorder:
         """已经被回执覆盖的观测与交付位置。读一次要扫全部覆盖记录，一份交付只读一次。"""
 
         return CoveredUnits(
-            observations=self.coverage.covered_observation_ids(self.clock()),
+            observations=self.coverage.covered_observation_ids(),
             envelopes=self.coverage.covered_envelope_ids(),
         )
 
@@ -175,7 +175,7 @@ class PhysicalSegmentRecorder:
                 ended_at=ended_at,
                 claim=BehaviorClaim(behavior=None, goal=None, summary=None, basis=()),
                 # 原因（没戴 / 充电 / 无数据）不进摘要：同一段没在看的时间换个原因再报，不是两段。lane 对收过的空白
-                # 不再调到这里（只把没收过的那几截交下来），这份摘要只在直接调 recorder 时起作用：防御。
+                # 不调到这里（只把没收过的那几截交下来），这份摘要只在直接调 recorder 时起作用：防御。
                 content_digest=canonical_digest({"unobserved": [_instant(started_at), _instant(ended_at)]}),
                 kind=SpanKind.UNOBSERVED,
             ),
@@ -204,7 +204,7 @@ class PhysicalSegmentRecorder:
             return UnitDisposition.REVISION_REJECTED
         existing = self.observations.read(envelope.source_id)
         if existing is not None and existing.payload_digest != envelope.payload_digest:
-            # 上一次只写到一半、这次内容变了：从没写完过，算不上改判。把那半截清掉，按这次的重新写——
+            # 上一次只写到一半、这次内容变了：从没写完过，算不上改判。把那半截清掉，按这次的重新写；
             # 留着它，那两条没被覆盖的凭据会把归约的封口永远卡在它那一刻。
             self._discard_half_written(
                 existing.source_id, [item.observation_id for item in existing.batch.observations]

@@ -118,7 +118,7 @@ class RuntimeConversation:
     source_outcomes: ConversationConsumerOutcomeStore
     memory_outputs: MemoryConversationOutputStore
     behavior_session_outputs: BehaviorSessionOutputStore
-    #: 会话 lane 消费者；预测层开着时外面包着提醒出口那一层（方案 32 第 4.2 条：同一份会话先过出口再进 lane）。
+    #: 会话 lane 消费者；预测层开着时外面包着提醒出口那一层（同一份会话先过出口再进 lane）。
     behavior_session_consumer: BehaviorSessionConsumer | OutletObservingConsumer
     source_inspector: ConversationConsumerStateInspector
     source_fence: ConversationConsumerExecutionFence
@@ -292,7 +292,7 @@ class RuntimeComponents:
 
     @property
     def claim_check(self) -> ClaimCheck:
-        """宿主来取提醒那一刻再判一次要的材料（裁定 104 第 2 条）：两支各看自己的"还没判完"——会话一支看会话源的会话 lane 这个
+        """宿主来取提醒那一刻再判一次要的材料（裁定 104）：两支各看自己的"还没判完"——会话一支看会话源的会话 lane 这个
         Consumer 到没到终态，物理一支看判断选上词没有（用预测拍那座带选词缓存的桥）。"""
 
         recovery = self.conversation.source_recovery
@@ -312,7 +312,7 @@ class RuntimeComponents:
         )
 
     def _check_pipelines(self) -> None:
-        """各支的管线读**这个** Runtime 的那一支（实例同一性，``ScenePipeline`` 自己再核内部接线）；两个常驻 worker 驱动的正是这
+        """各支的管线读这个 Runtime 的那一支（实例同一性，``ScenePipeline`` 自己再核内部接线）；两个常驻 worker 驱动的正是这
         几条管线——换代没有自己的循环，漏接的话进程照常、健康全绿，一代都不会做。"""
 
         if not self.pipelines:

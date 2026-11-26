@@ -1,5 +1,5 @@
 """词表口的实现：用基础词表的在用状态装出语义树要的 ``ClassCatalog``（裁定 20；裁定 101），读行为树上
-``kind_token`` 的换算口（``series.model.KindResolution``：删掉的节点换成最近的活着的上级，裁定 101 第 7 条），以及预测层的上下级口
+``kind_token`` 的换算口（``series.model.KindResolution``：删掉的节点换成最近的活着的上级，裁定 101），以及预测层的上下级口
 （``foresight.hierarchy.KindHierarchyPort``：每个活着的词的全部下级、在用的词，裁定 105）。
 
 scene、序列、预测层都不 import 词表状态，所以"在用状态怎么读成在用的词""编号怎么换算"住在组合根（occurrence 上的编号

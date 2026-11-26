@@ -1,6 +1,6 @@
-"""对答案（``19-预测层方案.md`` 第五节）：一条预期 vs 行为树上那几天的行。纯函数，不认识存储、不读时钟。
+"""对答案：一条预期 vs 行为树上那几天的行。纯函数，不认识存储、不读时钟。
 
-判据：``observed_from`` 之后、最晚时限之前这一类**第一次**发生（形成时已经做了的也算：每个机会都进账，裁定 49）——
+判据：``observed_from`` 之后、最晚时限之前这一类第一次发生（形成时已经做了的也算：每个机会都进账，裁定 49）——
 
 - 开口之后才发生：「提醒后发生」，不进自然命中，记提醒到发生的延迟；
 - 时窗开始之前：「早到」（记早了几分钟，负数）；时窗之内：「准时」；时窗之后、最晚时限之前：「晚了但做了」（记晚了几分钟）；
@@ -93,7 +93,7 @@ def counts_as_done(expectation: Expectation, kind_token: str, started_at: dateti
 
 
 def below_done(expectation: Expectation, rows: Sequence[FlowRow], *, kinds: KindHierarchy = FLAT) -> bool:
-    """说中的范围里有没有这个节点的下级做了（没放弃）的行：对它是"不知道"（裁定 105 第 2 条）——没看到它自己发生时，
+    """说中的范围里有没有这个节点的下级做了（没放弃）的行：对它是"不知道"（裁定 105）——没看到它自己发生时，
     组合根按"窗里有观测空白"那条短路记中性，不记命中也不记漏做。"""
 
     below = kinds.family(expectation.kind_token) - {expectation.kind_token}
@@ -174,8 +174,7 @@ def antecedent_holds_when_delivering(
     rows_on: Callable[[date], Iterable[AntecedentRow]],
 ) -> bool:
     """开口之前再核一遍事件触发的前因：它可能是没封口时建的，封口后归成了别的类、或成了非事件（找不到了）；``rows_on`` 给某一天
-    这一拍读到的行。找法与类的映射和结算同一个（``event_antecedent_holds``）。情境不按日历重核（结算重核；递送要不要也重核
-    待定）。"""
+    这一拍读到的行。找法与类的映射和结算同一个（``event_antecedent_holds``）。情境不按日历重核（只有结算重核）。"""
 
     return event_antecedent_holds(expectation, relation, rows_on=rows_on)
 

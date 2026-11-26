@@ -759,7 +759,7 @@ def test_delivery_and_settlement_read_the_same_rows_the_same_way(tmp_path, case)
     now = at(day, 9, 51)
     seen = seen_rows(TickMoment(at=now, slot=0), cache, ())
     run, _ledger = stage(tmp_path / "stage")
-    materials = JudgeMaterials(table, lambda uris: ForesightTick._rows_for(uris, cache, (), seen, now), seen=seen)
+    materials = JudgeMaterials(table, lambda uris: ForesightTick._rows_for(uris, cache, seen), seen=seen)
     settling = antecedent_holds_when_settling(
         item,
         relation,

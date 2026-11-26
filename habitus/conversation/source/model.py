@@ -31,7 +31,7 @@ def conversation_identity(conversation_id: str) -> str:
 
 
 class ConversationSourceCapacityError(ConversationSourceError):
-    """生命周期账到了容量上限，这份源不收：先放掉旧的再来（写入时就拒，枚举那一侧才永远不会超限卡死，L10.6）。"""
+    """生命周期账到了容量上限，这份源不收：先放掉旧的再来（写入时就拒，枚举那一侧才永远不会超限卡死）。"""
 
 
 def require_sha256(value: object, label: str) -> str:

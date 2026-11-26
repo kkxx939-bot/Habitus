@@ -26,8 +26,7 @@ _MIN_EXCHANGE_SUMMARY_CHARS = 128
 _VERBATIM_ARGUMENT_CHARS = 256
 
 
-# TODO(conversation-source): 修改此压缩算法语义时，必须同步提升
-# memory/workflow/conversation_consumer.py 中 tool_result_reducer_version。
+# TODO(conversation-source): 改此压缩算法语义时须人工提升 conversation_consumer.py 的 tool_result_reducer_version。
 class ConversationToolResultReducer:
     """在写入 Conversation 前压缩超大工具结果与超限工具交换里的调用参数，不建立旁路原文存储。"""
 

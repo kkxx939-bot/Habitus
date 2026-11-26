@@ -1,9 +1,9 @@
-"""夜里算机会表（N1）：在语义树同一条时间线上、用同一把尺（``scene.relations`` 的链合并与在场口径），对每条成立 / 候选关系
+"""换代时算机会表：在语义树同一条时间线上、用同一把尺（``scene.relations`` 的链合并与在场口径），对每条成立 / 候选关系
 列出历史每次前因之后后果来没来，再把每个行为类的复现（语义树登记的）抄进来。零模型、零统计：这里不排序、不给读数，只摆事实；
-读数怎么出、门怎么设是白天那一拍的事（第九节第 3 步）。
+读数怎么出、门怎么设是白天那一拍的事。
 
 哪些关系进表：后果是行为概念，并且是
-- 短跨度四段、前因是行为概念的；带条件的只收**成立的**（裁定 61 第 6 条：成立的组合当单元的一条边，没成立的照旧由
+- 短跨度四段、前因是行为概念的；带条件的只收成立的（裁定 61：成立的组合当单元的一条边，没成立的由
   "同一组"计数），它的机会只列条件全成立的链；
 - 日历情境段（日历条件 → 后果，裁定 59）：一个后果的几条日历关系只留最具体的那一族（周几集合在就不留被它包住的单个周几）。
 长跨度的其余几段还不进预测层（要重算标志）。
@@ -62,9 +62,9 @@ def build_table(
     coverage: Coverage | None = None,
     calendar: DayTypeCalendar | None = None,
 ) -> OpportunityTable:
-    """这条 lane 第 ``night`` 晚的机会表。``window_slots`` 是转移窗口的槽数（与关系检验同一个数）；``recurrences`` 是语义树
-    这一晚登记的每个类的复现（日历部分从这里抄）；
-    ``calendar_version`` 是这一晚日历情境用的放假数据版本，记在表上（裁定 59 第 4 条：不存每天的结果，只记所用数据的版本）；
+    """这条 lane ``night`` 那一代的机会表。``window_slots`` 是转移窗口的槽数（与关系检验同一个数）；``recurrences`` 是语义树
+    这一代登记的每个类的复现（日历部分从这里抄）；
+    ``calendar_version`` 是这一代日历情境用的放假数据版本，记在表上（裁定 59：不存每天的结果，只记所用数据的版本）；
     ``coverage`` 是这条 lane 的观测覆盖，抄成每天看着的比例，日型从 ``calendar`` 取（账的久别用；时间线上的日历条件只有
     有记录的日子，空白日也要日型）。"""
 
@@ -157,7 +157,7 @@ def _admitted(relation: Relation, line: LaneTimeline, concepts: ConceptSet) -> b
         return False
     if key.segment is Segment.SITUATION:
         # 只收抬高的日历关系：一个取值高了，同一维的其余取值就显得低（"周一 → 例会材料 ↓"只是"周三 ↑"的反面），
-        # 进单元会当压低的输入把历史切碎；语义树照样记着它们（2026-10-18，S8）
+        # 进单元会当压低的输入把历史切碎；语义树照样记着它们
         return relation.upward and calendar_key(concepts, key.antecedent) is not None
     antecedent = concepts.get(key.antecedent)
     return key.segment in _SEGMENTS and antecedent is not None and antecedent.role.is_behavior
@@ -182,9 +182,9 @@ def _calendar_opportunities(
     line: LaneTimeline, antecedent: str, consequent: str, key: str
 ) -> tuple[tuple[Opportunity, ...], tuple[str, ...]]:
     """日历条件成立的每一个人在场的日子是一次机会：后果那天有没有自然发生（只有被提醒才做的那天、后果第一次自然发生之前的
-    日子不知道，裁定 104 第 1 条）。机会的"前因"就是那一天本身（``calendar:<日子>``），起算是那天零点。
+    日子不知道，裁定 104）。机会的"前因"就是那一天本身（``calendar:<日子>``），起算是那天零点。
 
-    周几、几号、月末这类关系还交出它在哪几种日型上见过他自然地做（检验时日型是固定住的，裁定 59 第 7 条）；机会只列这几种日型的
+    周几、几号、月末这类关系还交出它在哪几种日型上见过他自然地做（检验时日型是固定住的，裁定 59）；机会只列这几种日型的
     日子与日型答不出的日子——建预期时也只在这几种日型上建，账上的机会与建预期的口径一致。"""
 
     held = line.calendar_days(antecedent) or {}

@@ -2,7 +2,7 @@
 
 先看协议的错误代码字段（OpenAI 兼容协议的 ``error.code`` / ``error.type``、Anthropic Messages 的 ``error.type``，
 适配器从响应体或流里的错误事件取出来放在 ``provider_code`` 上），再看 HTTP 状态码，再看传输层异常；都对不上是"认不出"。
-不按厂商、模型名或报错文字判断（OpenViking 按 SDK 异常类名与报错文字识别的那部分不借）。
+不按厂商、模型名或报错文字判断。
 """
 
 from __future__ import annotations
@@ -119,7 +119,7 @@ _KIND_TYPES: dict[ModelErrorKind, type[ModelClientError]] = {
     ModelErrorKind.CONTENT_SAFETY: ModelContentSafetyError,
 }
 
-#: 结构化输出的终止原因（``finish_reason``）里表示"被内容安全拦下"的那几个（两种协议的适配器已换成同一套写法）。
+#: 结构化输出的终止原因（``finish_reason``）里表示"被内容安全拦下"的那几个（两种协议的适配器用同一套写法）。
 CONTENT_BLOCKED_FINISH_REASONS = frozenset({"content_filter", "safety"})
 
 
@@ -133,7 +133,7 @@ def classify_failure(error: Exception) -> ModelClientError:
     code = _first_code(chain)
     message = str(error).strip() or type(error).__name__
     retry_after = _retry_after(chain)
-    # 证书不被信任与代理要认证按异常类型 / 状态认：都是传输错误的近亲，但重发多少遍都一样（W18）
+    # 证书不被信任与代理要认证按异常类型 / 状态认：都是传输错误的近亲，但重发多少遍都一样
     if any(isinstance(item, ssl.SSLCertVerificationError) for item in chain):
         return ModelTLSError(f"{message}; {TLS_UNTRUSTED_HINT}", status_code=status, provider_code=code)
     if status == 407 or any(_is_proxy_auth_rejection(item) for item in chain):

@@ -28,8 +28,7 @@ from habitus.memory.workflow.conversation_output import (
 )
 from habitus.memory.workflow.ingest import ConversationMemoryEnqueuer, ConversationMemoryIngestResult
 
-# TODO(conversation-source): Reducer、Chunker 或 Retention 语义变化时，必须同步提升本版本
-# 以及 fingerprint 中对应的组件版本；这些版本当前由人工维护。
+# TODO(conversation-source): 版本靠人工维护，Reducer、Chunker 或 Retention 语义变化时须同步提升本版本与组件版本。
 MEMORY_CONVERSATION_PROCESSOR_SCHEMA_VERSION = "memory_conversation_processor_v1"
 
 
@@ -57,7 +56,7 @@ class MemoryConversationConsumer:
         self.output_store = output_store
         self.clock = clock or (lambda: datetime.now(UTC))
         # 显式版本与确定性配置共同形成契约；不依赖 callable repr 或进程地址。
-        # TODO(conversation-source): 下列组件版本必须与各算法入口处的版本提示成对更新。
+        # TODO(conversation-source): 下列组件版本靠人工与各算法入口处的版本提示成对更新。
         self.processor_fingerprint = canonical_digest(
             {
                 "schema_version": MEMORY_CONVERSATION_PROCESSOR_SCHEMA_VERSION,

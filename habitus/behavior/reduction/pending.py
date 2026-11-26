@@ -3,8 +3,7 @@
 归约每轮的第一步就是它；此刻场景补"未封口"那一截的读口也是它（组合根经它把链读成行）。两处共用
 这一个口径，"封没封口"就只有一种答法：归约改了判据，读口跟着变，不必再抄一份。
 
-坏记录单条隔离：一条污染不许瘫痪整轮归约。读不出的原记录交给调用方（``rejected``），由它从存储撤下、留信号
-（26 号清单 2.4.3），不再每轮报同一句。
+坏记录单条隔离：一条污染不许瘫痪整轮归约。读不出的原记录交给调用方（``rejected``），由它从存储撤下、留信号，不每轮报同一句。
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ def pending_judgements(
     entries: Sequence[BehaviorReductionEntry] | None = None,
 ) -> PendingJudgements:
     """存储里的判断减去账本里已消费的，解析、分成行为与空白。``checkpoint`` 每 500 条调一次（长循环里续租约）。``entries`` 是调用方
-    这一轮已经读好的账本（归约一轮只读一次，26 号清单 6.3）；不给就自己读。"""
+    这一轮已经读好的账本（归约一轮只读一次）；不给就自己读。"""
 
     consumed = (
         ledger.consumed_judgement_ids()

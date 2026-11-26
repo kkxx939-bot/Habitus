@@ -114,7 +114,7 @@ class BehaviorTree:
         return document
 
     def iter_documents(self, kind: BehaviorKind) -> Iterator[BehaviorDocument]:
-        """按地址序分页读出某类的全部文档（全量扫描；夜批/离线整理用）。"""
+        """按地址序分页读出某类的全部文档（全量扫描）。"""
 
         after: BehaviorAddress | None = None
         while True:
@@ -131,12 +131,10 @@ class BehaviorTree:
         return self._decode(self._existing_document_path(address), address)
 
     def list_day_addresses(self, kind: BehaviorKind, occurred_on: date) -> tuple[BehaviorAddress, ...]:
-        """某天某类的全部地址；**目录只枚举一次、不读文档**。
+        """某天某类的全部地址；目录只枚举一次、不读文档。
 
-        与 ``read_day`` 同一条理由：逐个 ``exists``/``read`` 都会重新枚举整个日目录（实测 13.6 ms/次、
-        一天 2,074 篇即 2,074² 次条目扫描），所以"这一天有哪些地址已被占用"这类问题必须整天问一次，
-        不能逐条问。归约的撞车消歧与落盘干跑走这里（周尺度实测：逐链 exists 9,270 次 ≈ 133 秒，
-        整天列举全树 9,270 条 ≈ 0.33 秒）。
+        逐个 ``exists``/``read`` 都会重新枚举整个日目录，成本随篇数平方增长，所以"这一天有哪些地址
+        已被占用"必须整天问一次。归约的撞车消歧与落盘干跑走这里。
         """
 
         resolved_kind = BehaviorKind(kind)
@@ -150,8 +148,7 @@ class BehaviorTree:
     def read_day(self, kind: BehaviorKind, occurred_on: date) -> tuple[BehaviorDocument, ...]:
         """一次性读出某天某类的全部文档；目录只解析、只枚举一次。
 
-        逐篇 ``read`` 每次都沿路径逐级做身份校验，其中日目录那一级会重新枚举整个目录——
-        一天 2,074 篇就是 2,074 × 2,074 次条目扫描（实测 13.6 ms/篇、一天 28 秒），读一天的
+        逐篇 ``read`` 每次都沿路径逐级做身份校验，其中日目录那一级会重新枚举整个目录，读一天的
         成本随篇数平方增长。事件序列与语义关联都是按天整块读，走这里。
         """
 
@@ -192,7 +189,7 @@ class BehaviorTree:
         for resolved_kind in kinds:
             if after is not None and tuple(BehaviorKind).index(resolved_kind) < tuple(BehaviorKind).index(after.kind):
                 continue
-            # 翻页从游标那一天续（26 号清单 6.8）：排序键先按日期，游标之前的年、月、日按目录名直接跳过，不再每页从头重走
+            # 翻页从游标那一天续：排序键先按日期，游标之前的年、月、日按目录名直接跳过
             since = after.occurred_on if after is not None and resolved_kind is after.kind else None
             for occurred_on, day_path in self._day_paths(resolved_kind, since=since):
                 for stem in self._files.markdown_names(day_path):
@@ -205,7 +202,7 @@ class BehaviorTree:
         return tuple(result)
 
     def days(self, kind: BehaviorKind) -> tuple[date, ...]:
-        """这一种文档有哪些日子（只列年 / 月 / 日目录，不列叶子）：按天缓存的读侧据此找新增的日子（26 号清单 6.7）。"""
+        """这一种文档有哪些日子（只列年 / 月 / 日目录，不列叶子）：按天缓存的读侧据此找新增的日子。"""
 
         return tuple(day for day, _path in self._day_paths(BehaviorKind(kind)))
 
@@ -223,7 +220,7 @@ class BehaviorTree:
     def _address_order_key(self, address: BehaviorAddress) -> tuple[int, str]:
         # 游标序必须与枚举产出序同一口径：枚举按叶名的 canonical 身份（NFC+casefold）排序
         # （见 TreeFiles.markdown_names），而 identity_name 里的时间戳 'T' 未折叠——字面序与折叠序在
-        # 特定命名下会反转，分页边界附近的条目会被静默漏掉或重复产出（评审构造过反例）。
+        # 特定命名下会反转，分页边界附近的条目会被静默漏掉或重复产出。
         relative = self._relative_path(address)
         folded_leaf = canonical_path_identity(relative.name.removesuffix(".md"), "behavior document name")
         return tuple(BehaviorKind).index(address.kind), relative.with_name(f"{folded_leaf}.md").as_posix()

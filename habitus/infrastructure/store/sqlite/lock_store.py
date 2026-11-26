@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 import threading
 import uuid
@@ -61,11 +60,6 @@ class SQLiteLockStore:
     @property
     def initialized(self) -> bool:
         return self._initialized
-
-    @property
-    def coordination_domain(self) -> str:
-        identity = str(self.path.expanduser().absolute().resolve(strict=False))
-        return f"sqlite:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
 
     def initialize(self) -> None:
         """显式建立锁库；允许组合根延迟到 Runtime.initialize()。"""

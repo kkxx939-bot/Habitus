@@ -1,10 +1,10 @@
 """按 Source/Consumer 独立恢复缺失的首次耐久 Outcome。
 
-恢复由生命周期周期驱动（26 号清单 L9.2），启动时也跑一遍。每次尝试的失败记进重试账：可重试的按退避推迟，次数用完或
+恢复由生命周期周期驱动，启动时也跑一遍。每次尝试的失败记进重试账：可重试的按退避推迟，次数用完或
 确定性的放弃、等人工修复之后 ``forgive``。一批只取"现在该试"的——损坏、退避中、已放弃的都不占批，所以更早的坏条目
 挡不住更新的待恢复项。"等前序"不是失败，是有序 Consumer 的正常排队：不记账，下一轮再看。
 
-放弃之后：能放弃的 Consumer（Behavior）按自己的方式落终态——还没写进树的轮写成没读懂空白（23 号第一节第 6 条），不按失败
+放弃之后：能放弃的 Consumer（Behavior）按自己的方式落终态——还没写进树的轮写成没读懂空白，不按失败
 种类再分，账判放弃就写；不能放弃的（Memory）停在那里等人工修复。
 """
 
@@ -61,17 +61,17 @@ class ConversationSourceRecoveryResult:
 @dataclass(frozen=True)
 class ConversationSourceRecoveryPlan:
     """一轮该怎么处置每个没终态的 Source/Consumer。``attempt`` 按恢复顺序排好、最多一批；``salvaged`` 是这一轮
-    刚补救过的（Behavior 的账坏了：没写过的轮落「没读懂」、能重试的进每晚重试的堆，从此按终态算）；``broken`` 是坏了又
+    刚补救过的（Behavior 的账坏了：没写过的轮落「没读懂」、能重试的进重试的堆，从此按终态算）；``broken`` 是坏了又
     不补救的（Memory，等人工修复）。"""
 
     attempt: tuple[ConversationSourceRecoveryEntry, ...]
     broken: tuple[ConversationSourceRecoveryEntry, ...]
     deferred: tuple[ConversationSourceRecoveryEntry, ...]
     salvaged: tuple[ConversationSourceRecoveryEntry, ...] = ()
-    #: 信封或"还没终态"标记读不出来（损坏）的源：没法恢复，也不能让它拖垮这一轮，记下等人工处置（L10.9）。
+    #: 信封或"还没终态"标记读不出来（损坏）的源：没法恢复，也不能让它拖垮这一轮，记下等人工处置。
     corrupt: tuple[str, ...] = ()
     #: 读不出来的账本条目，按 ``source/`` 下的相对路径：认不出的"还没终态"文件（``pending/<文件名>``）与索引读不出来的
-    #: 地址（``index/<地址目录>``）。坏条目只挡它自己（裁定 60 第 6 条）：坏索引只挡它那个地址，别的地址照常恢复。
+    #: 地址（``index/<地址目录>``）。坏条目只挡它自己（裁定 60）：坏索引只挡它那个地址，别的地址照常恢复。
     unreadable: tuple[str, ...] = ()
 
 
@@ -201,7 +201,7 @@ class ConversationSourceRecovery:
         busy: Collection[tuple[str, ConversationSourceConsumer]],
     ) -> dict[tuple[SourceAddress, ConversationSourceConsumer], int]:
         """有序 Consumer（现在是 Memory）在每个地址上被挡在哪个序号：那一份坏了、在退避、或正在交付，同地址后面的只会报
-        "等前序"，不该占这一批（L10.8；原先它们每轮占满批次，别的地址的新源永远进不来）。"""
+        "等前序"，不该占这一批，否则别的地址的新源进不来。"""
 
         held: dict[tuple[SourceAddress, ConversationSourceConsumer], int] = {}
         for entry in pending:
@@ -341,7 +341,7 @@ class ConversationSourceRecovery:
 
 
 def source_unfinished(recovery: ConversationSourceRecovery, consumer: ConversationSourceConsumer) -> bool:
-    """这个 Consumer 有没有已经交进来、还没到终态的会话源（宿主来取提醒那一刻用，裁定 104 第 2 条）：判法与 ``_scan`` 同一个，
+    """这个 Consumer 有没有已经交进来、还没到终态的会话源（宿主来取提醒那一刻用，裁定 104）：判法与 ``_scan`` 同一个，
     "还没终态"标记是两个 Consumer 共用、惰性清除的，所以逐份看这个 Consumer 自己的状态。只读，不清标记；读不出来的信封跳过
     （``_scan`` 把它记进 ``corrupt``，它挡不住别的源，也不该挡提醒）。"""
 

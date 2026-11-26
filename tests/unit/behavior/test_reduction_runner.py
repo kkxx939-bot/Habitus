@@ -650,10 +650,10 @@ def test_coverage_survives_the_window_while_its_delivery_is_still_stored(tmp_pat
     later = harness.now + timedelta(days=10)
     ids = {OBS_A.observation_id}
     harness.runner.coverage.expire(later, retain=frozenset(ids))
-    assert ids <= harness.runner.coverage.covered_observation_ids(harness.now)  # 交付在，覆盖留
+    assert ids <= harness.runner.coverage.covered_observation_ids()  # 交付在，覆盖留
     harness.observations.discard(orphan)
     harness.runner.coverage.expire(later, retain=frozenset())
-    assert not (ids & harness.runner.coverage.covered_observation_ids(harness.now))  # 释放后才过期
+    assert not (ids & harness.runner.coverage.covered_observation_ids())  # 释放后才过期
 
 
 def test_an_old_unfused_observation_still_pins_the_frontier(tmp_path) -> None:
